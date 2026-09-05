@@ -107,3 +107,19 @@ Set  = [ { Column = "v", From = "$.camelCase" } ]
 	require.Equal(t, []sql.WhenClause{{Path: "$.eventType", Equals: "x"}}, config.Sources[0].Rules[0].When)
 	require.Equal(t, "$.camelCase", config.Sources[0].Rules[0].Set[0].From)
 }
+
+func TestSyncableParseConfigRejectsUnknownKeys(t *testing.T) {
+	dbs := map[string]cluster.Database{"testdb": &TestDatabase{}}
+	v := readConfig(t, "toml", strings.NewReader(`
+[sql]
+topic      = "simple"
+db         = "testdb"
+table      = "foo"
+primaryKey = "pk"
+keyColum   = "pk"
+`))
+	_, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+	require.Error(t, err)
+	require.Equal(t, "sql.keyColum", cluster.NewConfigError(err).Field)
+	require.Contains(t, err.Error(), `did you mean "keyColumn"?`)
+}

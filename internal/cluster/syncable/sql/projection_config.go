@@ -125,6 +125,12 @@ type ProjectionElementField struct {
 	Lookup string `mapstructure:"lookup"`
 	On     string `mapstructure:"on"`
 	Select string `mapstructure:"select"`
+
+	// tracker classifies From-extraction failures for this field
+	// (entry-specific vs config-shaped — see cluster.AmbiguityTracker).
+	// Populated where the aggregate/lookup runtimes are built; nil
+	// classifies Permanent.
+	tracker *cluster.AmbiguityTracker
 }
 
 // enriched reports whether this field is resolved from a dimension (Lookup set)

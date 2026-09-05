@@ -1,0 +1,247 @@
+package http
+
+import (
+	"context"
+	httpgo "net/http"
+
+	"go.uber.org/zap"
+
+	"github.com/committeddb/committed/internal/cluster"
+)
+
+// The four versioned config resources — database, ingestable, syncable,
+// and type — share an identical handler set: create (POST), list (GET),
+// list-versions, get-one-version, and rollback. The bodies differ only by
+// the resource name used in error strings and the Cluster accessor method
+// they call. Rather than copy each handler four ways, the factories below
+// produce a handler closed over (name, accessor); http.go wires one per
+// route. A new config resource is a few route lines and zero new handlers.
+//
+// Keeping the route table explicit (rather than registering a fixed set
+// per resource) is deliberate: it lets the resources that deviate stay
+// readable — type has no rollback and a bespoke GET /type/{id} graph
+// handler, syncable adds errors/status/deadletter/replay routes — without
+// special-casing inside a generic registrar.
+
+// ConfigWriteResponse is the body of a config POST or rollback: the id the
+// caller addressed and the server-assigned version the config now has (a
+// rollback creates a NEW version; a byte-identical re-POST retains the
+// existing one). Version is the one field the caller cannot know a priori —
+// versions are assigned at apply — which is what makes this response carry
+// information the old plain-text id echo did not. Version is omitted only if
+// the post-propose version read fails (the write itself succeeded).
+type ConfigWriteResponse struct {
+	ID      string `json:"id"`
+	Version uint64 `json:"version,omitempty"`
+	// Advisory, when present, is a non-fatal notice about a side-effect of an
+	// accepted write the caller should act on — currently, an in-place type
+	// [migration] edit that does not re-materialize already-synced history
+	// (see cluster.MigrationEditAdvisory). The write itself succeeded; the
+	// advisory is informational.
+	Advisory string `json:"advisory,omitempty"`
+	// MigrationEditDependents accompanies the migration-edit advisory: the
+	// always-current syncables consuming the edited type's topic, each of
+	// which must be re-materialized (POST /v1/syncable/{id}/rematerialize)
+	// or rebuilt for the migration fix to reach already-synced rows.
+	MigrationEditDependents []cluster.DependentSyncable `json:"migrationEditDependents,omitempty"`
+	// Warnings, when present, are non-fatal deprecation notices about the
+	// config document as posted — currently, the "sql-projection" syncable
+	// type spelling (canonical: "projection"). The write itself succeeded
+	// exactly as posted; each warning names what to rename before the
+	// deprecated form is removed.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// deprecationWarnings reports the deprecated-spelling notices for an accepted
+// config write, or nil. Parse failures return nil — the propose already
+// validated the document; this is advisory-only and must never fail a write.
+func deprecationWarnings(name string, c *cluster.Configuration) []string {
+	if name != "syncable" {
+		return nil
+	}
+	v, err := cluster.ParseConfigBytes(c.MimeType, c.Data)
+	if err != nil {
+		return nil
+	}
+	if v.GetString("syncable.type") == "sql-projection" {
+		return []string{`syncable type "sql-projection" is deprecated: rename the type to "projection" and the [sql-projection] section to [projection] (the deprecated spelling still works for now, but will be removed in a future release)`}
+	}
+	return nil
+}
+
+// currentVersion reads the version currently marked current for id, or 0 if
+// it cannot be determined. Propose blocks until the entry is applied locally,
+// so a read here observes the version the propose just created.
+func currentVersion(versions func(string) ([]cluster.VersionInfo, error), id string) uint64 {
+	vs, err := versions(id)
+	if err != nil {
+		return 0
+	}
+	for _, v := range vs {
+		if v.Current {
+			return v.Version
+		}
+	}
+	return 0
+}
+
+// addConfig handles POST /{resource}/{id}: build a Configuration from the
+// request body, propose it, and return {id, version} — the server-assigned
+// version the caller cannot otherwise know.
+func (h *HTTP) addConfig(
+	name string,
+	propose func(context.Context, *cluster.Configuration) error,
+	versions func(string) ([]cluster.VersionInfo, error),
+) httpgo.HandlerFunc {
+	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		c, err := createConfiguration(r)
+		if err != nil {
+			h.writeReadError(w, r, err, "invalid_config", "invalid "+name+" configuration")
+			return
+		}
+
+		if err := propose(r.Context(), c); err != nil {
+			writeProposeError(w, err, name, "propose "+name)
+			return
+		}
+
+		writeJSONStatus(w, httpgo.StatusOK, ConfigWriteResponse{
+			ID:       c.ID,
+			Version:  currentVersion(versions, c.ID),
+			Warnings: deprecationWarnings(name, c),
+		})
+	}
+}
+
+// addTypeConfig handles POST /type/{id} — addConfig plus a migration-edit
+// advisory. An in-place edit that changes only a type's [migration] transform is
+// accepted, but it does not re-materialize rows already synced through the old
+// migration on the type's dependent projections; the response body (and a
+// node-log line) tells the operator to rebuild those projections. before/after
+// snapshots bracket the propose — ProposeType blocks until the entry is applied
+// locally, so the after-read on this node observes the update the propose made,
+// exactly as currentVersion relies on. The reads are best-effort (a nil/error
+// snapshot simply yields no advisory), never gating the accepted write.
+func (h *HTTP) addTypeConfig() httpgo.HandlerFunc {
+	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		c, err := createConfiguration(r)
+		if err != nil {
+			h.writeReadError(w, r, err, "invalid_config", "invalid type configuration")
+			return
+		}
+
+		before, _ := h.db.ResolveType(cluster.LatestTypeRef(c.ID))
+
+		// ?force=true acknowledges that a nonConvertible bump strands the
+		// always-current syncables a plain POST would be refused over (409
+		// stranded_always_current names them).
+		var opts []cluster.ProposeTypeOption
+		if r.URL.Query().Get("force") == "true" {
+			opts = append(opts, cluster.AcknowledgeStrandedSyncables())
+		}
+		if err := h.db.ProposeType(r.Context(), c, opts...); err != nil {
+			writeProposeError(w, err, "type", "propose type")
+			return
+		}
+
+		resp := ConfigWriteResponse{ID: c.ID, Version: currentVersion(h.db.TypeVersions, c.ID)}
+		after, _ := h.db.ResolveType(cluster.LatestTypeRef(c.ID))
+		if adv := cluster.MigrationEditAdvisory(before, after); adv != "" {
+			resp.Advisory = adv
+			resp.MigrationEditDependents = h.db.MigrationEditDependents(c.ID)
+			zap.L().Warn("in-place type migration edit accepted: applies to new Actuals only — re-materialize the dependent always-current syncables for the fix to reach already-synced history",
+				zap.String("type", c.ID),
+				zap.Int("dependents", len(resp.MigrationEditDependents)))
+		}
+
+		writeJSONStatus(w, httpgo.StatusOK, resp)
+	}
+}
+
+// listConfig handles GET /{resource}: return every current configuration.
+func (h *HTTP) listConfig(name string, list func() ([]*cluster.Configuration, error)) httpgo.HandlerFunc {
+	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		if !h.linearize(w, r) {
+			return
+		}
+		cfgs, err := list()
+		if err != nil {
+			writeInternalError(w, "failed to retrieve "+name+"s", err)
+			return
+		}
+
+		writeConfigurations(w, cfgs)
+	}
+}
+
+// getVersions handles GET /{resource}/{id}/versions: the version history.
+func (h *HTTP) getVersions(name string, versions func(string) ([]cluster.VersionInfo, error)) httpgo.HandlerFunc {
+	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		if !h.linearize(w, r) {
+			return
+		}
+		id := r.PathValue("id")
+		vs, err := versions(id)
+		if err != nil {
+			writeVersionError(w, err, name)
+			return
+		}
+		writeArrayBody(w, vs)
+	}
+}
+
+// getVersion handles GET /{resource}/{id}/versions/{version}: one version.
+func (h *HTTP) getVersion(name string, version func(string, uint64) (*cluster.Configuration, error)) httpgo.HandlerFunc {
+	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		id := r.PathValue("id")
+		v, ok := parseVersion(w, r)
+		if !ok {
+			return
+		}
+		if !h.linearize(w, r) {
+			return
+		}
+		cfg, err := version(id, v)
+		if err != nil {
+			writeVersionError(w, err, name)
+			return
+		}
+		// A by-key GET returns the bare object; 404 already covers absence.
+		writeConfiguration(w, cfg)
+	}
+}
+
+// rollback handles POST /{resource}/{id}/rollback?to=<version>: re-propose
+// the named historical version as the current configuration, returning
+// {id, version} where version is the NEW version the rollback created.
+func (h *HTTP) rollback(
+	name string,
+	version func(string, uint64) (*cluster.Configuration, error),
+	propose func(context.Context, *cluster.Configuration) error,
+	versions func(string) ([]cluster.VersionInfo, error),
+) httpgo.HandlerFunc {
+	return func(w httpgo.ResponseWriter, r *httpgo.Request) {
+		id := r.PathValue("id")
+		to, ok := parseRollbackTarget(w, r)
+		if !ok {
+			return
+		}
+		// Reading the target version is a linearizable read, exactly like
+		// getVersion: without the barrier a lagging follower can 404 a version it
+		// simply hasn't applied yet, turning a valid rollback into a spurious
+		// not-found.
+		if !h.linearize(w, r) {
+			return
+		}
+		cfg, err := version(id, to)
+		if err != nil {
+			writeVersionError(w, err, name)
+			return
+		}
+		if err := propose(r.Context(), cfg); err != nil {
+			writeProposeError(w, err, name, "propose "+name+" rollback")
+			return
+		}
+		writeJSONStatus(w, httpgo.StatusOK, ConfigWriteResponse{ID: cfg.ID, Version: currentVersion(versions, cfg.ID)})
+	}
+}

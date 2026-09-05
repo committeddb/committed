@@ -59,7 +59,7 @@ func (d *DB) CreateInsert(config *Config) (*Insert, error) {
 		jsonPaths = append(jsonPaths, mapping.JsonPath)
 	}
 
-	return &Insert{sqlString, stmt, jsonPaths}, nil
+	return NewInsert(sqlString, stmt, jsonPaths), nil
 }
 
 func (d *DB) Close() error {

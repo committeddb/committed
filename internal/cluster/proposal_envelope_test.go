@@ -2,17 +2,20 @@ package cluster
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/clusterpb"
 )
 
 // These tests pin the typed control envelope (clusterpb.LogEntity.body):
-// writers encode every entity as exactly one body variant, readers map either
-// encoding — envelope or the legacy flat fields written by <= 0.7.2-beta —
-// into the same logical view through the logEntityView chokepoint.
+// writers encode every entity as exactly one body variant, and readers map it
+// into one logical view through the logEntityView chokepoint. Pre-envelope
+// flat bytes (<= 0.7.2-beta, below the 0.8.0 data-dir floor of 0.7.3-beta)
+// must fail decode loudly — pinned here with hand-built protowire bytes.
 
 func envelopeTestResolver(tp *Type) *stubResolver {
 	return &stubResolver{
@@ -88,11 +91,9 @@ func TestEnvelopeWritersEmitVariantsOnly(t *testing.T) {
 	if len(lp.LogEntities) != 3 {
 		t.Fatalf("got %d wire entities, want 3", len(lp.LogEntities))
 	}
-	for i, le := range lp.LogEntities {
-		if le.Key != nil || le.Data != nil || le.GetGeneration() != 0 || le.GetRefreshBoundary() {
-			t.Errorf("entity %d sets legacy flat fields: %+v", i, le)
-		}
-	}
+	// (No flat-field check: the legacy flat fields were removed from the
+	// schema when the floor rose to 0.7.3-beta, so the type system enforces
+	// what this loop used to assert.)
 	row := lp.LogEntities[0].GetRow()
 	if row == nil || string(row.GetKey()) != "row-key" || string(row.GetData()) != "row-data" || row.GetGeneration() != 3 {
 		t.Errorf("entity 0 is not the expected Row variant: %+v", lp.LogEntities[0].GetBody())
@@ -110,53 +111,79 @@ func TestEnvelopeWritersEmitVariantsOnly(t *testing.T) {
 	}
 }
 
-// legacyFlatProposal hand-builds the pre-envelope wire form of entityFixtures:
-// flat Key/Data (the delete sentinel for the delete), generation, and
-// refresh_boundary — exactly what a <= 0.7.2-beta binary wrote. keepData has
-// no legacy form; it shipped with the envelope.
+// legacyFlatProposal hand-builds the pre-envelope wire form at the raw
+// protowire level — flat Key (tag 2) / Data (tag 3, the delete sentinel for
+// the delete), generation (tag 5), refresh_boundary (tag 6) — exactly what a
+// <= 0.7.2-beta binary wrote. The tags are reserved in the schema now (the
+// data-dir floor is 0.7.3-beta), so the generated types can no longer express
+// this shape and the bytes must be built by hand.
 func legacyFlatProposal(t *testing.T, tp *Type) []byte {
 	t.Helper()
-	ref := &clusterpb.TypeRef{ID: tp.ID, Version: uint32(tp.Version)}
-	bs, err := proto.Marshal(&clusterpb.LogProposal{
-		LogEntities: []*clusterpb.LogEntity{
-			{Type: ref, Key: []byte("row-key"), Data: []byte("row-data"), Generation: 3},
-			{Type: ref, Key: []byte("del-key"), Data: delete, Generation: 4},
-			{Type: ref, Generation: 5, RefreshBoundary: true},
-		},
-	})
+	ref, err := proto.Marshal(&clusterpb.TypeRef{ID: tp.ID, Version: uint32(tp.Version)})
 	if err != nil {
-		t.Fatalf("proto.Marshal legacy: %v", err)
+		t.Fatalf("proto.Marshal TypeRef: %v", err)
 	}
-	return bs
+	entity := func(build func([]byte) []byte) []byte {
+		var e []byte
+		e = protowire.AppendTag(e, 1, protowire.BytesType) // type
+		e = protowire.AppendBytes(e, ref)
+		return build(e)
+	}
+	flatRow := entity(func(e []byte) []byte {
+		e = protowire.AppendTag(e, 2, protowire.BytesType) // Key
+		e = protowire.AppendBytes(e, []byte("row-key"))
+		e = protowire.AppendTag(e, 3, protowire.BytesType) // Data
+		e = protowire.AppendBytes(e, []byte("row-data"))
+		e = protowire.AppendTag(e, 5, protowire.VarintType) // generation
+		e = protowire.AppendVarint(e, 3)
+		return e
+	})
+	flatDelete := entity(func(e []byte) []byte {
+		e = protowire.AppendTag(e, 2, protowire.BytesType)
+		e = protowire.AppendBytes(e, []byte("del-key"))
+		e = protowire.AppendTag(e, 3, protowire.BytesType)
+		e = protowire.AppendBytes(e, delete)
+		e = protowire.AppendTag(e, 5, protowire.VarintType)
+		e = protowire.AppendVarint(e, 4)
+		return e
+	})
+	flatMarker := entity(func(e []byte) []byte {
+		e = protowire.AppendTag(e, 5, protowire.VarintType)
+		e = protowire.AppendVarint(e, 5)
+		e = protowire.AppendTag(e, 6, protowire.VarintType) // refresh_boundary
+		e = protowire.AppendVarint(e, 1)
+		return e
+	})
+	var lp []byte
+	for _, e := range [][]byte{flatRow, flatDelete, flatMarker} {
+		lp = protowire.AppendTag(lp, 1, protowire.BytesType) // logEntities
+		lp = protowire.AppendBytes(lp, e)
+	}
+	return lp
 }
 
-// TestEnvelopeDecodesLegacyFlatEntities is the reader-side back-compat pin: a
-// log written by <= 0.7.2-beta (flat fields, no body variant) must decode to
-// the same Entities as the envelope encoding — except KeepData, which has no
-// legacy form. Deleting the legacy branch from logEntityView fails this.
-func TestEnvelopeDecodesLegacyFlatEntities(t *testing.T) {
+// TestLegacyFlatEntitiesFailLoudly pins the 0.8.0 data-dir floor (0.7.3-beta):
+// pre-envelope flat bytes — written only by <= 0.7.2-beta, an era no
+// deployment ever ran — must FAIL decode with the floor error, never silently
+// apply as empty entities (their reserved tags land in the unknown-fields
+// guard at the logEntityView chokepoint).
+func TestLegacyFlatEntitiesFailLoudly(t *testing.T) {
 	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
 	dec := &Proposal{}
-	if err := dec.Unmarshal(legacyFlatProposal(t, tp), envelopeTestResolver(tp)); err != nil {
-		t.Fatalf("Unmarshal legacy bytes: %v", err)
+	err := dec.Unmarshal(legacyFlatProposal(t, tp), envelopeTestResolver(tp))
+	if err == nil {
+		t.Fatal("pre-envelope flat bytes decoded without error; the 0.7.3-beta floor must reject them loudly")
 	}
-	if len(dec.Entities) != 3 {
-		t.Fatalf("got %d entities, want 3", len(dec.Entities))
+	if !strings.Contains(err.Error(), "0.7.3-beta") {
+		t.Errorf("floor error should name the supported floor, got: %v", err)
 	}
-	// The legacy delete can't carry KeepData; align it so the shared assertion
-	// checks everything else.
-	if dec.Entities[1].KeepData {
-		t.Errorf("legacy delete decoded KeepData=true; keepData has no legacy form")
-	}
-	dec.Entities[1].KeepData = true
-	assertFixtureEntities(t, dec.Entities)
 }
 
-// TestScrubTraversalsHandleBothEncodings pins the scrub-side wire readers:
-// FilterProposalEntities and ForEachProposalEntity must see the same
-// (key, isDelete) view whether the record is envelope-encoded or legacy flat —
-// a scrub of a mixed-age log walks both.
-func TestScrubTraversalsHandleBothEncodings(t *testing.T) {
+// TestScrubTraversalsHandleEnvelope pins the scrub-side wire readers:
+// FilterProposalEntities and ForEachProposalEntity see the (key, isDelete)
+// view of every envelope record — and fail LOUDLY on pre-floor flat bytes
+// (the sibling test below), never silently dropping entities from a rewrite.
+func TestScrubTraversalsHandleEnvelope(t *testing.T) {
 	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
 	envelope, err := (&Proposal{Entities: entityFixtures(tp)}).Marshal()
 	if err != nil {
@@ -164,7 +191,6 @@ func TestScrubTraversalsHandleBothEncodings(t *testing.T) {
 	}
 	for name, raw := range map[string][]byte{
 		"envelope": envelope,
-		"legacy":   legacyFlatProposal(t, tp),
 	} {
 		t.Run(name, func(t *testing.T) {
 			// ForEachProposalEntity: collect the traversal's view.
@@ -212,6 +238,21 @@ func TestScrubTraversalsHandleBothEncodings(t *testing.T) {
 				t.Errorf("kept entities = %v, want [row-key, refresh-marker]", kept)
 			}
 		})
+	}
+}
+
+// TestScrubTraversalsRejectLegacyFlat: the scrubber's deterministic rewrite
+// must never run over bytes it cannot fully read — pre-floor flat records
+// error out of both traversals instead of being treated as empty (which would
+// silently drop entities from the rewritten log).
+func TestScrubTraversalsRejectLegacyFlat(t *testing.T) {
+	tp := &Type{ID: "topic-id", Name: "Topic", Version: 1}
+	raw := legacyFlatProposal(t, tp)
+	if err := ForEachProposalEntity(raw, func(string, []byte, []byte, bool) error { return nil }); err == nil {
+		t.Error("ForEachProposalEntity accepted pre-floor flat bytes")
+	}
+	if _, _, _, err := FilterProposalEntities(raw, func(string, []byte, bool) bool { return false }); err == nil {
+		t.Error("FilterProposalEntities accepted pre-floor flat bytes")
 	}
 }
 

@@ -28,13 +28,14 @@ whole archive**: a live node is refused (its exclusive lock blocks the shared
 one), and a node that tries to start part-way through the copy is blocked (its
 exclusive open fails) so it can't write into the directory mid-walk.
 
-> The shared lock guards BoltDB, which is the only lock in the data dir. It
-> closes the dominant race (an orchestrator restarting the stopped node while the
-> backup runs). It does not make the copy a true point-in-time image: a node
-> racing to start still runs the WAL-recovery steps of its open before it fails
-> on the locked BoltDB, a small residual window. For a fully atomic image, snapshot
-> the filesystem (LVM/ZFS/reflink) and back up the snapshot. Simplest of all:
-> keep the node stopped for the backup, as intended.
+> The shared lock guards BoltDB, which is the only lock in the data dir, and a
+> starting node acquires it as its FIRST act — before any of its WAL-recovery
+> steps touch the directory — so a node racing to start while the backup runs
+> fails immediately, having mutated nothing. The same stopped-node lock gates
+> `committed wal repair` and `committed wal decompress` (exclusively — a
+> rewrite must not run under a concurrent backup either). For belt-and-braces
+> atomicity, snapshot the filesystem (LVM/ZFS/reflink) and back up the
+> snapshot. Simplest of all: keep the node stopped for the backup, as intended.
 
 This is a deliberate, in-lane primitive: it does not run against a live
 database, and there is no backup *endpoint*. Automation (periodic backups,

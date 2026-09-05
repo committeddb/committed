@@ -11,6 +11,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
 type MemoryStorageSaveArgsForCall struct {
@@ -191,12 +192,10 @@ func (ms *MemoryStorage) Position(id string) cluster.Position {
 	return nil
 }
 
-// IngestSourceSeqHighwater is a stub: this in-memory test double has no
-// apply path to advance a highwater (ApplyCommitted only records the
-// applied index), so it always reports 0 ("dedup nothing"). Tests that
-// exercise effectively-once ingest dedup use the real wal.Storage.
-func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
-	return 0
+// IngestSourceDedup is a stub: no apply path, so always the empty record
+// ("dedup nothing").
+func (ms *MemoryStorage) IngestSourceDedup(id string) (string, uint64) {
+	return "", 0
 }
 
 // TopicRefreshEpoch is a stub: this in-memory test double has no apply path to
@@ -205,6 +204,20 @@ func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
 // use the real wal.Storage.
 func (ms *MemoryStorage) TopicRefreshEpoch(topic string) uint64 {
 	return 0
+}
+
+// HasContractFingerprint is a stub: this in-memory test double has no apply
+// path to record announced-shape marks, so it always reports false ("not yet
+// announced"). Tests that exercise tripwire dedupe use the real wal.Storage.
+func (ms *MemoryStorage) HasContractFingerprint(typeID string, version int, fingerprint string) bool {
+	return false
+}
+
+// IngestableCensus is a stub: this in-memory test double has no apply path to
+// record a published census, so it always reports none. Census tests use the
+// real wal.Storage.
+func (ms *MemoryStorage) IngestableCensus(id string) (*cluster.IngestableCensus, bool) {
+	return nil, false
 }
 
 func (ms *MemoryStorage) Database(id string) (cluster.Database, error) {
@@ -282,6 +295,8 @@ func (ms *MemoryStorage) Proposals() []*cluster.Proposal {
 type StorageStubs struct{}
 
 func (StorageStubs) DatabaseVersions(id string) ([]cluster.VersionInfo, error) { return nil, nil }
+func (StorageStubs) ProducerEdges() ([]db.DerivationEdge, error)               { return nil, nil }
+func (StorageStubs) IngestSourceDedup(id string) (string, uint64)              { return "", 0 }
 func (StorageStubs) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
 	return nil, nil
 }
@@ -345,7 +360,16 @@ func (StorageStubs) DeleteMemberPeerURL(id uint64) error             { return ni
 
 func (StorageStubs) MemberVersion(id uint64) (uint64, bool) { return 0, false }
 func (StorageStubs) MemberVersions() map[uint64]uint64      { return nil }
-func (StorageStubs) DeleteMemberVersion(id uint64) error    { return nil }
+
+// MemberZone stubs: no zones announced in unit fixtures — every syncable
+// resolves leader-owns, matching pre-zone behavior.
+func (StorageStubs) MemberZone(uint64) (string, bool) { return "", false }
+func (StorageStubs) MemberZones() map[uint64]string   { return nil }
+func (StorageStubs) DeleteMemberZone(uint64) error    { return nil }
+
+// TypeMigrationEditedAt stub: no in-place migration edits in unit fixtures.
+func (StorageStubs) TypeMigrationEditedAt(string) uint64 { return 0 }
+func (StorageStubs) DeleteMemberVersion(id uint64) error { return nil }
 
 // TODO Pull this reader out and make it concrete instead of an interface
 type Reader struct {
@@ -392,4 +416,31 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			}
 		}
 	}
+}
+
+// InterpretationRegistry is a stub: this in-memory test double applies no
+// restatements, so readers always see the empty registry (the restatement-free path).
+func (ms *MemoryStorage) InterpretationRegistry() *interpretation.Registry {
+	return interpretation.EmptyRegistry
+}
+
+// RestatementByID is a stub: no restatements are ever applied here.
+func (ms *MemoryStorage) RestatementByID(id string) (*cluster.Restatement, uint64, bool) {
+	return nil, 0, false
+}
+
+// AppliedRestatements is a stub: no restatements are ever applied here.
+func (ms *MemoryStorage) AppliedRestatements() ([]cluster.AppliedRestatement, error) {
+	return nil, nil
+}
+
+// SyncableCheckpoint is a stub: this double has no checkpoint records.
+func (ms *MemoryStorage) SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool) {
+	return nil, false
+}
+
+// SyncableRematerialization is a stub: no re-materializations run against
+// this in-memory double.
+func (ms *MemoryStorage) SyncableRematerialization(id string) (*cluster.SyncableRematerialization, bool) {
+	return nil, false
 }

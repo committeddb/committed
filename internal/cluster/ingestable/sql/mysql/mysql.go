@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -43,9 +42,6 @@ type MySQLDialect struct{}
 // convenience. flushSub keeps the parts' SourceSeqs strictly monotonic.
 
 const (
-	syncerBackoffMin = 1 * time.Second
-	syncerBackoffMax = 30 * time.Second
-
 	// defaultSnapshotBatchSize is the number of rows read per snapshot
 	// batch when Config.Options has no "batch_size" override. The
 	// snapshot uses keyset pagination (SELECT ... WHERE pk > :last_pk
@@ -433,101 +429,79 @@ const statusLagTimeout = 5 * time.Second
 // neither computation can run (source unreachable, unparsable inventory) does
 // Lag stay nil with CaughtUp false — an unknown lag is not a caught-up lag.
 func (m *MySQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
-	config.EnsureTopics()
-	// An EMPTY position means nothing has ever durably checkpointed — phase
-	// "pending", every table incomplete. It must not fall through to the
-	// progress==nil arm below, which renders the completed-streaming state
-	// (see sql.PendingStatus for the false-green incident this prevents). No
-	// source query: the binlog reader may not have run yet.
-	if len(pos) == 0 {
-		return sql.PendingStatus(config), nil
-	}
-	var progress *dialectpb.SnapshotProgress
-	var position, consumedGTID string
-	var consumedFile string
+	var consumedGTID, consumedFile string
 	var consumedPos uint64
-	if len(pos) > 0 {
+	decode := func(pos cluster.Position) (sql.StatusInputs, error) {
 		posProto := &dialectpb.MySQLBinLogPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
-			return cluster.IngestableStatus{}, fmt.Errorf("[mysql.status] decode position: %w", err)
+			return sql.StatusInputs{}, fmt.Errorf("[mysql.status] decode position: %w", err)
 		}
-		progress = posProto.SnapshotProgress
+		in := sql.StatusInputs{Progress: posProto.SnapshotProgress}
 		consumedGTID = posProto.GtidSet
 		if posProto.Name != "" {
-			position = fmt.Sprintf("%s:%d", posProto.Name, posProto.Pos)
+			in.Position = fmt.Sprintf("%s:%d", posProto.Name, posProto.Pos)
 			consumedFile, consumedPos = posProto.Name, uint64(posProto.Pos)
 		}
+		return in, nil
 	}
-
-	status := cluster.IngestableStatus{
-		Position:         position,
-		SnapshotProgress: sql.SnapshotTableStatus(config, progress),
-	}
-	if progress != nil {
-		status.Phase = "snapshot"
-		return status, nil
-	}
-	status.Phase = "streaming"
-
-	// No consumed GTID set → no transaction head to diff against. Fall back
-	// to BYTES behind the binlog write head, computed from the source's
-	// binlog inventory (SHOW BINARY LOGS — version-stable where SHOW MASTER
-	// STATUS was removed in 8.4): every file at-or-after the consumed one,
-	// minus the consumed offset. Same soft posture as the GTID query: any
-	// failure leaves Lag nil (logged at Debug), and a consumed file missing
-	// from the inventory means the source purged past our position — the
-	// file:pos analog of the gtid_purged hole, surfaced as the same distinct
-	// re-snapshot state rather than an understated lag.
-	if consumedGTID == "" {
-		if consumedFile == "" {
-			return status, nil
+	probe := func(ctx context.Context, status *cluster.IngestableStatus) {
+		// No consumed GTID set → no transaction head to diff against. Fall back
+		// to BYTES behind the binlog write head, computed from the source's
+		// binlog inventory (SHOW BINARY LOGS — version-stable where SHOW MASTER
+		// STATUS was removed in 8.4): every file at-or-after the consumed one,
+		// minus the consumed offset. Same soft posture as the GTID query: any
+		// failure leaves Lag nil (logged at Debug), and a consumed file missing
+		// from the inventory means the source purged past our position — the
+		// file:pos analog of the gtid_purged hole, surfaced as the same distinct
+		// re-snapshot state rather than an understated lag.
+		if consumedGTID == "" {
+			if consumedFile == "" {
+				return
+			}
+			files, err := readSourceBinlogInventory(ctx, config)
+			if err != nil {
+				zap.L().Debug("[mysql.status] binlog inventory query failed", zap.Error(err))
+				return
+			}
+			bytesBehind, purged, ok := binlogBytesBehind(files, consumedFile, consumedPos)
+			if purged {
+				status.ReSnapshotRequired = true
+				return
+			}
+			if ok {
+				status.Lag = &bytesBehind
+				status.LagUnit = cluster.LagUnitBytes
+				status.CaughtUp = bytesBehind == 0
+			}
+			return
 		}
-		files, err := readSourceBinlogInventory(ctx, config)
+		consumed, err := mysql.ParseMysqlGTIDSet(consumedGTID)
 		if err != nil {
-			zap.L().Debug("[mysql.status] binlog inventory query failed", zap.Error(err))
-			return status, nil
+			zap.L().Debug("[mysql.status] parse consumed GTID failed",
+				zap.String("gtid_set", consumedGTID), zap.Error(err))
+			return
 		}
-		bytesBehind, purged, ok := binlogBytesBehind(files, consumedFile, consumedPos)
-		if purged {
+		// Streaming with GTID positioning: read the source's executed/purged sets. A
+		// failure (source unreachable, permissions) leaves Lag nil — the rest of the
+		// status is still useful — so it is logged, not returned.
+		executed, purged, err := readSourceGTIDState(ctx, config)
+		if err != nil {
+			zap.L().Debug("[mysql.status] gtid source query failed", zap.Error(err))
+			return
+		}
+		if needsResnapshot(consumed, purged) {
+			// The source purged change data we never consumed: an unrecoverable hole.
+			// Surface the distinct re-snapshot state rather than a lag number that
+			// would understate a gap streaming can never close.
 			status.ReSnapshotRequired = true
-			return status, nil
+			return
 		}
-		if ok {
-			status.Lag = &bytesBehind
-			status.LagUnit = cluster.LagUnitBytes
-			status.CaughtUp = bytesBehind == 0
-		}
-		return status, nil
+		lag := gtidLag(executed, consumed)
+		status.Lag = &lag
+		status.LagUnit = cluster.LagUnitTransactions
+		status.CaughtUp = consumed.Contain(executed)
 	}
-	consumed, err := mysql.ParseMysqlGTIDSet(consumedGTID)
-	if err != nil {
-		zap.L().Debug("[mysql.status] parse consumed GTID failed",
-			zap.String("gtid_set", consumedGTID), zap.Error(err))
-		return status, nil
-	}
-
-	// Streaming with GTID positioning: read the source's executed/purged sets. A
-	// failure (source unreachable, permissions) leaves Lag nil — the rest of the
-	// status is still useful — so it is logged, not returned.
-	executed, purged, err := readSourceGTIDState(ctx, config)
-	if err != nil {
-		zap.L().Debug("[mysql.status] gtid source query failed", zap.Error(err))
-		return status, nil
-	}
-
-	if needsResnapshot(consumed, purged) {
-		// The source purged change data we never consumed: an unrecoverable hole.
-		// Surface the distinct re-snapshot state rather than a lag number that
-		// would understate a gap streaming can never close.
-		status.ReSnapshotRequired = true
-		return status, nil
-	}
-
-	lag := gtidLag(executed, consumed)
-	status.Lag = &lag
-	status.LagUnit = cluster.LagUnitTransactions
-	status.CaughtUp = consumed.Contain(executed)
-	return status, nil
+	return sql.RenderStatus(ctx, config, pos, decode, probe)
 }
 
 // readSourceGTIDState reads the source's @@gtid_executed (the global write head)
@@ -639,30 +613,12 @@ func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) (cols, g
 	return cols, generated, rows.Err()
 }
 
-// addedTables returns the configured tables absent from the durable
-// snapshotted-tables registry — the tables a re-POST added since the last
-// snapshot, whose history needs a backfill. Order follows config.Tables so the
-// backfill scan order is deterministic.
-func addedTables(configured, snapshotted []string) []string {
-	have := make(map[string]bool, len(snapshotted))
-	for _, t := range snapshotted {
-		have[t] = true
-	}
-	var added []string
-	for _, t := range configured {
-		if !have[t] {
-			added = append(added, t)
-		}
-	}
-	return added
-}
-
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	// Populate Topics before any snapshot/stream goroutine spawns, so per-spec
 	// routing (SpecForTable, specFor, refSpecs) never has to lazily mutate the shared
 	// config concurrently — a dialect entered directly has only the flat fields.
 	config.EnsureTopics()
-	backoff := syncerBackoffMin
+	backoff := sql.NewReconnectBackoff()
 
 	// Parse the initial resume position, if any. snapshot_progress
 	// being non-nil means a prior run was interrupted mid-snapshot
@@ -725,28 +681,13 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// Postgres addedTables branch. Overlap with the stream is covered by
 		// the sink's keyed upsert, exactly as on Postgres.
 		if lastPos != nil && resumeProgress == nil {
-			if added := addedTables(config.Tables, snapshottedTables); len(added) > 0 {
+			if added := sql.AddedTables(config.Tables, snapshottedTables); len(added) > 0 {
 				zap.L().Info("config change added tables; backfilling their existing rows (a full-table scan per added table; sibling tables are not re-read)",
 					zap.Strings("added_tables", added),
 					zap.Int("tables_total", len(config.Tables)))
-				completed := make([]string, 0, len(config.Tables)-len(added))
-				addedSet := map[string]bool{}
-				for _, t := range added {
-					addedSet[t] = true
-				}
-				for _, t := range config.Tables {
-					if !addedSet[t] {
-						completed = append(completed, t)
-					}
-				}
-				resumeProgress = &dialectpb.SnapshotProgress{
-					CompletedTables: completed,
-					PartialBackfill: true,
-				}
-				// Stamp backfilled rows at the current epoch, floored so they
-				// never land below a generation already on the sink. No bump:
-				// this is not a refresh.
-				currentEpoch = max(currentEpoch, epochFloor)
+				plan := sql.PlanSnapshot(sql.SnapshotBackfill, nil, currentEpoch, epochFloor, config.Tables, added)
+				resumeProgress = plan.Progress
+				currentEpoch = plan.Epoch
 			}
 		}
 
@@ -759,36 +700,30 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// the checkpoint epoch to 0 while the sink still holds rows up to the
 			// highwater), else epoch 1. A purge re-snapshot arrives here with the
 			// epoch already bumped (see the isGtidPurged branch).
-			partialBackfill := resumeProgress != nil && resumeProgress.PartialBackfill
+			kind := sql.SnapshotCold
 			if resumeProgress != nil {
-				currentEpoch = max(currentEpoch, 1)
-			} else {
-				currentEpoch = sql.RefreshSnapshotEpoch(currentEpoch, epochFloor)
+				kind = sql.SnapshotResume
 			}
-			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, resumeProgress, currentEpoch)
+			plan := sql.PlanSnapshot(kind, resumeProgress, currentEpoch, epochFloor, config.Tables, nil)
+			currentEpoch = plan.Epoch
+			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, plan.Progress, currentEpoch)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
 				}
 				zap.L().Warn("snapshot failed, retrying",
-					zap.Duration("backoff", backoff),
+					zap.Duration("backoff", backoff.Delay()),
 					zap.Error(err),
 				)
-				select {
-				case <-ctx.Done():
+				if backoff.Wait(ctx) != nil {
 					return nil
-				case <-time.After(backoff):
-				}
-				backoff *= 2
-				if backoff > syncerBackoffMax {
-					backoff = syncerBackoffMax
 				}
 				continue
 			}
 			lastPos = snapshotPos
 			lastGTID = snapshotGTID
 			resumeProgress = nil
-			backoff = syncerBackoffMin
+			backoff.Reset()
 			zap.L().Info("snapshot complete",
 				zap.String("binlog_file", lastPos.Name),
 				zap.Uint32("binlog_pos", lastPos.Pos),
@@ -802,25 +737,6 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// deliberately did not re-emit. One marker per proposal keeps each
 			// proposal homogeneous (one topic), matching the flush path; one spec
 			// for the flat form emits exactly one marker as before.
-			if !partialBackfill {
-				config.EnsureTopics()
-				for ti := range config.Topics {
-					spec := &config.Topics[ti]
-					if spec.Type == nil {
-						continue
-					}
-					marker := cluster.NewRefreshBoundaryEntity(spec.Type, currentEpoch)
-					select {
-					case pr <- &cluster.Proposal{Entities: []*cluster.Entity{marker}}:
-					case <-ctx.Done():
-						return nil
-					}
-				}
-			}
-
-			// Any completed snapshot — full or backfill — leaves every
-			// configured table snapshotted (table removal is rejected at
-			// config-replace time, so config.Tables only ever grows).
 			snapshottedTables = append([]string(nil), config.Tables...)
 
 			// Checkpoint the final snapshot position (no
@@ -832,10 +748,8 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			if err != nil {
 				return err
 			}
-			select {
-			case po <- bs:
-			case <-ctx.Done():
-				return nil
+			if err := sql.CompleteSnapshot(ctx, config, plan.Marker, currentEpoch, bs, pr, po); err != nil {
+				return nil // a cancelled worker: the normal shutdown path
 			}
 		}
 
@@ -873,25 +787,19 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				streamer, err = syncer.StartSync(*lastPos)
 			}
 			if err == nil {
-				backoff = syncerBackoffMin
+				// The attempt reached streaming: the next failure is a fresh
+				// one, so the reconnect delay starts over.
+				backoff.Reset()
 				break
 			}
 			syncer.Close()
 
 			zap.L().Warn("binlog sync start failed, retrying",
-				zap.Duration("backoff", backoff),
+				zap.Duration("backoff", backoff.Delay()),
 				zap.Error(err),
 			)
-
-			select {
-			case <-ctx.Done():
+			if backoff.Wait(ctx) != nil {
 				return nil
-			case <-time.After(backoff):
-			}
-
-			backoff *= 2
-			if backoff > syncerBackoffMax {
-				backoff = syncerBackoffMax
 			}
 		}
 		logResumePositioning(useGTID, gtidSet, lastPos)
@@ -905,17 +813,11 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			if err != nil {
 				syncer.Close()
 				zap.L().Warn("read source collation catalog failed, retrying",
-					zap.Duration("backoff", backoff),
+					zap.Duration("backoff", backoff.Delay()),
 					zap.Error(err),
 				)
-				select {
-				case <-ctx.Done():
+				if backoff.Wait(ctx) != nil {
 					return nil
-				case <-time.After(backoff):
-				}
-				backoff *= 2
-				if backoff > syncerBackoffMax {
-					backoff = syncerBackoffMax
 				}
 				continue
 			}
@@ -927,11 +829,12 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		// already on the sink, and cover a pre-feature checkpoint that resumed
 		// straight to streaming (snapshot already floors it). Keeping it on the
 		// handler means handleXID's checkpoints and the stamped entities agree.
-		currentEpoch = max(currentEpoch, epochFloor, 1)
+		currentEpoch = sql.FloorEpoch(currentEpoch, epochFloor)
 		handler := &MySQLEventHandler{
 			config:            config,
 			proposalChan:      pr,
 			positionChan:      po,
+			gtidResume:        useGTID,
 			epoch:             currentEpoch,
 			charsetPlans:      charsetPlans,
 			snapshottedTables: snapshottedTables,
@@ -1013,7 +916,11 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// (they keep their older generation and are never re-emitted). The gap
 			// is reconciled in-band, not just re-loaded. Floor to the topic highwater
 			// so the bump lands strictly above every generation already on the sink.
-			currentEpoch = max(currentEpoch, epochFloor, 1) + 1
+			// The gap plan's epoch — strictly above everything seen. The position
+			// reset below routes the next iteration through the cold plan, which
+			// re-derives from this bumped value (a second bump, harmless and
+			// long-standing: the sweep only needs "above").
+			currentEpoch = sql.PlanSnapshot(sql.SnapshotGap, nil, currentEpoch, epochFloor, config.Tables, nil).Epoch
 			lastPos = nil
 			lastGTID = ""
 			resumeProgress = nil
@@ -1025,21 +932,14 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				lastGTID = handler.consumedGTID.String()
 			}
 			zap.L().Warn("binlog stream exited, will reconnect",
-				zap.Duration("backoff", backoff),
+				zap.Duration("backoff", backoff.Delay()),
 				zap.Error(streamErr),
 			)
 		}
 
 		// --- backoff before reconnect ---
-		select {
-		case <-ctx.Done():
+		if backoff.Wait(ctx) != nil {
 			return nil
-		case <-time.After(backoff):
-		}
-
-		backoff *= 2
-		if backoff > syncerBackoffMax {
-			backoff = syncerBackoffMax
 		}
 	}
 }
@@ -1134,6 +1034,14 @@ type MySQLEventHandler struct {
 	resumeFileNum uint64
 	resumePos     uint32
 
+	// gtidResume records that this session resumed by the GTID-set watermark
+	// (StartSyncGTID). It gates HOW a lineage regression is reported: under
+	// GTID resume the regression is stamped LineageRegressed (the
+	// transaction-scoped dedup rides through; only a legacy stored record
+	// freezes), while a file:pos-only session keeps the DedupUnsafe freeze —
+	// coordinates are its ONLY identity, so a regression is undecidable.
+	gtidResume bool
+
 	// chunkingChanged is set at construction when the current chunkTag differs
 	// from the one recorded in the resume checkpoint — the flush budget, config
 	// rendering, or binary rendering version changed since the parts were
@@ -1167,6 +1075,21 @@ type MySQLEventHandler struct {
 	// or gtid_mode=OFF source leaves the checkpoint GTID-free.
 	consumedGTID mysql.GTIDSet
 	curTxnGTID   mysql.GTIDSet
+
+	// curTxnSourceTS and curTxnID are the in-flight transaction's capture
+	// provenance, stamped onto every proposal flushed for it (see
+	// cluster.Proposal.SourceCommitUnixNano/SourceTxnID) and cleared at
+	// commit. curTxnSourceTS is the latest binlog event-header timestamp
+	// (whole seconds — the header's resolution) observed for the
+	// transaction: at the commit flush that is the XID event's header, i.e.
+	// the source commit time; a mid-transaction soft flush carries its
+	// latest RowsEvent header (statement time, at most seconds earlier).
+	// curTxnID is the transaction's GTID when the source runs gtid_mode=ON,
+	// else the binlog coordinate of the transaction's first buffered row —
+	// captured ONCE so every part of a multi-part (soft-flushed)
+	// transaction shares one identity (the co-transaction evidence).
+	curTxnSourceTS uint32
+	curTxnID       string
 
 	// driftWarned dedups the DIVERGENCE-tier warning (a mapped non-key column
 	// dropped/renamed at the source): the check runs per RowsEvent — i.e. per
@@ -1445,10 +1368,17 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 
 	// Track the live offset (the row event's end position) so a mid-transaction
 	// soft-limit flush stamps a monotonic SourceSeq. It applies to every row of
-	// the event.
+	// the event. The header timestamp feeds the transaction's provenance stamp
+	// (a zero timestamp is a fake/heartbeat event — never one carrying rows,
+	// but guarded anyway so it can't blank a real observation).
 	if header != nil {
 		h.curPos = header.LogPos
+		if header.Timestamp != 0 {
+			h.curTxnSourceTS = header.Timestamp
+		}
 	}
+
+	h.captureTxnID()
 
 	// A RowsEvent carries EVERY row of its statement, not just one: a multi-row
 	// INSERT or a bulk DELETE has one image per row, and an UPDATE interleaves
@@ -1486,7 +1416,7 @@ func (h *MySQLEventHandler) handleRows(ctx context.Context, header *replication.
 		// is applied as ordered parts (the documented bounded exception — see
 		// sql.TxnSoftFlushBytes).
 		if h.pendingBytes >= h.flushBudget {
-			if err := h.flushPending(ctx, true); err != nil {
+			if _, err := h.flushPending(ctx, true, nil); err != nil {
 				return err
 			}
 		}
@@ -1602,23 +1532,18 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, spec *sql.TopicSpec, tabl
 // every group after the first. isSoftFlush is true for a mid-transaction byte-budget
 // flush (a same-coordinate multi-part piece) and false for the commit flush — it
 // drives the re-chunk DedupUnsafe guard.
-func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) error {
-	if len(h.pending) == 0 {
-		return nil
-	}
-	// Stamp streamed rows with the current refresh epoch so a later
-	// refresh-boundary marker can sweep rows a re-snapshot left behind (a
-	// streamed-then-gap-deleted row still carries this epoch until the sweep).
-	stampGeneration(h.pending, h.epoch)
-
-	// One proposal per topic, in first-appearance order (deterministic for replay).
-	// A single-topic flush yields one group == the original buffer, so its proposal
-	// is byte-identical to the pre-routing single-proposal flush.
-	groups := sql.PartitionByTopic(h.pending)
+// bundlePos, when non-nil, is the encoded post-transaction resume position
+// (the GTID-set watermark): it is attached to the LAST emitted group so the
+// durable watermark commits atomically with the transaction's final part —
+// only the commit flush passes it (a position must never advance past an
+// uncommitted transaction). Returns whether any proposal was emitted, so
+// handleXID can fall back to the out-of-band position checkpoint for
+// commits that flushed nothing (an unwatched-table transaction's XID).
+func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool, bundlePos []byte) (bool, error) {
+	buf := h.pending
 	h.pending = nil
 	h.pendingBytes = 0
-
-	for _, group := range groups {
+	seq := func(p *cluster.Proposal) {
 		// Disambiguate repeated proposals at one coordinate: a RowsEvent bigger than
 		// maxPendingEntities flushes several times at the same (file, pos), and a
 		// mixed-table flush emits several per-topic proposals at one (file, pos).
@@ -1630,20 +1555,28 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) 
 		} else {
 			h.flushFile, h.flushPos, h.flushSub = h.curFile, h.curPos, 0
 		}
-		p := &cluster.Proposal{Entities: group, SourceSeq: encodeSourceSeq(h.curFile, h.curPos, h.flushSub)}
+		p.SourceSeq = encodeSourceSeq(h.curFile, h.curPos, h.flushSub)
 		// Failover-lineage guard: if the live coordinate is at or below the resume
 		// baseline — a lower file number, OR the same file number at an equal/lower
 		// byte offset — this stream is a different binlog lineage (a promoted replica
-		// / RESET MASTER) whose coordinate encodes at or below the durable highwater
-		// (SourceSeq = fileNum<<32 | pos). Flag the proposal so the ingest worker
-		// freezes instead of silently dedup-dropping it — this data would otherwise be
-		// lost. A normal same-lineage resume only ever streams ABOVE the baseline, so
-		// this never trips falsely. Comparing the file number alone missed the
-		// equal-ordinal/lower-offset case (silent loss). See cluster.Proposal.DedupUnsafe.
+		// / RESET MASTER) whose coordinate encodes at or below coordinates the old
+		// lineage already used. Under a GTID resume this is EXPECTED after a
+		// promotion and harmless to the transaction-scoped dedup — stamp
+		// LineageRegressed so the worker rides through (freezing only while the
+		// stored dedup record is still the legacy scalar regime). A file:pos-only
+		// session has no transaction watermark, so the regression stays a
+		// DedupUnsafe freeze — coordinates are its only identity. A normal
+		// same-lineage resume only ever streams ABOVE the baseline, so neither
+		// trips falsely. Comparing the file number alone missed the
+		// equal-ordinal/lower-offset case (silent loss).
 		if h.resumeFileNum > 0 {
 			if n, ok := binlogFileNum(h.curFile); ok &&
 				(n < h.resumeFileNum || (n == h.resumeFileNum && h.curPos <= h.resumePos)) {
-				p.DedupUnsafe = true
+				if h.gtidResume {
+					p.LineageRegressed = true
+				} else {
+					p.DedupUnsafe = true
+				}
 			}
 		}
 		// Re-chunk guard (F1): the chunking inputs changed since this coordinate's
@@ -1653,24 +1586,35 @@ func (h *MySQLEventHandler) flushPending(ctx context.Context, isSoftFlush bool) 
 		if h.chunkingChanged && isSoftFlush {
 			p.DedupUnsafe = true
 		}
-
-		select {
-		case h.proposalChan <- p:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
 	}
-	return nil
+	// Provenance: the source commit time (event-header seconds) and transaction
+	// identity tracked for the in-flight transaction. This dialect checkpoints
+	// per transaction (handleXID bundles the post-transaction position), so its
+	// resume re-emits at most the in-flight transaction — the contract that
+	// earns txn-scoped dedup.
+	prov := sql.Provenance{
+		CommitUnixNano: int64(h.curTxnSourceTS) * int64(time.Second),
+		TxnID:          h.curTxnID,
+		TxnScopedDedup: h.curTxnID != "",
+	}
+	emitted, err := sql.Flush(ctx, buf, h.epoch, prov, seq, bundlePos, h.proposalChan)
+	return emitted > 0, err
 }
 
-// stampGeneration sets the reconciling-refresh epoch on every entity in a batch
-// (see cluster.Entity.Generation). The whole batch shares one epoch: the worker
-// holds a single "current epoch" that only changes when a binlog purge forces an
-// in-place re-snapshot, so stamping at flush time is enough.
-func stampGeneration(entities []*cluster.Entity, epoch uint64) {
-	for _, e := range entities {
-		e.Generation = epoch
+// captureTxnID records the in-flight transaction's provenance identity at its
+// first buffered row: the GTID when the source announces one (gtid_mode=ON —
+// the GTIDEvent precedes the transaction's row events), else the first row
+// event's binlog coordinate. Captured ONCE per transaction so every
+// soft-flushed part shares one identity; cleared on commit (handleXID).
+func (h *MySQLEventHandler) captureTxnID() {
+	if h.curTxnID != "" {
+		return
 	}
+	if h.curTxnGTID != nil {
+		h.curTxnID = h.curTxnGTID.String()
+		return
+	}
+	h.curTxnID = fmt.Sprintf("%s:%d", h.curFile, h.curPos)
 }
 
 // mergeGTID extends the consumed GTID set with one committed transaction's GTID.
@@ -1790,16 +1734,18 @@ func nonNeg(n int64) uint64 {
 func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.EventHeader) error {
 	if header != nil {
 		h.curPos = header.LogPos
+		// The XID event's header timestamp is the source commit time — the
+		// authoritative provenance stamp for the commit flush below.
+		if header.Timestamp != 0 {
+			h.curTxnSourceTS = header.Timestamp
+		}
 	}
 	pos := mysql.Position{Name: h.curFile, Pos: h.curPos}
 
-	if err := h.flushPending(ctx, false); err != nil {
-		return err
-	}
-
-	// Merge the just-committed transaction's GTID into the consumed set so the
-	// checkpoint carries the GTID resume cursor alongside file:pos. Resume still
-	// uses file:pos until the cutover slice — the GTID is written, not yet read.
+	// Merge the just-committed transaction's GTID into the consumed set FIRST,
+	// so the position built below — the post-transaction watermark — already
+	// covers this transaction. Resume reads this set (StartSyncGTID), so a
+	// restart streams strictly after it.
 	merged, err := mergeGTID(h.consumedGTID, h.curTxnGTID)
 	if err != nil {
 		return fmt.Errorf("merge committed GTID: %w", err)
@@ -1816,10 +1762,30 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 		return err
 	}
 
-	select {
-	case h.positionChan <- bs:
-	case <-ctx.Done():
-		return ctx.Err()
+	// Bundle the watermark onto the transaction's final proposal: position and
+	// entities commit in ONE raft entry, so the durable watermark advances
+	// atomically with the applied index — a crash can never leave a committed
+	// transaction outside the resume set, which is what shrinks the resume
+	// re-emission window to the single in-flight transaction and lets the
+	// dedup be transaction-scoped.
+	emitted, err := h.flushPending(ctx, false, bs)
+	if err != nil {
+		return err
+	}
+
+	// The transaction is flushed; its provenance must not bleed into the next
+	// one (whose own first row / GTID re-captures it).
+	h.curTxnSourceTS = 0
+	h.curTxnID = ""
+
+	// A commit that emitted nothing (an unwatched-table transaction's XID)
+	// still advances the resume position — out-of-band, as before.
+	if !emitted {
+		select {
+		case h.positionChan <- bs:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	h.lastPos = &mysql.Position{Name: pos.Name, Pos: pos.Pos}
@@ -2105,31 +2071,12 @@ func chunkTag(config *sql.Config, budget int) uint64 {
 	return t
 }
 
-// snapshot performs a pure-SQL initial dump of all watched tables using
-// keyset (cursor) pagination with one short transaction per batch. It
-// replaces the external mysqldump binary that canal uses internally.
-//
-// The flow:
-//
-//  1. If resumePos is nil (fresh start): FLUSH TABLES WITH READ LOCK,
-//     SHOW BINARY LOG STATUS, UNLOCK TABLES. The global lock is held
-//     only for microseconds to capture the starting binlog position.
-//     If resumePos is non-nil (mid-snapshot resume), reuse the saved
-//     position so the binlog tail still covers the time window from
-//     before the original snapshot started.
-//
-//  2. For each table, read in batches:
-//     SELECT * FROM t WHERE pk > :last_pk ORDER BY pk ASC LIMIT :N
-//     inside a short REPEATABLE READ transaction. Each batch becomes
-//     one cluster.Proposal, followed by a position checkpoint that
-//     records the table and last pk flushed. On restart, the checkpoint
-//     drives resume-from-last-pk so no already-flushed row is replayed.
-//
-//  3. The snapshot is not point-in-time consistent (tx per batch), but
-//     the binlog stream that starts from the pre-snapshot position will
-//     replay any concurrent changes, so the end state converges.
-//
-// Returns the binlog position where streaming should begin.
+// snapshot captures the binlog coordinate to stream from and enumerates the
+// configured tables into the log at it: the shared snapshot pass
+// (sql.RunSnapshot) drives the resume/complete bookkeeping, the inline
+// checkpoints, and the chunked parallel dispatch this dialect's reader plans;
+// this dialect supplies the keyset batch SQL and the checkpoint encoding at
+// the captured coordinate. Returns the coordinate the stream resumes from.
 func snapshot(
 	ctx context.Context,
 	config *sql.Config,
@@ -2145,7 +2092,6 @@ func snapshot(
 		return nil, "", fmt.Errorf("snapshot: open: %w", err)
 	}
 	defer func() { _ = db.Close() }()
-
 	// Determine the binlog position + GTID set to start streaming from. On a fresh
 	// start we capture them now under a brief global lock; on a mid-snapshot resume
 	// we keep the saved coordinate so the binlog tail covers the pre-snapshot
@@ -2161,68 +2107,40 @@ func snapshot(
 		}
 		logCapturedPositioning(ctx, db, gtid)
 	}
-
-	batchSize := parseBatchSize(config.Options)
-
-	// Build the initial progress map from the resume checkpoint.
-	progress := &dialectpb.SnapshotProgress{
-		LastPkByTable:   map[string]string{},
-		CompletedTables: nil,
+	if err := sql.RunSnapshot(ctx, sql.SnapshotRun{
+		Config:    config,
+		Reader:    mysqlSnapshotReader{db: db},
+		Tables:    config.Tables,
+		Progress:  sql.NewSnapshotProgress(resumeProgress),
+		Epoch:     epoch,
+		BatchSize: sql.ParseBatchSize(config.Options, defaultSnapshotBatchSize),
+		Readers:   sql.ParseSnapshotReaders(config.Options),
+		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
+			return encodeProgress(pos, gtid, p, epoch)
+		},
+		Proposals: pr,
+		Positions: po,
+	}); err != nil {
+		return nil, "", err
 	}
-	completed := map[string]bool{}
-	if resumeProgress != nil {
-		maps.Copy(progress.LastPkByTable, resumeProgress.LastPkByTable)
-		progress.CompletedTables = append(progress.CompletedTables, resumeProgress.CompletedTables...)
-		// Carry the partial-backfill mark through to every persisted
-		// mid-snapshot checkpoint: dropping it would make a crash-resume
-		// treat the pre-seeded sibling completions as a nearly-done FULL
-		// snapshot and emit the refresh marker — whose topic sweep would
-		// delete every sibling row this backfill never re-emits.
-		progress.PartialBackfill = resumeProgress.PartialBackfill
-		for _, t := range resumeProgress.CompletedTables {
-			completed[t] = true
-		}
-	}
-
-	// Announce whether this is a resume or a cold start, at absolute (table-level)
-	// granularity, so an operator can tell the two apart from the log alone — a
-	// per-run batch counter that resets each supervisor restart cannot. The keyset
-	// cursor itself is deliberately NOT logged: a natural PK is often source PII
-	// (see the per-batch flush log), so progress is reported by table counts only.
-	if resumeProgress != nil {
-		zap.L().Info("snapshot: resuming from checkpoint",
-			zap.Int("tables_complete", len(completed)),
-			zap.Int("tables_resuming", len(progress.LastPkByTable)),
-			zap.Int("tables_total", len(config.Tables)),
-			zap.Uint64("refresh_epoch", epoch))
-	} else {
-		zap.L().Info("snapshot: starting fresh",
-			zap.Int("tables_total", len(config.Tables)),
-			zap.Uint64("refresh_epoch", epoch))
-	}
-
-	for _, table := range config.Tables {
-		if completed[table] {
-			zap.L().Info("snapshot: skipping already-completed table",
-				zap.String("table", table),
-			)
-			continue
-		}
-		if err := snapshotTable(ctx, db, config, table, batchSize, progress, &pos, gtid, epoch, pr, po); err != nil {
-			return nil, "", fmt.Errorf("snapshot: table %s: %w", table, err)
-		}
-		// Mark complete and drop any partial cursor.
-		progress.CompletedTables = append(progress.CompletedTables, table)
-		delete(progress.LastPkByTable, table)
-		completed[table] = true
-
-		if err := emitProgress(ctx, po, pos, gtid, progress, epoch); err != nil {
-			return nil, "", err
-		}
-		zap.L().Info("snapshot: table complete", zap.String("table", table))
-	}
-
 	return &pos, gtid, nil
+}
+
+// mysqlSnapshotReader is the dialect's snapshot adapter: the keyset batch
+// SQL (readBatch) and, for snapshot_readers > 1, the chunk planner
+// (planTableChunks) plus the range-bounded chunk reads.
+type mysqlSnapshotReader struct{ db *gosql.DB }
+
+func (r mysqlSnapshotReader) ReadBatch(ctx context.Context, table string, spec *sql.TopicSpec, lastPK string, haveLastPK bool, batchSize int) ([]*cluster.Entity, string, int, error) {
+	return readBatch(ctx, r.db, table, spec, lastPK, haveLastPK, "", batchSize)
+}
+
+func (r mysqlSnapshotReader) PlanChunks(ctx context.Context, table string, spec *sql.TopicSpec, readers, batchSize int) (*dialectpb.TableChunkProgress, error) {
+	return planTableChunks(ctx, r.db, table, spec, readers, batchSize)
+}
+
+func (r mysqlSnapshotReader) ReadChunkBatch(ctx context.Context, table string, spec *sql.TopicSpec, lastPK string, haveLastPK bool, upper string, batchSize int) ([]*cluster.Entity, string, int, error) {
+	return readBatch(ctx, r.db, table, spec, lastPK, haveLastPK, upper, batchSize)
 }
 
 // captureBinlogPosition briefly acquires a global read lock to read the
@@ -2249,41 +2167,6 @@ func captureBinlogPosition(ctx context.Context, db *gosql.DB) (mysql.Position, s
 	return pos, gtidSet, nil
 }
 
-// parseBatchSize reads "batch_size" from Config.Options, falling back to
-// defaultSnapshotBatchSize on missing/invalid values.
-func parseBatchSize(options map[string]string) int {
-	if v, ok := options["batch_size"]; ok {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultSnapshotBatchSize
-}
-
-// emitProgress sends a position checkpoint with the given snapshot
-// progress. The binlog position stays anchored at the pre-snapshot
-// capture so a resume still replays binlog events that occurred while
-// the snapshot was running.
-func emitProgress(
-	ctx context.Context,
-	po chan<- cluster.Position,
-	pos mysql.Position,
-	gtid string,
-	progress *dialectpb.SnapshotProgress,
-	epoch uint64,
-) error {
-	bs, err := encodeProgress(pos, gtid, progress, epoch)
-	if err != nil {
-		return err
-	}
-	select {
-	case po <- bs:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 // encodeProgress marshals a binlog position + snapshot progress into the
 // dialect's checkpoint bytes. Shared by emitProgress (out-of-band checkpoint)
 // and the snapshot loop, which carries the checkpoint INLINE on the batch
@@ -2298,56 +2181,6 @@ func encodeProgress(pos mysql.Position, gtid string, progress *dialectpb.Snapsho
 		SnapshotProgress: progress,
 		RefreshEpoch:     epoch,
 	})
-}
-
-// handOffSnapshotWindow hands one read window's rows to pr — one single-row
-// proposal per row (a proposal is a TRANSACTION; the read window is read tuning,
-// never proposal composition) — bundling the inline resume checkpoint
-// (Proposal.Position) on every sql.SnapshotCheckpointStride-th row and on the
-// window's final row. Each checkpoint's cursor is THAT row's key, not the
-// window's last, so the durable resume cursor trails committed progress by at
-// most one stride: a worker frozen mid-window restarts from the last committed
-// checkpoint instead of re-reading and re-proposing the whole window (whose
-// SourceSeq-0 duplicates nothing would dedup out of the permanent log), and the
-// freeze/restart supervisor sees an advancing position instead of counting a
-// merely-slow worker toward give-up. A checkpoint-bearing row is an ordered
-// proposal (the ingest worker drains its pipeline before proposing it), so it
-// trails every row it covers; rows after it simply re-emit on resume.
-// progress is mutated in place per checkpoint, ending at the window's last
-// EMITTED key. The caller's read cursor (lastPK) can end further: it advances
-// per SCANNED row, so marshal-skipped tail rows sit past the durable cursor.
-// That gap is convergent — a crash re-scans only rows that skip again, and an
-// all-skipped window (no proposals, so no checkpoint) simply leaves the
-// durable cursor at the previous emission. Mirrors the Postgres dialect's
-// handOffSnapshotWindow; only the checkpoint encoding differs.
-func handOffSnapshotWindow(
-	ctx context.Context,
-	rows []*cluster.Entity,
-	table string,
-	progress *dialectpb.SnapshotProgress,
-	pos mysql.Position,
-	gtid string,
-	epoch uint64,
-	pr chan<- *cluster.Proposal,
-) error {
-	stride := sql.SnapshotCheckpointStride
-	for ri, row := range rows {
-		p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
-		if ri == len(rows)-1 || (ri+1)%stride == 0 {
-			progress.LastPkByTable[table] = string(row.Key)
-			posBytes, err := encodeProgress(pos, gtid, progress, epoch)
-			if err != nil {
-				return err
-			}
-			p.Position = posBytes
-		}
-		select {
-		case pr <- p:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
 }
 
 // logCapturedPositioning makes the positioning decision VISIBLE at snapshot
@@ -2477,93 +2310,6 @@ func binlogStatus(ctx context.Context, conn *gosql.Conn) (mysql.Position, string
 	return mysql.Position{}, "", fmt.Errorf("binlogStatus: could not determine binlog position")
 }
 
-// snapshotTable reads all rows from a table using keyset pagination.
-// Each batch opens its own short REPEATABLE READ transaction, emits
-// its rows as a single proposal, then checkpoints the progress
-// (last pk flushed) before moving on. This bounds MVCC read-view
-// lifetime to the batch duration instead of the full-table scan.
-//
-// Column mapping and primary-key extraction mirror the binlog streaming
-// path (OnRow) so consumers see identical entity shapes.
-func snapshotTable(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	table string,
-	batchSize int,
-	progress *dialectpb.SnapshotProgress,
-	pos *mysql.Position,
-	gtid string,
-	epoch uint64,
-	pr chan<- *cluster.Proposal,
-	po chan<- cluster.Position,
-) error {
-	// Resolve this table's topic-spec (the snapshot iterates config.Tables, so table
-	// is a config entry SpecForTable keys on directly). One spec for the flat form.
-	spec := config.SpecForTable(table)
-	if spec == nil {
-		return fmt.Errorf("snapshot: no topic-spec routes table %q", table)
-	}
-	// lastPK, haveLastPK distinguish "no rows yet flushed" from
-	// "last flushed pk was the empty string".
-	lastPK, haveLastPK := progress.LastPkByTable[table]
-
-	batchNum := 0
-	totalRows := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		batchNum++
-
-		rows, lastKey, count, err := readBatch(ctx, db, table, spec, lastPK, haveLastPK, batchSize)
-		if err != nil {
-			return err
-		}
-		if count == 0 {
-			// Empty table, or we've advanced past the last row.
-			break
-		}
-
-		// Stamp the snapshot rows with the refresh epoch (a purge re-snapshot
-		// bumps it; the initial snapshot is epoch 1) so the closing
-		// refresh-boundary marker can sweep the rows this positive enumeration
-		// could not re-emit.
-		stampGeneration(rows, epoch)
-
-		// Advance the read cursor to this window, then hand the rows off with
-		// inline checkpoints every sql.SnapshotCheckpointStride rows (and on the
-		// window's final row) — see handOffSnapshotWindow. Each checkpoint
-		// commits atomically with the row it rides (Proposal.Position), closing
-		// the effectively-once gap a separate position proposal left open for
-		// snapshot rows (SourceSeq 0, so the streaming dedup can't cover them).
-		lastPK = lastKey
-		haveLastPK = true
-		if err := handOffSnapshotWindow(ctx, rows, table, progress, *pos, gtid, epoch, pr); err != nil {
-			return err
-		}
-		totalRows += count
-
-		// Deliberately no last_pk: a natural primary key is often source PII
-		// (email, national id, account no), and this line is Info-level and
-		// shipped to log aggregation. The batch/row counts give progress; the
-		// resume cursor lives in progress.LastPkByTable, not the logs.
-		zap.L().Info("snapshot: batch flushed",
-			zap.String("table", table),
-			zap.Int("batch", batchNum),
-			zap.Int("rows_in_batch", count),
-			zap.Int("rows_total", totalRows),
-		)
-
-		if count < batchSize {
-			// A short batch means we've reached the end.
-			break
-		}
-	}
-
-	return nil
-}
-
 // readBatch opens a short REPEATABLE READ transaction and reads up to
 // batchSize rows with pk > lastPK (or the first batchSize rows when
 // haveLastPK is false). Returns the entities, the last pk value in the
@@ -2575,6 +2321,7 @@ func readBatch(
 	spec *sql.TopicSpec,
 	lastPK string,
 	haveLastPK bool,
+	upper string,
 	batchSize int,
 ) ([]*cluster.Entity, string, int, error) {
 	pkCols := spec.PrimaryKey
@@ -2595,46 +2342,14 @@ func readBatch(
 		return nil, "", 0, fmt.Errorf("set session time_zone: %w", err)
 	}
 
-	// Keyset pagination ordered by the full PK. A single column is `c > ?`; a
-	// composite is the row-value comparison `(c1, c2) > (?, ?)` — MySQL coerces
-	// the bound string cursor values to each column's type. The cursor is the
-	// prior batch's last entity key (CompositeKey), decoded to per-column
-	// values here.
-	orderCols := make([]string, len(pkCols))
-	for i, c := range pkCols {
-		orderCols[i] = sqlident.MySQL.Ident(c) + " ASC"
-	}
-	orderBy := strings.Join(orderCols, ", ")
-
 	// The batch predicate (FROM … WHERE … ORDER BY … LIMIT) is shared verbatim by
 	// the row read below and the JSON type-resolution query in phase 2, so under
 	// this REPEATABLE READ tx both see the same rows in the same order and zip
 	// one-for-one. The type query prepends its own `?` JSON-path args ahead of
 	// these cursor args (SELECT placeholders bind before WHERE placeholders).
-	var fromWhere string
-	var args []any
-	if haveLastPK {
-		cursor, derr := sql.DecodeCompositeCursor(lastPK, len(pkCols))
-		if derr != nil {
-			return nil, "", 0, derr
-		}
-		cols := make([]string, len(pkCols))
-		placeholders := make([]string, len(pkCols))
-		args = make([]any, len(pkCols))
-		for i, c := range pkCols {
-			cols[i] = sqlident.MySQL.Ident(c)
-			placeholders[i] = "?"
-			args[i] = cursor[i]
-		}
-		fromWhere = fmt.Sprintf(
-			"FROM %s WHERE (%s) > (%s) ORDER BY %s LIMIT %d",
-			sqlident.MySQL.Table(table), strings.Join(cols, ", "), strings.Join(placeholders, ", "), orderBy, batchSize,
-		)
-	} else {
-		fromWhere = fmt.Sprintf(
-			"FROM %s ORDER BY %s LIMIT %d",
-			sqlident.MySQL.Table(table), orderBy, batchSize,
-		)
+	fromWhere, args, err := batchPredicate(table, pkCols, lastPK, haveLastPK, upper, batchSize)
+	if err != nil {
+		return nil, "", 0, err
 	}
 
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT * %s", fromWhere), args...)

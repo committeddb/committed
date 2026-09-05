@@ -71,6 +71,11 @@ tags:
     description: Configurations for syncing data to external systems
   - name: type
     description: Schema and type definitions
+  - name: restatement
+    description: |
+      The restatement interpretation registry: append-only, consensus-ordered
+      statements that rebind how already-committed actuals are READ (never
+      their bytes). Corrections are new restatements — later in the log wins.
   - name: proposal
     description: Append proposals to the commit log (write-only)
   - name: node
@@ -329,6 +334,12 @@ paths:
     post:
       tags: [ingestable]
       summary: Create or update an ingestable configuration
+      description: |
+        The `[ingestable]` envelope additionally carries the shape-census
+        knobs (see `GET /v1/ingestable/{id}/status`): the census is on by
+        default; `census = false` opts out, `censusValues = true` opts into
+        bounded distinct-value tracking for enum drafting (bounded by
+        `censusValueLimit`, default 16).
       operationId: addIngestable
       parameters:
         - $ref: '#/components/parameters/ResourceId'
@@ -456,6 +467,15 @@ paths:
         caught up. The ingest analogue of `GET /v1/syncable/{id}/status`. Read
         behind a linearize barrier so the persisted position is consistent on
         whichever node answers; the lag is a live query against the source slot.
+
+        The response also carries the JSON shape `census` the worker took
+        during its snapshot pass, per topic: every payload path with its
+        observed types, counts, and first/last-seen row (including paths
+        nested inside JSON columns); each distinct shape with its row range;
+        and a draft JSON Schema (`draftSchema`) ready to review and POST as a
+        type. Types and paths only — the draft carries `enum` values only when
+        the ingestable opted into `censusValues`. Omitted until a census has
+        been published (census opted out, or no snapshot yet).
       operationId: getIngestableStatus
       parameters:
         - $ref: '#/components/parameters/Consistency'
@@ -738,6 +758,59 @@ paths:
         without a valid column/elementKey/element, an enrichment
         referencing an unknown lookup) fails here with 400. A rule or
         source with no `when` matches every event of its topic.
+
+        `iceberg` lands the topic in an Apache Iceberg table (S3 Tables,
+        Athena, Redshift Spectrum — anything reading Iceberg through a REST
+        catalog) as a CURRENT-STATE table: copy-on-write merge keyed by the
+        entity key (source DELETEs remove rows, refresh boundaries sweep
+        stale generations), committed in batches (`iceberg.flushRows` /
+        `iceberg.flushInterval`; the worker checkpoint advances only on a
+        committed flush, and re-commits are deduplicated by a snapshot
+        property). v1 table shape is a fixed envelope (key, payload,
+        committed_index, generation); config takes `iceberg.catalog` (the
+        REST catalog URL — credentials in the URL are refused; auth comes
+        from the node's AWS credential chain / catalog token),
+        `iceberg.namespace`, `iceberg.table`, optional `iceberg.warehouse`
+        and `[iceberg.props]` FileIO properties (s3.endpoint …). See
+        docs/operations/iceberg-sink.md.
+
+        `loopback` derives a topic INSIDE the cluster: it consumes
+        `loopback.topic`, applies `[[loopback.mappings]]` (`jsonPath` →
+        `field`; none = whole-payload passthrough) once, and proposes the
+        result to `loopback.target` under the target's type — so N
+        downstream syncables consume the derived topic with dumb mappings.
+        Keys, generations, delete tombstones, and refresh-boundary markers
+        forward verbatim (RTBF deletes chase the derivation chain;
+        re-keying is refused). The target type must exist; a
+        non-snapshot-kind target additionally requires
+        `loopback.acknowledgeAppendSemantics = true` (replays append
+        instead of converging). The derivation graph is guarded at POST
+        and re-checked deterministically at apply: a cycle (400,
+        an infinite consensus loop) and a second producer for a derived
+        topic (400, interleaved refresh-epoch spaces) are refused.
+
+        `syncable.zone` (optional) pins the syncable to a node in that zone
+        (nodes announce theirs via `COMMITTED_ZONE`), so sync egress to a
+        same-zone sink never pays a redundant cross-zone crossing. STRICT
+        pin: if no current member announces the zone, the syncable stalls
+        loudly (status `pinUnsatisfiable`) and never silently falls back to
+        the leader; it catches up completely when a node in the zone
+        returns. Admission refuses a zone no current member announces (400)
+        and refuses any pin until the whole cluster is upgraded to resolve
+        zones (503 `cluster_below_feature_level`). The rebuild and
+        rematerialize verbs route to the serving node automatically (one
+        bounded hop via each node's announced COMMITTED_API_URL); while a
+        pin is unsatisfiable they answer 503 `pin_unsatisfiable`.
+
+        `syncable.mode` declares the consumer stance: `as-stored` (default —
+        exact written bytes; version handling is the consumer's, whether
+        pinned to one version or version-aware) or `always-current` (entities
+        arrive upgraded through the type's migration chain). Always-current is
+        admission-checked: a topic whose type declares a
+        `nonConvertible` version anywhere in its history refuses it with 400
+        naming the gap — data below the break can never reach the current
+        version, so the promise is unkeepable (see docs/read-models.md
+        § Consumer stances).
       operationId: addSyncable
       parameters:
         - $ref: '#/components/parameters/ResourceId'
@@ -1224,6 +1297,50 @@ paths:
         '507':
           $ref: '#/components/responses/InsufficientStorage'
 
+  /v1/syncable/{id}/rematerialize:
+    post:
+      tags: [syncable]
+      summary: Re-materialize a syncable's keyed sink in place, non-destructively
+      description: |
+        The non-destructive sibling of `/rebuild`: the sink keeps serving
+        reads while the worker replays the topic from index 0 through the
+        CURRENT projection + interpretation. Keyed upserts converge rows in
+        place; every re-emitted row is stamped with the replay's epoch (a
+        committed-managed `committed_rematerialized` column, added
+        idempotently); when the replay reaches the target head — the data
+        head at this call, with live writes simply following in log order —
+        a completion sweep deletes the rows the replay never positively
+        re-emitted (rows an old projection wrote that the current one no
+        longer produces) and the in-progress record clears. This is the cure
+        for projection rot (a mapping added, a migration fixed, a restatement
+        landed) and the re-derivation that refreshes the checkpoint's
+        `interpretationPin`. Restart-resumable: the in-progress record is
+        replicated, and a resumed replay keeps converging under the same
+        epoch.
+
+        Keyed sinks only: a keyless/append sink or a webhook refuses with
+        409 `not_rematerializable` (use `/rebuild` or a blue-green
+        replacement). Leader-pinned. Poll `GET /v1/syncable/{id}/status`:
+        `rematerializing` with `rematerializeTargetHead` shows progress
+        against `checkpointIndex`.
+      operationId: rematerializeSyncable
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      responses:
+        '200':
+          description: Re-materialization started; the replay is underway.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: This sink cannot converge a replay in place (keyless/append or webhook).
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
   /v1/syncable/{id}/rebuild:
     post:
       tags: [syncable]
@@ -1333,8 +1450,19 @@ paths:
       summary: Create or update a type configuration
       description: |
         Proposes a type configuration. A schema change requires an explicit
-        `[migration]` section: either `transform = "<jq>"` (a jq program
-        upgrading previous-version data to the new shape) or `none = true`.
+        `[migration]` section declaring exactly one intent:
+        `transform = "<jq>"` (a jq program upgrading previous-version data to
+        the new shape), `none = true` (additive — old data is already valid),
+        or `nonConvertible = true` (this version requires information the
+        previous version's actuals never contained, so no program can upgrade
+        old data). A `nonConvertible` bump that would strand existing
+        always-current syncables is refused with 409
+        `stranded_always_current` naming them; re-POST with `?force=true` to
+        acknowledge the stranding deliberately (stranded syncables then
+        dead-letter below-break data at the migration chain rather than
+        receiving it unconverted). The intent is immutable per version: an
+        in-place edit must restate `nonConvertible = true`, and a break can
+        only be declared WITH the schema bump that causes it.
         The transform is compiled at propose time, so syntax errors fail
         here — but a program can still break at runtime on real payloads.
         To catch that early, optionally set
@@ -1362,9 +1490,30 @@ paths:
         (adoption) or changing the discriminator updates the current
         version in place — no version bump, no `[migration]` section
         needed.
+
+        `validate` selects the validation strategy: `0` (none, the
+        default), `1` (gate — a proposal whose payload violates the
+        schema is rejected with 400), or `2` (announce — the tripwire:
+        a divergent payload still commits, and the first occurrence of
+        each distinct divergent shape emits a ContractExtension event
+        to the topic named by `schemaChangeTopic`, which is required
+        with `validate = 2` and must name an existing, non-announce
+        type — declare the events topic first. Attach an ordinary
+        syncable to that topic to deliver divergence events to a
+        warehouse table or webhook). Re-pointing `schemaChangeTopic`
+        updates the current version in place, like the discriminator.
       operationId: addType
       parameters:
         - $ref: '#/components/parameters/ResourceId'
+        - name: force
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: |
+            Set `true` to acknowledge that a `nonConvertible` version bump
+            strands the always-current syncables a plain POST is refused over
+            (409 `stranded_always_current` names them). No effect otherwise.
       requestBody:
         required: true
         description: Type configuration as TOML or JSON.
@@ -1631,6 +1780,211 @@ paths:
           $ref: '#/components/responses/InsufficientStorage'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  /v1/restatement:
+    get:
+      tags: [restatement]
+      summary: List the restatement interpretation registry
+      description: |
+        Every applied restatement, in log order. A restatement is an append-only,
+        consensus-ordered statement that rebinds how already-committed actuals
+        are READ — never their bytes: entities of `type` committed in
+        `[fromIndex, toIndex]`, stamped `fromVersion` (0 = any stamp), and
+        matching `predicate` (empty = all) read as `readAsVersion`. Among
+        matching restatements, later in the log (`index`) wins; matching is always
+        against the stamped version. The authoritative reading every syncable
+        receives is stamp ⊕ this fold.
+      operationId: getRestatements
+      parameters:
+        - $ref: '#/components/parameters/Consistency'
+      responses:
+        '200':
+          description: All applied restatements, in log order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    type: { type: string }
+                    fromIndex: { type: integer, format: int64 }
+                    toIndex: { type: integer, format: int64 }
+                    readAsVersion: { type: integer }
+                    fromVersion: { type: integer }
+                    predicate: { type: string }
+                    index:
+                      type: integer
+                      format: int64
+                      description: The restatement's raft index — its interpretation coordinate.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
+  /v1/restatement/dryrun:
+    post:
+      tags: [restatement]
+      summary: Dry-run a restatement against the committed log
+      operationId: dryRunRestatement
+      description: |
+        Rehearses a restatement before authoring it: the same admission-level
+        validation as `POST /v1/restatement/{id}` (400 on rejection, with the
+        admission path's actual words), then a scan of the restatement's own
+        `[fromIndex, toIndex]` range through the REAL interpretation fold.
+        The report says what the selectors actually catch (`stampEligible`,
+        `matched`, broken down `byStampedVersion`), what the restatement really
+        changes (`rebound`, with before/after reading `samples`), which rows
+        its predicate cannot evaluate (`predicateErrors` — each of these
+        dead-letters or wedges a live consumer), which already-applied restatements
+        it composes with (`overlaps`), and the re-materialization bill:
+        every syncable consuming the topic (`affectedSyncables`) goes stale
+        the moment the restatement commits. Auto-generated `findings` name the
+        authoring signatures — a restatement that matches nothing, one that
+        changes no readings, a predicate that filtered nothing. Nothing is
+        admitted or stored. Rehearse, then author the same body under
+        `POST /v1/restatement/{id}`.
+      parameters:
+        - name: maxEntries
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 10000000, default: 100000 }
+          description: Scan budget in committed entries.
+        - name: timeoutSeconds
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 600, default: 120 }
+          description: |
+            Wall-clock bound. The deadline yields a PARTIAL report (the
+            `truncated` field says so), never an error.
+      requestBody:
+        required: true
+        description: The restatement as TOML or JSON — the same body the real POST takes.
+        content:
+          text/toml:
+            schema: { type: string }
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: The dry-run report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scanFrom: { type: integer, format: int64 }
+                  scanTo: { type: integer, format: int64 }
+                  entriesScanned: { type: integer }
+                  entitiesOfType: { type: integer }
+                  stampEligible: { type: integer }
+                  matched: { type: integer }
+                  rebound: { type: integer }
+                  predicateErrors: { type: integer }
+                  byStampedVersion:
+                    type: object
+                    additionalProperties: { type: integer }
+                  samples:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index: { type: integer, format: int64 }
+                        key: { type: string }
+                        stampedVersion: { type: integer }
+                        currentReading: { type: integer }
+                        candidateReading: { type: integer }
+                  affectedSyncables:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        interpretationPin: { type: integer, format: int64 }
+                        alreadyStale: { type: boolean }
+                  overlaps:
+                    type: array
+                    items: { type: string }
+                  coverage: { type: string, enum: [complete, partial] }
+                  truncated: { type: string }
+                  findings:
+                    type: array
+                    items: { type: string }
+                  parseMs: { type: integer, format: int64 }
+                  readMs: { type: integer, format: int64 }
+                  durationMs: { type: integer, format: int64 }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/restatement/{id}:
+    post:
+      tags: [restatement]
+      summary: Author a restatement (append-only; immutable per id)
+      description: |
+        Proposes one interpretation-registry statement as TOML:
+
+            [restatement]
+            type = "photo-meta"        # the type (topic) whose readings rebind
+            fromIndex = 100            # inclusive raft-index range of existing
+            toIndex = 250              #   actuals (never beyond the applied log)
+            readAsVersion = 2        # the version matching actuals read as
+            # fromVersion = 1          # optional: only entities STAMPED v1
+            # predicate = '.license == "cc"'   # optional deterministic jq
+
+        Restatements are IMMUTABLE: a re-POST under an existing id with different
+        content is refused with 400 — author a NEW restatement to correct one
+        (among matching restatements, later in the log wins) — while an identical
+        re-POST is an idempotent 200 no-op. Admission is loud: an unknown
+        type, an undeclared version, a range beyond the applied log, or a
+        predicate outside the deterministic jq subset (no now(), no env) all
+        fail here. Refused with 503 `cluster_below_feature_level` until every
+        member of a mixed-version cluster can fold restatements.
+
+        Restatements mark dependent syncables STALE (see
+        `GET /v1/syncable/{id}/status` `interpretationStale`): rows synced
+        before the restatement landed were derived under the superseded reading.
+        Re-derivation is operator-triggered, never automatic.
+
+        REHEARSE FIRST: `POST /v1/restatement/dryrun` takes this same body and
+        reports what the selectors catch, what actually changes, and which
+        syncables would go stale — before anything is admitted. Restatements are
+        append-only, so the dry-run is the only place a selector mistake is
+        free.
+      operationId: addRestatement
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+      requestBody:
+        required: true
+        description: Restatement as TOML or JSON.
+        content:
+          text/toml:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: Restatement committed (or an identical re-POST no-op).
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotLinearizable'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /v1/node/status:
     get:
@@ -2096,7 +2450,7 @@ components:
 
     NodeStatusResponse:
       type: object
-      required: [node, leader, appliedIndex, degradedConfigs, disk, safeMode]
+      required: [node, leader, appliedIndex, degradedConfigs, disk, safeMode, scrub]
       description: |
         Per-node diagnostics for the node that served the request. The
         fields are node-local and ephemeral (not replicated), so two nodes
@@ -2141,6 +2495,33 @@ components:
             whose worker crashloops the node. Per-boot and node-local; a
             restart without the flag resumes all workers. See
             docs/operations/safe-mode.md.
+        scrub:
+          type: object
+          required: [pendingBound, completedBound, pendingDeleteKeyErasures]
+          description: |
+            This node's right-to-be-forgotten scrub progress. Each node
+            rewrites its own permanent event log, so erasure through
+            `pendingBound` is physically complete on THIS node once
+            `completedBound` catches up — the erasure runbook's verification
+            loop polls this block on every node. `pendingDeleteKeyErasures`
+            counts retained delete tombstones whose raw subject key has not
+            yet been erased: ZERO is the identifier-erasure end condition; a
+            count that is nonzero and not shrinking means a consumer is
+            holding the erasure gate (see the runbook's delay section).
+          properties:
+            pendingBound:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Highest committed Scrub command bound.
+            completedBound:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Highest bound this node's rewrite has completed.
+            pendingDeleteKeyErasures:
+              type: integer
+              minimum: 0
 
     ClusterStatusResponse:
       type: object
@@ -2319,6 +2700,23 @@ components:
             only on a `POST /type/{id}` that changed just the `[migration]`
             transform in place (schema and version unchanged). The write
             succeeded; the advisory is informational.
+        migrationEditDependents:
+          type: array
+          description: |
+            Accompanies the migration-edit advisory: the always-current
+            syncables consuming the edited type's topic. Each must be
+            re-materialized (`POST /v1/syncable/{id}/rematerialize` — keyed
+            sinks converge in place) or rebuilt for the migration fix to
+            reach rows already synced through the previous transform.
+            As-stored consumers deliver written bytes and are unaffected.
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id:
+                type: string
+              name:
+                type: string
         warnings:
           type: array
           items:
@@ -2599,6 +2997,65 @@ components:
             otherwise. `0` with the field present means the worker has
             examined nothing yet — with `caughtUp` that splits "nothing to
             examine" from "never started scanning".
+        interpretationPin:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            The restatements-registry index this syncable's current materialization
+            began under — the second half of the (data, interpretation)
+            determinism pair. 0 means pinned before any restatements existed.
+            Always present.
+        interpretationStale:
+          type: boolean
+          description: |
+            True when the reading of a consumed topic changed past
+            `interpretationPin` — a restatement landed, or a type's [migration]
+            was edited in place (always-current consumers only): rows
+            already synced were derived under a superseded reading and stay
+            that way until the operator re-derives (POST .../rematerialize,
+            or a blue-green rebuild). Staleness is loud and queryable, never
+            auto-healed. Always present.
+        rematerializing:
+          type: boolean
+          description: |
+            True while a POST .../rematerialize replay is in progress.
+            Omitted when none is running.
+        rematerializeTargetHead:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            The data head the in-progress re-materialization must reach before
+            its completion sweep runs — compare `checkpointIndex` against it
+            for progress. Omitted when no re-materialization is running.
+        pinnedZone:
+          type: string
+          description: |
+            The zone this syncable is pinned to (`syncable.zone`). Omitted
+            for unpinned syncables. `ownerNode` shows the serving node.
+        pinUnsatisfiable:
+          type: boolean
+          description: |
+            True when NO current member announces the pinned zone: the
+            strict pin stalls loudly (zero writes from any node — never a
+            silent leader fallback) until a node in the zone returns, then
+            catches up completely from the replicated checkpoint. Omitted
+            for unpinned syncables.
+        derivedFrom:
+          type: string
+          description: |
+            For a `loopback` syncable: the source topic it consumes. Together
+            with `derivesInto` this is the syncable's derivation provenance —
+            the edge it contributes to the cluster's derivation DAG. Omitted
+            for every non-deriving kind.
+        derivesInto:
+          type: string
+          description: |
+            For a `loopback` syncable: the derived topic it produces. Pair
+            with `interpretationStale` to read "this derived topic was
+            materialized under a superseded reading". Omitted for every
+            non-deriving kind.
 
     IngestableStatusResponse:
       type: object
@@ -2695,6 +3152,17 @@ components:
         complete:
           type: boolean
           description: Whether this table's snapshot finished.
+        chunksTotal:
+          type: integer
+          minimum: 0
+          description: |
+            For a chunked parallel snapshot (`snapshot_readers` > 1 with a
+            splittable primary key): how many PK-range chunks the table's
+            frozen plan holds. Omitted for a single-stream table.
+        chunksDone:
+          type: integer
+          minimum: 0
+          description: How many of the table's chunks have finished. Omitted for a single-stream table.
 
     PipelineStatusResponse:
       type: object

@@ -66,14 +66,20 @@ jobs:
 
   # Rolling-upgrade per-node test: builds the real binary and exercises the
   # graceful-stop → restart-over-same-data-dir → /ready → /version cycle plus
-  # state survival (docs/operations/upgrade.md). No Docker, runs in seconds, so
-  # it gates every push/PR like the unit suites — it guards the binary-level
-  # shutdown/restart/readiness path the in-process tests can't reach.
+  # state survival (docs/operations/upgrade.md), and the old-binary data-dir
+  # read contract (old_datadir_test.go): fixtures are captured on demand from
+  # the pinned release tags — real old-binary bytes, never committed — so the
+  # checkout needs the full history + tags, and the CDC-seeded era uses the
+  # runner's docker at capture time. A few minutes cold; it still gates every
+  # push/PR — it guards the binary-level shutdown/restart/readiness path and
+  # the cross-version read contract the in-process tests can't reach.
   test-upgrade:
     name: test (upgrade)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the fixture capture builds released tags in git worktrees
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.x"
@@ -101,9 +107,56 @@ jobs:
   # doesn't cancel the others (we want every shard's evidence). Limit to main
   # pushes and manual dispatch to keep PR feedback fast; rely on lint + test
   # for the PR gate.
+  # Hot-path benchmarks (real fsyncs): propose→apply round-trip, apply
+  # per-entry vs batched, reader catch-up, ingest shape. No thresholds — the
+  # log IS the artifact (see docs/operations/performance.md for why
+  # percent-level gates flake on shared runners); compare two runs' logs
+  # with benchstat.
+  bench:
+    name: bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - run: make bench
+
+  # Multi-node crash-recovery e2e: real binaries, real WAL on disk, real
+  # process crashes. Guards WAL-replay-then-catch-up (SIGKILL a follower,
+  # advance the majority, restart over the data dir) and restart-after-grow
+  # (grow 3->4, restart every node without updating COMMITTED_PEERS) — the
+  # durability paths the in-process suites cannot reach (their "restarts"
+  # reuse in-RAM raft storage). No Docker; gates every push/PR. This harness
+  # caught the never-compacted-log grow panic ("need non-empty snapshot") the day it
+  # was written.
+  test-multinode:
+    name: test (multinode)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+      - run: make test/multinode
+      # Re-run just the throughput report with its log line surfaced, so
+      # every commit's CI log carries the 3-node number (the suite run above
+      # hides t.Logf on pass).
+      - run: make bench/multinode
+
+  # The adversarial suite guards the raft safety invariants (partition,
+  # leader flap, concurrent config changes, read-index safety). PRs run a
+  # REDUCED pass — count=1 per shard, 4 parallel shards ≈ 4 iterations —
+  # so a consensus-safety regression or an obvious new flake surfaces
+  # before merge instead of after landing on main (there is no branch
+  # protection; CI is the visibility layer). Pushes keep the full flake
+  # gate: count=5 x 4 shards = 20 iterations.
   test-adversarial:
     name: test (adversarial ${{ matrix.shard }}/4)
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -116,7 +169,7 @@ jobs:
         with:
           go-version: "1.26.x"
           check-latest: true
-      - run: make test/adversarial ADVERSARIAL_COUNT=5
+      - run: make test/adversarial ADVERSARIAL_COUNT=${{ github.event_name == 'pull_request' && '1' || '5' }}
 
   # Scan the runtime image for known-vulnerable OS packages and Go
   # modules. Trivy reads the GitHub Advisory DB + NVD — the same advisory
@@ -149,6 +202,10 @@ jobs:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # The action release pins an older Trivy; pin the scanner itself
+          # so the CVE feeds and severity mappings stay current. Bump this
+          # alongside the action tag when a new release appears.
+          version: v0.74.0
           image-ref: committed:scan
           scanners: vuln
           vuln-type: os,library

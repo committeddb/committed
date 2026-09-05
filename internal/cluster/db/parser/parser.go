@@ -2,6 +2,7 @@ package parser
 
 import (
 	"errors"
+	"sync"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/config"
@@ -16,6 +17,19 @@ var ErrInlineConnStringPassword = errors.New(
 		`cluster's replicated log, snapshots, or returned by GET`)
 
 type Parser struct {
+	// mu guards the three registries. Registration happens AFTER db.New in
+	// production and cannot move earlier — several sub-parsers need the live
+	// DB (the loopback Proposer, the ingest dialects) while db.New needs the
+	// parser: an inherent cycle. But New's machinery is already running, and
+	// the apply path can push a config BUILD that parses concurrently with
+	// registration (a crash-window replay tail, or a peer's commit arriving
+	// mid-boot on a multi-node restart). The reconcile-after-registration
+	// contract absorbs the SEMANTIC ordering (a build that races ahead of
+	// its kind's registration degrades loudly and the reconcile heals it);
+	// this lock supplies the missing MEMORY safety — the same
+	// safe-publication contract the DB's validator seams carry (see the
+	// atomic validator holders in db.go).
+	mu                sync.RWMutex
 	databaseParsers   map[string]cluster.DatabaseParser
 	ingestableParsers map[string]cluster.IngestableParser
 	syncableParsers   map[string]cluster.SyncableParser

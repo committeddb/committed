@@ -35,19 +35,26 @@ import (
 // because the tail (raft index > B — at minimum the Scrub command's own mirrored
 // entry) is never a removal candidate.
 
-// handleScrub applies a committed Scrub command. It records the requested bound
-// and signals the worker; the O(N) rewrite happens off the Ready loop. Skipping
-// when the bound is already completed avoids a redundant full rewrite for a
-// stale or duplicate command.
-func (s *Storage) handleScrub(e *cluster.Entity, _ uint64) error {
+// handleScrub applies a committed Scrub command. It records the command in the
+// durable scrub history (unconditionally — the history must be a pure function
+// of the log, and the short-circuit below consults node-local progress),
+// records the requested bound, and signals the worker; the O(N) rewrite
+// happens off the Ready loop. Skipping when the bound is already completed
+// avoids a redundant full rewrite for a stale or duplicate command.
+func (s *Storage) handleScrub(e *cluster.Entity, raftIndex uint64) error {
 	sc := &cluster.Scrub{}
 	if err := sc.Unmarshal(e.Data); err != nil {
+		return err
+	}
+	if err := s.update(func(tx *bolt.Tx) error {
+		return recordScrubHistory(tx, raftIndex, sc.UpperBound)
+	}); err != nil {
 		return err
 	}
 	if sc.UpperBound <= s.lastScrubbedBound.Load() {
 		return nil
 	}
-	if err := s.setPendingScrubBound(sc.UpperBound); err != nil {
+	if err := s.setPendingScrubBound(sc.UpperBound, sc.HashDeleteKeys, raftIndex); err != nil {
 		return err
 	}
 	s.signalScrub()
@@ -55,8 +62,12 @@ func (s *Storage) handleScrub(e *cluster.Entity, _ uint64) error {
 }
 
 // setPendingScrubBound raises the persisted pending bound to max(existing, b).
-// Monotonic so a later command never lowers an in-flight bound.
-func (s *Storage) setPendingScrubBound(b uint64) error {
+// Monotonic so a later command never lowers an in-flight bound. The erasure
+// authorization (hash) and the command's own raft index ride the pending
+// record with the bound they arrived on: the worker executes the highest
+// pending bound under that command's authorization, and the gate harvest is
+// bounded by that command's index (see deleteKeyEraseGate).
+func (s *Storage) setPendingScrubBound(b uint64, hash bool, cmdIndex uint64) error {
 	return s.update(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(pendingScrubBucket)
 		if bkt == nil {
@@ -67,7 +78,19 @@ func (s *Storage) setPendingScrubBound(b uint64) error {
 		}
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], b)
-		return bkt.Put(pendingScrubBoundKey, buf[:])
+		if err := bkt.Put(pendingScrubBoundKey, buf[:]); err != nil {
+			return err
+		}
+		var flag [1]byte
+		if hash {
+			flag[0] = 1
+		}
+		if err := bkt.Put(pendingScrubHashKey, flag[:]); err != nil {
+			return err
+		}
+		var ci [8]byte
+		binary.BigEndian.PutUint64(ci[:], cmdIndex)
+		return bkt.Put(pendingScrubCmdIndexKey, ci[:])
 	})
 }
 
@@ -122,15 +145,25 @@ func (s *Storage) scrubWorker() {
 // immediately.
 func (s *Storage) runPendingScrub() error {
 	for {
-		bound, err := s.loadPendingScrubBound()
+		bound, hash, cmdIndex, err := s.loadPendingScrub()
 		if err != nil {
 			return err
 		}
 		if bound == 0 || bound <= s.lastScrubbedBound.Load() {
 			return nil
 		}
-		if err := s.runScrub(bound); err != nil {
+		erase, err := s.runScrub(bound, hash, cmdIndex)
+		if err != nil {
 			return err
+		}
+		// Reconcile the erasure-cadence bucket to the rewrite's surviving raw
+		// deletes BEFORE advancing the completed bound, so "completed" implies
+		// "reconciled" (idempotent: a crash here re-runs the rewrite and this
+		// reconcile on retry).
+		if erase != nil {
+			if err := s.reconcileUnhashedDeletes(bound, erase.eligibleMax, erase.raws, erase.msel); err != nil {
+				return err
+			}
 		}
 		// markScrubComplete prunes the now-dead tombstones and compacts bbolt in one
 		// kvMu.Lock critical section, so no snapshot can copy a freed-but-uncompacted
@@ -141,16 +174,41 @@ func (s *Storage) runPendingScrub() error {
 	}
 }
 
+// eraseOutcome carries one authorized rewrite's delete-key erasure results to
+// the post-completion reconcile of the cadence bucket.
+type eraseOutcome struct {
+	eligibleMax uint64
+	raws        []rawDelete
+	msel        map[string]uint64
+}
+
 // runScrub rewrites the event log, removing entities tombstoned within the
 // freeze line bound, and swaps the rewritten directory in. See the file header
-// for the determinism and invariant guarantees.
-func (s *Storage) runScrub(bound uint64) error {
+// for the determinism and invariant guarantees. hash authorizes the delete-key
+// erasure pass (Scrub.HashDeleteKeys) and cmdIndex is the authorizing
+// command's raft index — the deterministic cap for the erasure gate's harvest.
+func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutcome, error) {
 	// RTBF (user-tombstone) selection: max delete index <= bound per (type, key).
 	// Captured once; deletes recorded after this point have index > bound and are
 	// irrelevant, so the selection is frozen and identical across replicas.
 	sel, err := s.tombstoneSelections(bound)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	// Delete-key erasure threshold (0 disables the pass): retained user-delete
+	// entries at raft index <= eraseMax get their raw subject key rewritten to
+	// cluster.ErasedKey. Computed like sel/msel as a pure function of
+	// replicated state — see deleteKeyEraseGate.
+	var erase *eraseOutcome
+	var eraseMax uint64
+	if hash {
+		var eraseRaws []rawDelete
+		eraseMax, eraseRaws, err = s.deleteKeyEraseGate(cmdIndex, bound)
+		if err != nil {
+			return nil, err
+		}
+		erase = &eraseOutcome{eligibleMax: eraseMax, raws: eraseRaws}
 	}
 
 	// Metadata-GC (system-tombstone) selection: max raft index <= bound per
@@ -165,12 +223,15 @@ func (s *Storage) runScrub(bound uint64) error {
 	// from a disjointness assumption.
 	msel, err := s.metadataSupersessions(bound)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if erase != nil {
+		erase.msel = msel
 	}
 
 	tmpDir := s.scrubTmpDir(bound)
 	if err := os.RemoveAll(tmpDir); err != nil { // clear any stale partial attempt
-		return err
+		return nil, err
 	}
 	// NoSync: this is a throwaway temp log that becomes authoritative only at the
 	// atomic rename below, and any pre-swap crash discards it (recoverScrubDirs /
@@ -180,9 +241,13 @@ func (s *Storage) runScrub(bound uint64) error {
 	// propose path through the shared storage lock for hours. We fsync explicitly
 	// with newLog.Sync() before the rename instead; segment cycling still fsyncs
 	// each filled segment (cycle()), so only the tail is left for that final Sync.
-	newLog, err := wal.Open(tmpDir, &wal.Options{NoSync: true})
+	// The rewritten log compresses like the live one; the drain below (before
+	// the swap lock) compresses everything this rewrite sealed, so the swap
+	// installs an already-compressed log instead of leaving the whole rewrite
+	// as backlog for the sealer.
+	newLog, err := wal.Open(tmpDir, &wal.Options{NoSync: true, SealedSegmentCompression: wal.CompressionZstd})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	swapped := false
 	retired := s.eventRetiredDir()
@@ -223,7 +288,7 @@ func (s *Storage) runScrub(bound uint64) error {
 			if rerr != nil {
 				return rerr
 			}
-			keep, payload, ferr := scrubFilterEntry(raw, sel, msel)
+			keep, payload, ferr := scrubFilterEntry(raw, sel, msel, eraseMax)
 			if ferr != nil {
 				return ferr
 			}
@@ -242,11 +307,11 @@ func (s *Storage) runScrub(bound uint64) error {
 	// phase B.
 	first, err := s.firstEventSeq()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	startLast, err := s.lastEventSeq()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Sequence numbers and a tombstoned-key count only — no source keys/PII.
 	s.logger.Info("scrub: rewriting permanent event log",
@@ -256,7 +321,7 @@ func (s *Storage) runScrub(bound uint64) error {
 		zap.Int("tombstonedKeys", len(sel)))
 	if first != 0 && startLast != 0 {
 		if err := copyRange(first, startLast, false); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -276,13 +341,13 @@ func (s *Storage) runScrub(bound uint64) error {
 	for range scrubConvergeRounds {
 		cur, lerr := s.lastEventSeq()
 		if lerr != nil {
-			return lerr
+			return nil, lerr
 		}
 		if cur <= copied || cur-copied <= scrubConvergeResidue {
 			break // caught up, or small enough to finish under the lock
 		}
 		if err := copyRange(copied+1, cur, false); err != nil {
-			return err
+			return nil, err
 		}
 		copied = cur
 	}
@@ -292,31 +357,55 @@ func (s *Storage) runScrub(bound uint64) error {
 	// so this flushes at most ~SegmentSize and does the bulk of the fsync work
 	// OUTSIDE the lock. The tiny locked delta is synced again below.
 	if err := newLog.Sync(); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Phase B (locked): catch up the now-small delta, then swap. eventMu.Lock waits
 	// for in-flight reads/the appender to drain and blocks new ones for the brief
+	// Compress the rewrite's sealed segments BEFORE taking the swap lock —
+	// this is O(surviving log) work that must not stall appendEvents. The
+	// locked delta below may seal a few more segments; those trickle through
+	// the background sealer after the swap.
+	for {
+		did, cerr := newLog.CompressNextSealed()
+		if cerr != nil {
+			return nil, cerr
+		}
+		if !did {
+			break
+		}
+	}
+
+	// Before the swap: wait out any in-flight from-0 log reads, so no such
+	// read spans the swap and observes two different rewrite states — the
+	// pair-consistency invariant the delete-key erasure gate rests on (see
+	// BeginFromZeroRead). Placed before the lock so pinned readers (and the
+	// appender) keep running while we wait; shutdown aborts the wait and the
+	// pending bound retries later.
+	if werr := s.waitFromZeroReads(); werr != nil {
+		return nil, werr
+	}
+
 	// swap.
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
 
 	endLast, err := s.lastEventSeqLocked()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if endLast > copied {
 		if err := copyRange(copied+1, endLast, true); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	// Sync the locked delta (bounded by the residue + current tail segment) so the
 	// whole rewritten log is durable before the rename makes it authoritative.
 	if err := newLog.Sync(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := newLog.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	// Durability: fsync the freshly-written swap dir so its segment entries survive
 	// power loss BEFORE it is renamed into place. The parent-dir fsync after the
@@ -331,7 +420,7 @@ func (s *Storage) runScrub(bound uint64) error {
 	// on the next Open. Clear any stale events.retired/ first (usually absent —
 	// recoverScrubDirs reaps it on Open — so this is a fast no-op).
 	if err := os.RemoveAll(retired); err != nil {
-		return err
+		return nil, err
 	}
 	// Close the LIVE event-log handle ahead of the rename, or fatal — a returned
 	// error would leave the dead handle for appendEvent to hit later as a
@@ -343,7 +432,7 @@ func (s *Storage) runScrub(bound uint64) error {
 		// untouched (still the original log). Reopen it so the node survives; fatal
 		// only if that also fails, so a closed handle never reaches appendEvent.
 		s.reopenEventLogAfterSwapOrFatal("event-log scrub aborted before swap")
-		return fmt.Errorf("move events aside for scrub swap: %w", err)
+		return nil, fmt.Errorf("move events aside for scrub swap: %w", err)
 	}
 	if err := os.Rename(tmpDir, s.eventLogDir); err != nil {
 		// eventLog is closed and the original was already moved to `retired`, so
@@ -357,7 +446,7 @@ func (s *Storage) runScrub(bound uint64) error {
 				zap.Error(err), zap.NamedError("rollback", rbErr))
 		}
 		s.reopenEventLogAfterSwapOrFatal("event-log scrub swap rolled back")
-		return fmt.Errorf("rename scrubbed event log into place: %w", err)
+		return nil, fmt.Errorf("rename scrubbed event log into place: %w", err)
 	}
 	swapped = true
 
@@ -391,7 +480,7 @@ func (s *Storage) runScrub(bound uint64) error {
 		zap.Uint64("bound", bound),
 		zap.Int("tombstonedKeys", len(sel)),
 		zap.Uint64("survivorEntries", nextSeq))
-	return nil
+	return erase, nil
 }
 
 // reopenEventLogAfterSwapOrFatal reopens the permanent event log at
@@ -467,7 +556,7 @@ func (s *Storage) recomputeEventBoundsAfterSwapOrFatal(what string) {
 // in both), but the two predicates are ORed and provably agree on any overlap —
 // RTBF spares the delete-tombstone, metadata GC keeps the latest per key — so an
 // entity is removed iff either fires, with no conflict.
-func scrubFilterEntry(raw []byte, sel, msel map[string]uint64) (keep bool, payload []byte, err error) {
+func scrubFilterEntry(raw []byte, sel, msel map[string]uint64, eraseMax uint64) (keep bool, payload []byte, err error) {
 	pe := &pb.Entry{}
 	if err := proto.Unmarshal(raw, pe); err != nil {
 		return false, nil, err
@@ -490,7 +579,21 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64) (keep bool, paylo
 		}
 		return false
 	}
-	newData, allRemoved, changed, err := cluster.FilterProposalEntities(pe.Data, remove)
+	// Delete-key erasure (third removal reason's sibling — a REWRITE, not a
+	// removal): a spared user-delete at or below the gate threshold has its raw
+	// subject key replaced with the erased sentinel. eraseMax 0 = pass disabled
+	// (an unauthorized or pre-upgrade scrub). Idempotent: an already-erased key
+	// is left alone, so re-scrubs keep the bytes stable.
+	var rewriteKey func(typeID string, key []byte) []byte
+	if eraseMax != 0 {
+		rewriteKey = func(typeID string, key []byte) []byte {
+			if idx <= eraseMax && isUserDefinedType(typeID) && !cluster.IsErasedKey(key) {
+				return cluster.ErasedKey
+			}
+			return nil
+		}
+	}
+	newData, allRemoved, changed, err := cluster.ScrubProposalEntities(pe.Data, remove, rewriteKey)
 	if err != nil {
 		return false, nil, err
 	}
@@ -640,6 +743,30 @@ func (s *Storage) recomputeEventBoundsLocked() error {
 // loadPendingScrubBound reads the highest requested scrub bound (0 if none).
 func (s *Storage) loadPendingScrubBound() (uint64, error) {
 	return s.loadScrubUint(pendingScrubBoundKey)
+}
+
+// loadPendingScrub reads the pending scrub record: the highest requested bound
+// plus the erasure authorization and command index of the command that raised
+// it (see setPendingScrubBound). Absent flag/index read as zero values — the
+// pre-upgrade record shape — which disables the erasure pass for that rewrite.
+func (s *Storage) loadPendingScrub() (bound uint64, hash bool, cmdIndex uint64, err error) {
+	err = s.view(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(pendingScrubBucket)
+		if bkt == nil {
+			return ErrBucketMissing
+		}
+		if b := bkt.Get(pendingScrubBoundKey); len(b) == 8 {
+			bound = binary.BigEndian.Uint64(b)
+		}
+		if fb := bkt.Get(pendingScrubHashKey); len(fb) == 1 && fb[0] == 1 {
+			hash = true
+		}
+		if ci := bkt.Get(pendingScrubCmdIndexKey); len(ci) == 8 {
+			cmdIndex = binary.BigEndian.Uint64(ci)
+		}
+		return nil
+	})
+	return bound, hash, cmdIndex, err
 }
 
 // loadScrubCompleted reads the highest completed scrub bound (0 if none).

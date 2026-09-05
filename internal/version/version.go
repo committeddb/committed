@@ -33,7 +33,39 @@ var (
 // includes the refresh-boundary marker (featureLevelRefreshBoundary). A binary
 // that predates the mechanism announces nothing and is treated as level 0, so
 // the gate holds any level-1 emission until every such node is upgraded.
-const FeatureLevel uint64 = 1
+//
+// Level 2: the restatement interpretation registry (featureLevelRestatements). The
+// Restatement record is a GATED system type — a node that cannot fold restatements must
+// not skip them (its syncables would emit stale readings) — so a restatement is
+// only admitted once every member announces level 2.
+//
+// Level 3: zone-pinned syncable ownership (featureLevelZonePinning). The
+// NodeZone announcement itself is ungated (an old node skips it safely), but
+// ownership RESOLUTION must not activate until every member resolves zones:
+// otherwise an old leader (resolving "leader owns everything") and a new
+// pinned node would both stream to the same sink — two concurrent writers.
+// Every node resolves leader-owns until the cluster minimum reaches 3, and
+// a `zone` syncable config is only admitted from level 3.
+//
+// Level 4: RTBF delete-key erasure (featureLevelRTBFErase). The event-log
+// rewrite every replica performs for a Scrub command must be byte-identical
+// across nodes; a Scrub carrying HashDeleteKeys additionally rewrites gated
+// delete-tombstone keys to the erased sentinel, which an older binary's
+// scrubber would not do — diverging the rewritten logs. The proposer sets the
+// flag only once the cluster minimum reaches 4, so every member computes the
+// same rewrite.
+//
+// Level 5: canonical uniqueidentifier rendering on SQL Server ingest
+// (sqlserver.featureLevelCanonicalUUID). Pre-0.8.0 binaries render a
+// uniqueidentifier as the driver's UPPERCASE GUID; from level 5 it renders
+// RFC 4122 lowercase — the same bytes PostgreSQL's uuid ingests, so one
+// logical UUID keys and joins identically across engines. The spelling is in
+// entity KEYS, so a mixed-version cluster must never produce both: every
+// node renders the old way until the cluster minimum reaches 5, then a
+// session resuming a checkpoint written the old way re-snapshots once at a
+// bumped epoch (its closing markers sweep the old spellings on keyed sinks).
+// The checkpoint records its rendering; once canonical it stays canonical.
+const FeatureLevel uint64 = 5
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

@@ -143,6 +143,15 @@ func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.Stag
 			handle.stageRecoveryFolded.Store(0)
 		}()
 	}
+	// The fold below is a from-0 read: start it against a scrub-current log
+	// and pin the swap while it runs, or a mid-fold rewrite could erase a
+	// delete key whose upsert this fold already retained (delete-key erasure
+	// pair-consistency; see wal.Storage.BeginFromZeroRead).
+	if !db.awaitScrubCurrent(ctx) {
+		return ctx.Err()
+	}
+	releaseFromZero := db.beginFromZeroRead()
+	defer releaseFromZero()
 	r := db.storage.Reader("") // from index 0; entries ≤ frontier are skipped below
 	folded := 0
 	for {
@@ -240,7 +249,7 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		db.logger.Warn("SAFE MODE: sync worker held; delete or fix the config over the API, then restart without COMMITTED_SAFE_MODE to resume",
 			zap.String("id", id))
 		if s != nil {
-			if err, completed := runBounded(db.workerDrainTimeout, s.Close); !completed {
+			if err, completed := runBounded(db.workers.drainTimeout, s.Close); !completed {
 				db.logger.Warn("held syncable close did not return in time", zap.String("id", id))
 			} else if err != nil {
 				db.logger.Warn("held syncable close failed", zap.String("id", id), zap.Error(err))
@@ -248,57 +257,41 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		}
 		return nil
 	}
-	db.workersMu.Lock()
-	if db.closed {
-		db.workersMu.Unlock()
-		return ErrClosed
-	}
-	// See db.Ingest for the rationale behind the loop and the
-	// re-check of db.closed after each wait.
-	replaced := false
-	for {
-		existing, ok := db.syncWorkers[id]
-		if !ok {
-			break
-		}
-		replaced = true
-		existing.cancel()
-		db.workersMu.Unlock()
-		if !waitDone(existing.done, db.workerDrainTimeout) {
-			db.logger.Warn("sync replace: prior worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
-		}
-		// Release the superseded syncable's prepared statements (only if it
-		// drained, so we don't race a wedged worker) — otherwise every re-POST
-		// leaks a statement set on the shared pool.
-		db.closeDrainedSyncable(existing, id)
-		db.workersMu.Lock()
-		if db.closed {
-			db.workersMu.Unlock()
-			return ErrClosed
-		}
-		if db.syncWorkers[id] == existing {
-			delete(db.syncWorkers, id)
-		}
-	}
+	err := db.workers.replace(workerKindSync, id,
+		func(replaced bool) *workerHandle {
+			if replaced && db.metrics != nil {
+				db.metrics.WorkerReplaced("sync", id)
+			}
+			return db.newSyncWorker(id, s)
+		},
+		func(prev *workerHandle, drained bool) {
+			if !drained {
+				db.logger.Warn("sync replace: prior worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
+					zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
+			}
+			// Release the superseded syncable's prepared statements (only if it
+			// drained, so we don't race a wedged worker) — otherwise every re-POST
+			// leaks a statement set on the shared pool.
+			db.closeDrainedSyncable(prev, id)
+		})
+	return err
+}
 
-	if replaced && db.metrics != nil {
-		db.metrics.WorkerReplaced("sync", id)
-	}
-
-	// cancel ownership passes to the workerHandle. It is invoked by
-	// db.Close (see db.go:~390) and by the replace path above when a
-	// duplicate Sync call supersedes this worker, so the cancel is
-	// not leaked. gosec can't see through the handle indirection.
+// newSyncWorker builds the handle for a sync worker on s and starts its
+// goroutine. The caller — the registry's replace, holding its lock —
+// registers the returned handle. The running gauge flips true before the
+// goroutine starts, as it always has, so an instant exit cannot leave it
+// stuck true.
+func (db *DB) newSyncWorker(id string, s cluster.Syncable) *workerHandle {
+	// cancel ownership passes to the workerHandle. It is invoked by db.Close
+	// and by the registry's replace when a duplicate Sync call supersedes
+	// this worker, so the cancel is not leaked. gosec can't see through the
+	// handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
 	handle := &workerHandle{cancel: cancel, done: make(chan struct{}), syncable: s}
-	db.syncWorkers[id] = handle
-	db.workersMu.Unlock()
-
 	if db.metrics != nil {
 		db.metrics.SetWorkerRunning("sync", id, true)
 	}
-
 	go func() {
 		defer func() {
 			if db.metrics != nil {
@@ -306,11 +299,10 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 			}
 			close(handle.done)
 		}()
-		db.resetSyncBreaker(id) // fresh breaker state for this worker run (e.g. after a replace)
+		db.syncBreaker.reset(id) // fresh breaker state for this worker run (e.g. after a replace)
 		_ = db.sync(workerCtx, id, s, handle)
 	}()
-
-	return nil
+	return handle
 }
 
 // deleteSync tears down a syncable that was removed from the log: it cancels
@@ -395,7 +387,7 @@ func (db *DB) reconcileSyncWorkers(list func() ([]*SyncableWithID, error)) {
 		installed++
 	}
 	cancelled := 0
-	for _, id := range db.syncWorkerIDs() {
+	for _, id := range db.workers.ids(workerKindSync) {
 		if _, ok := present[id]; !ok {
 			db.logger.Warn("sync reconcile: cancelling worker for a config that no longer exists (deleted, incl. via snapshot)",
 				zap.String("id", id))
@@ -407,35 +399,14 @@ func (db *DB) reconcileSyncWorkers(list func() ([]*SyncableWithID, error)) {
 		zap.Int("installed", installed), zap.Int("degraded", degraded), zap.Int("cancelled", cancelled))
 }
 
-// syncWorkerIDs snapshots the registered sync worker ids.
-func (db *DB) syncWorkerIDs() []string {
-	db.workersMu.Lock()
-	defer db.workersMu.Unlock()
-	ids := make([]string, 0, len(db.syncWorkers))
-	for id := range db.syncWorkers {
-		ids = append(ids, id)
-	}
-	return ids
-}
-
 func (db *DB) deleteSync(id string, keepData bool) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
-	if ok {
-		handle.cancel()
-		db.workersMu.Unlock()
-		if !waitDone(handle.done, db.workerDrainTimeout) {
-			db.logger.Warn("delete sync: worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
-		}
-		db.workersMu.Lock()
-		if db.syncWorkers[id] == handle {
-			delete(db.syncWorkers, id)
-		}
+	handle, drained := db.workers.remove(workerKindSync, id, abandonOnWedge, nil)
+	if handle != nil && !drained {
+		db.logger.Warn("delete sync: worker did not exit in time; abandoning it (wedged on its destination?) and proceeding",
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	}
-	db.workersMu.Unlock()
 
-	if !ok || handle.syncable == nil {
+	if handle == nil || handle.syncable == nil {
 		// No worker built on this node — nothing to tear down. In safe mode
 		// that is EVERY delete; outside it this is a DEGRADED config's
 		// delete (its build failed, so no worker held a destination
@@ -473,14 +444,78 @@ func (db *DB) deleteSync(id string, keepData bool) {
 	// and the destination that wedged the worker above is the same one Teardown
 	// is about to talk to — an unbounded DROP there would park the listener and
 	// stall the raft apply loop on its next config send.
-	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+	if err, completed := runBounded(db.workers.drainTimeout, teardownable.Teardown); !completed {
 		db.logger.Error("syncable deleted but destination teardown did not return in time (unreachable destination?); abandoning it (orphaned destination state; remove it manually)",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	} else if err != nil {
 		// Best-effort: the logical delete already committed. Log loudly and
 		// move on — the worst case is orphaned destination state.
 		db.logger.Error("syncable deleted but destination teardown failed (orphaned destination state; remove it manually)",
 			zap.String("id", id), zap.Error(err))
+	}
+}
+
+// fromZeroReadPinner and scrubCurrentWaiter are the optional Storage
+// extensions the delete-key erasure design relies on (wal.Storage implements
+// both; test doubles usually don't, in which case the pins and waits are
+// no-ops — the same optional-interface shape as scrubBacklogReporter).
+type fromZeroReadPinner interface {
+	BeginFromZeroRead() func()
+}
+
+type scrubCurrentWaiter interface {
+	WaitScrubCurrent(done <-chan struct{}) error
+}
+
+// beginFromZeroRead pins the local scrub swap for the duration of a from-0
+// log read (see wal.Storage.BeginFromZeroRead). No-op release when the
+// storage doesn't participate.
+func (db *DB) beginFromZeroRead() func() {
+	if p, ok := db.storage.(fromZeroReadPinner); ok {
+		return p.BeginFromZeroRead()
+	}
+	return func() {}
+}
+
+// awaitScrubCurrent blocks until the local event log reflects every committed
+// Scrub command (see wal.Storage.WaitScrubCurrent); false means the context
+// ended first. Called before a from-0 read begins: together with the read pin
+// it guarantees such a read observes one, current log state — the invariant
+// the delete-key erasure gate's exemptions rest on.
+func (db *DB) awaitScrubCurrent(ctx context.Context) bool {
+	w, ok := db.storage.(scrubCurrentWaiter)
+	if !ok {
+		return true
+	}
+	return w.WaitScrubCurrent(ctx.Done()) == nil
+}
+
+// fromZeroPin tracks one worker's from-0 read pin: acquired at a from-0
+// leadership gain, released once the read has passed the head captured at
+// acquisition (everything below it was read from one log state), on
+// leadership loss, or on worker exit.
+type fromZeroPin struct {
+	releaseFn func()
+	until     uint64
+}
+
+func (p *fromZeroPin) acquire(db *DB, until uint64) {
+	p.release()
+	p.releaseFn = db.beginFromZeroRead()
+	p.until = until
+}
+
+func (p *fromZeroPin) release() {
+	if p.releaseFn != nil {
+		p.releaseFn()
+		p.releaseFn = nil
+	}
+}
+
+// maybeRelease drops the pin once a read lands past the acquisition head.
+func (p *fromZeroPin) maybeRelease(readIndex uint64) {
+	if p.releaseFn != nil && readIndex > p.until {
+		p.release()
 	}
 }
 
@@ -541,6 +576,27 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 	var pendingCount int
 	var pendingSince time.Time
 
+	// remat tracks an in-progress re-materialization (see rematerialize.go):
+	// loaded at leadership gain, swept + cleared when the consumed head
+	// reaches its target.
+	var remat rematState
+
+	// fzPin is this worker's from-0 read pin (delete-key erasure; see
+	// fromZeroPin). Held only while a from-0 replay is below the head it
+	// started against.
+	var fzPin fromZeroPin
+	defer fzPin.release()
+
+	// interpPin is the checkpoint's interpretation index — the restatements
+	// registry index this syncable's CURRENT materialization began under (the
+	// second half of the determinism pair). Carried UNCHANGED across
+	// checkpoint bumps and restarts: it only re-pins when derivation
+	// genuinely restarts from index 0 (a fresh syncable, or a future
+	// re-materialization). Restatements landing past it mark the syncable stale
+	// (some already-synced rows used a superseded reading) — surfaced via
+	// status, healed only by an operator-triggered re-derivation.
+	var interpPin uint64
+
 	for {
 		// Cheap non-blocking ctx check at the top so a cancellation
 		// observed mid-iteration short-circuits the next round.
@@ -565,6 +621,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
 			pendingCount = 0
+			fzPin.release()
 			// Do NOT clear the stuck record on leadership loss. The record is
 			// cluster-wide replicated state — losing leadership does not unstick
 			// the syncable; the new owner adopts it (or re-wedges) and clears it on
@@ -572,15 +629,38 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			// drop then re-raise the alert) on every leadership change.
 			progressed = true
 		case !isNode && db.isNode(id):
+			// A FROM-0 replay (no committed checkpoint) starts against a
+			// scrub-current local log and pins the swap until it passes the
+			// head it started at — the delete-key erasure invariants (see
+			// awaitScrubCurrent / fromZeroPin). Resumed reads need neither.
+			if _, resumed := db.storage.SyncableCheckpoint(id); !resumed {
+				if !db.awaitScrubCurrent(ctx) {
+					return nil
+				}
+				_, h, _ := db.SyncableProgress(id)
+				fzPin.acquire(db, h)
+			}
 			r = db.storage.Reader(id)
 			handle.activeReader.Store(&readerRef{r: r})
 			// checkpoint/head on the start line turn every future "young mirror
 			// frozen at 0" question into a one-line answer: this worker begins a
 			// scan of head-checkpoint entries (the field incident this serves was
 			// undiagnosable precisely for lack of it).
+			// The interpretation pin: adopt the checkpoint's (a resumed
+			// materialization keeps its epoch's pin, 0 for pre-restatements
+			// checkpoints — honestly "derived under no restatements"); a FRESH
+			// syncable starting from index 0 pins the current registry.
+			if ck, ok := db.storage.SyncableCheckpoint(id); ok {
+				interpPin = ck.InterpretationIndex
+			} else {
+				interpPin = db.freshInterpretationPin(id)
+			}
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
+			// Stage-state recovery gates serving: a stage-carrying syncable
+			// must re-derive its node-local store before consuming (a reset
+			// store, an ownership move, a lost NoSync tail).
 			if rec, ok := cluster.SyncableAs[cluster.StageRecoverer](s); ok {
 				if err := db.recoverStageState(ctx, id, rec, cp, handle); err != nil {
 					if exit := db.stageRecoveryFailed(ctx, id, err); exit {
@@ -589,6 +669,10 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 					break // idle backoff, then retry — never a hot loop
 				}
 			}
+			// An in-progress re-materialization: begin epoch marking so the
+			// replay converges the sink (see rematerialize.go). After stage
+			// recovery, so a recovery retry never double-begins.
+			remat = db.beginRematerializationIfRequested(ctx, id, s)
 			isNode = true
 			retryActual = nil
 			lastSeen, lastBumped = 0, 0
@@ -644,11 +728,13 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 				a, readErr = r.Read()
 				if readErr == nil {
 					i = a.Index
+					fzPin.maybeRelease(i)
 				}
 			}
 
 			switch {
 			case readErr == io.EOF:
+				fzPin.release() // caught up: any from-0 pass is complete
 				// Caught up. If the consumed head (lastSeen) is past the last
 				// index durably checkpointed (lastBumped), advance the
 				// checkpoint to it with one bump. For a selective single
@@ -675,7 +761,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 				// yet, so a low-traffic syncable never lags its checkpoint
 				// forever (sync-checkpoint-cadence constraint 2).
 				if lastSeen > lastBumped {
-					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen}); err != nil {
+					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen, InterpretationIndex: interpPin}); err != nil {
 						// Bump orphaned (ctx canceled, or leader change). Leave
 						// lastBumped behind; the next EOF retries. Don't set
 						// progressed — back off rather than spin on a wedged bump.
@@ -687,6 +773,9 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 						progressed = true
 					}
 				}
+				// Caught up: if a re-materialization's replay has covered its
+				// target, sweep and clear.
+				db.completeRematerializationIfDone(ctx, id, s, &remat, lastSeen)
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)
 			default:
@@ -725,8 +814,12 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 					db.metrics.SyncCompleted(id, time.Since(syncStart))
 				}
 				if syncErr != nil {
+					// A site-established config-shaped failure
+					// (cluster.ErrConfigShaped) is deliberately NOT
+					// ErrPermanent, so it takes the transient branch below —
+					// wedge loudly, stop dead-lettering the topic's rows.
 					if errors.Is(syncErr, cluster.ErrPermanent) {
-						if c, tripped := db.recordSyncPermanent(id, i); tripped {
+						if c, tripped := db.syncBreaker.recordPermanent(id, i); tripped {
 							db.tripSyncBreaker(id, c, syncErr)
 							db.publishSyncableParked(ctx, id, i, syncErr)
 							return nil // park: hold the checkpoint, stop dead-lettering the topic
@@ -790,7 +883,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 					pendingCount++
 				}
 				if pendingCount > 0 && (pendingCount >= every || (maxAge > 0 && time.Since(pendingSince) >= maxAge)) {
-					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen}); err != nil {
+					if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: lastSeen, InterpretationIndex: interpPin}); err != nil {
 						// The bump did not durably apply — ctx canceled by a
 						// replace/Close, or ErrProposalUnknown/ErrProposalLost
 						// after a leader change orphaned the bump. Do NOT advance:
@@ -887,6 +980,15 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// persisted", cluster.CheckpointPolicy).
 	syncedSinceBump := 0
 	var pendingBumpIndex uint64
+	// fzPin: this worker's from-0 read pin — see the single-flush worker.
+	var fzPin fromZeroPin
+	defer fzPin.release()
+
+	// interpPin: the checkpoint's interpretation index — see the single-flush
+	// worker's declaration for the pinning contract.
+	var interpPin uint64
+	// remat: see the single-flush worker's declaration.
+	var remat rematState
 	tracker := db.newStuckTracker(id)
 
 	flush := func() bool {
@@ -907,7 +1009,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				// this batch to isolate the offending proposal(s).
 				db.logger.Warn("permanent batch error, falling back to per-proposal sync",
 					zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Error(syncErr))
-				ok := db.syncBatchFallback(ctx, id, s, batch, "")
+				ok := db.syncBatchFallback(ctx, id, s, batch, "", interpPin)
 				if ok {
 					batch = batch[:0]
 					retryBatch = false
@@ -941,7 +1043,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			prospectivePending = batch[len(batch)-1].Index
 		}
 		if prospectivePending != 0 && prospectiveCount >= every {
-			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: prospectivePending}); err != nil {
+			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: prospectivePending, InterpretationIndex: interpPin}); err != nil {
 				// The bump did not durably apply (ctx canceled, or
 				// ErrProposalUnknown/ErrProposalLost after a leader change
 				// orphaned the bump). Keep the batch and retry the SyncBatch +
@@ -977,7 +1079,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		if pendingBumpIndex == 0 {
 			return false
 		}
-		if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex}); err != nil {
+		if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex, InterpretationIndex: interpPin}); err != nil {
 			db.logger.Warn("proposeSyncableIndex error at EOF, will retry",
 				zap.String("id", id), zap.Error(err))
 			return false
@@ -992,7 +1094,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		// breaker; park the worker (checkpoint held) rather than spin on the
 		// systematically-failing batch. The reset is per worker launch, so a
 		// replacement after a config fix starts fresh.
-		if db.syncBreakerTripped(id) {
+		if db.syncBreaker.tripped(id) {
 			return nil
 		}
 		select {
@@ -1010,6 +1112,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			isNode = false
 			batch = batch[:0]
 			retryBatch = false
+			fzPin.release()
 			// Drop the cadence accumulators without bumping: we must not
 			// propose while not the owner, and the new owner re-derives its
 			// position from the durable checkpoint — the un-persisted tail
@@ -1021,15 +1124,38 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// the new owner clears it on progress. See the single-flush worker.
 			progressed = true
 		case !isNode && db.isNode(id):
+			// A FROM-0 replay (no committed checkpoint) starts against a
+			// scrub-current local log and pins the swap until it passes the
+			// head it started at — the delete-key erasure invariants (see
+			// awaitScrubCurrent / fromZeroPin). Resumed reads need neither.
+			if _, resumed := db.storage.SyncableCheckpoint(id); !resumed {
+				if !db.awaitScrubCurrent(ctx) {
+					return nil
+				}
+				_, h, _ := db.SyncableProgress(id)
+				fzPin.acquire(db, h)
+			}
 			r = db.storage.Reader(id)
 			handle.activeReader.Store(&readerRef{r: r})
 			// checkpoint/head on the start line turn every future "young mirror
 			// frozen at 0" question into a one-line answer: this worker begins a
 			// scan of head-checkpoint entries (the field incident this serves was
 			// undiagnosable precisely for lack of it).
+			// The interpretation pin: adopt the checkpoint's (a resumed
+			// materialization keeps its epoch's pin, 0 for pre-restatements
+			// checkpoints — honestly "derived under no restatements"); a FRESH
+			// syncable starting from index 0 pins the current registry.
+			if ck, ok := db.storage.SyncableCheckpoint(id); ok {
+				interpPin = ck.InterpretationIndex
+			} else {
+				interpPin = db.freshInterpretationPin(id)
+			}
 			cp, head, _ := db.SyncableProgress(id)
 			db.logger.Info("starting sync", zap.String("id", id),
 				zap.Uint64("checkpoint", cp), zap.Uint64("head", head))
+			// Stage-state recovery gates serving: a stage-carrying syncable
+			// must re-derive its node-local store before consuming (a reset
+			// store, an ownership move, a lost NoSync tail).
 			if rec, ok := cluster.SyncableAs[cluster.StageRecoverer](s); ok {
 				if err := db.recoverStageState(ctx, id, rec, cp, handle); err != nil {
 					if exit := db.stageRecoveryFailed(ctx, id, err); exit {
@@ -1038,6 +1164,10 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 					break // idle backoff, then retry — never a hot loop
 				}
 			}
+			// An in-progress re-materialization: begin epoch marking so the
+			// replay converges the sink (see rematerialize.go). After stage
+			// recovery, so a recovery retry never double-begins.
+			remat = db.beginRematerializationIfRequested(ctx, id, s)
 			isNode = true
 			batch = batch[:0]
 			retryBatch = false
@@ -1060,7 +1190,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				if len(batch) > 0 && tracker.skipRequested(ctx, batch[0].Index) {
 					db.logger.Warn("operator dead-letter: isolating wedged batch",
 						zap.String("id", id), zap.Int("batch_size", len(batch)), zap.Uint64("head_index", batch[0].Index))
-					if db.syncBatchFallback(ctx, id, s, batch, "manual") {
+					if db.syncBatchFallback(ctx, id, s, batch, "manual", interpPin) {
 						batch = batch[:0]
 						retryBatch = false
 						tracker.honored(ctx)
@@ -1077,6 +1207,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			a, readErr := r.Read()
 			switch {
 			case readErr == io.EOF:
+				fzPin.release() // caught up: any from-0 pass is complete
 				// Caught up. Flush any partial batch immediately, then persist
 				// any sub-stride pending boundary — the EOF flush of the
 				// CheckpointPolicy contract, which keeps a caught-up
@@ -1090,10 +1221,16 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				if !retryBatch && bumpPending() {
 					progressed = true
 				}
+				// Caught up: if a re-materialization's replay has covered its
+				// target, sweep and clear.
+				if !retryBatch {
+					db.completeRematerializationIfDone(ctx, id, s, &remat, pendingBumpIndex)
+				}
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)
 			default:
 				i := a.Index
+				fzPin.maybeRelease(i)
 				// Exclude a proposal already dead-lettered (a permanent skip
 				// or an operator's manual skip) from the batch, so the skip
 				// survives restart and a manually-isolated poison proposal
@@ -1155,7 +1292,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 //     on what the syncable is stuck on, so dead-letter the still-failing
 //     proposal with that kind ("manual") and continue, isolating the bad
 //     proposal(s) while letting the healthy ones in the batch through.
-func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []*cluster.Actual, transientSkipKind string) bool {
+func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncable, entries []*cluster.Actual, transientSkipKind string, interpPin uint64) bool {
 	for _, e := range entries {
 		syncStart := time.Now()
 		shouldSnapshot, syncErr := db.callSync(ctx, id, s, e)
@@ -1163,11 +1300,14 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			db.metrics.SyncCompleted(id, time.Since(syncStart))
 		}
 		if syncErr != nil {
+			// Config-shaped failures (cluster.ErrConfigShaped, not
+			// ErrPermanent) fall to the transient path below (stop the
+			// fallback; the batch loop wedges) — the single-flush worker's twin.
 			if errors.Is(syncErr, cluster.ErrPermanent) {
-				if c, tripped := db.recordSyncPermanent(id, e.Index); tripped {
+				if c, tripped := db.syncBreaker.recordPermanent(id, e.Index); tripped {
 					db.tripSyncBreaker(id, c, syncErr)
 					db.publishSyncableParked(ctx, id, e.Index, syncErr)
-					return false // stop the batch; syncBatch parks (checks syncBreakerTripped)
+					return false // stop the batch; syncBatch parks (checks syncBreaker.tripped)
 				}
 				db.logger.Error("permanent sync error, skipping proposal",
 					zap.String("id", id), zap.Uint64("index", e.Index), zap.Error(syncErr))
@@ -1200,7 +1340,7 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 			return false
 		}
 		if shouldSnapshot {
-			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.Index}); err != nil {
+			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: e.Index, InterpretationIndex: interpPin}); err != nil {
 				// The bump did not durably apply. Stop the fallback and
 				// leave the remaining batch for the caller to retry rather
 				// than advancing past an unconfirmed index. The successful
@@ -1338,6 +1478,9 @@ func (db *DB) SyncableProgress(id string) (checkpoint, head uint64, err error) {
 // unconditionally as ownerNode and uses it to route the opt-in readPosition
 // proxy to the owner.
 func (db *DB) SyncableOwner(id string) uint64 {
+	if zone, active, owner := db.syncableZonePin(id); zone != "" && active {
+		return owner // 0 = strict pin unsatisfiable: nobody serves
+	}
 	if n := db.storage.Node(id); n != 0 {
 		return n
 	}
@@ -1351,10 +1494,8 @@ func (db *DB) SyncableOwner(id string) uint64 {
 // re-deriving worker previously read as plain "running" with silently
 // climbing lag).
 func (db *DB) SyncableStageRecovery(id string) (folded, target uint64, ok bool) {
-	db.workersMu.Lock()
-	handle, found := db.syncWorkers[id]
-	db.workersMu.Unlock()
-	if !found {
+	handle := db.workers.lookup(workerKindSync, id)
+	if handle == nil {
 		return 0, 0, false
 	}
 	t := handle.stageRecoveryTarget.Load()
@@ -1370,10 +1511,8 @@ func (db *DB) SyncableStageRecovery(id string) (folded, target uint64, ok bool) 
 // SyncableReadPosition — the stage store lives with the worker — so the
 // HTTP layer proxies to the owner for the any-node answer.
 func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
-	db.workersMu.Unlock()
-	if !ok || handle.syncable == nil {
+	handle := db.workers.lookup(workerKindSync, id)
+	if handle == nil || handle.syncable == nil {
 		return nil, false
 	}
 	in, ok := cluster.SyncableAs[cluster.StageIntrospector](handle.syncable)
@@ -1392,10 +1531,8 @@ func (db *DB) SyncableStageStats(id string) (map[string]cluster.StageStat, bool)
 // stages; err: undeclared stage name or part-count mismatch).
 // Owner-local like the counts — the HTTP layer proxies to the owner.
 func (db *DB) SyncableStageKeyExists(id, stage string, keyParts []string) (bool, bool, error) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
-	db.workersMu.Unlock()
-	if !ok || handle.syncable == nil {
+	handle := db.workers.lookup(workerKindSync, id)
+	if handle == nil || handle.syncable == nil {
 		return false, false, nil
 	}
 	in, ok := cluster.SyncableAs[cluster.StageIntrospector](handle.syncable)
@@ -1419,10 +1556,8 @@ func (db *DB) SyncableStageKeyExists(id, stage string, keyParts []string) (bool,
 // construction — non-owner workers hold no reader — so the HTTP layer
 // proxies the call to SyncableOwner's node for the any-node answer.
 func (db *DB) SyncableReadPosition(id string) (uint64, bool) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
-	db.workersMu.Unlock()
-	if !ok {
+	handle := db.workers.lookup(workerKindSync, id)
+	if handle == nil {
 		return 0, false
 	}
 	ref := handle.activeReader.Load()

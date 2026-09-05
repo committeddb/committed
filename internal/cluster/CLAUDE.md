@@ -1,10 +1,13 @@
 # internal/cluster
 
-Core domain package. All key interfaces are defined in `cluster.go`.
+Core domain package: the vocabulary (Proposal/Actual/Entity/Type) and the plugin contracts.
 
-## Key interfaces (cluster.go)
+## Key contracts
 
-- **Cluster**: Main interface — propose writes, manage configs, sync/ingest
+There is deliberately no aggregated service interface: the engine is
+`*db.DB` (db/), and its HTTP handlers (db/http/) hold it directly. The
+contracts here are the domain types and the PLUGIN seams:
+
 - **Syncable** (syncable.go): Consumes committed Actuals (`cluster.Actual`, in Index order) and applies them to an external system. A Syncable is handed Actuals, never Proposals — propose a `Proposal`, sync an `Actual`.
 - **Ingestable** (ingestable.go): Ingests data from an external source into topics
 - **Database** (database.go): External database connection config
@@ -12,9 +15,9 @@ Core domain package. All key interfaces are defined in `cluster.go`.
 
 ## Package layout
 
-- **db/**: Raft consensus, WAL storage, sync/ingest processing. `db.go` is the main Cluster implementation. `raft.go` handles Raft node lifecycle. `sync.go` handles syncable processing. `ingest.go` handles ingestable processing.
+- **db/**: Raft consensus, WAL storage, sync/ingest processing. `db.go` anchors `db.DB`, the engine. `raft.go` handles Raft node lifecycle. `sync.go` handles syncable processing. `ingest.go` handles ingestable processing.
 - **db/wal/**: Write-ahead log storage layer (tidwall/wal wrapper)
-- **http/**: REST API handlers (Chi router). `handler.go` defines all routes and handlers. `versions.go` handles config version history endpoints.
+- **db/http/**: REST API handlers (Chi router) — the engine's transport subpackage; `http.go` assembles the router and the route table, `versions.go` handles config version history endpoints. Lives under `db/` so handlers hold the engine directly (no aggregated service interface).
 - **syncable/sql/**: SQL sync implementations — `mysql/` and `postgres/` subdirectories
 - **ingestable/sql/**: SQL ingest implementations — `mysql/` and `postgres/` subdirectories
 - **clusterpb/**: Protobuf definitions (generated — do not edit, regenerate with `go generate ./...`)

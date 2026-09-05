@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
@@ -85,6 +86,9 @@ func (db *DB) buildSyncable(id string) (cluster.Syncable, error) {
 	if mode == cluster.ModeAlwaysCurrent {
 		syncable = migration.Wrap(syncable, db.storage, db.metrics)
 	}
+	// Mirror the build sites: every syncable — a replay included — reads the
+	// authoritative interpretation (stamp ⊕ restatement fold) before consuming.
+	syncable = interpretation.Wrap(syncable, db.storage.InterpretationRegistry, db.storage)
 	return syncable, nil
 }
 

@@ -15,7 +15,7 @@ import (
 // worker-handle-lifecycle-races F1 fix: cancelling a FROZEN ingest worker must
 // condemn its handle under the first lock hold so a pending supervisor restart,
 // firing inside the cancel's drain window, refuses to resurrect it. Before the
-// fix the supervisor's `ingestWorkers[id] != frozen` preflight passed during
+// fix the supervisor's `workers.ingest[id] != frozen` preflight passed during
 // that window (the map entry is deleted only after the relock), so it installed
 // a fresh worker on the SAME Ingestable instance the cancel then Closed —
 // use-after-Close on a live source plus a zombie worker for a deleted config.
@@ -48,7 +48,7 @@ func TestWorkerLifecycle_CancelCondemnsAgainstSupervisorResurrection(t *testing.
 	require.NotZero(t, rid, "ingest worker never registered a Propose waiter")
 
 	// Rendezvous channels. poised closes when the supervisor is about to
-	// reacquire workersMu; the test releases it (proceed) only once cancel is
+	// reacquire workers.mu; the test releases it (proceed) only once cancel is
 	// parked in its drain window with the handle condemned; attemptDone closes
 	// when the supervisor's restart goroutine exits.
 	poised := make(chan struct{})

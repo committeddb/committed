@@ -60,10 +60,22 @@ func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
 					prev.SchemaType == t.SchemaType &&
 					prev.Validate == t.Validate &&
 					prev.Name == t.Name {
-					changed := !bytes.Equal(prev.Migration, t.Migration) ||
+					migrationEdited := !bytes.Equal(prev.Migration, t.Migration)
+					changed := migrationEdited ||
 						prev.EntityKind != t.EntityKind ||
 						prev.Discriminator != t.Discriminator
 					if changed {
+						// An in-place MIGRATION edit moves the interpretation
+						// coordinate: record its apply index (same atomic tx)
+						// so always-current consumers pinned below it read
+						// interpretationStale until re-materialized. Kind
+						// adoption and discriminator edits are inert over
+						// history and record nothing.
+						if migrationEdited {
+							if err := putTypeMigrationEditTx(tx, t.ID, raftIndex); err != nil {
+								return err
+							}
+						}
 						s.logger.Info("updating mutable fields for existing type version",
 							zap.String("id", t.ID), zap.Int("version", t.Version))
 						return overwriteCurrentVersion(b, []byte(t.ID), t)
@@ -234,6 +246,12 @@ func (s *Storage) Types() ([]*cluster.Configuration, error) {
 			}
 			if tipe.Discriminator != "" {
 				toml += fmt.Sprintf("\ndiscriminator = \"%s\"", tipe.Discriminator)
+			}
+			// Announce-typed types list their strategy and destination — the
+			// operator-declared pair that makes the tripwire legible in a
+			// listing. Other strategies keep the pre-existing minimal output.
+			if tipe.Validate == cluster.ValidateAnnounce {
+				toml += fmt.Sprintf("\nvalidate = %d\nschemaChangeTopic = \"%s\"", cluster.ValidateAnnounce, tipe.SchemaChangeTopic)
 			}
 
 			cfg := &cluster.Configuration{

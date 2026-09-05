@@ -31,7 +31,8 @@ func TestMigrateEntities_NonRowVariantsPassThroughUntouched(t *testing.T) {
 	marker := cluster.NewRefreshBoundaryEntity(tp, 3)
 	del := cluster.NewDeleteEntity(tp, []byte("k"))
 
-	out, err := migrateEntities(context.Background(), &mustNotResolve{t}, nil, []*cluster.Entity{marker, del})
+	s := &single{resolver: &mustNotResolve{t}, trackers: map[string]*cluster.AmbiguityTracker{}}
+	out, err := s.migrateEntities(context.Background(), &cluster.Actual{Index: 1, Entities: []*cluster.Entity{marker, del}})
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	require.Same(t, marker, out[0], "the marker must pass through untouched")

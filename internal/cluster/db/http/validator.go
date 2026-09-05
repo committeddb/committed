@@ -1,0 +1,285 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+
+	"github.com/bufbuild/protocompile"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/committeddb/committed/internal/cluster"
+)
+
+// entityValidator validates an entity's raw JSON data against a type
+// schema. One concrete implementation exists per Type.SchemaType that
+// AddProposal knows how to handle (JSONSchema, Protobuf). Implementations
+// own the compiled schema artifact and are cached by (typeID, Version).
+type entityValidator interface {
+	// validate returns:
+	//  - nil: data is schema-valid.
+	//  - schemaValidationError: data is well-formed but fails the schema.
+	//    The wrapped error's message is safe to surface in HTTP details.
+	//  - any other error: the schema or input was structurally unusable
+	//    (malformed JSON, malformed descriptor). Treated as 5xx by callers.
+	validate(data []byte) error
+}
+
+// schemaValidationError marks a validation failure that the caller
+// should surface as a 400. Any other error from validate() is a 5xx.
+type schemaValidationError struct {
+	err error
+}
+
+func (e *schemaValidationError) Error() string { return e.err.Error() }
+func (e *schemaValidationError) Unwrap() error { return e.err }
+
+// SchemaValidator implements cluster.TypeSchemaValidator and
+// cluster.EntitySchemaValidator by compiling a type's entity schema with the
+// SAME compilers the proposal path uses (compileValidator), so the schema a
+// POST /type accepts is exactly the one every proposal will run against. It
+// is injected into the db layer (DB.SetTypeSchemaValidator /
+// DB.SetEntityValidator) in cmd/node.go, which is why the compilers can live
+// here in the http layer while the admission check and the tripwire run in db
+// — db never imports http. Holds its own compiled-schema cache (keyed by
+// (typeID, Version), safe because Version bumps on any schema change), so use
+// one instance per process, by pointer.
+type SchemaValidator struct {
+	schemas sync.Map // schemaCacheKey -> entityValidator
+}
+
+// ValidateTypeSchema returns nil for a valid schema, a non-validating type, or an
+// unknown SchemaType (compileValidator fails open with (nil, nil)); it returns the
+// compile error only when a known SchemaType's schema will not compile.
+func (v *SchemaValidator) ValidateTypeSchema(t *cluster.Type) error {
+	_, err := compileValidator(t)
+	return err
+}
+
+// ValidateEntityData implements cluster.EntitySchemaValidator for the
+// validation tripwire: it reports a payload's schema violations structurally
+// instead of gating. (nil, nil) = conformant, non-validating type, or unknown
+// SchemaType (fail-open, matching ValidateTypeSchema); non-nil divergence =
+// well-formed payload violating the schema; error = schema or input
+// structurally unusable.
+func (v *SchemaValidator) ValidateEntityData(t *cluster.Type, data []byte) (*cluster.SchemaDivergence, error) {
+	key := schemaCacheKey{id: t.ID, version: t.Version}
+	var ev entityValidator
+	if cached, ok := v.schemas.Load(key); ok {
+		ev = cached.(entityValidator)
+	} else {
+		compiled, err := compileValidator(t)
+		if err != nil {
+			return nil, err
+		}
+		if compiled == nil {
+			return nil, nil
+		}
+		v.schemas.Store(key, compiled)
+		ev = compiled
+	}
+
+	err := ev.validate(data)
+	if err == nil {
+		return nil, nil
+	}
+	var vErr *schemaValidationError
+	if errors.As(err, &vErr) {
+		return divergenceFrom(vErr), nil
+	}
+	return nil, err
+}
+
+// divergenceFrom flattens a validation failure into structured causes. A
+// JSONSchema failure yields one cause per leaf validation error (instance
+// location as a JSON pointer, the tripped keyword, the human message); any
+// other failure (e.g. a Protobuf unknown-field error) yields a single cause
+// carrying the message.
+func divergenceFrom(vErr *schemaValidationError) *cluster.SchemaDivergence {
+	var je *jsonschema.ValidationError
+	if !errors.As(vErr.err, &je) {
+		return &cluster.SchemaDivergence{Causes: []cluster.SchemaDivergenceCause{{Message: vErr.Error()}}}
+	}
+	d := &cluster.SchemaDivergence{}
+	flattenValidationError(je, d)
+	return d
+}
+
+// englishPrinter renders jsonschema error kinds; the library's own Error()
+// uses the same locale.
+var englishPrinter = message.NewPrinter(language.English)
+
+func flattenValidationError(e *jsonschema.ValidationError, d *cluster.SchemaDivergence) {
+	if len(e.Causes) == 0 {
+		path := "/" + strings.Join(e.InstanceLocation, "/")
+		if len(e.InstanceLocation) == 0 {
+			path = "/"
+		}
+		d.Causes = append(d.Causes, cluster.SchemaDivergenceCause{
+			Path:    path,
+			Keyword: strings.Join(e.ErrorKind.KeywordPath(), "."),
+			Message: e.ErrorKind.LocalizedString(englishPrinter),
+		})
+		return
+	}
+	for _, c := range e.Causes {
+		flattenValidationError(c, d)
+	}
+}
+
+// compileValidator builds an entityValidator for the given type, or
+// returns (nil, nil) if this type shouldn't be validated. Both validating
+// strategies compile — ValidateSchema to gate, ValidateAnnounce for the
+// tripwire (callers scope gating to ValidateSchema themselves). Unknown
+// SchemaType values fall through to (nil, nil) — we fail-open for now per
+// proposal-validation.md's "do not fail-closed for unknown schema types"
+// guidance, which becomes the place to revisit once Thrift/Avro land.
+func compileValidator(t *cluster.Type) (entityValidator, error) {
+	if t.Validate != cluster.ValidateSchema && t.Validate != cluster.ValidateAnnounce {
+		return nil, nil
+	}
+	switch t.SchemaType {
+	case "JSONSchema":
+		return compileJSONSchemaValidator(t)
+	case "Protobuf":
+		return compileProtobufValidator(t)
+	default:
+		return nil, nil
+	}
+}
+
+// --- JSONSchema ----------------------------------------------------------
+
+type jsonSchemaValidator struct {
+	sch *jsonschema.Schema
+}
+
+func compileJSONSchemaValidator(t *cluster.Type) (entityValidator, error) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(t.Schema))
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal schema: %w", err)
+	}
+
+	url := "urn:committed:type:" + t.ID
+	c := jsonschema.NewCompiler()
+	if err := c.AddResource(url, doc); err != nil {
+		return nil, fmt.Errorf("add resource: %w", err)
+	}
+	sch, err := c.Compile(url)
+	if err != nil {
+		return nil, fmt.Errorf("compile: %w", err)
+	}
+	return &jsonSchemaValidator{sch: sch}, nil
+}
+
+func (v *jsonSchemaValidator) validate(data []byte) error {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		return &schemaValidationError{err: fmt.Errorf("entity data is not valid JSON: %w", err)}
+	}
+	if err := v.sch.Validate(doc); err != nil {
+		return &schemaValidationError{err: err}
+	}
+	return nil
+}
+
+// --- Protobuf -----------------------------------------------------------
+
+// protobufSchemaFile is the synthetic filename we feed to protocompile
+// for an in-memory .proto source. It's referenced nowhere else — the
+// resolver returns the schema bytes regardless of filename, and the
+// compiled FileDescriptor's Path is this constant.
+const protobufSchemaFile = "type.proto"
+
+type protobufValidator struct {
+	md protoreflect.MessageDescriptor
+}
+
+// compileProtobufValidator parses the .proto source in t.Schema and
+// selects the message whose name equals t.Name. The .proto may declare
+// multiple messages, but only the one named after the type is the
+// entity shape — helper messages (nested structs, oneofs) must be
+// declared in the same file and referenced by that root.
+func compileProtobufValidator(t *cluster.Type) (entityValidator, error) {
+	if t.Name == "" {
+		return nil, errors.New("protobuf type requires a non-empty Name that matches the top-level message name")
+	}
+
+	// Wrap the in-memory resolver with WithStandardImports so the user's
+	// .proto can reference google/protobuf/descriptor.proto and friends
+	// without us having to ship their sources. Our Accessor only serves
+	// the user's file — every other path returns os.ErrNotExist, which
+	// WithStandardImports catches and fills in for the well-known files.
+	inMemory := &protocompile.SourceResolver{
+		Accessor: func(filename string) (io.ReadCloser, error) {
+			if filename == protobufSchemaFile {
+				return io.NopCloser(bytes.NewReader(t.Schema)), nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+	compiler := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(inMemory),
+	}
+
+	files, err := compiler.Compile(context.Background(), protobufSchemaFile)
+	if err != nil {
+		return nil, fmt.Errorf("compile .proto: %w", err)
+	}
+	if len(files) == 0 {
+		return nil, errors.New("compile .proto: no files produced")
+	}
+
+	// Look up by short name first, then by fully-qualified name (package
+	// + name) if the .proto declares a `package` statement.
+	msgs := files[0].Messages()
+	md := msgs.ByName(protoreflect.Name(t.Name))
+	if md == nil {
+		md = findMessageByShortName(msgs, t.Name)
+	}
+	if md == nil {
+		return nil, fmt.Errorf("protobuf schema has no message named %q (declare `message %s { ... }` in the .proto)", t.Name, t.Name)
+	}
+
+	return &protobufValidator{md: md}, nil
+}
+
+func findMessageByShortName(msgs protoreflect.MessageDescriptors, short string) protoreflect.MessageDescriptor {
+	want := protoreflect.Name(short)
+	for i := 0; i < msgs.Len(); i++ {
+		md := msgs.Get(i)
+		if md.Name() == want {
+			return md
+		}
+	}
+	return nil
+}
+
+func (v *protobufValidator) validate(data []byte) error {
+	msg := dynamicpb.NewMessage(v.md)
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(data, msg); err != nil {
+		return &schemaValidationError{err: cleanProtoJSONError(err)}
+	}
+	return nil
+}
+
+// cleanProtoJSONError strips protojson's "(line N:M):" prefix because
+// entity data is a JSON object, not a multi-line document, so the
+// position is noise that doesn't help operators diagnose.
+func cleanProtoJSONError(err error) error {
+	s := err.Error()
+	if i := strings.Index(s, "): "); i >= 0 && strings.HasPrefix(s, "(line ") {
+		return errors.New(s[i+3:])
+	}
+	return err
+}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/http"
 )
 
@@ -38,4 +39,17 @@ Value = "CaseSensitiveToken"
 	require.Equal(t, 250, config.TimeoutMs)
 	require.Equal(t, []http.Header{{Name: "X-Auth", Value: "CaseSensitiveToken"}}, config.Headers,
 		"header names and values are user data — case preserved")
+}
+
+func TestHTTPParseConfigRejectsUnknownKeys(t *testing.T) {
+	v := readConfig(t, "toml", bytes.NewReader([]byte(`
+[http]
+topic   = "simple"
+url     = "https://example.test/hook"
+timeout = 250
+`)))
+	_, err := (&http.SyncableParser{}).ParseConfig(v)
+	require.Error(t, err)
+	require.Equal(t, "http.timeout", cluster.NewConfigError(err).Field)
+	require.Contains(t, err.Error(), `did you mean "timeoutMs"?`)
 }

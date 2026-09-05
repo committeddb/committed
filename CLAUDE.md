@@ -66,7 +66,7 @@ Databases, syncables, and ingestables use TOML configuration. See README.md for 
 
 ## API Endpoints
 
-All served via Chi router in `internal/cluster/http/`:
+All served via Chi router in `internal/cluster/db/http/`:
 
 - `GET/POST /database/{id}` - Database configurations
 - `POST /proposal` - Append proposals (write-only; the log is not queried over HTTP — sync it out and query there)

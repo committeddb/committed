@@ -19,16 +19,18 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/http"
 	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
-	"github.com/committeddb/committed/internal/cluster/http"
 	ingestablesql "github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	ingestablemysql "github.com/committeddb/committed/internal/cluster/ingestable/sql/mysql"
 	ingestablepostgres "github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
 	ingestablesqlserver "github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
+	synciceberg "github.com/committeddb/committed/internal/cluster/syncable/iceberg"
+	"github.com/committeddb/committed/internal/cluster/syncable/loopback"
 	syncsql "github.com/committeddb/committed/internal/cluster/syncable/sql"
 	syncdialects "github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 	"github.com/committeddb/committed/internal/version"
@@ -250,6 +252,15 @@ image can be templated per-node by an orchestrator:
 		// only unit tests (which assert exact entry counts) leave it off.
 		dbOpts = append(dbOpts, db.WithVersionAnnounce())
 
+		// COMMITTED_ZONE names this node's zone (vendor-neutral — an AZ, a
+		// rack, a site). Announced into the cluster at startup; a syncable
+		// config carrying `zone = "..."` is then served by a node in that
+		// zone instead of the leader, so same-zone sync egress never pays a
+		// redundant cross-zone crossing. Unset = unpinned node.
+		if zone := os.Getenv("COMMITTED_ZONE"); zone != "" {
+			dbOpts = append(dbOpts, db.WithZone(zone))
+		}
+
 		// Wire the global zap logger into db so internal supervisor /
 		// raft / leader-transition logs are visible. Without this, the
 		// DB defaults to zap.NewNop and operators have no visibility
@@ -411,7 +422,7 @@ image can be templated per-node by an orchestrator:
 		// NB: the database parser is registered earlier, before wal.Open (see
 		// above). These three need *d (the ingestable parser) or are simply
 		// fine to register here alongside it.
-		d.AddIngestableParser("sql", ingestableParser(d, d))
+		d.AddIngestableParser("sql", ingestableParser(d, d, d))
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
 		// One projection parser, two type spellings: "projection" is canonical,
 		// "sql-projection" is a deprecation alias (POST answers with a
@@ -425,10 +436,17 @@ image can be templated per-node by an orchestrator:
 		d.AddSyncableParser("projection", projectionParser)
 		d.AddSyncableParser("sql-projection", projectionParser)
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
-		// Inject the entity-schema compiler so ProposeType rejects a broken schema
-		// at POST /type (the compilers live in the http layer, which db can't
-		// import — see cluster.TypeSchemaValidator).
-		d.SetTypeSchemaValidator(http.SchemaValidator{})
+		d.AddSyncableParser("loopback", &loopback.SyncableParser{Proposer: d})
+		d.AddSyncableParser("iceberg", &synciceberg.SyncableParser{})
+		// Inject the entity-schema compilers so ProposeType rejects a broken
+		// schema at POST /type and Propose's validation tripwire can check
+		// announce-typed payloads (the compilers live in the http layer, which
+		// db can't import — see cluster.TypeSchemaValidator /
+		// cluster.EntitySchemaValidator). One instance: it caches compiled
+		// schemas by (typeID, version).
+		schemaValidator := &http.SchemaValidator{}
+		d.SetTypeSchemaValidator(schemaValidator)
+		d.SetEntityValidator(schemaValidator)
 
 		// Restore ingestable and syncable workers for configs applied in a
 		// previous run. These MUST run after the sub-parsers above are
@@ -595,11 +613,14 @@ func dbParser() *syncsql.DBParser {
 	return p
 }
 
-func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader) *ingestablesql.IngestableParser {
+func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader, features ingestablesqlserver.FeatureReader) *ingestablesql.IngestableParser {
 	p := ingestablesql.NewIngestableParser(t)
 	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
 	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{}
-	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{}
+	// The SQL Server dialect's uniqueidentifier rendering is gated on the
+	// cluster feature level (a mixed-version cluster must not spell one key
+	// two ways), so it reads the db's gate.
+	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{Features: features}
 	// Wire the delete-surviving per-topic refresh-epoch floor so a same-topic
 	// recreate resumes its generation above the rows still on the sink.
 	p.EpochFloor = epoch

@@ -19,6 +19,30 @@ Request-size caps and HTTP timeouts live in
 disk) is covered in
 [event-log-architecture.md](../event-log-architecture.md).
 
+## Event-log compression (0.8.0+)
+
+Sealed event-log segments compress at rest with zstd, automatically: the
+active tail segment stays plain (the write path never compresses), and a
+background sealer compresses each segment shortly after the log cycles past
+it. On the first start after an upgrade the sealer sweeps the whole existing
+backlog, oldest first — expect the events/ directory to shrink roughly
+7–9x on JSON-payload topics (measured 8.8x on a 37 GB field log → 4.2 GB)
+over the first minutes. Replay and rebuild reads are unaffected or faster
+(zstd decodes at GB/s, and the disk reads are ~9x smaller); reads decompress
+transparently, and memory sizing is unchanged (see operations/memory.md).
+
+**Downgrade is a one-way door with a key**: binaries older than 0.8.0 do not
+recognize compressed (`.zst`) segments. Before starting an old binary
+against a data dir that ran 0.8.0+, stop the node and run
+`committed wal decompress --data <datadir>` — it rewrites every compressed
+segment back to the plain format. Upgrades need nothing.
+
+`committed wal repair` understands both formats. A checksum failure inside a
+compressed segment is data corruption (rebuild from a healthy replica),
+never a torn tail — torn tails only occur in the plain active tail, exactly
+as before. Backups copy segment files as-is, so backups of a compressed log
+are proportionally smaller.
+
 ## The per-node watcher
 
 Each node runs a background **disk-usage watcher** that every 30s

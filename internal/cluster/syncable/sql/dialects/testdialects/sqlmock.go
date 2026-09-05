@@ -154,6 +154,22 @@ func (d *SQLMockDialect) CreateGenerationSweepSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateGenerationSweepSQL(config)
 }
 
+// EnsureRematerializationColumn is a no-op like EnsureGenerationColumn: the
+// mock's DDL surface isn't exercised.
+func (d *SQLMockDialect) EnsureRematerializationColumn(_ context.Context, db *gosql.DB, config *sql.Config) error {
+	return nil
+}
+
+// CreateRematerializationUpsertSQL / CreateRematerializationSweepSQL mirror
+// MySQL (the dialect the mock stands in for).
+func (d *SQLMockDialect) CreateRematerializationUpsertSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateRematerializationUpsertSQL(config)
+}
+
+func (d *SQLMockDialect) CreateRematerializationSweepSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateRematerializationSweepSQL(config)
+}
+
 func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {
 	return d.db, nil
 }

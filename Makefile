@@ -92,8 +92,13 @@ test-all:
 # one `go test` invocation makes parallel container startup choke
 # Docker on most CI runners). -race because the integration tests
 # exercise the full goroutine fan-out across HTTP / ingest / sync.
+# -timeout is the per-package hang backstop, not a performance budget:
+# the wal package under -race legitimately passed 5m on a loaded shared
+# runner (the alarm fired 1s into a fresh test after ~299s of earlier
+# ones), so it sits at 2x the loaded envelope. A real hang still dies
+# well inside the job limit.
 test/integration:
-	go test -race -tags integration -timeout 300s ./... -cover
+	go test -race -tags integration -timeout 600s ./... -cover
 
 # Runs the adversarial raft suite (phase 1: partition, leader flap,
 # concurrent config changes; phase 2: asymmetric partition, slow
@@ -137,9 +142,35 @@ test/cdc:
 # asserting graceful shutdown + /ready + /version + state survival (see
 # docs/operations/upgrade.md and e2e/upgrade/). Tagged `upgrade` so it's
 # out of `make test`; -p=1 because the node binds a fixed-per-run port.
-# -timeout 300s covers the one-off `go build .` on a fresh machine.
+# -timeout 900s covers the one-off `go build .` PLUS the first-run fixture
+# captures (old_datadir_test.go builds two released tags and, for the
+# CDC-seeded era, pulls a MySQL image; captures are cached under the
+# gitignored e2e/upgrade/testdata/*/datadir, so later runs take seconds).
 test/upgrade:
-	go test -tags upgrade -p=1 -timeout 300s ./e2e/upgrade/...
+	go test -tags upgrade -p=1 -timeout 900s ./e2e/upgrade/...
+
+# Multi-node crash-recovery e2e: builds the real binary, boots a real 3-node
+# cluster over COMMITTED_PEERS, SIGKILLs a follower, advances the log on the
+# majority, restarts the follower over its data dir, and asserts WAL replay +
+# catch-up; plus the restart-after-grow wedge (grow 3->4, restart every node
+# without updating COMMITTED_PEERS). No Docker. See e2e/multinode.
+# Hot-path micro-benchmarks with REAL fsyncs — the numbers behind
+# docs/operations/performance.md. Run before/after a write/apply/read-path
+# change and compare with benchstat; CI runs this on every push/PR so each
+# commit's log carries its numbers.
+bench:
+	go test -bench=. -benchtime=1s -run='^$$' ./internal/cluster/db/wal/ ./internal/cluster/db/ ./internal/cluster/ ./internal/cluster/interpretation/
+
+test/multinode:
+	go test -tags multinode -p=1 -timeout 600s ./e2e/multinode/...
+
+# The 3-node HTTP throughput report by itself, with the THROUGHPUT REPORT
+# line surfaced (t.Logf is invisible without -v, and -v drowns the line in
+# per-node logs — so capture and grep). Falls back to the full log when the
+# line is absent (build failure etc.).
+bench/multinode:
+	@log=$$(mktemp); go test -tags multinode -run TestMultiNodeThroughput_Report -p=1 -timeout 300s -v ./e2e/multinode/ >$$log 2>&1; \
+	status=$$?; grep -E "THROUGHPUT REPORT|--- PASS|--- FAIL" $$log || cat $$log; rm -f $$log; exit $$status
 
 # Backup/restore round-trip: builds the real binary, boots a node, writes
 # state, asserts backup refuses a live node, stops it, backs it up, restores

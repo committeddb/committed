@@ -84,7 +84,20 @@ type DB struct {
 	// entity schema at ProposeType so a broken schema is rejected at POST /type
 	// rather than accepted then failing every proposal. Nil-safe: a DB without it
 	// (some tests) simply skips the admission schema check.
-	schemaValidator cluster.TypeSchemaValidator
+	//
+	// Both validators are ATOMIC on purpose: injection happens after New
+	// returns (the compilers live in the http layer, wired in cmd/node.go),
+	// but New has already started background proposers — the version
+	// announce, the scrub scheduler — whose Propose/ProposeType paths read
+	// these fields. A plain interface field was a data race (CI-caught in
+	// the census tripwire test), and a torn interface write is
+	// memory-unsafe, not merely stale.
+	schemaValidator atomic.Pointer[typeSchemaValidatorBox]
+	// entityValidator, when injected (SetEntityValidator), checks announce-typed
+	// entities' payloads in Propose so the validation tripwire can emit
+	// ContractExtension events (see tripwire.go). Nil-safe: a DB without it
+	// simply never announces — it NEVER gates either way.
+	entityValidator atomic.Pointer[entitySchemaValidatorBox]
 	leaderState     *LeaderState
 
 	// waiters maps request IDs (set in db.Propose) to waiter records
@@ -122,56 +135,27 @@ type DB struct {
 	// Populated from options (default defaultProposeTimeout).
 	proposeTimeout time.Duration
 
-	// workersMu guards syncWorkers / ingestWorkers / closed. The two
-	// maps key running per-ID worker goroutines (one per syncable /
-	// ingestable ID), so that a second db.Sync / db.Ingest call for
-	// the same ID cancels and replaces the existing worker instead of
-	// spawning a duplicate that would race with the first over the
-	// same Reader, Position, and proposeC slot. db.Close cancels every
-	// entry and waits for the workers' done channels.
-	//
-	// closed is set to true by db.Close after it has drained the
-	// registry. db.Sync / db.Ingest check it under workersMu and
-	// reject installs with ErrClosed when set, so a late caller (e.g.,
-	// listenForSyncables waking up after the drain has run) can't
-	// spawn an unobserved worker that escapes the drain. Without this
-	// flag, the spawn-vs-Close race produced a brief leak window
-	// where a goroutine could outlive Close by however long it took
-	// to observe db.ctx.Done() on its own.
-	workersMu     sync.Mutex
-	syncWorkers   map[string]*workerHandle
-	ingestWorkers map[string]*workerHandle
-	closed        bool
+	// workers is the sync/ingest worker registry (worker_registry.go): the
+	// per-ID worker handles, the closed flag, and the lock guarding them.
+	// Always non-nil after New.
+	workers *workerRegistry
 
-	// ingestSupervisorMu guards ingestSupervisorStates. Deliberately
-	// separate from workersMu so the supervisor's bookkeeping doesn't
-	// contend with the hot worker-registry path.
-	ingestSupervisorMu     sync.Mutex
-	ingestSupervisorStates map[string]*ingestSupervisorState
+	// ingestSupervisor is the freeze/restart bookkeeping subsystem
+	// (ingest_supervisor.go): the per-id give-up state machine and the
+	// node-local frozen/recovering flag set, with their own locks so the
+	// bookkeeping doesn't contend with the hot worker-registry path.
+	// Always non-nil after New. The restart ORCHESTRATION
+	// (superviseRestartIngest) stays a DB method — it coordinates the
+	// worker registry, storage, and propose paths this state advises.
+	ingestSupervisor *ingestSupervisor
 
-	// ingestFrozenMu guards ingestFrozen, the node-local set of ingestables whose
-	// worker is currently FROZEN and being restarted by the supervisor (the
-	// "recovering" state). It drives the workerState the status endpoint reports
-	// for a live worker on this node, so it must be tracked independently of the
-	// committed.ingest.frozen gauge (which is a no-op when no metrics endpoint is
-	// wired — the common beta case). Set at freeze-exit, cleared on durable
-	// progress or worker teardown.
-	ingestFrozenMu sync.Mutex
-	ingestFrozen   map[string]bool
-
-	// syncBreakerMu guards syncBreakerStates, the per-syncable run of
-	// consecutive permanent sync errors (within a healthy window) driving the
-	// sync circuit breaker (see sync_breaker.go). Separate from workersMu to
-	// stay off the hot worker-registry path.
-	syncBreakerMu     sync.Mutex
-	syncBreakerStates map[string]*syncBreakerState
-
-	// Cached supervisor tuning; resolved in New from options/defaults so
-	// the freeze-restart hot path reads a struct field rather than
-	// dereferencing the options config on each call.
-	ingestSupervisorInitialBackoff time.Duration
-	ingestSupervisorMaxBackoff     time.Duration
-	ingestSupervisorMaxAttempts    int
+	// syncBreaker is the sync circuit-breaker state machine
+	// (sync_breaker.go): the per-syncable run of consecutive permanent sync
+	// errors within a healthy window, with its own lock so the bookkeeping
+	// stays off the hot worker-registry path. Always non-nil after New. The
+	// trip's loud signals and the replicated parked record stay DB methods,
+	// composing logging, metrics, and the propose path.
+	syncBreaker *syncBreaker
 
 	// syncStuckThreshold is how long a worker must be continuously blocked
 	// retrying a transient error before it publishes a replicated
@@ -192,44 +176,29 @@ type DB struct {
 	// (derived from tickInterval at New time). See raft-leader-read-proxy.md.
 	advertisedAPIURL string
 	announceInterval time.Duration
+	// zone is this node's configured placement identity (COMMITTED_ZONE; ""
+	// = unpinned). Announced into the replicated memberZones map at startup
+	// (announceZone) for zone-pinned syncable ownership resolution.
+	zone string
 
 	maxProposalBytes uint64
 
-	// diskState is the current disk-pressure level (a diskState value),
-	// published by the disk-usage watcher goroutine and read by the propose
-	// gate (checkDiskWritable). Stored as an int32 so it can be updated
-	// atomically without a lock on the hot propose path. Stays diskOK when
-	// no watcher is configured, so the gate is a no-op.
-	diskState atomic.Int32
-
-	// Cluster-aware admission (see disk_cluster.go). diskVerdict is the
-	// cached cluster write-admission verdict the propose gate enforces
-	// (atomic pointer: the gate reads it lock-free on the hot path; nil or
-	// stale falls back to the node-local diskState). diskReports is the
-	// leader-side map of member disk reports, guarded by diskReportsMu.
-	// diskNudgeC wakes the coordinator loop early on a local disk-state
-	// change. lastDiskTransfer rate-limits disk-pressure leadership
-	// transfers; it is touched only from coordinator cycles.
-	diskVerdict          atomic.Pointer[diskVerdictState]
-	diskReportsMu        sync.Mutex
-	diskReports          map[uint64]diskReport
-	diskNudgeC           chan struct{}
-	diskReportInterval   time.Duration
-	diskTransferCooldown time.Duration
-	lastDiskTransfer     time.Time
-	diskReportSend       diskReportSender
-	transferLeadershipFn func(transferee uint64)
-	pickTransferTargetFn func(now time.Time) uint64
+	// disk is the write-admission subsystem (disk_cluster.go): the
+	// node-local disk-pressure gate plus the cluster-aware verdict
+	// machinery. Always non-nil after New; the propose gate consults it
+	// (checkWritable) and onDiskState feeds it watcher transitions.
+	disk *diskAdmission
 
 	// applyStall backs ApplyStalled (the /ready probe's apply-wedge
 	// signal). Probe-driven state, no goroutine — see applyStallDetector.
 	applyStall applyStallDetector
 
 	// Graceful-shutdown leadership transfer (see shutdown.go). Injected as
-	// fields, like the disk-pressure transfer collaborators above, so the
-	// target choice and the wait-for-handoff loop are unit-testable without a
-	// live cluster.
+	// fields — the disk-admission subsystem carries its own transfer seam —
+	// so the target choice and the wait-for-handoff loop are unit-testable
+	// without a live cluster.
 	shutdownTransferTargetFn func() uint64
+	transferLeadershipFn     func(transferee uint64)
 	isLeaderFn               func() bool
 	shutdownTransferTimeout  time.Duration
 
@@ -247,7 +216,7 @@ type DB struct {
 	afterRebuildCheckpointReset func()
 
 	// beforeCancelIngestRelockForTest is a test-only seam invoked by
-	// cancelIngestWorker inside its drain window — after it drops workersMu and
+	// cancelIngestWorker inside its drain window — after it drops workers.mu and
 	// drains, before it reacquires the lock to delete the map entry (nil in
 	// production, so zero overhead). It lets a test deterministically drive an
 	// ingest supervisor's restart attempt into that window to prove a condemned
@@ -258,7 +227,7 @@ type DB struct {
 	// beforeIngestSupervisorRelockForTest and afterIngestSupervisorAttemptForTest
 	// are test-only seams in superviseRestartIngest (both nil in production). The
 	// first is called after the backoff, just before the supervisor reacquires
-	// workersMu — a poise point a test can hold the supervisor at until it has a
+	// workers.mu — a poise point a test can hold the supervisor at until it has a
 	// condemned handle ready. The second is deferred at the top of the goroutine
 	// so it fires on every exit path, letting a test wait until the supervisor's
 	// restart attempt has fully completed. Together they make the cancel-vs-
@@ -272,7 +241,7 @@ type DB struct {
 	afterIngestSupervisorRestartForTest func(frozenCtxErr error)
 
 	// ingestDrainTimeoutForTest bounds the apply-drain the freeze-exit performs
-	// before a supervised restart (see spawnIngestWorkerLocked). Zero in
+	// before a supervised restart (see newIngestWorker). Zero in
 	// production, where the drain waits unbounded on workerCtx — on a live node
 	// apply always catches up to the commit index, and a dead apply releases the
 	// wait via db.ctx. Tests whose in-memory storage stubs AppliedIndex to 0 set
@@ -287,14 +256,6 @@ type DB struct {
 	syncCh   <-chan *SyncableWithID
 	ingestCh <-chan *IngestableWithID
 
-	// workerDrainTimeout bounds how long the listener-path worker handoffs
-	// (Sync/Ingest replace, deleteSync/deleteIngest) wait for a cancelled worker
-	// to exit before abandoning it. Unbounded, a worker wedged in tx.Commit
-	// against an unreachable destination would park the single-threaded listener
-	// and stall the raft apply loop on its next config send. Defaults to
-	// closeDrainTimeout; tests override it to keep the wedged-worker cases fast.
-	workerDrainTimeout time.Duration
-
 	// safeMode mirrors db.WithSafeMode: Sync and Ingest release the built
 	// worker object and return without spawning, so a boot-time worker
 	// failure can't crashloop the node while the operator inspects and
@@ -303,66 +264,6 @@ type DB struct {
 
 	logger  *zap.Logger
 	metrics *metrics.Metrics
-}
-
-// workerHandle is the registry entry for a per-ID Sync or Ingest
-// goroutine. cancel terminates the worker's context; done is closed
-// by the worker itself just before it returns. Replace and Close
-// both wait on done so they can guarantee the previous worker has
-// fully exited (released its Reader, finished any in-flight Propose,
-// returned from the user-supplied Sync/Ingest callback) before
-// proceeding.
-// readerRef boxes an ActualReader so workerHandle.activeReader (an
-// atomic.Pointer) can hold-and-clear it: the worker goroutine publishes its
-// reader on leadership gain and clears on loss, and the status path reads it
-// concurrently for the opt-in readPosition diagnostic.
-type readerRef struct{ r ActualReader }
-
-type workerHandle struct {
-	cancel context.CancelFunc
-	// activeReader is the sync worker's live log reader while it owns the
-	// syncable (nil while idle/non-owner). Status queries type-assert the
-	// optional Position() capability on it — see DB.SyncableReadPosition.
-	activeReader atomic.Pointer[readerRef]
-	// ctx is the worker goroutine's context (the one cancel cancels). Retained so
-	// a teardown path that must release the context node — notably the ingest
-	// supervisor's restart, which drops a frozen handle whose goroutine exited via
-	// ingestExitFreeze rather than a cancel — can cancel it, and so a test can
-	// observe that it did.
-	ctx  context.Context
-	done chan struct{}
-	// condemned marks a handle whose owner has begun tearing it down. A teardown
-	// path (cancelIngestWorker, db.Ingest's replace loop) sets it under workersMu
-	// BEFORE dropping the lock to drain, so the ingest supervisor's restart
-	// preflight — which reacquires workersMu during that drain window — sees the
-	// frozen handle is being removed and refuses to resurrect it. Without this,
-	// the supervisor's `ingestWorkers[id] != frozen` check passes during the
-	// window (the map entry is deleted only after the relock), and it installs a
-	// fresh worker on the SAME Ingestable instance that the teardown then Closes
-	// out from under it. Guarded by workersMu.
-	condemned bool
-	// closeResources runs this handle's resource release (its Syncable or
-	// Ingestable Close) at most once, however many teardown paths reach it
-	// concurrently (delete, reconcile, db.Close, replace). The Close contract
-	// does not promise concurrency safety — a binlog syncer is not safe to Close
-	// twice — so the drain-then-close helpers route the actual Close through it.
-	closeResources sync.Once
-	// stageRecoveryFolded/-Target publish a running stage-state
-	// re-derivation's progress (target = the checkpoint being re-derived
-	// to; 0 = no re-derivation active). Owner-local observability for
-	// the status endpoint — the field finding: a re-deriving worker read
-	// as plain "running" with silently climbing lag for ~30 minutes.
-	stageRecoveryFolded atomic.Uint64
-	stageRecoveryTarget atomic.Uint64
-	// syncable is the parsed Syncable this worker runs, retained so the delete
-	// path can reuse it as a teardown handle (e.g. DROP TABLE for a SQL
-	// syncable) without re-parsing the config — which would re-run Init. It is
-	// nil for ingest workers (deleteSync only reads it for syncables).
-	syncable cluster.Syncable
-	// ingestable is the parsed Ingestable this worker runs, retained so the
-	// status path can ask it to decode its persisted position and query source
-	// lag (IngestableStatus) without re-parsing. It is nil for syncable workers.
-	ingestable cluster.Ingestable
 }
 
 // waiter is the per-request state used by blocking db.Propose. ack is
@@ -396,15 +297,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		cfg.proposeTimeout = defaultProposeTimeout
 	}
 
-	if cfg.ingestSupervisorInitialBackoff == 0 {
-		cfg.ingestSupervisorInitialBackoff = defaultIngestSupervisorInitialBackoff
-	}
-	if cfg.ingestSupervisorMaxBackoff == 0 {
-		cfg.ingestSupervisorMaxBackoff = defaultIngestSupervisorMaxBackoff
-	}
-	if cfg.ingestSupervisorMaxAttempts == 0 {
-		cfg.ingestSupervisorMaxAttempts = defaultIngestSupervisorMaxAttempts
-	}
 	if cfg.maxProposalBytes == 0 {
 		cfg.maxProposalBytes = DefaultMaxProposalBytes
 	}
@@ -423,36 +315,29 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	ctx, cancelSyncs := context.WithCancel(context.Background())
 
 	db := &DB{
-		proposeC:                       proposeC,
-		confChangeC:                    confChangeC,
-		storage:                        s,
-		ctx:                            ctx,
-		cancelSyncs:                    cancelSyncs,
-		parser:                         p,
-		waiters:                        make(map[uint64]*waiter),
-		appliedNotifyCh:                make(chan struct{}),
-		leaderChangeGrace:              cfg.leaderChangeGrace,
-		proposeTimeout:                 cfg.proposeTimeout,
-		syncWorkers:                    make(map[string]*workerHandle),
-		ingestWorkers:                  make(map[string]*workerHandle),
-		syncStuckThreshold:             cfg.syncStuckThreshold,
-		scrubInterval:                  cfg.scrubInterval,
-		advertisedAPIURL:               cfg.advertisedAPIURL,
-		safeMode:                       cfg.safeMode,
-		announceInterval:               cfg.tickInterval,
-		ingestSupervisorStates:         make(map[string]*ingestSupervisorState),
-		ingestSupervisorInitialBackoff: cfg.ingestSupervisorInitialBackoff,
-		ingestSupervisorMaxBackoff:     cfg.ingestSupervisorMaxBackoff,
-		ingestSupervisorMaxAttempts:    cfg.ingestSupervisorMaxAttempts,
-		maxProposalBytes:               cfg.maxProposalBytes,
-		diskReports:                    make(map[uint64]diskReport),
-		diskNudgeC:                     make(chan struct{}, 1),
-		diskReportInterval:             cfg.diskReportInterval,
-		applyStall:                     applyStallDetector{threshold: ApplyStallThreshold},
-		diskTransferCooldown:           cfg.diskTransferCooldown,
-		diskReportSend:                 cfg.diskReportSender,
-		logger:                         cfg.logger,
-		metrics:                        cfg.metrics,
+		proposeC:           proposeC,
+		confChangeC:        confChangeC,
+		storage:            s,
+		ctx:                ctx,
+		cancelSyncs:        cancelSyncs,
+		parser:             p,
+		waiters:            make(map[uint64]*waiter),
+		appliedNotifyCh:    make(chan struct{}),
+		leaderChangeGrace:  cfg.leaderChangeGrace,
+		proposeTimeout:     cfg.proposeTimeout,
+		workers:            newWorkerRegistry(closeDrainTimeout),
+		syncStuckThreshold: cfg.syncStuckThreshold,
+		scrubInterval:      cfg.scrubInterval,
+		advertisedAPIURL:   cfg.advertisedAPIURL,
+		safeMode:           cfg.safeMode,
+		announceInterval:   cfg.tickInterval,
+		zone:               cfg.zone,
+		ingestSupervisor:   newIngestSupervisor(cfg.ingestSupervisorInitialBackoff, cfg.ingestSupervisorMaxBackoff, cfg.ingestSupervisorMaxAttempts),
+		syncBreaker:        newSyncBreaker(),
+		maxProposalBytes:   cfg.maxProposalBytes,
+		applyStall:         applyStallDetector{threshold: ApplyStallThreshold},
+		logger:             cfg.logger,
+		metrics:            cfg.metrics,
 	}
 	// Seed the RequestID counter at a random point in the top half of the uint64
 	// space so each process lifetime's contiguous block of ids is disjoint from
@@ -462,17 +347,6 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 
 	db.syncCh = sync
 	db.ingestCh = ingest
-	db.workerDrainTimeout = closeDrainTimeout
-
-	if db.diskReportInterval == 0 {
-		db.diskReportInterval = DefaultDiskReportInterval
-	}
-	if db.diskTransferCooldown == 0 {
-		db.diskTransferCooldown = defaultDiskTransferCooldown
-	}
-	if db.diskReportSend == nil {
-		db.diskReportSend = newHTTPDiskReportSender(cfg.diskReportClient, cfg.diskReportToken)
-	}
 
 	// Three hooks are wired into the raft layer. The per-entry applied
 	// notifier (db.notifyApplied) receives each committed entry's bytes so
@@ -492,6 +366,29 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	db.raft = raft
 	db.leaderState = raft.leaderState
 
+	// The disk-admission subsystem (disk_cluster.go) is built once raft is
+	// wired — its engine views (leader identity, voter set, leadership
+	// transfer) read through the closures below — and before any goroutine
+	// that can feed it: the disk watcher's onDiskState callback lands in
+	// setLocalState.
+	db.disk = newDiskAdmission(diskAdmissionDeps{
+		selfID:             db.ID,
+		leaderID:           db.Leader,
+		isLeader:           db.IsLeader,
+		memberAPIURL:       db.MemberAPIURL,
+		voters:             db.diskVoters,
+		replicationMatch:   db.diskReplicationMatch,
+		transferLeadership: db.raft.transferLeadership,
+		reportInterval:     cfg.diskReportInterval,
+		transferCooldown:   cfg.diskTransferCooldown,
+		send:               cfg.diskReportSender,
+		reportClient:       cfg.diskReportClient,
+		reportToken:        cfg.diskReportToken,
+		ctx:                ctx,
+		logger:             cfg.logger,
+		metrics:            cfg.metrics,
+	})
+
 	// The watcher subscribes to leader-ID transitions from LeaderState
 	// BEFORE the first Ready iteration could land — subscribe() just
 	// registers a channel, so events that arrive before we start
@@ -506,6 +403,10 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 	go db.announceAPIURL()
 	if cfg.announceVersion {
 		go db.announceVersion()
+		// The zone announce rides the same gate: it proposes only when the
+		// configured zone differs from the stored one, so zoneless fixtures
+		// and steady-state restarts stay proposal-free.
+		go db.announceZone()
 	}
 
 	// Start the disk-usage watcher last, once db.raft is wired, so its
@@ -517,41 +418,59 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		go w.run(db.ctx)
 	}
 
-	// Cluster-aware disk admission (disk_cluster.go). The coordinator runs
-	// even with no local watcher: this node's own state stays pinned at ok,
-	// but its propose gate still needs the leader's verdict so it won't
-	// forward writes into a cluster that can't safely take them. A negative
-	// interval (WithDiskReportInterval(<=0)) disables it.
+	// Graceful-shutdown leadership-transfer collaborators (shutdown.go).
 	db.transferLeadershipFn = db.raft.transferLeadership
-	db.pickTransferTargetFn = db.pickTransferTarget
 	db.shutdownTransferTargetFn = db.shutdownTransferTarget
-	db.isLeaderFn = db.isLeader
+	db.isLeaderFn = db.isRaftLeader
 	db.shutdownTransferTimeout = defaultShutdownTransferTimeout
-	if db.diskReportInterval > 0 {
-		go db.diskCoordinator()
+
+	// The disk-admission coordinator runs even with no local watcher: this
+	// node's own state stays pinned at ok, but its propose gate still needs
+	// the leader's verdict so it won't forward writes into a cluster that
+	// can't safely take them. A negative interval
+	// (WithDiskReportInterval(<=0)) disables it.
+	if db.disk.reportInterval > 0 {
+		go db.disk.run()
 	}
 
 	return db
 }
 
-// onDiskState is the disk-usage watcher's callback, invoked on every change in
-// disk-pressure level. It publishes the new state for the propose gate to read
-// and nudges the raft compaction-pressure hint so the node frees raft-log disk
-// sooner while space is critical/full. On the leader it then synchronously
-// recomputes the cluster admission verdict (so the gate never enforces a
-// verdict older than the state just published); on a follower it nudges the
-// disk coordinator to report the transition to the leader right away. Called
-// from the watcher goroutine (and tests via SetDiskStateForTest).
+// onDiskState is the disk-usage watcher's callback, invoked on every change
+// in disk-pressure level. It fans the event out to the two subsystems that
+// care: the raft compaction-pressure hint (so the node frees raft-log disk
+// sooner while space is critical/full) and the disk-admission subsystem,
+// which publishes the state for the propose gate and reconciles the cluster
+// verdict. Called from the watcher goroutine (and tests via
+// SetDiskStateForTest).
 func (db *DB) onDiskState(s diskState) {
-	db.diskState.Store(int32(s))
 	if db.raft != nil {
 		db.raft.setCompactionPressure(s >= diskCritical)
 	}
-	if db.leaderState != nil && db.leaderState.IsLeader() {
-		db.recomputeDiskVerdict(time.Now())
-		return
+	db.disk.setLocalState(s)
+}
+
+// diskVoters and diskReplicationMatch are the raft-side views db.New wires
+// into the disk-admission subsystem: the current voter set, and each
+// member's replication match index (transfer-target ranking).
+func (db *DB) diskVoters() map[uint64]struct{} {
+	voters, _, _ := db.raft.memberStatus()
+	return voters
+}
+
+func (db *DB) diskReplicationMatch() map[uint64]uint64 {
+	_, _, _, _, views := db.raft.membershipView()
+	match := make(map[uint64]uint64, len(views))
+	for _, mv := range views {
+		match[mv.id] = mv.match
 	}
-	db.nudgeDiskCoordinator()
+	return match
+}
+
+// SafeMode reports whether this node booted with worker spawns held
+// (db.WithSafeMode / COMMITTED_SAFE_MODE). Per-boot, node-local.
+func (db *DB) SafeMode() bool {
+	return db.safeMode
 }
 
 // listenForSyncables forwards syncable registrations from the input
@@ -665,6 +584,12 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 // position bumps, which collect acks for later drain) use proposeAsync
 // directly and manage the ack lifecycle themselves.
 func (db *DB) Propose(ctx context.Context, p *cluster.Proposal) error {
+	// The validation tripwire: announce-typed entities' divergences are
+	// detected and announced BEFORE the data commits (see tripwire.go). A
+	// signal, never a gate — nothing in there can fail this proposal — and
+	// free for proposals with no announce-typed entities.
+	db.announceDivergences(ctx, p)
+
 	start := time.Now()
 	rid, ack, err := db.proposeAsync(ctx, p)
 	if err != nil {
@@ -766,7 +691,7 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 	// waiter so a rejected proposal consumes nothing. At critical only
 	// user-data proposals are rejected; at full everything is. Returns the
 	// typed cluster.ErrInsufficientStorage the HTTP layer maps to 507.
-	if err := db.checkDiskWritable(kind); err != nil {
+	if err := db.disk.checkWritable(kind); err != nil {
 		return 0, nil, err
 	}
 
@@ -864,17 +789,48 @@ func (db *DB) ProposeDeleteType(ctx context.Context, id string) error {
 	return db.Propose(ctx, p)
 }
 
+// featureLevelRTBFErase gates the Scrub command's delete-key erasure pass
+// (Scrub.HashDeleteKeys): the pass changes the deterministic event-log rewrite
+// every replica performs, so it must not be authorized until every member runs
+// a binary that computes it — an older scrubber would produce a diverging
+// (un-erased) rewrite of the same command. See version.FeatureLevel level 4.
+const featureLevelRTBFErase uint64 = 4
+
 // Scrub proposes a Scrub command at the current applied index (the freeze line)
 // and returns once it has been applied — each node then runs the physical
 // rewrite in the background. See the cluster.Cluster.Scrub contract. The bound
 // is read at propose time but carried in the committed command, so every replica
-// rewrites against the same frozen prefix.
+// rewrites against the same frozen prefix — as is the delete-key erasure
+// authorization, granted only once the whole cluster can compute that pass.
 func (db *DB) Scrub(ctx context.Context) error {
-	e, err := cluster.NewScrubEntity(db.storage.AppliedIndex())
+	e, err := cluster.NewScrubEntity(db.storage.AppliedIndex(), db.featureEnabled(featureLevelRTBFErase))
 	if err != nil {
 		return err
 	}
 	return db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{e}})
+}
+
+// scrubProgressReporter is the optional Storage extension reporting the
+// node-local scrub coordinates (wal.Storage implements it; the in-memory
+// test double does not, in which case /node/status reports zeros).
+type scrubProgressReporter interface {
+	ScrubProgress() (pending, completed uint64)
+	// PendingDeleteKeyErasures counts un-erased delete keys — the operator's
+	// completion number, deliberately not the scheduler's eligibility
+	// heuristic (which reads false while a lagging consumer blocks raw keys).
+	PendingDeleteKeyErasures() int
+}
+
+// ScrubStatus implements cluster.Cluster: this node's scrub progress plus the
+// un-erased delete-key count — the poll target for the RTBF runbook's
+// verification loop.
+func (db *DB) ScrubStatus() cluster.ScrubStatus {
+	st := cluster.ScrubStatus{}
+	if r, ok := db.storage.(scrubProgressReporter); ok {
+		st.PendingBound, st.CompletedBound = r.ScrubProgress()
+		st.PendingDeleteKeyErasures = r.PendingDeleteKeyErasures()
+	}
+	return st
 }
 
 // scrubBacklogReporter is the optional Storage extension that reports whether
@@ -908,15 +864,34 @@ func (db *DB) scrubScheduler() {
 	}
 }
 
+// deleteKeyEraseBacklogReporter is the optional Storage extension reporting
+// whether an un-erased RTBF delete key has plausibly become eligible for
+// erasure (wal.Storage implements it; see HasDeleteKeyEraseBacklog). Checked
+// only once the cluster feature level authorizes the erasure pass.
+type deleteKeyEraseBacklogReporter interface {
+	HasDeleteKeyEraseBacklog() bool
+}
+
 // maybeProposeScrub proposes a Scrub when this node is the leader and storage
-// reports RTBF backlog. Best-effort: a transient propose failure (no quorum,
-// leader change) is logged and retried on the next tick.
+// reports backlog: RTBF upserts to remove, metadata to GC, or — once the
+// cluster can compute the erasure pass — an eligible un-erased delete key.
+// Best-effort: a transient propose failure (no quorum, leader change) is
+// logged and retried on the next tick.
 func (db *DB) maybeProposeScrub() {
 	if db.raft.Leader() != db.ID() {
 		return
 	}
 	reporter, ok := db.storage.(scrubBacklogReporter)
-	if !ok || !reporter.HasScrubBacklog() {
+	if !ok {
+		return
+	}
+	backlog := reporter.HasScrubBacklog()
+	if !backlog && db.featureEnabled(featureLevelRTBFErase) {
+		if er, ok := db.storage.(deleteKeyEraseBacklogReporter); ok {
+			backlog = er.HasDeleteKeyEraseBacklog()
+		}
+	}
+	if !backlog {
 		return
 	}
 	// Bound the propose so a wedged raft layer can't pin this goroutine past
@@ -940,7 +915,7 @@ func (db *DB) maybeProposeScrub() {
 //     worker were stuck in a bump while raft was wedged (quorum loss,
 //     slow Ready loop), the drain would hang forever. Cancel-first
 //     guarantees workers can always reach exit.
-//  2. Snapshot the worker registry under workersMu and wait on every
+//  2. Snapshot the worker registry under workers.mu and wait on every
 //     handle's done channel. By now the workers are already racing
 //     toward exit (their contexts are canceled); the drain is just
 //     waiting for them to finish unwinding so we know the user-supplied
@@ -1020,22 +995,8 @@ func (db *DB) closeUntil(deadline time.Time) error {
 		<-drainDone
 	}()
 
-	db.workersMu.Lock()
-	db.closed = true
-	handles := make([]*workerHandle, 0, len(db.ingestWorkers)+len(db.syncWorkers))
-	for id, h := range db.ingestWorkers {
-		handles = append(handles, h)
-		h.cancel()
-		delete(db.ingestWorkers, id)
-	}
-	for id, h := range db.syncWorkers {
-		handles = append(handles, h)
-		h.cancel()
-		delete(db.syncWorkers, id)
-	}
-	db.workersMu.Unlock()
-
-	if abandoned := drainWorkers(handles, clampToDeadline(closeDrainTimeout, deadline)); abandoned > 0 {
+	handles, abandoned := db.workers.closeAll(clampToDeadline(closeDrainTimeout, deadline))
+	if abandoned > 0 {
 		db.logger.Warn("close: worker drain timed out; abandoned wedged worker(s) and proceeded with shutdown "+
 			"(a syncable stuck in tx.Commit against an unreachable destination is the usual cause)",
 			zap.Int("abandoned", abandoned), zap.Duration("timeout", closeDrainTimeout))
@@ -1151,9 +1112,9 @@ func (db *DB) closeDrainedSyncable(handle *workerHandle, id string) {
 	// handle concurrently — a second path that lost the race returns without
 	// re-closing rather than double-closing the prepared statements.
 	handle.closeResources.Do(func() {
-		if err, completed := runBounded(db.workerDrainTimeout, handle.syncable.Close); !completed {
+		if err, completed := runBounded(db.workers.drainTimeout, handle.syncable.Close); !completed {
 			db.logger.Warn("syncable close did not return in time (unreachable destination?); abandoning it — prepared statements linger until the pool recycles the connection",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+				zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 		} else if err != nil {
 			db.logger.Warn("syncable close on teardown failed; prepared statements may linger until the pool recycles the connection",
 				zap.String("id", id), zap.Error(err))
@@ -1282,6 +1243,17 @@ func (db *DB) ID() uint64 {
 // through to etcd raft's Status() snapshot. Used by the /ready HTTP probe.
 func (db *DB) Leader() uint64 {
 	return db.raft.Leader()
+}
+
+// IsLeader reports whether this node has taken up leadership: its Ready loop
+// has processed the election, so the leader-only work the engine gates on
+// this view — disk-report aggregation, leader-owned workers, the shutdown
+// hand-off's peers — is actually running here. It can lag Leader() (raft's
+// own soft state) by one Ready iteration; a request that reads Leader()==ID
+// and then hits a leader-only path in that window gets the retryable
+// not-leader answer, never a wrong one.
+func (db *DB) IsLeader() bool {
+	return db.leaderState != nil && db.leaderState.IsLeader()
 }
 
 // AddMember adds a voting node to the cluster via a joint-consensus

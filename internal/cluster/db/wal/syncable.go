@@ -9,6 +9,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/migration"
 )
 
@@ -89,10 +90,20 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 		// version history and rollback-by-number from nodes that didn't crash
 		// there. Mirrors saveType. The build below is still queued, so a
 		// replay re-establishes the worker.
-		if existing, gerr := getVersioned(b, []byte(t.ID)); gerr != nil || !bytes.Equal(existing, bs) {
+		existing, gerr := getVersioned(b, []byte(t.ID))
+		if gerr != nil || !bytes.Equal(existing, bs) {
 			if _, err := putVersioned(b, []byte(t.ID), bs); err != nil {
 				return fmt.Errorf("[wal.syncable] putVersioned: %w", err)
 			}
+		}
+
+		// Maintain the live create-index record (absent→present transition
+		// only) for the delete-key erasure cadence, atomic with the config
+		// write. The erasure GATE never reads this — it harvests creation
+		// indices from the log prefix (see deleteKeyEraseGate).
+		existedBefore := gerr == nil && len(existing) > 0
+		if err := recordSyncableCreateIndex(tx, []byte(t.ID), raftIndex, existedBefore, false); err != nil {
+			return fmt.Errorf("[wal.syncable] recordSyncableCreateIndex: %w", err)
 		}
 
 		return nil
@@ -135,6 +146,47 @@ func (s *Storage) saveSyncable(t *cluster.Configuration, raftIndex uint64) error
 // deterministic state-machine write), no worker is (re)started, and the
 // degraded record is the loud, queryable evidence.
 func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
+	// Deterministic derivation backstop: the leader's admission check can be
+	// raced (two proposes admitted against the same applied state, both
+	// committed). Replaying the stored configs' derivation edges in log-index
+	// order decides — identically on every node and every restart — which
+	// config a cycle or fan-in refuses: the one that landed later. A config's
+	// verdict depends only on earlier-indexed configs, so listener timing
+	// (later configs already persisted when this build dequeues) cannot
+	// change the answer. Refused = persisted but degraded (no worker), so a
+	// derivation cycle can never actually run.
+	if derr := s.derivationRefusals()[db.EdgeRef{Kind: "syncable", ID: t.ID}]; derr != nil {
+		s.recordConfigError("syncable", t.ID, configErrBuild, derr)
+		s.logger.Error("syncable config persisted but refused by the derivation guard (degraded); fix the graph and re-POST the config",
+			zap.String("id", t.ID), zap.Error(derr))
+		return nil
+	}
+
+	// Epoch-continuity backstop for configs that raced past (or were
+	// admitted on a stale applied view by) the admission check — the same
+	// predicate admission runs (db.DerivedTopicEpochRegression), so the two
+	// cannot skew. Deliberately NOT part of the deterministic replay above:
+	// the replay must stay a pure function of the stored config set, and
+	// this predicate reads point-in-time replicated state
+	// (TopicRefreshEpoch). Build is the right home — it is already
+	// node-local and environment-dependent (Init reaches destination
+	// databases), degrades loudly, and retries every minute, so a
+	// lagging-source handover wedges visibly instead of silently stranding
+	// stale rows, and self-heals the moment the source's epoch space climbs
+	// past the target's old highwater (the handover has become
+	// reconcilable). A healthy loopback can never trip it: the target's
+	// epochs are bumped only by this loopback's own forwards of the
+	// source's, so target ≤ source holds in steady state.
+	if targets, terr := s.parser.SyncableDerivedTopics(t.MimeType, t.Data); terr == nil && len(targets) > 0 {
+		sources, _ := s.parser.SyncableTopics(t.MimeType, t.Data)
+		if derr := db.DerivedTopicEpochRegression(sources, targets, s.TopicRefreshEpoch); derr != nil {
+			s.recordConfigError("syncable", t.ID, configErrBuild, derr)
+			s.logger.Error("syncable config persisted but refused by the epoch-continuity guard (degraded); the build retries every minute and admits once the source's epoch space catches up — or derive into a fresh topic",
+				zap.String("id", t.ID), zap.Error(derr))
+			return nil
+		}
+	}
+
 	_, parsed, parsedMode, err := s.parser.ParseSyncable(t.MimeType, t.Data, s)
 	if err != nil {
 		s.recordConfigError("syncable", t.ID, configErrBuild, err)
@@ -156,7 +208,10 @@ func (s *Storage) buildSyncable(t *cluster.Configuration) cluster.Syncable {
 	if parsedMode == cluster.ModeAlwaysCurrent {
 		parsed = migration.Wrap(parsed, s, s.metrics)
 	}
-	return parsed
+	// EVERY syncable reads the authoritative interpretation: the outer
+	// wrapper rebinds each entity to stamp ⊕ restatement fold before the
+	// migration chain (inside) or the consumer (either mode) sees it.
+	return interpretation.Wrap(parsed, s.InterpretationRegistry, s)
 }
 
 // SyncableExists reports whether a syncable config id currently exists (a
@@ -193,6 +248,11 @@ func (s *Storage) deleteSyncable(id []byte, keepData bool) error {
 			return ErrBucketMissing
 		}
 		if err := deleteVersioned(b, id); err != nil {
+			return err
+		}
+		// Clear the erasure-cadence create-index record with the config, so a
+		// deleted syncable stops contributing to the live gate approximation.
+		if err := recordSyncableCreateIndex(tx, id, 0, false, true); err != nil {
 			return err
 		}
 		// Sweep the per-syncable-id state kept outside the config sub-bucket and not
@@ -274,15 +334,91 @@ func (s *Storage) reconcileSyncableList() ([]*db.SyncableWithID, error) {
 			out = append(out, &db.SyncableWithID{ID: r.id})
 			continue
 		}
-		// Same build body as the apply-queued path (evidence recording and
-		// the migration wrapper live in one place). A nil result is a
-		// degraded build: the entry stays PRESENT so its worker is kept
+		// Same build body as the apply-queued path (evidence recording, the
+		// derivation guard, and the wrappers live in one place). A nil result
+		// is a degraded build: the entry stays PRESENT so its worker is kept
 		// (not cancelled as a phantom delete), just not reconfigured.
 		out = append(out, &db.SyncableWithID{ID: r.id, Syncable: s.buildSyncable(r.cfg)})
 	}
 	s.sweepConfigErrorsExcept("syncable", present)
 	s.reportNotAdmissible("syncable")
 	return out, nil
+}
+
+// producerEdgesTx enumerates the stored producer graph — deriving syncables
+// and topic-producing ingestables, each with the raft index its current
+// version applied at. It is the SINGLE edge source: admission
+// (db.ReplayWithCandidate via Storage.ProducerEdges) and the build-time
+// replay below both consume it, so the two predicates cannot skew.
+func (s *Storage) producerEdgesTx(tx *bolt.Tx) []db.DerivationEdge {
+	var edges []db.DerivationEdge
+	if b := tx.Bucket(syncableBucket); b != nil {
+		_ = forEachCurrent(b, func(id, data []byte) error {
+			cfg := &cluster.Configuration{}
+			if err := cfg.Unmarshal(data); err != nil {
+				return nil // undecodable — degraded elsewhere, no edges
+			}
+			targets, err := s.parser.SyncableDerivedTopics(cfg.MimeType, cfg.Data)
+			if err != nil || len(targets) == 0 {
+				return nil // non-deriving kind (or unparseable — degraded elsewhere)
+			}
+			sources, _ := s.parser.SyncableTopics(cfg.MimeType, cfg.Data)
+			edges = append(edges, db.DerivationEdge{
+				Kind:    "syncable",
+				ID:      string(id),
+				Index:   versionedLastIndex(b, id),
+				Sources: sources,
+				Targets: targets,
+			})
+			return nil
+		})
+	}
+	if b := tx.Bucket(ingestableBucket); b != nil {
+		_ = forEachCurrent(b, func(id, data []byte) error {
+			cfg := &cluster.Configuration{}
+			if err := cfg.Unmarshal(data); err != nil {
+				return nil
+			}
+			topics, err := s.parser.IngestableTopics(cfg.MimeType, cfg.Data)
+			if err != nil || len(topics) == 0 {
+				return nil // kind reports no topics (or unparseable — degraded elsewhere)
+			}
+			edges = append(edges, db.DerivationEdge{
+				Kind:    "ingestable",
+				ID:      string(id),
+				Index:   versionedLastIndex(b, id),
+				Targets: topics,
+			})
+			return nil
+		})
+	}
+	return edges
+}
+
+// ProducerEdges is the view-transaction wrapper for admission (db.Storage).
+func (s *Storage) ProducerEdges() ([]db.DerivationEdge, error) {
+	var edges []db.DerivationEdge
+	err := s.view(func(tx *bolt.Tx) error {
+		edges = s.producerEdgesTx(tx)
+		return nil
+	})
+	return edges, err
+}
+
+// derivationRefusals computes which stored configs the producer guard
+// refuses (db.ReplayDerivation over producerEdgesTx: cycles and duplicate
+// epoch-stamping producers, replayed jointly in log-index order — an
+// ingestable×loopback collision resolves identically to any other). Pure
+// function of the stored set — every node computes the same map.
+// buildSyncable and buildIngestable consult it at build time (off the apply
+// path — pure bbolt reads + config parsing, no destination or source I/O).
+func (s *Storage) derivationRefusals() map[db.EdgeRef]error {
+	var refusals map[db.EdgeRef]error
+	_ = s.view(func(tx *bolt.Tx) error {
+		refusals = db.ReplayDerivation(s.producerEdgesTx(tx))
+		return nil
+	})
+	return refusals
 }
 
 func (s *Storage) Syncables() ([]*cluster.Configuration, error) {

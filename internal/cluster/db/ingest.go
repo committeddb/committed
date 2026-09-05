@@ -180,81 +180,36 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 		}
 		return nil
 	}
-	db.workersMu.Lock()
-	if db.closed {
-		db.workersMu.Unlock()
-		return ErrClosed
+	err := db.workers.replace(workerKindIngest, id,
+		func(replaced bool) *workerHandle {
+			if replaced {
+				// A re-POST replaced the worker — a new worker generation. Drop the
+				// supervisor give-up state so the fresh worker starts with a full restart
+				// budget instead of inheriting a prior give-up (this is the "raise the cap
+				// and re-POST" recovery). Works for a byte-identical re-POST too, which
+				// does not bump the config version but still replaces the worker here.
+				db.ingestSupervisor.prune(id)
+				if db.metrics != nil {
+					db.metrics.WorkerReplaced("ingest", id)
+				}
+			}
+			return db.newIngestWorker(id, i)
+		},
+		func(prev *workerHandle, drained bool) {
+			if !drained {
+				db.logger.Warn("ingest replace: prior worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
+					zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
+			}
+			// Release the superseded ingestable's source resources (only if it drained,
+			// so we don't race a wedged worker) — otherwise every re-POST leaks them.
+			db.closeDrainedIngestable(prev, id)
+		})
+	if err != nil {
+		return err
 	}
-	// Loop until the slot is empty before installing. The naive
-	// "if existing { cancel; wait; install }" shape races when two
-	// callers replace the same id concurrently: both observe the
-	// original entry, both wait on it, then both install — and the
-	// loser's worker is orphaned (running but unreferenced from the
-	// map, so no future replace can find it).
-	//
-	// The loop fixes this by re-checking the slot after each wait.
-	// If the slot still points to the entry we just waited on, we
-	// clear it and break out. If a concurrent caller slipped a new
-	// entry in while we waited, we cancel+wait that one too. This
-	// converges in normal use (one extra cycle per pre-empting caller)
-	// and the lock is dropped only during the wait, so the exiting
-	// worker is never blocked by us.
-	//
-	// Re-check db.closed after each wait too: a concurrent db.Close
-	// may have flipped the flag while we were dropped. Without the
-	// re-check, we'd install a worker that escapes the Close drain.
-	replaced := false
-	for {
-		existing, ok := db.ingestWorkers[id]
-		if !ok {
-			break
-		}
-		replaced = true
-		// Condemn before dropping the lock to drain: if existing is a frozen
-		// handle with a pending supervisor, the supervisor could otherwise
-		// reacquire the lock in the drain window and resurrect existing on its
-		// Ingestable instance — which closeDrainedIngestable below then Closes.
-		// The loop re-check converges the MAP, but only the flag stops the Close
-		// from racing a resurrected worker. See workerHandle.condemned.
-		existing.condemned = true
-		existing.cancel()
-		db.workersMu.Unlock()
-		if !waitDone(existing.done, db.workerDrainTimeout) {
-			db.logger.Warn("ingest replace: prior worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
-		}
-		// Release the superseded ingestable's source resources (only if it drained,
-		// so we don't race a wedged worker) — otherwise every re-POST leaks them.
-		db.closeDrainedIngestable(existing, id)
-		db.workersMu.Lock()
-		if db.closed {
-			db.workersMu.Unlock()
-			return ErrClosed
-		}
-		if db.ingestWorkers[id] == existing {
-			delete(db.ingestWorkers, id)
-		}
-	}
-
-	if replaced {
-		// A re-POST replaced the worker — a new worker generation. Drop the
-		// supervisor give-up state so the fresh worker starts with a full restart
-		// budget instead of inheriting a prior give-up (this is the "raise the cap
-		// and re-POST" recovery). Works for a byte-identical re-POST too, which
-		// does not bump the config version but still replaces the worker here.
-		db.pruneIngestSupervisorState(id)
-		if db.metrics != nil {
-			db.metrics.WorkerReplaced("ingest", id)
-		}
-	}
-
-	db.spawnIngestWorkerLocked(id, i)
-	db.workersMu.Unlock()
-
 	if db.metrics != nil {
 		db.metrics.SetWorkerRunning("ingest", id, true)
 	}
-
 	return nil
 }
 
@@ -282,39 +237,23 @@ func (db *DB) Ingest(_ context.Context, id string, i cluster.Ingestable) error {
 // teardown: reconcile never touches sources). Returns the drained handle (nil
 // if no worker was built here).
 func (db *DB) cancelIngestWorker(id string) *workerHandle {
-	db.workersMu.Lock()
-	handle, ok := db.ingestWorkers[id]
-	if ok {
-		// Condemn under this first lock hold, before dropping it to drain. A
-		// frozen worker's supervisor may reacquire workersMu inside the drain
-		// window below and, seeing the (not-yet-deleted) map entry still equal to
-		// its frozen handle, resurrect it on the same Ingestable instance we are
-		// about to Close. The condemned flag makes that preflight bail. See
-		// workerHandle.condemned and superviseRestartIngest.
-		handle.condemned = true
-		handle.cancel()
-		db.workersMu.Unlock()
-		if !waitDone(handle.done, db.workerDrainTimeout) {
-			db.logger.Warn("delete ingest: worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
-				zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
-		}
-		if db.beforeCancelIngestRelockForTest != nil {
-			db.beforeCancelIngestRelockForTest()
-		}
-		db.workersMu.Lock()
-		if db.ingestWorkers[id] == handle {
-			delete(db.ingestWorkers, id)
-		}
+	// Condemned + cancelled under one hold, drained outside it, deregistered
+	// on relock — the registry's remove. beforeCancelIngestRelockForTest is
+	// the test-only poise point inside that drain window. See
+	// workerHandle.condemned and superviseRestartIngest.
+	handle, drained := db.workers.remove(workerKindIngest, id, abandonOnWedge, db.beforeCancelIngestRelockForTest)
+	if handle != nil && !drained {
+		db.logger.Warn("delete ingest: worker did not exit in time; abandoning it (wedged on its source?) and proceeding",
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	}
-	db.workersMu.Unlock()
 
 	// cancelIngestWorker's only callers are delete and the reconcile
 	// absent-cancel — both mean this id's config is GONE. Drop its supervisor
 	// give-up state so a later recreate of the same id starts with a fresh
 	// restart budget (and the state map stays bounded).
-	db.pruneIngestSupervisorState(id)
+	db.ingestSupervisor.prune(id)
 
-	if !ok || handle.ingestable == nil {
+	if handle == nil || handle.ingestable == nil {
 		return nil // no worker built on this node — nothing to clean up
 	}
 
@@ -358,12 +297,7 @@ func (db *DB) reconcileIngestWorkers(list func() ([]*IngestableWithID, error)) {
 		}
 		installed++
 	}
-	db.workersMu.Lock()
-	ids := make([]string, 0, len(db.ingestWorkers))
-	for id := range db.ingestWorkers {
-		ids = append(ids, id)
-	}
-	db.workersMu.Unlock()
+	ids := db.workers.ids(workerKindIngest)
 	cancelled := 0
 	for _, id := range ids {
 		if _, ok := present[id]; !ok {
@@ -401,9 +335,9 @@ func (db *DB) deleteIngest(id string) {
 	// Bounded (runBounded): this runs on the single-threaded config listener.
 	// The SQL implementation ctx-bounds itself (TeardownSource), but the guard
 	// must hold for any implementation.
-	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+	if err, completed := runBounded(db.workers.drainTimeout, teardownable.Teardown); !completed {
 		db.logger.Error("ingestable deleted but source teardown did not return in time (unreachable source?); abandoning it (an orphaned replication slot may pin the source's WAL; drop it manually)",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	} else if err != nil {
 		// Best-effort: the logical delete already committed. Log loudly and move
 		// on — the worst case is an orphaned slot pinning the source's WAL.
@@ -423,7 +357,7 @@ func (db *DB) deleteIngest(id string) {
 // (isNode only gates which node actually streams), so the local handle is
 // present on any node that has the config; a missing handle means no ingestable
 // of that id is configured here, surfaced as ErrIngestableNotRunning (404).
-// The Ingestable's Status is called without holding workersMu — it makes a
+// The Ingestable's Status is called without holding workers.mu — it makes a
 // source query and must not block the worker registry.
 func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.IngestableStatus, error) {
 	// Parked is a REPLICATED terminal state — report it from ANY node, even one
@@ -435,13 +369,12 @@ func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.Ingestab
 		return cluster.IngestableStatus{WorkerState: cluster.WorkerStateParked}, nil
 	}
 
-	db.workersMu.Lock()
-	handle, ok := db.ingestWorkers[id]
+	handle := db.workers.lookup(workerKindIngest, id)
+	ok := handle != nil
 	var ing cluster.Ingestable
 	if ok {
 		ing = handle.ingestable
 	}
-	db.workersMu.Unlock()
 
 	if ing == nil {
 		return cluster.IngestableStatus{}, cluster.ErrIngestableNotRunning
@@ -456,7 +389,7 @@ func (db *DB) IngestableStatus(ctx context.Context, id string) (cluster.Ingestab
 	// replicated terminal parked state above). The phase/position still reflect
 	// where it wedged; workerState is the health headline.
 	st.WorkerState = cluster.WorkerStateRunning
-	if db.isIngestFrozen(id) {
+	if db.ingestSupervisor.isFrozen(id) {
 		st.WorkerState = cluster.WorkerStateRecovering
 	}
 	return st, nil
@@ -471,13 +404,13 @@ func (db *DB) TopicRefreshEpoch(topic string) uint64 {
 	return db.storage.TopicRefreshEpoch(topic)
 }
 
-// spawnIngestWorkerLocked installs a fresh ingest worker handle for id
-// in the registry and starts the worker goroutine. Caller MUST hold
-// db.workersMu and MUST have already ensured the registry slot for id
-// is empty and db.closed is false. Shared between db.Ingest (which
-// drains any prior entry via the replace loop first) and
-// superviseRestartIngest (which drops the frozen handle directly
-// under the same lock, then calls this to install the replacement).
+// newIngestWorker builds a fresh ingest worker handle for id and starts
+// the worker goroutine; the CALLER registers the returned handle, holding
+// db.workers.mu with the slot for id already empty and the registry not
+// closed. Shared between the registry's replace (on behalf of db.Ingest,
+// which drains any prior entry first) and superviseRestartIngest (which
+// drops the frozen handle directly under the same lock, then registers the
+// replacement).
 //
 // Centralizing the handle/goroutine/supervisor-wiring here is load-
 // bearing for the supervisor-vs-user-replace race: holding the lock
@@ -488,14 +421,13 @@ func (db *DB) TopicRefreshEpoch(topic string) uint64 {
 // atomically. A user replace that arrives after the unlock still wins
 // the final state (its db.Ingest replaces the supervisor-installed
 // handle via the normal replacement loop).
-func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHandle {
+func (db *DB) newIngestWorker(id string, i cluster.Ingestable) *workerHandle {
 	// cancel ownership passes to the workerHandle. It is invoked by
 	// db.Close and by the replace loop in db.Ingest when a duplicate
 	// supersedes this worker, so the cancel is not leaked. gosec can't
 	// see through the handle indirection.
 	workerCtx, cancel := context.WithCancel(db.ctx) //nolint:gosec // G118: cancel owned by workerHandle
 	handle := &workerHandle{cancel: cancel, ctx: workerCtx, done: make(chan struct{}), ingestable: i}
-	db.ingestWorkers[id] = handle
 
 	go func() {
 		reason := db.ingest(workerCtx, id, i)
@@ -542,7 +474,7 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 			// The worker froze and the supervisor is about to restart it — mark it
 			// recovering (node-local) so the status endpoint stops reporting a live
 			// "streaming" phase for a worker that is actually wedged and retrying.
-			db.setIngestFrozen(id, true)
+			db.ingestSupervisor.setFrozen(id, true)
 			go db.superviseRestartIngest(id, i, handle)
 		}
 	}()
@@ -551,44 +483,17 @@ func (db *DB) spawnIngestWorkerLocked(id string, i cluster.Ingestable) *workerHa
 }
 
 // clearIngestFrozen marks id un-frozen after the worker makes durable progress
-// (a checkpoint advanced past a freeze). Idempotent and nil-safe. The supervisor
-// no longer clears the gauge on restart — a restart is not recovery — so this
-// progress signal is what un-sets it. It fires only on a committed checkpoint,
-// which a poison proposal blocks, so it never flaps against the freeze that set
-// the gauge.
+// (a checkpoint advanced past a freeze), and clears the matching gauge — the
+// flag/gauge pairing is the one composition the supervisor's setFrozen doesn't
+// own. The supervisor no longer clears the gauge on restart — a restart is not
+// recovery — so this progress signal is what un-sets it. It fires only on a
+// committed checkpoint, which a poison proposal blocks, so it never flaps
+// against the freeze that set the gauge.
 func (db *DB) clearIngestFrozen(id string) {
-	db.setIngestFrozen(id, false)
+	db.ingestSupervisor.setFrozen(id, false)
 	if db.metrics != nil {
 		db.metrics.IngestFrozen(id, false)
 	}
-}
-
-// setIngestFrozen sets or clears id's node-local frozen flag — the "recovering"
-// state the status endpoint reports for a live worker on this node. Node-local by
-// design: recovering is a LIVE state tied to the owner running the worker (a
-// follower has no worker to recover), so it rides ingest's node-local live-status
-// model rather than the replicated terminal parked record. Tracked independently of
-// the committed.ingest.frozen gauge (a no-op when no metrics endpoint is wired — the
-// common beta case), so the status endpoint works regardless.
-func (db *DB) setIngestFrozen(id string, frozen bool) {
-	db.ingestFrozenMu.Lock()
-	defer db.ingestFrozenMu.Unlock()
-	if frozen {
-		if db.ingestFrozen == nil {
-			db.ingestFrozen = make(map[string]bool)
-		}
-		db.ingestFrozen[id] = true
-		return
-	}
-	delete(db.ingestFrozen, id)
-}
-
-// isIngestFrozen reports whether id's worker is currently frozen/recovering on this
-// node (the supervisor is restarting it).
-func (db *DB) isIngestFrozen(id string) bool {
-	db.ingestFrozenMu.Lock()
-	defer db.ingestFrozenMu.Unlock()
-	return db.ingestFrozen[id]
 }
 
 // proposalTopic returns the topic/type id of a proposal's first entity for
@@ -604,6 +509,10 @@ func proposalTopic(p *cluster.Proposal) string {
 
 func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) ingestExitReason {
 	isNode := false
+	// lineageRideNoted dedups the once-per-run failover ride-through Info in
+	// the dedup branch (the dialect stamps LineageRegressed on every proposal
+	// of the regressed lineage; the note only needs saying once).
+	lineageRideNoted := false
 
 	// The ingressLifecycle owns the inner Ingest goroutine and the
 	// channels it writes to. Holding it as a struct (not as loose
@@ -621,6 +530,11 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 	defer ingress.stop()
 
 	backoff := ingestBackoffMin
+
+	// The JSON shape census (see census.go): folds snapshot-phase rows,
+	// publishes replicated census state. nil (all methods no-op) when the
+	// operator opted out or no config is stored.
+	census := db.newCensusRecorder(id)
 
 	// dataProposeFailed is the POSITION BARRIER: armed the moment any data
 	// proposal fails, before the error is even classified. A standalone
@@ -700,6 +614,10 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 	// proposeIngestData's disk-pressure pause, and applies backpressure by
 	// awaiting the oldest ack once the window is full.
 	submitPipelined := func(p *cluster.Proposal) error {
+		// The validation tripwire runs in db.Propose, which this pipelined
+		// lane bypasses (proposeAsync directly) — so run it here: divergent
+		// SNAPSHOT rows announce too. A signal, never a gate.
+		db.announceDivergences(ctx, p)
 		pauseBackoff := ingestBackoffMin
 		for {
 			rid, ack, err := db.proposeAsync(ctx, p)
@@ -776,40 +694,71 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				// applies.
 				proposal.IngestableID = id
 
-				// Effectively-once dedup. After a crash/flap the dialect
-				// resumes from a checkpoint that may trail the last
-				// committed proposal and re-emits proposals already in the
-				// log. We drop those here — BEFORE raft — by comparing the
-				// dialect's monotonic SourceSeq against the durable
-				// highwater. Dropping pre-raft keeps the duplicate out of
-				// the committed event log entirely, so syncables never see
-				// it. SourceSeq==0 (snapshot rows / non-CDC / legacy) is
-				// never deduped.
-				if proposal.SourceSeq > 0 && proposal.SourceSeq <= db.storage.IngestSourceSeqHighwater(id) {
-					// A dialect that can no longer trust SourceSeq as a
-					// content-identity against the highwater (source lineage
-					// regressed on failover, or a same-coordinate multi-part
-					// replay under changed chunking) flags the proposal
-					// DedupUnsafe. Dropping it could silently lose real data, so
-					// FREEZE loudly instead — the fail-safe the system-of-record
-					// contract requires. See cluster.Proposal.DedupUnsafe.
-					if proposal.DedupUnsafe {
-						db.logger.Error("ingest dedup: proposal below the source-seq highwater is flagged unsafe to drop (source lineage regression or re-chunk under changed config/binary); freezing to avoid silent data loss — operator intervention required",
+				// Effectively-once dedup, TRANSACTION-scoped. After a
+				// crash/flap the dialect resumes from its durable watermark
+				// and can re-emit only the single in-flight transaction (the
+				// commit flush bundles the position, so anything older is in
+				// the resume set). A re-emitted part is a duplicate only if
+				// it belongs to the SAME source transaction as the dedup
+				// record with a seq at or below its highwater; a proposal
+				// from a different transaction is never compared against
+				// another transaction's coordinates — post-failover
+				// low-numbered lineages and cross-transaction coordinate
+				// inflation are harmless by construction. The legacy scalar
+				// regime (stored record has no transaction identity —
+				// pre-upgrade state, or a dialect that stamps none) keeps
+				// the old global comparison. Dropping pre-raft keeps the
+				// duplicate out of the committed event log entirely, so
+				// syncables never see it. SourceSeq==0 (snapshot rows /
+				// non-CDC / legacy) is never deduped.
+				if proposal.SourceSeq > 0 {
+					storedTxn, storedSeq := db.storage.IngestSourceDedup(id)
+					scalarRegime := storedTxn == ""
+					dedupTxn := ""
+					if proposal.TxnScopedDedup {
+						dedupTxn = proposal.SourceTxnID
+					}
+					dup := proposal.SourceSeq <= storedSeq &&
+						(scalarRegime || dedupTxn == storedTxn)
+					switch {
+					case dup && (proposal.DedupUnsafe || (proposal.LineageRegressed && scalarRegime)):
+						// The dialect cannot vouch for this drop: a
+						// same-coordinate multi-part replay under changed
+						// chunking (DedupUnsafe — a WITHIN-transaction risk
+						// scoping can't help), or a lineage regression while
+						// the stored record is still the legacy scalar
+						// regime, where a scalar comparison could silently
+						// drop the new lineage's data (the upgrade window:
+						// the first transaction-stamped apply flips the
+						// regime and retires this freeze). FREEZE loudly —
+						// the fail-safe the system-of-record contract
+						// requires.
+						db.logger.Error("ingest dedup: proposal at or below the dedup highwater is flagged unsafe to drop (re-chunk under changed config/binary, or lineage regression against a legacy scalar record); freezing to avoid silent data loss — operator intervention required",
 							zap.String("id", id),
 							zap.Uint64("sourceSeq", proposal.SourceSeq),
-							zap.Uint64("highwater", db.storage.IngestSourceSeqHighwater(id)))
+							zap.Uint64("highwater", storedSeq),
+							zap.String("storedTxn", storedTxn))
 						if db.metrics != nil {
 							db.metrics.IngestFrozen(id, true)
 						}
 						return ingestExitFreeze
+					case dup:
+						db.logger.Debug("ingest dedup skip",
+							zap.String("id", id), zap.Uint64("sourceSeq", proposal.SourceSeq))
+						if db.metrics != nil {
+							db.metrics.IngestDedupSkipped(id)
+						}
+						backoff = ingestBackoffMin
+						continue
+					case proposal.LineageRegressed && !lineageRideNoted:
+						// Transaction-scoped record + regressed coordinates =
+						// the failover ride-through working as designed; note
+						// it once per worker run so the operator can see the
+						// promotion was absorbed without a freeze.
+						lineageRideNoted = true
+						db.logger.Info("ingest: source coordinate lineage regressed (failover/promotion) — riding through under the transaction-scoped watermark, no operator action needed",
+							zap.String("id", id))
 					}
-					db.logger.Debug("ingest dedup skip",
-						zap.String("id", id), zap.Uint64("sourceSeq", proposal.SourceSeq))
-					if db.metrics != nil {
-						db.metrics.IngestDedupSkipped(id)
-					}
-					backoff = ingestBackoffMin
-					continue
 				}
 
 				// Hold a refresh-boundary marker until every member can apply
@@ -825,6 +774,11 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					backoff = ingestBackoffMin
 					continue
 				}
+
+				// Census: fold snapshot rows (a refresh-boundary marker forces
+				// the pass's census to publish before the boundary commits).
+				// Never gates — see census.go.
+				census.observe(ctx, proposal)
 
 				// Lane split. Bare snapshot rows pipeline; ordered
 				// proposals (CDC, bundled-position rows, markers) drain the
@@ -883,7 +837,7 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						// pipelined rows and this failed proposal can be
 						// committed-but-unapplied (acks fire at apply, which can
 						// lag commit under a busy Ready loop). The freeze-exit
-						// handler (spawnIngestWorkerLocked) drains apply to the
+						// handler (newIngestWorker) drains apply to the
 						// commit index before the supervisor re-reads the
 						// position, so a committed batch is never re-emitted into
 						// the permanent event log — the effectively-once contract

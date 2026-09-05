@@ -45,9 +45,7 @@ func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex u
 	var once sync.Once
 	db.afterRebuildCheckpointReset = func() {
 		once.Do(func() {
-			db.workersMu.Lock()
-			_, live := db.syncWorkers[id]
-			db.workersMu.Unlock()
+			live := db.workers.lookup(workerKindSync, id) != nil
 			if !live {
 				return // worker already stopped — a real worker could not bump here
 			}
@@ -59,7 +57,7 @@ func (db *DB) InjectStaleWorkerBumpOnRebuildResetForTest(id string, staleIndex u
 // SetWorkerDrainTimeoutForTest overrides the bound the listener-path worker
 // handoffs (Sync/Ingest replace, deleteSync/deleteIngest) wait for a cancelled
 // worker before abandoning it, so a wedged-worker test runs fast.
-func (db *DB) SetWorkerDrainTimeoutForTest(d time.Duration) { db.workerDrainTimeout = d }
+func (db *DB) SetWorkerDrainTimeoutForTest(d time.Duration) { db.workers.drainTimeout = d }
 
 // SetIngestDrainTimeoutForTest bounds the apply-drain the freeze-exit performs
 // before a supervised restart. Production leaves it 0 (unbounded on workerCtx);
@@ -70,12 +68,10 @@ func (db *DB) SetIngestDrainTimeoutForTest(d time.Duration) { db.ingestDrainTime
 // InjectWedgedSyncWorkerForTest registers a sync worker handle whose done
 // channel never closes — modelling a worker stuck in tx.Commit against an
 // unreachable destination that ignores its cancelled context. deleteSync/replace
-// must abandon it within workerDrainTimeout rather than block the listener (and
+// must abandon it within workers.drainTimeout rather than block the listener (and
 // thus the raft apply loop) forever.
 func (db *DB) InjectWedgedSyncWorkerForTest(id string) {
-	db.workersMu.Lock()
-	db.syncWorkers[id] = &workerHandle{cancel: func() {}, done: make(chan struct{})}
-	db.workersMu.Unlock()
+	db.workers.put(workerKindSync, id, &workerHandle{cancel: func() {}, done: make(chan struct{})})
 }
 
 // StuckTrackerPublishedAfterGainForTest models the sync worker's leadership-GAIN
@@ -121,9 +117,7 @@ func (db *DB) SetAfterRebuildCheckpointResetForTest(f func()) { db.afterRebuildC
 func (db *DB) InjectDrainedSyncWorkerForTest(id string, s cluster.Syncable) {
 	done := make(chan struct{})
 	close(done)
-	db.workersMu.Lock()
-	db.syncWorkers[id] = &workerHandle{cancel: func() {}, done: done, syncable: s}
-	db.workersMu.Unlock()
+	db.workers.put(workerKindSync, id, &workerHandle{cancel: func() {}, done: done, syncable: s})
 }
 
 // IsLeaderForTest reports whether this node currently believes it is leader —
@@ -230,9 +224,10 @@ func WithTransportWrapperForTest(w func(Transport) Transport) Option {
 // raft.Node, no transport, no serve loops) — the tests that use it
 // only exercise the compaction decision logic, which reads
 // storage.AppliedIndex / EventIndex / RaftLogApproxSize and calls
-// storage.CreateSnapshot / Compact. Production callers must continue
-// to use NewRaft.
-func NewRaftForCompactionTest(s Storage, maxSize uint64, maxAge time.Duration, logger *zap.Logger) *Raft {
+// storage.CreateSnapshot / Compact. Takes the Raft's own caller-site slice
+// of Storage, so a test double need only satisfy what the Raft holds.
+// Production callers must continue to use NewRaft.
+func NewRaftForCompactionTest(s raftStorage, maxSize uint64, maxAge time.Duration, logger *zap.Logger) *Raft {
 	return &Raft{
 		storage:         s,
 		compactMaxSize:  maxSize,
@@ -418,16 +413,16 @@ func (db *DB) WaitForAnyWaiterForTest(timeout time.Duration) uint64 {
 // is the post-increment freeze count for this id; giveup is true once
 // the count exceeds the configured max-attempts cap.
 func (db *DB) RecordFreezeAndNextBackoffForTest(id string, pos cluster.Position) (backoff time.Duration, consecutive int, giveup bool) {
-	return db.recordFreezeAndNextBackoff(id, pos)
+	return db.ingestSupervisor.recordFreezeAndNextBackoff(id, pos)
 }
 
 // SupervisorStateExistsForTest reports whether the supervisor still holds
 // give-up bookkeeping for id — used to pin that a config delete prunes it
 // (bounding the map and granting a recreated id a fresh budget).
 func (db *DB) SupervisorStateExistsForTest(id string) bool {
-	db.ingestSupervisorMu.Lock()
-	defer db.ingestSupervisorMu.Unlock()
-	_, ok := db.ingestSupervisorStates[id]
+	db.ingestSupervisor.mu.Lock()
+	defer db.ingestSupervisor.mu.Unlock()
+	_, ok := db.ingestSupervisor.states[id]
 	return ok
 }
 
@@ -441,13 +436,7 @@ func (db *DB) SupervisorStateExistsForTest(id string) bool {
 // deletion paths; returns a copy so the caller can sort / inspect
 // without holding the lock.
 func (db *DB) IngestWorkerIDsForTest() []string {
-	db.workersMu.Lock()
-	defer db.workersMu.Unlock()
-	ids := make([]string, 0, len(db.ingestWorkers))
-	for id := range db.ingestWorkers {
-		ids = append(ids, id)
-	}
-	return ids
+	return db.workers.ids(workerKindIngest)
 }
 
 // SetLocalDiskStateForTest stores the node-local disk-pressure level WITHOUT
@@ -460,7 +449,7 @@ func (db *DB) SetLocalDiskStateForTest(level string) {
 	if !ok {
 		panic("unknown disk state " + level)
 	}
-	db.diskState.Store(int32(s))
+	db.disk.local.Store(int32(s))
 }
 
 // SetClusterVerdictForTest injects a cached cluster write-admission verdict
@@ -472,7 +461,7 @@ func (db *DB) SetClusterVerdictForTest(state, reason string, leaderID uint64, ag
 	if !ok {
 		panic("unknown disk state " + state)
 	}
-	db.diskVerdict.Store(&diskVerdictState{
+	db.disk.verdict.Store(&diskVerdictState{
 		state:    s,
 		reason:   reason,
 		leaderID: leaderID,
@@ -488,16 +477,16 @@ func (db *DB) RecordDiskReportForTest(nodeID uint64, state string, age time.Dura
 	if !ok {
 		panic("unknown disk state " + state)
 	}
-	db.diskReportsMu.Lock()
-	db.diskReports[nodeID] = diskReport{state: s, at: time.Now().Add(-age)}
-	db.diskReportsMu.Unlock()
+	db.disk.reportsMu.Lock()
+	db.disk.reports[nodeID] = diskReport{state: s, at: time.Now().Add(-age)}
+	db.disk.reportsMu.Unlock()
 }
 
 // DiskCoordinateForTest runs one disk-coordinator cycle synchronously (the
 // same body the background loop runs on each tick), so tests can drive the
 // leader recompute / follower report-and-cache paths deterministically.
 func (db *DB) DiskCoordinateForTest() {
-	db.diskCoordinate(time.Now())
+	db.disk.coordinate(time.Now())
 }
 
 // SetDiskTransferHooksForTest overrides the transfer-trigger collaborators:
@@ -505,16 +494,16 @@ func (db *DB) DiskCoordinateForTest() {
 // transfer call. cooldown rate-limits successive transfers. Returns nothing;
 // drive the decision via MaybeTransferLeadershipForTest.
 func (db *DB) SetDiskTransferHooksForTest(pick func() uint64, transfer func(uint64), cooldown time.Duration) {
-	db.pickTransferTargetFn = func(time.Time) uint64 { return pick() }
-	db.transferLeadershipFn = transfer
-	db.diskTransferCooldown = cooldown
+	db.disk.pickTransferTargetFn = func(time.Time) uint64 { return pick() }
+	db.disk.transferLeadership = transfer
+	db.disk.transferCooldown = cooldown
 }
 
 // MaybeTransferLeadershipForTest runs one disk-pressure transfer decision at
 // the given instant, against the current local disk state and the hooks set
 // via SetDiskTransferHooksForTest.
 func (db *DB) MaybeTransferLeadershipForTest(now time.Time) {
-	db.maybeTransferLeadership(now, db.diskVerdict.Load())
+	db.disk.maybeTransferLeadership(now, db.disk.verdict.Load())
 }
 
 // SetShutdownTransferHooksForTest overrides the graceful-shutdown leadership
@@ -570,18 +559,12 @@ func (db *DB) WaiterIDsForTest() []uint64 {
 
 // HasSyncWorkerForTest reports whether a sync worker is registered for id.
 func (db *DB) HasSyncWorkerForTest(id string) bool {
-	db.workersMu.Lock()
-	defer db.workersMu.Unlock()
-	_, ok := db.syncWorkers[id]
-	return ok
+	return db.workers.lookup(workerKindSync, id) != nil
 }
 
 // HasIngestWorkerForTest reports whether an ingest worker is registered for id.
 func (db *DB) HasIngestWorkerForTest(id string) bool {
-	db.workersMu.Lock()
-	defer db.workersMu.Unlock()
-	_, ok := db.ingestWorkers[id]
-	return ok
+	return db.workers.lookup(workerKindIngest, id) != nil
 }
 
 // CancelIngestWorkerForTest drives the unexported cancelIngestWorker (the
@@ -592,7 +575,7 @@ func (db *DB) CancelIngestWorkerForTest(id string) {
 }
 
 // SetBeforeCancelIngestRelockForTest installs the drain-window seam
-// cancelIngestWorker calls after it drops workersMu and drains, before it
+// cancelIngestWorker calls after it drops workers.mu and drains, before it
 // relocks to delete the map entry — the window a racing supervisor restart
 // must not resurrect a condemned handle in.
 func (db *DB) SetBeforeCancelIngestRelockForTest(fn func()) {
@@ -602,7 +585,7 @@ func (db *DB) SetBeforeCancelIngestRelockForTest(fn func()) {
 // SetIngestSupervisorRaceSeamsForTest installs the two superviseRestartIngest
 // seams that make the cancel-vs-supervisor resurrection race deterministic:
 // beforePreflight fires after the backoff, just before the supervisor
-// reacquires workersMu (a poise point); afterAttempt fires when the
+// reacquires workers.mu (a poise point); afterAttempt fires when the
 // supervisor's restart goroutine exits, on every path.
 func (db *DB) SetIngestSupervisorRaceSeamsForTest(beforePreflight, afterAttempt func()) {
 	db.beforeIngestSupervisorRelockForTest = beforePreflight
@@ -627,16 +610,14 @@ func (db *DB) SetAfterIngestSupervisorRestartForTest(fn func(frozenCtxErr error)
 // decision + terminal cleanup directly, mirroring TestIngestSupervisor_BackoffAndGiveup.
 func (db *DB) SuperviseRestartIngestGiveupForTest(id string, i cluster.Ingestable) error {
 	pos := db.storage.Position(id)
-	for k := 0; k < db.ingestSupervisorMaxAttempts; k++ {
-		db.recordFreezeAndNextBackoff(id, pos)
+	for k := 0; k < db.ingestSupervisor.maxAttempts; k++ {
+		db.ingestSupervisor.recordFreezeAndNextBackoff(id, pos)
 	}
 	ctx, cancel := context.WithCancel(db.ctx)
 	done := make(chan struct{})
 	close(done) // the frozen worker's goroutine already exited (ingestExitFreeze)
 	h := &workerHandle{cancel: cancel, ctx: ctx, done: done, ingestable: i}
-	db.workersMu.Lock()
-	db.ingestWorkers[id] = h
-	db.workersMu.Unlock()
+	db.workers.put(workerKindIngest, id, h)
 	db.superviseRestartIngest(id, i, h) // the (maxAttempts+1)th observation → give-up
 	return h.ctx.Err()
 }
@@ -649,3 +630,20 @@ func SetSyncBatchCapForTest(n int) func() {
 	syncBatchCap = n
 	return func() { syncBatchCap = old }
 }
+
+// put registers h under id without draining whatever was there — test-only,
+// for seams that inject a hand-built handle. The one registry lock holder
+// outside worker_registry.go.
+func (r *workerRegistry) put(kind workerKind, id string, h *workerHandle) {
+	r.mu.Lock()
+	r.table(kind)[id] = h
+	r.mu.Unlock()
+}
+
+// The type and restatement vocabularies, exposed so the conformance test can
+// prove each equals the keys ParseType / ParseRestatement actually read.
+var (
+	TypeKeys        = typeKeys
+	MigrationKeys   = migrationKeys
+	RestatementKeys = restatementKeys
+)

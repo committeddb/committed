@@ -48,8 +48,111 @@ func (db *DB) AddSyncableParser(name string, p cluster.SyncableParser) {
 	db.parser.AddSyncableParser(name, p)
 }
 
+// refuseAlwaysCurrentAcrossBreak refuses an always-current syncable whose
+// consumed topics carry a declared nonConvertible version anywhere in their
+// history. The check reads config-declared topics and walks each topic type's
+// version records; a topic whose type doesn't resolve is skipped (the type
+// may simply not exist yet — the existing fail-open posture for guards over
+// half-declared configs).
+func (db *DB) refuseAlwaysCurrentAcrossBreak(c *cluster.Configuration) error {
+	topics, err := db.parser.SyncableTopics(c.MimeType, c.Data)
+	if err != nil {
+		return cluster.NewConfigError(fmt.Errorf("enumerate consumed topics: %w", err))
+	}
+	for _, topic := range topics {
+		latest, err := db.storage.ResolveType(cluster.LatestTypeRef(topic))
+		if err != nil || latest == nil {
+			continue // topic's type not declared yet — nothing to check against
+		}
+		for v := 2; v <= latest.Version; v++ {
+			tv, err := db.storage.ResolveType(cluster.TypeRefAt(topic, v))
+			if err != nil || tv == nil {
+				continue
+			}
+			if tv.NonConvertible {
+				return &cluster.ConfigError{
+					Err: fmt.Errorf("always-current is not admissible over topic %q: version %d is declared nonConvertible (v%d data can never reach the current version). The stances that remain are as-stored with version-pinned handling, or version-aware consumption; a restatement rebinding the below-break reading can also lift this", topic, v, v-1),
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// refuseDerivationHazards refuses a syncable config whose derivation edges
+// (source topic → derived topic) would break the producer graph: a cycle
+// (an infinite consensus loop) or a second epoch-stamping producer for a
+// topic — including an INGESTABLE already producing the loopback's target
+// (two interleaved refresh-epoch spaces — one producer's reconciling sweep
+// could erase the other's rows downstream). Non-deriving kinds contribute no
+// edges and pass for free. Fail-closed on storage errors: these invariants
+// must hold, so an unanswerable check refuses.
+func (db *DB) refuseDerivationHazards(c *cluster.Configuration) error {
+	targets, err := db.parser.SyncableDerivedTopics(c.MimeType, c.Data)
+	if err != nil || len(targets) == 0 {
+		return nil // not a deriving kind (an unparseable config was refused earlier)
+	}
+	sources, _ := db.parser.SyncableTopics(c.MimeType, c.Data)
+
+	stored, err := db.storage.ProducerEdges()
+	if err != nil {
+		// Fail-closed: the invariant must hold, so an unanswerable
+		// enumeration refuses instead of passing.
+		return fmt.Errorf("producer guard: enumerate producer edges: %w", err)
+	}
+	candidate := DerivationEdge{Kind: "syncable", ID: c.ID, Sources: sources, Targets: targets}
+	if err := ReplayWithCandidate(stored, candidate); err != nil {
+		return cluster.NewConfigError(err)
+	}
+	return nil
+}
+
+// refuseDerivedTopicEpochRegression is the admission half (the fast 400) of
+// the epoch-continuity guard for producer HANDOVER — the predicate itself,
+// with the full rationale, is DerivedTopicEpochRegression, which the
+// node-local build backstop (wal.buildSyncable) shares so the two cannot
+// skew. Two tiers, like the producer guard: this refusal is best-effort
+// (admission reads this node's applied view, which can lag or be raced);
+// the build backstop catches what slips through, degrading loudly and
+// retrying every minute — so a lagging-source handover self-heals the
+// moment the source's epoch space climbs past the target's old highwater.
+// The ingestable direction needs no guard at all: the ingest epoch floor
+// (Storage.TopicRefreshEpoch, bumped at apply by EVERY committed
+// generation, forwarded ones included) already makes a replacement
+// ingestable stamp above any prior producer's epochs.
+func (db *DB) refuseDerivedTopicEpochRegression(c *cluster.Configuration) error {
+	targets, err := db.parser.SyncableDerivedTopics(c.MimeType, c.Data)
+	if err != nil || len(targets) == 0 {
+		return nil // not a deriving kind
+	}
+	sources, _ := db.parser.SyncableTopics(c.MimeType, c.Data)
+	if err := DerivedTopicEpochRegression(sources, targets, db.storage.TopicRefreshEpoch); err != nil {
+		return cluster.NewConfigError(err)
+	}
+	return nil
+}
+
+// SyncableDerivation reports the derivation provenance of a stored syncable:
+// the topic it consumes and the topic it derives into. ok is false for every
+// non-deriving kind — the status surface omits the fields entirely then.
+func (db *DB) SyncableDerivation(id string) (source, target string, ok bool) {
+	cfg := db.currentSyncableConfig(id)
+	if cfg == nil {
+		return "", "", false
+	}
+	targets, err := db.parser.SyncableDerivedTopics(cfg.MimeType, cfg.Data)
+	if err != nil || len(targets) == 0 {
+		return "", "", false
+	}
+	sources, _ := db.parser.SyncableTopics(cfg.MimeType, cfg.Data)
+	if len(sources) == 0 {
+		return "", targets[0], true
+	}
+	return sources[0], targets[0], true
+}
+
 func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) error {
-	name, validated, _, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
+	name, validated, mode, err := db.ParseSyncable(c.MimeType, c.Data, db.storage)
 	if err != nil {
 		return cluster.NewConfigError(err)
 	}
@@ -66,6 +169,45 @@ func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) err
 		}
 	}
 	c.Name = name
+
+	// An always-current syncable over a topic with a declared nonConvertible
+	// version is a promise committed cannot keep — data below the break can
+	// never reach the current version. Refuse loudly HERE, at POST, naming
+	// the gap and the stances that remain, instead of dead-lettering the
+	// first stranded entity at runtime (the admission-validation rule:
+	// silent/late failure is the dangerous kind). Conservative by design: any
+	// declared break in the type's history refuses, because data stamped
+	// below it may exist.
+	if mode == cluster.ModeAlwaysCurrent {
+		if err := db.refuseAlwaysCurrentAcrossBreak(c); err != nil {
+			return err
+		}
+	}
+
+	// Derivation-graph guard: a config that derives a topic (a loopback) must
+	// keep the graph a DAG and stay its target's only producer. Loud at POST;
+	// the apply path re-checks deterministically (see wal.saveSyncable) so a
+	// config racing past this admission check degrades instead of looping.
+	if err := db.refuseDerivationHazards(c); err != nil {
+		return err
+	}
+
+	// Epoch-continuity guard for producer HANDOVER: a derived topic whose
+	// sink history carries refresh epochs above the new source's cannot be
+	// reconciled by forwarded sweeps — refuse at POST, with the build-time
+	// backstop catching raced/stale-view admits (see the guard's doc).
+	if err := db.refuseDerivedTopicEpochRegression(c); err != nil {
+		return err
+	}
+
+	// Zone-pin admission: a `zone` config is only admitted when every member
+	// can resolve zones (else it would sit leader-served with its pin
+	// silently ignored — the admission-validation rule) and the zone has an
+	// announced current member (a pin that matches nobody stalls at first
+	// use; refuse it loudly here instead).
+	if err := db.refuseUnservableZonePin(c); err != nil {
+		return err
+	}
 
 	// Guard: a re-POST some destinations can't absorb in place (e.g. a SQL
 	// projection whose CREATE-only DDL never ALTERs the table) is rejected and
@@ -150,10 +292,21 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 	if cfg == nil {
 		return cluster.ErrResourceNotFound
 	}
+	if zone, active, owner := db.syncableZonePin(id); zone != "" && active {
+		switch {
+		case owner == 0:
+			return cluster.ErrZonePinUnsatisfiable
+		case owner != db.ID():
+			// The HTTP layer routes this verb to the owner; landing here means
+			// a stale routing view — refuse rather than race the remote
+			// worker's in-flight checkpoint bump.
+			return cluster.ErrNotSyncableOwner
+		}
+	}
 
 	// 1. Stop the local worker first so it can't bump the checkpoint after the
 	//    reset below. Returns its handle so step 3 can tear the destination down.
-	//    The drain is BOUNDED (workerDrainTimeout, like every sibling handoff) —
+	//    The drain is BOUNDED (workers.drainTimeout, like every sibling handoff) —
 	//    but unlike delete/replace, rebuild must NOT proceed past a failed
 	//    drain: a still-live worker's in-flight checkpoint bump could land after
 	//    the reset and silently defeat the replay (the exact stale-bump hazard
@@ -198,31 +351,19 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 // subsequent reset — see RebuildSyncable. Returns (nil, true) if no worker was
 // registered, and (handle, false) on a wedged worker the caller must abort on.
 func (db *DB) rebuildStopWorkerLocal(id string) (*workerHandle, bool) {
-	db.workersMu.Lock()
-	handle, ok := db.syncWorkers[id]
-	if !ok {
-		db.workersMu.Unlock()
-		return nil, true // no local worker — nothing to drain
-	}
-	handle.cancel()
-	db.workersMu.Unlock()
-	// Bounded, on the HTTP handler goroutine: a worker wedged in an
-	// uninterruptible tx.Commit never closes done, and an unbounded wait here
-	// hung the request past its write timeout and leaked the goroutine (each
-	// retry parking another one). On timeout the handle stays REGISTERED —
-	// unlike the delete/replace abandons — because the caller aborts and a
-	// retry must find (and re-check) the still-live worker rather than run a
-	// reset it could still defeat.
-	if !waitDone(handle.done, db.workerDrainTimeout) {
+	// keepOnWedge: unlike the delete/replace abandons, a worker that did not
+	// exit in time stays REGISTERED — the caller aborts, and a retry must find
+	// (and re-check) the still-live worker rather than run a reset it could
+	// still defeat. Bounded, on the HTTP handler goroutine: a worker wedged in
+	// an uninterruptible tx.Commit never closes done, and an unbounded wait
+	// here hung the request past its write timeout and leaked the goroutine
+	// (each retry parking another one).
+	handle, drained := db.workers.remove(workerKindSync, id, keepOnWedge, nil)
+	if handle != nil && !drained {
 		db.logger.Warn("rebuild: worker did not exit in time (wedged on its destination?); aborting the rebuild",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 		return handle, false
 	}
-	db.workersMu.Lock()
-	if db.syncWorkers[id] == handle {
-		delete(db.syncWorkers, id)
-	}
-	db.workersMu.Unlock()
 	return handle, true
 }
 
@@ -248,9 +389,9 @@ func (db *DB) rebuildTeardownDestinationLocal(id string, handle *workerHandle) {
 	// Bounded (runBounded): rebuild runs on an HTTP handler goroutine, and a
 	// destination that wedged the worker would otherwise hang the request (and
 	// leak the goroutine) until the kernel TCP timeout.
-	if err, completed := runBounded(db.workerDrainTimeout, teardownable.Teardown); !completed {
+	if err, completed := runBounded(db.workers.drainTimeout, teardownable.Teardown); !completed {
 		db.logger.Error("rebuild: destination teardown did not return in time (unreachable destination?); replay will write over the existing destination (rebuild not clean)",
-			zap.String("id", id), zap.Duration("timeout", db.workerDrainTimeout))
+			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	} else if err != nil {
 		db.logger.Error("rebuild: destination teardown failed; replay will write over the existing destination (rebuild not clean)",
 			zap.String("id", id), zap.Error(err))

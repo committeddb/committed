@@ -47,6 +47,11 @@ type ValidationStrategy int
 const (
 	NoValidation   ValidationStrategy = 0
 	ValidateSchema ValidationStrategy = 1
+	// ValidateAnnounce is the tripwire, never a gate: a divergent payload
+	// still commits (a non-conformant CDC row is a true fact about the
+	// source), and the first occurrence of each distinct divergent shape
+	// emits a ContractExtension event to the Type's SchemaChangeTopic.
+	ValidateAnnounce ValidationStrategy = 2
 )
 
 // EntityKind declares what the entities written under a type are,
@@ -160,12 +165,72 @@ type Type struct {
 	// EntityKindEvent; projection-style syncables can default their
 	// match rules to it.
 	Discriminator string
+	// SchemaChangeTopic is the Type ID of the topic that receives
+	// ContractExtension events when data claiming this type diverges from
+	// its schema under ValidateAnnounce. Type-level so both arrival paths
+	// (CDC ingest, direct proposals) announce through one knob. Empty for
+	// non-announce types.
+	SchemaChangeTopic string
+	// NonConvertible declares the third migration intent: this version
+	// requires information the previous version's actuals never contained,
+	// so no program can upgrade old data. Always-current syncables are
+	// refused across the break; the migration chain dead-letters old-stamped
+	// entities at it instead of silently delivering unconverted data.
+	NonConvertible bool
 	// MigrationExplicit is transient (not persisted). Set by ParseType
 	// when the operator provided a [migration] section (either
 	// transform or none=true). Used by ProposeType to enforce the
 	// requirement that every version after v1 declares its migration
 	// intent explicitly.
 	MigrationExplicit bool
+}
+
+// ProposeTypeOption adjusts type admission (see Cluster.ProposeType).
+type ProposeTypeOption func(*ProposeTypeOptions)
+
+// ProposeTypeOptions is the resolved option set. Callers use the With-style
+// constructors; implementations fold the options with ResolveProposeTypeOptions.
+type ProposeTypeOptions struct {
+	// AcknowledgeStranded admits a nonConvertible version bump although it
+	// strands always-current syncables — the operator's deliberate
+	// acknowledgment that those consumers' promise is being broken.
+	AcknowledgeStranded bool
+}
+
+// AcknowledgeStrandedSyncables acknowledges that a nonConvertible bump
+// strands the named always-current syncables and admits it anyway. The HTTP
+// layer passes it for POST /v1/type/{id}?force=true.
+func AcknowledgeStrandedSyncables() ProposeTypeOption {
+	return func(o *ProposeTypeOptions) { o.AcknowledgeStranded = true }
+}
+
+// ResolveProposeTypeOptions folds an option list into its resolved set.
+func ResolveProposeTypeOptions(opts []ProposeTypeOption) ProposeTypeOptions {
+	var o ProposeTypeOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// StrandedSyncablesError refuses a nonConvertible version bump that would
+// strand always-current syncables: their promise — every entity delivered at
+// the current version — becomes unkeepable for data below the break. The
+// operator either re-declares those syncables under a stance that survives a
+// break (version-pinned / version-aware) or re-POSTs with force to
+// acknowledge the stranding deliberately. The HTTP layer renders it 409.
+type StrandedSyncablesError struct {
+	// TypeID and Version identify the refused nonConvertible bump.
+	TypeID  string
+	Version int
+	// Syncables are the always-current syncables consuming this type's topic.
+	Syncables []string
+}
+
+func (e *StrandedSyncablesError) Error() string {
+	return fmt.Sprintf(
+		"type %q version %d is nonConvertible and would strand always-current syncable(s) %v — their data below the break can never reach the current version. Re-declare them version-pinned or version-aware, or re-POST with ?force=true to acknowledge the stranding",
+		e.TypeID, e.Version, e.Syncables)
 }
 
 // TypeSchemaValidator validates that a Type's entity schema is structurally
@@ -209,10 +274,12 @@ func MigrationEditAdvisory(before, after *Type) string {
 		return ""
 	}
 	return "the [migration] transform was updated in place at the same version, so it " +
-		"applies only to Actuals synced from now on; rows already synced through the " +
-		"previous migration are unchanged on every projection that consumes this type's " +
-		"topic. Rebuild those projections to re-materialize already-synced history — see " +
-		"docs/read-models.md, \"Changing the rules after a projection is live\"."
+		"applies only to Actuals synced from now on; already-synced rows keep the " +
+		"previous migration's output on every always-current consumer of this " +
+		"type's topic (migrationEditDependents names them). Re-materialize each " +
+		"(POST /v1/syncable/{id}/rematerialize — keyed sinks converge in place) or " +
+		"rebuild blue-green — see docs/read-models.md, \"Changing the rules after a " +
+		"projection is live\"."
 }
 
 type TimePoint struct {
@@ -263,17 +330,19 @@ func (t *Type) Marshal() ([]byte, error) {
 		Name: t.Name,
 		// Version, Validate, and EntityKind are bounded by the domain:
 		// Version is monotonically assigned starting at 1 (will never
-		// exceed int32), Validate has only two defined values
-		// (NoValidation=0, ValidateSchema=1), and EntityKind only the
-		// defined EntityKind constants (ParseEntityKind rejects anything
-		// else).
-		Version:       int32(t.Version), //nolint:gosec // G115: bounded by domain
-		SchemaType:    t.SchemaType,
-		Schema:        t.Schema,
-		Validate:      clusterpb.LogValidationStrategy(t.Validate), //nolint:gosec // G115: bounded by domain
-		Migration:     t.Migration,
-		EntityKind:    clusterpb.LogEntityKind(t.EntityKind), //nolint:gosec // G115: bounded by domain
-		Discriminator: t.Discriminator,
+		// exceed int32), Validate has only the defined ValidationStrategy
+		// constants (ParseType rejects anything else), and EntityKind only
+		// the defined EntityKind constants (ParseEntityKind rejects
+		// anything else).
+		Version:           int32(t.Version), //nolint:gosec // G115: bounded by domain
+		SchemaType:        t.SchemaType,
+		Schema:            t.Schema,
+		Validate:          clusterpb.LogValidationStrategy(t.Validate), //nolint:gosec // G115: bounded by domain
+		Migration:         t.Migration,
+		EntityKind:        clusterpb.LogEntityKind(t.EntityKind), //nolint:gosec // G115: bounded by domain
+		Discriminator:     t.Discriminator,
+		SchemaChangeTopic: t.SchemaChangeTopic,
+		NonConvertible:    t.NonConvertible,
 	}
 
 	return proto.Marshal(lt)
@@ -295,6 +364,8 @@ func (t *Type) Unmarshal(bs []byte) error {
 	t.Migration = lt.Migration
 	t.EntityKind = EntityKind(lt.EntityKind)
 	t.Discriminator = lt.Discriminator
+	t.SchemaChangeTopic = lt.SchemaChangeTopic
+	t.NonConvertible = lt.NonConvertible
 
 	return nil
 }

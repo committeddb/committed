@@ -64,6 +64,11 @@ type Projection struct {
 	// creating event was scrubbed before a fresh replay, surviving events build a
 	// partial row and the scrub's delete Actual removes it.
 	delete *Delete
+	// syncIndex is the Index of the Actual currently being applied — the
+	// ambiguity trackers' distinct-row identity (see cluster.AmbiguityTracker).
+	// Worker-goroutine-only state, set per Actual in Sync/SyncBatch, exactly
+	// like projectionSource.unmatchedRun.
+	syncIndex uint64
 }
 
 // projectionUnmatchedWarnRun is how many CONSECUTIVE unmatched events a
@@ -82,7 +87,11 @@ type projectionSource struct {
 	// with the projection's PrimaryKey columns (one path for a single key,
 	// several for a composite).
 	keyPaths []string
-	onDelete string
+	// keyTrackers classify each keyPath's extraction failures (entry-specific
+	// vs config-shaped), positionally aligned with keyPaths. See
+	// cluster.AmbiguityTracker.
+	keyTrackers cluster.AmbiguityTrackers
+	onDelete    string
 	// when is the source-level filter (empty = consume every event of the
 	// topic), evaluated on upsert before the rules/aggregate apply. For a
 	// stage-fed source a live delta that FAILS it is a retraction, not a
@@ -129,8 +138,11 @@ type projectionSource struct {
 type aggregateRuntime struct {
 	column     string
 	elementKey string
-	fields     []ProjectionElementField // plain fields only (stored in the sidecar)
-	sidecar    string
+	// elementKeyTracker classifies elementKey extraction failures; the
+	// per-field trackers live on fields (see cluster.AmbiguityTracker).
+	elementKeyTracker *cluster.AmbiguityTracker
+	fields            []ProjectionElementField // plain fields only (stored in the sidecar)
+	sidecar           string
 
 	upsertSidecar    *gosql.Stmt
 	upsertSidecarSQL string
@@ -222,6 +234,11 @@ type projectionStmt struct {
 	rule ProjectionRule
 	SQL  string
 	Stmt *gosql.Stmt
+	// setTrackers classify each set entry's From-extraction failures
+	// (entry-specific vs config-shaped — see cluster.AmbiguityTracker),
+	// positionally aligned with rule.Set. Runtime state kept off the
+	// config struct so parsed configs stay pure data.
+	setTrackers cluster.AmbiguityTrackers
 }
 
 // NewProjection constructs a Projection. m may be nil (no metrics);
@@ -426,7 +443,8 @@ func (p *Projection) Init() error {
 		ps := &projectionSource{
 			topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When,
 			fromStage: src.FromStage, rowOwner: src.RowOwner, normalize: src.Normalize,
-			updateOnly: ownerDeclared && !src.RowOwner && src.FromStage != "",
+			updateOnly:  ownerDeclared && !src.RowOwner && src.FromStage != "",
+			keyTrackers: cluster.NewAmbiguityTrackers(len(src.KeyPath)),
 		}
 		// Register ps NOW, before preparing its statements, so a partway failure
 		// leaves the statements it did prepare reachable from p.sources for the
@@ -486,7 +504,7 @@ func (p *Projection) Init() error {
 				if err != nil {
 					return fmt.Errorf("prepare source %d (topic %q) rule %d sql [%s]: %w", si+1, src.Topic, i+1, sqlString, err)
 				}
-				ps.rules = append(ps.rules, &projectionStmt{rule: r, SQL: sqlString, Stmt: stmt})
+				ps.rules = append(ps.rules, &projectionStmt{rule: r, SQL: sqlString, Stmt: stmt, setTrackers: cluster.NewAmbiguityTrackers(len(r.Set))})
 			}
 			if src.OnDelete == onDeleteClear {
 				ps.clearSQL = p.dialect.CreateClearSQL(ddlConfig, src.ownedColumns())
@@ -596,9 +614,15 @@ func (p *Projection) initLookup(si int, src ProjectionSource) (*lookupRuntime, e
 	}
 
 	rt := &lookupRuntime{
-		name:      lk.Name,
-		fields:    lk.Fields,
+		name: lk.Name,
+		// A copy: the trackers attached below are runtime state, and the
+		// parsed config must stay pure data (aggregates get the same
+		// property from plainElementFields' filtered copy).
+		fields:    append([]ProjectionElementField(nil), lk.Fields...),
 		dimension: spec.Dimension,
+	}
+	for i := range rt.fields {
+		rt.fields[i].tracker = cluster.NewAmbiguityTracker()
 	}
 	// A partway failure below leaves rt unreturned (never stored on its source),
 	// so Projection.Close can't reach its statements — close them here.
@@ -638,10 +662,11 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 	}
 
 	rt := &aggregateRuntime{
-		column:     ag.Column,
-		elementKey: ag.ElementKey,
-		fields:     plainElementFields(ag.Element), // enriched fields are joined in, not stored
-		sidecar:    spec.Sidecar,
+		column:            ag.Column,
+		elementKey:        ag.ElementKey,
+		elementKeyTracker: cluster.NewAmbiguityTracker(),
+		fields:            plainElementFields(ag.Element), // enriched fields are joined in, not stored
+		sidecar:           spec.Sidecar,
 		// materialize and rebuild carry one parent-key placeholder per value
 		// column plus one (the inserted key / the WHERE) — bind the parent
 		// key that many times, whichever dialect rendered the statement.
@@ -649,6 +674,9 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 	}
 	if spec.Column != "" {
 		rt.parentBinds++
+	}
+	for i := range rt.fields {
+		rt.fields[i].tracker = cluster.NewAmbiguityTracker()
 	}
 	// A partway failure below leaves rt unreturned (never stored on its source),
 	// so Projection.Close can't reach its statements — close them here.
@@ -709,6 +737,7 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 	if !relevant {
 		return false, nil
 	}
+	p.syncIndex = a.Index
 
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -794,6 +823,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 		committed := false
 		berr := p.stageStore.Update(func(stx *stagestore.Tx) error {
 			for _, a := range as {
+				p.syncIndex = a.Index
 				if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
 					return err
 				}
@@ -822,6 +852,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	}
 
 	for _, a := range as {
+		p.syncIndex = a.Index
 		for _, e := range a.Entities {
 			for _, src := range p.sources[e.Type.ID] {
 				if err := p.applyEntity(ctx, tx, nil, src, e); err != nil {
@@ -992,10 +1023,15 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, stx *stagest
 func (p *Projection) resolveRowKeys(src *projectionSource, data, parent any) ([]any, error) {
 	keys := make([]any, len(src.keyPaths))
 	for i, kp := range src.keyPaths {
+		tr := src.keyTrackers.At(i)
 		v, err := resolveScopedPath(kp, data, parent)
 		if err != nil {
-			return nil, cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
+			// Entry-specific (this matched row is missing its key field) or a
+			// keyPath typo failing every matched row — the tracker classifies
+			// from this path's own history (see cluster.AmbiguityTracker).
+			return nil, tr.Classify(p.syncIndex, fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
 		}
+		tr.Succeeded()
 		keys[i] = stages.NormalizeKeyValue(src.normalize, coerceForColumn(v, p.columnType(p.config.PrimaryKey[i])))
 	}
 	return keys, nil
@@ -1039,13 +1075,20 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 		// enrichment entries need their on column's COERCED value (pass 2), so
 		// the plain values must exist first regardless of Set order.
 		plain := make(map[string]any, len(r.rule.Set))
-		for _, s := range r.rule.Set {
+		for k, s := range r.rule.Set {
+			tr := r.setTrackers.At(k)
 			switch {
 			case s.From != "":
 				v, err := resolveScopedPath(s.From, data, parent)
 				if err != nil {
-					return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
+					// The set-path ambiguity: absent in this row vs a typo
+					// failing every row this rule matches. Per-site history
+					// classifies (see cluster.AmbiguityTracker) — successes of
+					// rows this rule never matched don't mask a path that fails
+					// every row it is actually evaluated against.
+					return true, "", tr.Classify(p.syncIndex, fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
 				}
+				tr.Succeeded()
 				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
 			case s.Expr != "":
 				v, err := evalExpr(s.compiled, data, parent)
@@ -1189,10 +1232,12 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	if len(src.keyPaths) == 0 {
 		return cluster.Permanent(fmt.Errorf("[projection.aggregate] no keyPath configured (topic %q)", src.topic))
 	}
+	keyTr := src.keyTrackers.At(0)
 	parentKey, err := jsonpath.Get(src.keyPaths[0], jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
+		return keyTr.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
 	}
+	keyTr.Succeeded()
 
 	// Capture the child's prior parent before the sidecar upsert overwrites it. A
 	// child re-delivered under a different parent (re-parenting) must have its old
@@ -1205,14 +1250,16 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 
 	elementKey, err := jsonpath.Get(ag.elementKey, jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
+		return ag.elementKeyTracker.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
 	}
+	ag.elementKeyTracker.Succeeded()
 	element := make(map[string]any, len(ag.fields))
 	for _, f := range ag.fields {
 		v, err := jsonpath.Get(f.From, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
+			return f.tracker.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
 		}
+		f.tracker.Succeeded()
 		element[f.Field] = v
 	}
 	elementJSON, err := json.Marshal(element)
@@ -1689,8 +1736,9 @@ func (p *Projection) applyLookup(ctx context.Context, tx *gosql.Tx, src *project
 	for _, f := range lk.fields {
 		v, err := jsonpath.Get(f.From, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
+			return f.tracker.Classify(p.syncIndex, fmt.Errorf("[projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
 		}
+		f.tracker.Succeeded()
 		fields[f.Field] = v
 	}
 	fieldsJSON, err := json.Marshal(fields)

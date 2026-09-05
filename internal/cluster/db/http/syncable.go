@@ -1,0 +1,811 @@
+package http
+
+import (
+	"encoding/json"
+	"errors"
+	httpgo "net/http"
+	"strconv"
+	"time"
+
+	"github.com/committeddb/committed/internal/cluster"
+)
+
+// defaultErrorsPageLimit is the page size the dead-letter listing handlers
+// (GetSyncableErrors, GetTypeMigrationErrors) use when the caller omits
+// ?limit. Storage clamps the upper bound, so a caller asking for more just
+// gets a full page.
+const defaultErrorsPageLimit = 100
+
+// AddSyncable (POST /syncable/{id}) and GetSyncables (GET /syncable) are
+// served by the generic config handlers in config_handlers.go. The handlers
+// below are syncable-specific: dead-letter inspection, manual dead-lettering,
+// status, and replay.
+
+// SyncableDeadLetterResponse is one dead-lettered proposal — a proposal a
+// syncable permanently skipped. index is the raft index of the dropped
+// proposal (the proposal itself stays in the log); pass it back as
+// ?since to page forward.
+type SyncableDeadLetterResponse struct {
+	Index     uint64 `json:"index"`
+	Timestamp string `json:"timestamp"`
+	Kind      string `json:"kind"`
+	// Acknowledged marks a record an operator resolved out-of-band; it no
+	// longer counts against completeness but remains listed as the audit
+	// trail. AcknowledgedAt is when (RFC 3339, UTC); both omitted while
+	// unacknowledged.
+	Acknowledged   bool   `json:"acknowledged,omitempty"`
+	AcknowledgedAt string `json:"acknowledgedAt,omitempty"`
+	Message        string `json:"message"`
+}
+
+// GetSyncableErrors returns the dead-letter records for a syncable —
+// proposals it permanently skipped — in ascending raft-index order.
+// Query params: ?since=<raft index> (exclusive cursor, default 0) and
+// ?limit=<n> (page size, default 100; storage caps the maximum). The
+// records are replicated state, so any node answers identically.
+func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	// Same 404 gate as the status endpoint: an unknown id's empty dead-letter
+	// list is indistinguishable from a healthy syncable's.
+	if ok, err := h.db.SyncableExists(id); err != nil {
+		writeInternalError(w, "failed to check syncable existence", err)
+		return
+	} else if !ok {
+		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+		return
+	}
+
+	var since uint64
+	if qs := r.URL.Query().Get("since"); qs != "" {
+		n, err := strconv.ParseUint(qs, 10, 64)
+		if err != nil {
+			writeErrorf(w, httpgo.StatusBadRequest, "invalid_parameter", "since parameter %q is not a valid raft index", qs)
+			return
+		}
+		since = n
+	}
+
+	limit := defaultErrorsPageLimit
+	if ql := r.URL.Query().Get("limit"); ql != "" {
+		n, err := strconv.Atoi(ql)
+		if err != nil || n <= 0 {
+			writeErrorf(w, httpgo.StatusBadRequest, "invalid_parameter", "limit parameter %q is not a positive integer", ql)
+			return
+		}
+		limit = n
+	}
+
+	if !h.linearize(w, r) {
+		return
+	}
+
+	dls, err := h.db.SyncableDeadLetters(id, since, limit)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve syncable errors", err)
+		return
+	}
+
+	body := make([]SyncableDeadLetterResponse, 0, len(dls))
+	for _, d := range dls {
+		item := SyncableDeadLetterResponse{
+			Index:        d.Index,
+			Timestamp:    time.Unix(0, d.TimestampUnixNano).UTC().Format(time.RFC3339Nano),
+			Kind:         d.Kind,
+			Message:      d.Message,
+			Acknowledged: d.Acknowledged,
+		}
+		if d.Acknowledged {
+			item.AcknowledgedAt = time.Unix(0, d.AcknowledgedAtUnixNano).UTC().Format(time.RFC3339Nano)
+		}
+		body = append(body, item)
+	}
+
+	writeArrayBody(w, body)
+}
+
+// SyncableDeadLetterStuckResponse reports which proposal a manual dead-letter
+// request targeted — the raft index the syncable was blocked on.
+type SyncableDeadLetterStuckResponse struct {
+	Index uint64 `json:"index"`
+}
+
+// DeadLetterStuckSyncable skips the proposal a syncable is currently blocked
+// retrying (POST /syncable/{id}/deadletter). A transient sync error retries
+// forever by design, so a syncable wedged on a proposal the downstream will
+// never accept stalls visibly rather than losing data; this is the operator's
+// lever to dead-letter that one proposal (kind "manual") and let the worker
+// advance.
+//
+// Node-agnostic: the stuck state is replicated, so any node can find the
+// blocked index and propose the skip through Raft. A syncable that isn't
+// currently blocked gets 409. The worker honors the request on its next
+// retry; poll GET /syncable/{id}/errors to confirm the manual dead letter.
+func (h *HTTP) DeadLetterStuckSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	index, err := h.db.DeadLetterStuckSyncable(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, cluster.ErrSyncNotStuck) {
+			writeError(w, httpgo.StatusConflict, "not_stuck",
+				"syncable is not currently blocked; it may be healthy or unknown")
+			return
+		}
+		writeInternalError(w, "failed to dead-letter the stuck proposal", err)
+		return
+	}
+
+	// 202: the worker honors the request on its next retry, so the
+	// dead-letter record lands shortly after this returns. The body names
+	// the targeted index; poll GET /syncable/{id}/errors to confirm.
+	bs, err := json.Marshal(SyncableDeadLetterStuckResponse{Index: index})
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpgo.StatusAccepted)
+	_, _ = w.Write(bs)
+}
+
+// SyncableDeleteResponse confirms a syncable was deleted and whether the
+// operator asked to keep its destination state.
+type SyncableDeleteResponse struct {
+	ID       string `json:"id"`
+	KeepData bool   `json:"keepData"`
+}
+
+// DeleteSyncable (DELETE /syncable/{id}) removes a syncable: its config and
+// checkpoint are deleted atomically (consensus), the worker is stopped, and —
+// unless ?keepData=true — the owner tears down the syncable's destination
+// best-effort (for a SQL syncable, dropping its table). A later same-name POST
+// then starts fresh from index 0.
+//
+// The logical deletion is the authoritative act and completes before this
+// returns (Propose blocks until the Actual applies); the destination teardown
+// is a best-effort side effect that settles shortly after on the leader. The
+// route is leader-pinned so this runs where the teardown does.
+func (h *HTTP) DeleteSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	keepData := false
+	if raw := r.URL.Query().Get("keepData"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "keepData must be a boolean")
+			return
+		}
+		keepData = v
+	}
+
+	if err := h.db.DeleteSyncable(r.Context(), id, keepData); err != nil {
+		writeProposeError(w, err, "syncable", "delete syncable")
+		return
+	}
+
+	bs, err := json.Marshal(SyncableDeleteResponse{ID: id, KeepData: keepData})
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpgo.StatusOK)
+	_, _ = w.Write(bs)
+}
+
+// RebuildSyncable (POST /syncable/{id}/rebuild) re-materializes a syncable's
+// destination in place from index 0, keeping the same config. The destination
+// (for a SQL syncable, its table) is torn down, recreated empty, and refilled
+// by replaying the log — the recovery primitive for a drifted/corrupted
+// projection. Schema changes are NOT done this way (use DELETE then POST).
+// Returns 404 if the syncable is unknown. Leader-pinned.
+func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	if err := h.db.RebuildSyncable(r.Context(), id); err != nil {
+		writeRebuildError(w, err)
+		return
+	}
+
+	// 202 with a small ack body: the checkpoint reset and destination
+	// teardown/re-init are done, but the replay that refills the destination
+	// runs in the worker afterward. The body exists because an empty 202 next
+	// to legitimate 405s (wrong verbs on this route) field-read as a routing
+	// failure — an operator spent half an hour disbelieving a success. It
+	// names the poll target so the next step is in the response itself.
+	bs, err := json.Marshal(SyncableRebuildResponse{
+		ID:     id,
+		Status: "rebuilding",
+		Poll:   "/v1/syncable/" + id + "/status",
+	})
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	// Location is the idiomatic HTTP spelling of the async-accept pattern:
+	// 202 + where to watch. Same pointer as the body's poll field, visible to
+	// curl -i and REST tooling without parsing the body.
+	w.Header().Set("Location", "/v1/syncable/"+id+"/status")
+	w.WriteHeader(httpgo.StatusAccepted)
+	_, _ = w.Write(bs)
+}
+
+// RematerializeSyncable handles POST /syncable/{id}/rematerialize: the
+// NON-destructive replay — the sink keeps serving while the worker replays
+// from index 0 through the current projection + interpretation, converging
+// keyed rows in place and sweeping never-re-emitted rows at the end. The
+// destructive sibling (drop + replay) is /rebuild. Leader-pinned like
+// rebuild: the drain/re-apply must run where the worker lives.
+func (h *HTTP) RematerializeSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	if err := h.db.RematerializeSyncable(r.Context(), id); err != nil {
+		writeRematerializeError(w, err)
+		return
+	}
+	writeJson(w, []byte(`{"status":"rematerializing"}`))
+}
+
+// SyncableRebuildResponse acknowledges an accepted rebuild: the destination
+// was reset and the replay is running in the worker. Poll the status
+// endpoint (lag → 0) to watch it converge. Re-POSTing rebuild is safe —
+// repeated triggers converge to the same reconciled state (field-observed:
+// a triple-fire ended at exact parity with one clean generation).
+type SyncableRebuildResponse struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Poll   string `json:"poll"`
+}
+
+// SyncableStatusResponse is the operational status of a syncable's worker:
+// whether it is blocked (and on what), plus its numeric progress (how far it
+// has synced vs. how far there is to sync).
+type SyncableStatusResponse struct {
+	// Stuck means TRANSIENTLY blocked and still retrying — deliberately
+	// false during a terminal park, which the field read as a
+	// contradiction ("stuck: false" beside a parked worker with frozen
+	// lag). The two are mutually exclusive by design: stuck = the worker
+	// is alive and will resume by itself; parked (see WorkerState) = it
+	// STOPPED and needs an operator. Read WorkerState first; Stuck
+	// refines "running".
+	Stuck bool `json:"stuck"`
+	// WorkerState is the worker's lifecycle state: "running" (healthy, or
+	// transiently stuck retrying — see Stuck), "parked" (the circuit breaker
+	// tripped on a systematic config fault and the worker STOPPED; fix the config
+	// and re-POST it, or delete the syncable), or "degraded" (the config
+	// persisted but its build FAILED on this node — e.g. a missing ${VAR} — so
+	// no worker was started; Message carries the build error). running/parked
+	// are replicated, so any node reports them; degraded is the answering
+	// node's view (builds are node-local).
+	WorkerState string `json:"workerState"`
+	// Index, Since, and Message are present when stuck OR parked — what the worker
+	// last blocked or failed on. For a degraded config, Message carries the
+	// (redacted) build error instead.
+	Index   uint64 `json:"index,omitempty"`
+	Since   string `json:"since,omitempty"`
+	Message string `json:"message,omitempty"`
+
+	// Progress fields are ALWAYS present (not only when stuck). Distinct
+	// from Index above, which is the stuck-only "index it's blocked on".
+	//
+	// CheckpointIndex is the persisted SyncableIndex — the consumed head the
+	// worker has synced, topic-skipped, or dead-lettered through.
+	// HeadIndex is DataEventIndex — the highest data (non-metadata) raft
+	// index on this node, the head the worker converges to at EOF. Lag is
+	// max(0, HeadIndex − CheckpointIndex) and CaughtUp is Lag == 0, which is
+	// true exactly when the worker has nothing left to process. See the
+	// consumed-head semantics in syncable-progress-lag.
+	CheckpointIndex uint64 `json:"checkpointIndex"`
+	HeadIndex       uint64 `json:"headIndex"`
+	Lag             uint64 `json:"lag"`
+	CaughtUp        bool   `json:"caughtUp"`
+
+	// InterpretationPin is the interpretation coordinate this syncable's
+	// current materialization began under (the second half of the
+	// determinism pair — 0 = pinned before any interpretation revisions
+	// existed). InterpretationStale is true when the reading of a consumed
+	// topic changed past the pin — a restatement landed, or a type's
+	// [migration] was edited in place (always-current consumers only): some
+	// already-synced rows were derived under a superseded reading and stay
+	// that way until the operator re-derives (staleness is loud and
+	// queryable, never auto-healed).
+	InterpretationPin   uint64 `json:"interpretationPin"`
+	InterpretationStale bool   `json:"interpretationStale"`
+
+	// Rematerializing is true while a POST /rematerialize replay is in
+	// progress; RematerializeTargetHead is the data head the replay must
+	// reach before its completion sweep runs (progress = checkpointIndex
+	// against it). Omitted when no re-materialization is running.
+	Rematerializing         bool   `json:"rematerializing,omitempty"`
+	RematerializeTargetHead uint64 `json:"rematerializeTargetHead,omitempty"`
+
+	// PinnedZone is the zone this syncable is pinned to (`zone` in its
+	// config); omitted for unpinned syncables. PinUnsatisfiable is true when
+	// NO current member announces that zone — the strict pin's loud stall:
+	// nobody serves the syncable (never a silent leader fallback), and it
+	// catches up completely when a node in the zone returns. ownerNode shows
+	// who serves it (0 while unsatisfiable).
+	PinnedZone       string `json:"pinnedZone,omitempty"`
+	PinUnsatisfiable bool   `json:"pinUnsatisfiable,omitempty"`
+
+	// DerivedFrom / DerivesInto are the derivation provenance of a loopback
+	// syncable: the topic it consumes and the derived topic it produces.
+	// Omitted for every non-deriving kind. Pair with InterpretationStale to
+	// read "this derived topic was materialized under a superseded reading".
+	DerivedFrom string `json:"derivedFrom,omitempty"`
+	DerivesInto string `json:"derivesInto,omitempty"`
+
+	// DeadLetters is how many proposals this syncable has skipped
+	// (dead-lettered), permanently or manually; LastDeadLetterIndex is the
+	// raft index of the most recent skip (omitted when none). ALWAYS
+	// present: a sink can be caught up AND have skipped rows, so the honest
+	// completeness check is caughtUp && deadLetters == 0 — without this
+	// field that state reads as fully green. List the records via
+	// GET /syncable/{id}/errors; re-drive one after fixing the
+	// destination via POST /syncable/{id}/replay/{index} (which clears it
+	// from this count).
+	DeadLetters uint64 `json:"deadLetters"`
+	// AcknowledgedDeadLetters counts records an operator has acknowledged
+	// as resolved out-of-band (superseded by a later event, or fixed at
+	// the source). They no longer count against completeness but stay
+	// listable on GET /syncable/{id}/errors as the audit trail. Omitted
+	// when zero.
+	AcknowledgedDeadLetters uint64 `json:"acknowledgedDeadLetters,omitempty"`
+	LastDeadLetterIndex     uint64 `json:"lastDeadLetterIndex,omitempty"`
+
+	// OwnerNode is the raft node ID whose worker does this syncable's work:
+	// the pinned node when the config names one, otherwise the current leader
+	// (0 when no leader is known). ALWAYS present — it tells an operator
+	// whose logs to read, and which node a degraded readPosition answer is
+	// missing (see ReadPosition).
+	OwnerNode uint64 `json:"ownerNode"`
+	// ReadPosition is the raft index of the last log entry the worker's
+	// reader examined — it advances per entry SCANNED, including entries
+	// skipped as other topics', so a worker wading a mostly-foreign log
+	// shows motion here while CheckpointIndex legitimately sits still. It
+	// counts committed's internal entries too, which HeadIndex excludes, so
+	// under live mixed traffic it routinely reads slightly AHEAD of the same
+	// response's HeadIndex — motion, not skew (observed on the first field
+	// validation: position 33 past head on a caught-up mirror).
+	// Present only when the request opts in with ?readPosition=true AND the
+	// owner's live worker answered (directly, or via the transparent proxy
+	// hop this handler makes to OwnerNode); absent on the default call — the
+	// default stays a local O(1) read, safe to poll — and absent when the
+	// owner is unreachable (soft degrade: every other field still serves).
+	// 0 with the field present means the worker has examined nothing yet —
+	// with CaughtUp it distinguishes "nothing to examine" from "never
+	// started scanning", the split the phantom-adoption incident needed.
+	ReadPosition *uint64 `json:"readPosition,omitempty"`
+	// Stages is each declared stage's introspection row: keys (the
+	// store's current output count) plus inputs/fanned flow counters
+	// since the worker started. The three numbers split every
+	// silent-empty state: inputs 0 = log region not reached; inputs > 0,
+	// fanned 0 = the forEach fan finds no array; flow > 0 with keys 0 =
+	// the when/joins rejected everything. Present only when the request
+	// opts in with ?stages=true AND the owner's live worker answered
+	// (directly or via the same transparent proxy hop readPosition
+	// uses); absent for stage-free syncables and on soft degrade.
+	Stages map[string]cluster.StageStat `json:"stages,omitempty"`
+	// StageRecovery is present while the ANSWERING node's worker is
+	// re-deriving stage state before consuming (workerState reads
+	// "re-deriving"): Folded is the log index re-derived so far, Target
+	// the checkpoint it must reach. Owner-local; served on the default
+	// call — the field finding was a re-deriving worker invisible as
+	// plain "running" with climbing lag for the full re-derivation.
+	StageRecovery *StageRecoveryStatus `json:"stageRecovery,omitempty"`
+	// StageKeyExists answers a single-key probe
+	// (?probeStage=<stage>&probeKey=<key>): does that stage currently
+	// hold an output at that key (stored form: canonical digits,
+	// normalized case)? The second half of the stage-introspection pair —
+	// counts say "is it empty?", the probe says "is THIS pair in it?".
+	// Present only when probed and the owner's worker answered.
+	StageKeyExists *bool `json:"stageKeyExists,omitempty"`
+}
+
+// StageRecoveryStatus is a running stage-state re-derivation's progress.
+type StageRecoveryStatus struct {
+	Folded uint64 `json:"folded"`
+	Target uint64 `json:"target"`
+}
+
+// GetSyncableStatus reports a syncable worker's operational status
+// (GET /syncable/{id}/status): whether it is blocked retrying a transient
+// error, and its numeric progress — checkpointIndex / headIndex / lag /
+// caughtUp. Backed by replicated + local apply state read behind the same
+// linearize barrier, so any node answers identically and without a leader
+// hop — this is how an operator (or a dashboard) discovers a wedged syncable
+// behind a load balancer (and the index to expect when they POST
+// .../deadletter), and answers "is it caught up?" (lag == 0).
+//
+// ?readPosition=true opts into one owner-local extra: the worker's live scan
+// position (see SyncableStatusResponse.ReadPosition). That datum exists only
+// on the owning node, so a non-owner transparently proxies the request there
+// — one bounded hop, paid only by callers who asked. If the owner can't be
+// reached (or ownership is unknown/settling), the response degrades softly:
+// every replicated field still serves, readPosition is absent, and ownerNode
+// says who has it. The default call's no-hop poll-safety contract is
+// untouched.
+func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	// Existence gate FIRST — before any state is synthesized and before the
+	// readPosition proxy hop. An unknown id (typo'd, or deleted) must 404:
+	// the status fields all read plausibly for an absent id (checkpoint 0
+	// against the real head; workerState "running" is derived from the
+	// ABSENCE of a park record, which an absent id satisfies vacuously), so
+	// without this gate monitoring watches a healthy phantom forever — the
+	// field finding. Same oracle and wording as the rebuild endpoint's gate.
+	if ok, err := h.db.SyncableExists(id); err != nil {
+		writeInternalError(w, "failed to check syncable existence", err)
+		return
+	} else if !ok {
+		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+		return
+	}
+
+	wantPosition := false
+	if raw := r.URL.Query().Get("readPosition"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "readPosition must be a boolean")
+			return
+		}
+		wantPosition = v
+	}
+	wantStages := false
+	if raw := r.URL.Query().Get("stages"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "stages must be a boolean")
+			return
+		}
+		wantStages = v
+	}
+	probeStage := r.URL.Query().Get("probeStage")
+	// probeKey repeats for a composite key — ?probeKey=a&probeKey=b, one
+	// per keyPath position. The parts pass through verbatim: the
+	// KEY-SPACE OWNER (the introspector) renders and composes them, so
+	// this layer knows nothing about key encodings and the caller cannot
+	// misreproduce the stored bytes into a false absence (the field's
+	// first probe guessed comma-joined and read exactly that).
+	probeKeyParts := r.URL.Query()["probeKey"]
+	if (probeStage == "") != (len(probeKeyParts) == 0) {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "probeStage and probeKey go together")
+		return
+	}
+
+	owner := h.db.SyncableOwner(id)
+	if (wantPosition || wantStages || probeStage != "") && owner != 0 && owner != h.db.ID() && r.Header.Get(forwardedHeader) == "" {
+		// The scan position lives in the owner's worker — proxy the whole
+		// request there (its response carries the same replicated fields plus
+		// the position). Any failure to hop falls through to the local
+		// answer: soft degrade, not leaderRead's 503, because everything
+		// except readPosition is still perfectly answerable here.
+		if ownerURL, ok := h.db.MemberAPIURL(owner); ok && ownerURL != "" {
+			if err := h.proxyToMember(w, r, ownerURL); err == nil {
+				return
+			}
+		}
+	}
+
+	if !h.linearize(w, r) {
+		return
+	}
+
+	stuck, ok, err := h.db.SyncableStuck(id)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve syncable status", err)
+		return
+	}
+
+	checkpoint, head, err := h.db.SyncableProgress(id)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve syncable progress", err)
+		return
+	}
+
+	// A present record is either transient-stuck (Parked=false) or a terminal park
+	// (Parked=true), never both — Stuck reports the transient case, WorkerState the
+	// terminal one.
+	resp := SyncableStatusResponse{Stuck: ok && !stuck.Parked, WorkerState: cluster.WorkerStateRunning}
+	if ok && stuck.Parked {
+		resp.WorkerState = cluster.WorkerStateParked
+	}
+	if ok {
+		resp.Index = stuck.Index
+		resp.Since = time.Unix(0, stuck.SinceUnixNano).UTC().Format(time.RFC3339Nano)
+		resp.Message = stuck.Message
+	}
+
+	applyBuildDegraded(&resp, id, h.db.ConfigBuildErrors())
+
+	// A running re-derivation overrides "running" on the node doing it
+	// (owner-local, like degraded): the worker is alive but NOT consuming
+	// — new entries apply only after the fold-only pass reaches the
+	// checkpoint, so lag climbs by design and reads as a stall without
+	// this state.
+	if folded, target, ok := h.db.SyncableStageRecovery(id); ok {
+		resp.WorkerState = cluster.WorkerStateRederiving
+		resp.StageRecovery = &StageRecoveryStatus{Folded: folded, Target: target}
+	}
+
+	resp.CheckpointIndex = checkpoint
+	resp.HeadIndex = head
+	resp.Lag, resp.CaughtUp = progressFields(checkpoint, head)
+
+	dlCount, dlAcked, dlLast, err := h.db.SyncableDeadLetterStats(id)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve dead-letter stats", err)
+		return
+	}
+	resp.DeadLetters = dlCount
+	resp.AcknowledgedDeadLetters = dlAcked
+	resp.LastDeadLetterIndex = dlLast
+
+	pin, stale, err := h.db.SyncableInterpretation(id)
+	if err != nil {
+		writeInternalError(w, "failed to retrieve interpretation staleness", err)
+		return
+	}
+	resp.InterpretationPin = pin
+	resp.InterpretationStale = stale
+
+	if rec, ok := h.db.SyncableRematerialization(id); ok {
+		resp.Rematerializing = true
+		resp.RematerializeTargetHead = rec.TargetHead
+	}
+
+	if source, target, ok := h.db.SyncableDerivation(id); ok {
+		resp.DerivedFrom = source
+		resp.DerivesInto = target
+	}
+
+	if zone, unsatisfiable, ok := h.db.SyncableZonePin(id); ok {
+		resp.PinnedZone = zone
+		resp.PinUnsatisfiable = unsatisfiable
+	}
+
+	resp.OwnerNode = owner
+	if wantPosition {
+		// Populated when this node's worker holds a live reader — it is the
+		// owner, or a forwarded request landed here believing it is. A
+		// non-owner (stale forward, ownership settling) has no reader and
+		// simply leaves the field absent — the degraded shape, with
+		// OwnerNode pointing at who to ask.
+		if pos, ok := h.db.SyncableReadPosition(id); ok {
+			resp.ReadPosition = &pos
+		}
+	}
+	if wantStages {
+		// Same owner-local contract as readPosition: absent on a non-owner
+		// or a stage-free syncable, never an error.
+		if stats, ok := h.db.SyncableStageStats(id); ok {
+			resp.Stages = stats
+		}
+	}
+	if probeStage != "" {
+		exists, ok, err := h.db.SyncableStageKeyExists(id, probeStage, probeKeyParts)
+		if err != nil {
+			// A typo'd stage name must not read as "key absent".
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", err.Error())
+			return
+		}
+		if ok {
+			resp.StageKeyExists = &exists
+		}
+	}
+
+	bs, err := json.Marshal(resp)
+	if err != nil {
+		writeInternalError(w, "failed to marshal response", err)
+		return
+	}
+	writeJson(w, bs)
+}
+
+// AcknowledgeSyncableDeadLetter marks a dead-letter record resolved
+// out-of-band (POST /syncable/{id}/deadletter/{index}/acknowledge). The third
+// verb the superseded case needs: REPLAY re-applies the stale proposal —
+// regressing a sink row a later event already corrected — and leaving the
+// record inflates deadLetters forever, so a resolved incident reads
+// permanently red. Acknowledge attests "resolved out-of-band": the record
+// leaves the completeness count, stays listable as an audit trail, and a
+// later replay is still allowed (its success deletes the record entirely).
+// Replicated — acknowledge once, every node agrees. Idempotent.
+func (h *HTTP) AcknowledgeSyncableDeadLetter(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+	index, err := strconv.ParseUint(r.PathValue("index"), 10, 64)
+	if err != nil {
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_parameter",
+			"index %q is not a valid raft index", r.PathValue("index"))
+		return
+	}
+
+	err = h.db.AcknowledgeSyncableDeadLetter(r.Context(), id, index)
+	switch {
+	case err == nil:
+		w.WriteHeader(httpgo.StatusOK)
+	case errors.Is(err, cluster.ErrNotDeadLettered):
+		writeError(w, httpgo.StatusNotFound, "not_dead_lettered",
+			"raft index is not a dead letter for this syncable")
+	default:
+		writeInternalError(w, "failed to acknowledge the dead letter", err)
+	}
+}
+
+// ReplaySyncableDeadLetter re-drives a dead-lettered proposal
+// (POST /syncable/{id}/replay/{index}): it re-runs the syncable's Sync for the
+// proposal at `index` and, on success, clears the dead-letter record. Use it
+// after fixing the downstream that caused the original skip. Node-agnostic.
+func (h *HTTP) ReplaySyncableDeadLetter(w httpgo.ResponseWriter, r *httpgo.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+	index, err := strconv.ParseUint(r.PathValue("index"), 10, 64)
+	if err != nil {
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_parameter",
+			"index %q is not a valid raft index", r.PathValue("index"))
+		return
+	}
+
+	writeReplayDeadLetterResult(w, h.db.ReplaySyncableDeadLetter(r.Context(), id, index))
+}
+
+// applyBuildDegraded overrides the worker state when THIS syncable's config
+// failed its build on the answering node. "Running" is derived from the
+// ABSENCE of a park record, which a worker that never STARTED satisfies
+// vacuously — the same absence-derived lie the status handler's existence
+// gate closes for absent ids, one door over (a missing ${VAR} config read
+// "running" with growing lag). Degraded is the ANSWERING NODE's view (builds
+// are node-local; the record is this node's config-error bookkeeping) and
+// the error is already redacted at the record surface. It can't coexist with
+// a park except as a transient race — a new config version clears the park
+// record atomically with the version write, and degraded is that version's
+// build verdict — so degraded, the more current fact, wins. Records for
+// OTHER ids or kinds must never leak into this response. A free function so
+// the override table is testable directly.
+func applyBuildDegraded(resp *SyncableStatusResponse, id string, errs []cluster.ConfigBuildError) {
+	for _, ce := range errs {
+		if ce.Kind == "syncable" && ce.ID == id {
+			resp.WorkerState = cluster.WorkerStateDegraded
+			resp.Message = ce.Error
+			break
+		}
+	}
+}
+
+// progressFields derives the status response's lag arithmetic. Both inputs
+// are sourced behind the handler's linearize barrier, so checkpoint
+// (replicated apply state) and head (local apply state) are mutually
+// consistent and head ≥ checkpoint on the default path. Clamp anyway as
+// belt-and-suspenders, and for ?consistency=stale reads on a lagging
+// follower where the two could momentarily cross — an unsigned underflow
+// here would report an astronomical lag.
+func progressFields(checkpoint, head uint64) (lag uint64, caughtUp bool) {
+	if head > checkpoint {
+		lag = head - checkpoint
+	}
+	return lag, lag == 0
+}
+
+// The error→response mappings below are free functions so their tables are
+// testable directly (drive each error, assert the envelope) — the handlers
+// hold the engine concretely, so there is no seam to inject these errors
+// through, and most of them (a wedged worker, a mid-flap ownership move)
+// cannot be induced deterministically in a real single-node engine.
+
+// writeRebuildError maps a RebuildSyncable failure.
+func writeRebuildError(w httpgo.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, cluster.ErrResourceNotFound):
+		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+	case errors.Is(err, cluster.ErrZonePinUnsatisfiable):
+		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+	case errors.Is(err, cluster.ErrNotSyncableOwner):
+		// Stale routing view (ownership just moved): retryable, the next
+		// attempt's hop lands on the current owner.
+		writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+	case errors.Is(err, cluster.ErrWorkerWedged):
+		// A wedged worker aborts the rebuild before anything changed — a
+		// retryable condition (wait out the destination, or re-POST the config
+		// to replace the worker), so 503 rather than a generic failure.
+		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+	default:
+		writeProposeError(w, err, "syncable", "rebuild syncable")
+	}
+}
+
+// writeRematerializeError maps a RematerializeSyncable failure — rebuild's
+// table plus the in-place-convergence refusal.
+func writeRematerializeError(w httpgo.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, cluster.ErrResourceNotFound):
+		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+	case errors.Is(err, cluster.ErrNotRematerializable):
+		// 409: the config is fine, but this sink shape cannot converge a
+		// replay in place — the message names the alternatives.
+		writeError(w, httpgo.StatusConflict, "not_rematerializable", err.Error())
+	case errors.Is(err, cluster.ErrZonePinUnsatisfiable):
+		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+	case errors.Is(err, cluster.ErrNotSyncableOwner):
+		// Stale routing view (ownership just moved): retryable, the next
+		// attempt's hop lands on the current owner.
+		writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+	case errors.Is(err, cluster.ErrWorkerWedged):
+		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+	default:
+		writeProposeError(w, err, "syncable", "rematerialize syncable")
+	}
+}
+
+// writeReplayDeadLetterResult maps a ReplaySyncableDeadLetter outcome,
+// including the nil (200) case.
+func writeReplayDeadLetterResult(w httpgo.ResponseWriter, err error) {
+	switch {
+	case err == nil:
+		w.WriteHeader(httpgo.StatusOK)
+	case errors.Is(err, cluster.ErrNotDeadLettered):
+		writeError(w, httpgo.StatusNotFound, "not_dead_lettered",
+			"raft index is not a dead letter for this syncable")
+	case errors.Is(err, cluster.ErrReplaySyncFailed):
+		// The downstream rejected the proposal again; the dead letter is left
+		// in place. Surface the cause so the operator can see what failed.
+		writeErrorWithDetails(w, httpgo.StatusBadGateway, "replay_failed",
+			"the syncable rejected the proposal again; dead letter left in place", redactedDetail(err))
+	default:
+		writeInternalError(w, "failed to replay the dead-lettered proposal", err)
+	}
+}
+
+// capString bounds a detail string before it goes into a response body so a
+// chatty error can't bloat it.
+func capString(s string) string {
+	const max = 512
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
+}
+
+// redactedDetail returns an error string safe to put in a response body: it
+// routes through cluster.RedactedMessage (the shared sink choke point), so an
+// error chain carrying a cluster.RedactedError (a driver or migration error that
+// may echo entity PII or connection identity) exposes only its PII-free
+// RedactedMessage, while committed-authored text passes through. The full detail
+// is kept in this node's logs (see the db replay path). Use this for any detail
+// derived from a Sync/apply error, then cap it for the response body.
+func redactedDetail(err error) string {
+	msg, _ := cluster.RedactedMessage(err)
+	return capString(msg)
+}

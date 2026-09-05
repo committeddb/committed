@@ -43,7 +43,13 @@ Committed is specifically NOT a databse designed for querying.
   multi-topic BFF rows, collection aggregates, cross-topic enrichment
   (`projection`, the primary read-model pattern; see
   [docs/read-models.md](docs/read-models.md)). Destinations today:
-  SQL (MySQL/PostgreSQL) and HTTP.
+  SQL (MySQL/PostgreSQL), HTTP, Apache Iceberg on S3 (`iceberg` — a
+  current-state warehouse landing zone for Athena/Spectrum/S3 Tables;
+  see [docs/operations/iceberg-sink.md](docs/operations/iceberg-sink.md))
+  — and the cluster itself (`loopback`),
+  which derives a new topic from a source topic so one transform serves
+  N dumb consumers ([docs/read-models.md](docs/read-models.md)
+  § Derived topics).
 
 ### Running
 
@@ -98,6 +104,7 @@ same image can be templated per-node by an orchestrator:
 | `COMMITTED_DATA_DIR` | `./data` | Directory for the WAL, raft state, and metadata. |
 | `COMMITTED_PEER_URL` | `http://127.0.0.1:9022` | This node's advertised raft peer URL. Used when `COMMITTED_PEERS` is unset. |
 | `COMMITTED_PEERS` | _(unset)_ | Full static cluster membership as `id=url` pairs, e.g. `1=http://n1:9022,2=http://n2:9022,3=http://n3:9022`. Give the same value to every node; it must include this node's `COMMITTED_NODE_ID`. |
+| `COMMITTED_ZONE` | _(unset)_ | This node's zone (vendor-neutral: an AZ, rack, or site), announced into the cluster at startup. A syncable config with `zone = "..."` is served by a node in that zone instead of the leader — see [`docs/operations/zones.md`](docs/operations/zones.md). |
 | `COMMITTED_API_URL` | _(unset)_ | This node's advertised HTTP API base URL (e.g. `http://n1:8080`), self-announced into the cluster so followers can proxy leader-only reads. Set it on every node. |
 
 `COMMITTED_PEERS` is consumed only on a node's **first** boot
@@ -114,7 +121,7 @@ under [`docs/operations/`](docs/operations/).
 
 ### API tour
 
-Routes are served by Chi from `internal/cluster/http/`. The full
+Routes are served by Chi from `internal/cluster/db/http/`. The full
 OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
 `/docs`. Every API endpoint lives under a `/v1` prefix (see
 [`docs/api-compatibility.md`](docs/api-compatibility.md)); bearer-token
@@ -187,6 +194,138 @@ design, so each variant either dead-letters on the jsonpaths it doesn't
 carry or clobbers columns it didn't mean to write. The whole-payload
 `"$"` mapping shape below is the right way to land an event topic in
 SQL and is exempt from the warning.
+
+#### The shape census: drafting a contract from the data
+
+The hardest part of blessing a contract on an existing table is that nobody
+knows what's in it — JSON columns whose shape lives only in what developers
+happened to write, evolved over years, often with several shapes interleaved.
+Committed takes that census for free: the ingest snapshot pass already streams
+every historical row, and the worker folds each row's payload **shape** (paths
+and types — never values) into a per-topic census, published as replicated
+state and served on `GET /v1/ingestable/{id}/status`:
+
+- every path with its observed types, row count, and first/last-seen row —
+  including paths nested inside JSON columns;
+- each **distinct shape** with its count and row range — the interleaved-shapes
+  evidence;
+- a **draft JSON Schema** mirroring the observed structure
+  (`additionalProperties: false` at every level), ready to review and POST as
+  a type — with `validate = 2` it becomes the tripwire's contract. Inference
+  is bootstrap-only: the draft is never auto-blessed, and the runtime never
+  infers — after blessing, the tripwire reconciles reality against the
+  declared contract.
+
+The census is **on by default** (it only happens while a snapshot streams the
+table — getting one later costs a full re-snapshot) and adds roughly a
+microsecond per row; `census = false` in the `[ingestable]` section opts out.
+Value tracking is **opt-in**: `censusValues = true` keeps a bounded set of
+distinct values per string field (`censusValueLimit`, default 16), and the
+drafter then proposes `enum` for fields whose values repeat — so a brand-new
+enum value later fires the tripwire as an ordinary schema violation. Opt-in
+because it puts source values into replicated state; by default the census
+carries types and paths only.
+
+Two limits, stated plainly: the census describes **only what was written** —
+it is first-row detection over history, not pre-deploy contract enforcement
+(that would need the producer's write path, which committed does not have).
+And a discriminant the producer never recorded is unrecoverable by any
+system: if two shapes interleave with no field telling them apart, the
+census shows you the interleaving, but no tool — here or anywhere — can
+conjure the missing label. Fix that at the producer, or bind readings by row
+range with restatements.
+
+#### Schema validation: gate or tripwire
+
+A type with a schema chooses what happens when a payload doesn't match it,
+via `validate`:
+
+- `0` — none (the default). Payloads are never checked.
+- `1` — **gate**. A direct proposal whose payload violates the schema is
+  rejected with 400. Right for topics whose producers you control.
+- `2` — **announce** (the tripwire). The payload **still commits** — a
+  non-conformant CDC row is a true fact about the source, and refusing to
+  record it would make the log less true — and the first occurrence of each
+  *distinct divergent shape* emits a **ContractExtension** event to the topic
+  named by `schemaChangeTopic`. Right for CDC-fed topics, where the contract
+  polices reality instead of blocking it.
+
+```toml
+# 1. Declare the events topic first (any non-announce type works):
+#    POST /v1/type/schema-changes
+[type]
+name = "SchemaChanges"
+entityKind = "standalone"
+
+# 2. Declare the announce-typed topic pointing at it:
+#    POST /v1/type/photo-meta
+[type]
+name = "PhotoMeta"
+schemaType = "JSONSchema"
+schema = '{"type":"object","properties":{"caption":{"type":"string"}},"additionalProperties":false}'
+validate = 2
+schemaChangeTopic = "schema-changes"
+```
+
+Attach any ordinary syncable to `schema-changes` — a SQL projection into a
+warehouse table your dbt tests watch, or an `http` syncable posting to a
+webhook — and the data team learns *the day reality diverges from the
+contract*, with the diff in hand. The event carries the type id/name, the
+version validated against, the divergent shape's fingerprint, the observed
+shape, and the structured violations (paths and types only — never sample
+values), plus the source position when it arrived via CDC. Events are keyed
+`typeID:version:fingerprint` and delivery is at-least-once: one event per
+distinct shape (replicated dedupe, surviving restarts and failover), with the
+rare concurrent-detection duplicate converging in keyed sinks. The tripwire
+runs on every write path — CDC ingest (snapshot and streaming) and direct
+proposals — and it never pauses or fails a write; for a schema to catch
+*added* fields, declare `additionalProperties: false`.
+
+A running CDC worker validates against the contract that was current when the
+worker was built (the same point the type version it stamps is fixed). After
+blessing a new contract on an already-flowing topic, re-POST the ingestable —
+or restart the node — so its worker picks the contract up; direct proposals
+always validate against the current version.
+
+#### Repairing the reading: restatements
+
+An entity's stamped version is a *cache of the default reading in force at
+write time* — for CDC data, committed classified it; nobody asserted anything.
+When the census or the tripwire reveals that months of actuals are stamped v1
+but were really v2-shaped (the unannounced writer), the log's bytes are still
+true; the *reading* is wrong. There is no ALTER TABLE and no rewrite:
+**restatements** are append-only, consensus-ordered statements that rebind readings:
+
+```toml
+# POST /v1/restatement/photos-backfill-v2
+[restatement]
+type = "photo-meta"        # the type (topic) whose readings rebind
+fromIndex = 1200           # inclusive raft-index range of existing actuals
+toIndex = 8400
+readAsVersion = 2        # read these as v2
+fromVersion = 1            # optional: only entities STAMPED v1
+# predicate = '.writer == "app-b"'   # optional: the interleaved-writers case,
+                                     # a deterministic jq program (no now(), no env)
+```
+
+Every syncable — both modes — receives the authoritative reading: stamp ⊕
+restatement fold. A rebound entity dispatches, and enters the always-current
+migration chain, at its *effective* version, so a v2-shaped row wrongly
+stamped v1 is never mangled by the v1→v2 transform. Restatements are **immutable**:
+a wrong restatement is corrected by appending another — among matching restatements,
+later in the log wins, matching always against the stamp — and replaying data
+plus restatements history is deterministic at every `(data index, interpretation
+index)` pair. Topics with no restatements pay nothing on the read path.
+
+A restatement also marks dependent syncables **stale**
+(`GET /v1/syncable/{id}/status` → `interpretationStale`): rows synced before
+it landed were derived under the superseded reading. Staleness is loud and
+queryable, never auto-healed — re-derivation is yours to trigger:
+`POST /v1/syncable/{id}/rematerialize` replays the topic from index 0 through
+the current projection + interpretation while the keyed sink keeps serving
+(rows converge in place; a completion sweep removes rows the replay no longer
+produces), or blue-green a replacement for sink shapes that can't converge
+in place. `GET /v1/restatement` lists the registry.
 
 Configure a database to write into (sink):
 

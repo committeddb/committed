@@ -14,8 +14,8 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
-	"github.com/committeddb/committed/internal/cluster/db/dbfakes"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // testCtx returns a context with a generous deadline. PR2's blocking
@@ -99,32 +99,23 @@ func TestProposeType(t *testing.T) {
 	}
 }
 
+// TestResolveType resolves a type through the real path — propose, apply,
+// read back from wal.Storage — rather than a scripted storage double: the
+// latest ref resolves to the applied version-1 type, and an id that was
+// never proposed is ErrTypeMissing.
 func TestResolveType(t *testing.T) {
 	expected := createType("foo")
+	d, _ := newWalDB(t)
+	require.NoError(t, d.ProposeType(testCtx(t), expected.config))
 
-	// FakeStorage must return a sane FirstIndex BEFORE the DB is constructed:
-	// db.New synchronously starts a Raft node which calls FirstIndex during
-	// bootstrap. With the default zero return, etcd's raftLog computes
-	// committed = firstIndex - 1 = MaxUint64 and panics. (Previously this
-	// "worked" only because startRaft ran in a goroutine that hadn't been
-	// scheduled by the time the test finished.)
-	s := &dbfakes.FakeStorage{}
-	s.FirstIndexReturns(1, nil)
-	// raft 3.7's Storage contract requires a non-nil ConfState from
-	// InitialState (confchange.Restore dereferences it during bootstrap);
-	// the zero-value fake would return nil and panic the node start.
-	s.InitialStateReturns(&raftpb.HardState{}, &raftpb.ConfState{}, nil)
-	s.ResolveTypeReturns(expected.tipe, nil)
+	got, err := d.ResolveType(cluster.LatestTypeRef(expected.tipe.ID))
+	require.NoError(t, err)
+	require.Equal(t, expected.tipe.ID, got.ID)
+	require.Equal(t, expected.tipe.Name, got.Name)
+	require.Equal(t, expected.tipe.Version, got.Version)
 
-	db := createDBWithStorage(s)
-	defer db.Close()
-
-	got, err := db.ResolveType(cluster.LatestTypeRef(expected.tipe.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	require.Equal(t, expected.tipe, got)
+	_, err = d.ResolveType(cluster.LatestTypeRef("never-proposed"))
+	require.ErrorIs(t, err, wal.ErrTypeMissing)
 }
 
 // TODO Test deletes - may have to test with a syncable because a delete doesn't have context except when read

@@ -40,6 +40,11 @@ import (
 // SQLServerDialect implements sql.Dialect for SQL Server sources via Change
 // Tracking. Stateless — per-worker state lives in Ingest's locals.
 type SQLServerDialect struct {
+	// Features is the cluster feature-level gate (db.FeatureEnabled), wired by
+	// the node. It decides the uniqueidentifier rendering for each session —
+	// see featureLevelCanonicalUUID. Nil (tests constructing the dialect
+	// directly) means the gate is open: the 0.8.0 rendering.
+	Features FeatureReader
 	// snapshotBatchHook is test-only failure injection for resume tests (the
 	// same seam the other dialects expose). Nil in production.
 	snapshotBatchHook func(table string, batch int) error
@@ -220,32 +225,10 @@ func (d *SQLServerDialect) SourceColumns(config *sql.Config) (columns, generated
 	generated = make(map[string][]string)
 	for _, table := range config.Tables {
 		ref := resolveTableRef(table)
-		rows, err := db.QueryContext(ctx, `
-			SELECT name, is_computed
-			FROM sys.columns
-			WHERE object_id = OBJECT_ID(@p1)
-			ORDER BY column_id`, ref.objectID())
+		cols, gen, err := sourceTableColumns(ctx, db, ref)
 		if err != nil {
 			return nil, nil, fmt.Errorf("[sqlserver] columns of %s: %w", table, err)
 		}
-		var cols, gen []string
-		for rows.Next() {
-			var name string
-			var computed bool
-			if err := rows.Scan(&name, &computed); err != nil {
-				_ = rows.Close()
-				return nil, nil, err
-			}
-			cols = append(cols, name)
-			if computed {
-				gen = append(gen, name)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, nil, err
-		}
-		_ = rows.Close()
 		if len(cols) == 0 {
 			return nil, nil, fmt.Errorf("[sqlserver] table %s not found (schema %s)", table, ref.schema)
 		}
@@ -257,6 +240,34 @@ func (d *SQLServerDialect) SourceColumns(config *sql.Config) (columns, generated
 	return columns, generated, nil
 }
 
+// sourceTableColumns reads one table's column names in source order and its
+// computed-column subset from sys.columns. Empty cols means the table does
+// not exist (OBJECT_ID resolved to NULL). Shared by SourceColumns and the
+// poll loop's key-drift classifier.
+func sourceTableColumns(ctx context.Context, db *gosql.DB, ref tableRef) (cols, generated []string, err error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT name, is_computed
+		FROM sys.columns
+		WHERE object_id = OBJECT_ID(@p1)
+		ORDER BY column_id`, ref.objectID())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		var computed bool
+		if err := rows.Scan(&name, &computed); err != nil {
+			return nil, nil, err
+		}
+		cols = append(cols, name)
+		if computed {
+			generated = append(generated, name)
+		}
+	}
+	return cols, generated, rows.Err()
+}
+
 // Status decodes the checkpoint into a point-in-time IngestableStatus and,
 // when streaming, diffs the consumed CT version against the source's current
 // version for a transaction-count lag — plus the retention check: any
@@ -265,51 +276,42 @@ func (d *SQLServerDialect) SourceColumns(config *sql.Config) (columns, generated
 // rather than an understated lag. Source-query failures leave Lag nil (soft,
 // logged at Debug), same posture as the other dialects.
 func (d *SQLServerDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
-	config.EnsureTopics()
-	if len(pos) == 0 {
-		return sql.PendingStatus(config), nil
+	var version uint64
+	decode := func(pos cluster.Position) (sql.StatusInputs, error) {
+		posProto := &dialectpb.SQLServerPosition{}
+		if err := proto.Unmarshal(pos, posProto); err != nil {
+			return sql.StatusInputs{}, fmt.Errorf("[sqlserver.status] decode position: %w", err)
+		}
+		version = posProto.Version
+		return sql.StatusInputs{Position: fmt.Sprintf("ct:%d", posProto.Version), Progress: posProto.SnapshotProgress}, nil
 	}
-	posProto := &dialectpb.SQLServerPosition{}
-	if err := proto.Unmarshal(pos, posProto); err != nil {
-		return cluster.IngestableStatus{}, fmt.Errorf("[sqlserver.status] decode position: %w", err)
+	probe := func(ctx context.Context, status *cluster.IngestableStatus) {
+		cctx, cancel := context.WithTimeout(ctx, statusQueryTimeout)
+		defer cancel()
+		db, err := openSQLServer(config.ConnectionString)
+		if err != nil {
+			zap.L().Debug("[sqlserver.status] open failed", zap.Error(err))
+			return
+		}
+		defer func() { _ = db.Close() }()
+		current, minValid, err := readCTState(cctx, db, config)
+		if err != nil {
+			zap.L().Debug("[sqlserver.status] ct state query failed", zap.Error(err))
+			return
+		}
+		if minValid > version {
+			status.ReSnapshotRequired = true
+			return
+		}
+		var lag uint64
+		if current > version {
+			lag = current - version
+		}
+		status.Lag = &lag
+		status.LagUnit = cluster.LagUnitTransactions
+		status.CaughtUp = lag == 0
 	}
-
-	status := cluster.IngestableStatus{
-		Position:         fmt.Sprintf("ct:%d", posProto.Version),
-		SnapshotProgress: sql.SnapshotTableStatus(config, posProto.SnapshotProgress),
-	}
-	if posProto.SnapshotProgress != nil {
-		status.Phase = "snapshot"
-		return status, nil
-	}
-	status.Phase = "streaming"
-
-	cctx, cancel := context.WithTimeout(ctx, statusQueryTimeout)
-	defer cancel()
-	db, err := openSQLServer(config.ConnectionString)
-	if err != nil {
-		zap.L().Debug("[sqlserver.status] open failed", zap.Error(err))
-		return status, nil
-	}
-	defer func() { _ = db.Close() }()
-
-	current, minValid, err := readCTState(cctx, db, config)
-	if err != nil {
-		zap.L().Debug("[sqlserver.status] ct state query failed", zap.Error(err))
-		return status, nil
-	}
-	if minValid > posProto.Version {
-		status.ReSnapshotRequired = true
-		return status, nil
-	}
-	var lag uint64
-	if current > posProto.Version {
-		lag = current - posProto.Version
-	}
-	status.Lag = &lag
-	status.LagUnit = cluster.LagUnitTransactions
-	status.CaughtUp = lag == 0
-	return status, nil
+	return sql.RenderStatus(ctx, config, pos, decode, probe)
 }
 
 // readCTState reads the source's current CT version and the MAXIMUM of the
@@ -469,6 +471,59 @@ func (d *SQLServerDialect) TeardownSource(config *sql.Config) error {
 	return nil
 }
 
+// FeatureReader answers whether the whole cluster is at a feature level —
+// the db's cluster-minimum gate, sized to this dialect's one question.
+type FeatureReader interface {
+	FeatureEnabled(level uint64) bool
+}
+
+// featureLevelCanonicalUUID gates the canonical (RFC 4122 lowercase)
+// uniqueidentifier rendering. The spelling is in entity KEYS: a cluster where
+// one owner renders uppercase and the next lowercase would key the same row
+// twice, so every node keeps the pre-0.8.0 uppercase rendering until every
+// member announces level 5. See version.FeatureLevel and sessionUUIDRendering.
+const featureLevelCanonicalUUID uint64 = 5
+
+// The two uniqueidentifier renderings a checkpoint can record
+// (SQLServerPosition.uuid_rendering).
+const (
+	uuidRenderingLegacy    uint32 = 0 // the driver's UPPERCASE GUID; every pre-field checkpoint
+	uuidRenderingCanonical uint32 = 1 // RFC 4122 lowercase — what PostgreSQL's uuid ingests as
+)
+
+// canonicalUUIDEnabled reports whether this node may render canonically.
+func (d *SQLServerDialect) canonicalUUIDEnabled() bool {
+	return d.Features == nil || d.Features.FeatureEnabled(featureLevelCanonicalUUID)
+}
+
+// sessionUUIDRendering decides one session's uniqueidentifier rendering from
+// the checkpoint it resumes and the cluster gate, and whether the session must
+// first re-snapshot (rerender): the checkpoint was spelled the OTHER way, so
+// every uniqueidentifier key and payload field on the sink is the old spelling
+// and only a full re-emission at a bumped epoch (whose closing markers sweep
+// the old rows on keyed sinks) re-keys it. The promotion is one-way: a
+// canonical checkpoint stays canonical even if the gate reads closed (a
+// member mid-join announces level 0 for a moment), so a membership change can
+// never flip a sink back to uppercase.
+func sessionUUIDRendering(checkpoint uint32, hasCheckpoint, gateOpen bool) (rendering uint32, rerender bool) {
+	if checkpoint == uuidRenderingCanonical {
+		return uuidRenderingCanonical, false
+	}
+	if gateOpen {
+		return uuidRenderingCanonical, hasCheckpoint
+	}
+	return uuidRenderingLegacy, false
+}
+
+// renderUniqueidentifier spells a GUID for this session: the driver's
+// uppercase form (legacy), or RFC 4122 lowercase (canonical).
+func renderUniqueidentifier(u mssql.UniqueIdentifier, canonical bool) string {
+	if canonical {
+		return strings.ToLower(u.String())
+	}
+	return u.String()
+}
+
 // columnCategories maps a result set's driver type metadata onto the shared
 // JSON categories, keyed by LOWERCASED column name (the shared decode
 // contract). uniqueidentifier is flagged for the mixed-endian byte fix (see
@@ -501,9 +556,9 @@ func columnCategories(types []*gosql.ColumnType) (cats map[string]sql.JSONCatego
 // scanRowValues scans the current row into a lowercased-column value map,
 // fixing the uniqueidentifier representation: the driver hands GUIDs back as
 // their 16 raw mixed-endian bytes, which would render as garbage text —
-// convert to the canonical string form the same way on every read path so
-// snapshot and CT payloads agree byte-for-byte.
-func scanRowValues(rows *gosql.Rows, cols []string, uuidCols map[string]bool) (map[string]any, error) {
+// convert to the session's string form the same way on every read path so
+// snapshot and CT payloads agree byte-for-byte (see renderUniqueidentifier).
+func scanRowValues(rows *gosql.Rows, cols []string, uuidCols map[string]bool, canonicalUUID bool) (map[string]any, error) {
 	vals := make([]any, len(cols))
 	ptrs := make([]any, len(cols))
 	for i := range vals {
@@ -520,7 +575,7 @@ func scanRowValues(rows *gosql.Rows, cols []string, uuidCols map[string]bool) (m
 			if b, ok := v.([]byte); ok && len(b) == 16 {
 				var u mssql.UniqueIdentifier
 				if err := u.Scan(b); err == nil {
-					v = u.String()
+					v = renderUniqueidentifier(u, canonicalUUID)
 				}
 			}
 		}

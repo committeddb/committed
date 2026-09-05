@@ -4,11 +4,9 @@ import (
 	"context"
 	gosql "database/sql"
 	"fmt"
-	"maps"
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -18,12 +16,13 @@ import (
 
 // encodePosition marshals the durable checkpoint. Plain proto — this dialect
 // has no legacy format to magic-byte around.
-func encodePosition(version uint64, progress *dialectpb.SnapshotProgress, epoch uint64, snapshotted []string) (cluster.Position, error) {
+func encodePosition(version uint64, progress *dialectpb.SnapshotProgress, epoch uint64, snapshotted []string, rendering uint32) (cluster.Position, error) {
 	bs, err := proto.Marshal(&dialectpb.SQLServerPosition{
 		Version:           version,
 		SnapshotProgress:  progress,
 		RefreshEpoch:      epoch,
 		SnapshottedTables: snapshotted,
+		UuidRendering:     rendering,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode position: %w", err)
@@ -31,170 +30,49 @@ func encodePosition(version uint64, progress *dialectpb.SnapshotProgress, epoch 
 	return bs, nil
 }
 
-// newSnapshotProgress seeds a mutable progress cursor from a durable one
-// (nil-safe), carrying the partial-backfill mark — dropping it would let a
-// crash mid-backfill resume as a FULL refresh whose closing marker sweeps the
-// sibling rows the backfill never re-emits (the shared propagation contract).
-func newSnapshotProgress(seed *dialectpb.SnapshotProgress) *dialectpb.SnapshotProgress {
-	p := &dialectpb.SnapshotProgress{LastPkByTable: map[string]string{}}
-	if seed != nil {
-		maps.Copy(p.LastPkByTable, seed.LastPkByTable)
-		p.CompletedTables = append(p.CompletedTables, seed.CompletedTables...)
-		p.PartialBackfill = seed.PartialBackfill
-	}
-	return p
+// snapshot enumerates tables into the log at the captured change-tracking
+// version: the shared snapshot pass (sql.RunSnapshot) drives the
+// resume/complete bookkeeping and the inline checkpoints; this dialect
+// supplies the keyset batch SQL and the checkpoint encoding at version.
+func (d *SQLServerDialect) snapshot(ctx context.Context, s *session, progress *dialectpb.SnapshotProgress) error {
+	config := s.config
+	// The inline checkpoints record every configured table as snapshotted
+	// (the registry the completion checkpoint will carry), at the session's
+	// base version and epoch.
+	version, epoch, snapshotted, rendering := s.version, s.epoch, config.Tables, s.rendering
+	return sql.RunSnapshot(ctx, sql.SnapshotRun{
+		Config:    config,
+		Reader:    sqlserverSnapshotReader{db: s.db, canonicalUUID: s.canonicalUUID()},
+		Tables:    config.Tables,
+		Progress:  progress,
+		Epoch:     epoch,
+		BatchSize: sql.ParseBatchSize(config.Options, defaultSnapshotBatchSize),
+		Readers:   1,
+		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
+			return encodePosition(version, p, epoch, snapshotted, rendering)
+		},
+		BatchHook: d.snapshotBatchHook,
+		Proposals: s.pr,
+		Positions: s.po,
+	})
 }
 
-// stampGeneration sets the reconciling-refresh epoch on every entity in a
-// batch (same helper as the other dialects; per-dialect because it touches
-// the dialect's batch shapes).
-func stampGeneration(entities []*cluster.Entity, epoch uint64) {
-	for _, e := range entities {
-		e.Generation = epoch
-	}
+// defaultSnapshotBatchSize is the keyset batch when Config.Options has no
+// "batch_size" override. Smaller than the MySQL/Postgres default: the
+// change-tracking dialect's snapshot reads are plainer OFFSET-free keyset
+// scans against sources that are typically smaller.
+const defaultSnapshotBatchSize = 1000
+
+// sqlserverSnapshotReader is the dialect's snapshot adapter: one keyset
+// batch per call (readBatch). canonicalUUID is the session's
+// uniqueidentifier rendering (see renderUniqueidentifier).
+type sqlserverSnapshotReader struct {
+	db            *gosql.DB
+	canonicalUUID bool
 }
 
-// snapshot dumps existing rows from the given tables with keyset pagination —
-// one short read transaction per batch, per-table resume progress, inline
-// checkpoints riding the proposals (Proposal.Position, the shared
-// effectively-once contract for SourceSeq-0 snapshot rows). The CT version was
-// captured BEFORE the first read, so every change racing the snapshot is also
-// re-delivered by the poll loop — the shared convergent contract.
-func (d *SQLServerDialect) snapshot(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	tables []string,
-	progress *dialectpb.SnapshotProgress,
-	version uint64,
-	epoch uint64,
-	snapshotted []string,
-	pr chan<- *cluster.Proposal,
-	po chan<- cluster.Position,
-) error {
-	batchSize := batchSizeOption(config.Options)
-
-	completed := make(map[string]bool, len(progress.CompletedTables))
-	for _, t := range progress.CompletedTables {
-		completed[t] = true
-	}
-
-	// Table-level resume-vs-fresh announcement; the keyset cursor itself is
-	// never logged (a natural PK is often source PII — the shared logging
-	// contract).
-	if len(completed) > 0 || len(progress.LastPkByTable) > 0 {
-		zap.L().Info("snapshot: resuming from checkpoint",
-			zap.Int("tables_complete", len(completed)),
-			zap.Int("tables_resuming", len(progress.LastPkByTable)),
-			zap.Int("tables_total", len(tables)),
-			zap.Uint64("refresh_epoch", epoch))
-	} else {
-		zap.L().Info("snapshot: starting fresh",
-			zap.Int("tables_total", len(tables)),
-			zap.Uint64("refresh_epoch", epoch))
-	}
-
-	for _, table := range tables {
-		if completed[table] {
-			zap.L().Info("snapshot: skipping already-completed table", zap.String("table", table))
-			continue
-		}
-		if err := d.snapshotTable(ctx, db, config, table, batchSize, progress, version, epoch, snapshotted, pr); err != nil {
-			return fmt.Errorf("snapshot: table %s: %w", table, err)
-		}
-		progress.CompletedTables = append(progress.CompletedTables, table)
-		delete(progress.LastPkByTable, table)
-		completed[table] = true
-
-		posBytes, err := encodePosition(version, progress, epoch, snapshotted)
-		if err != nil {
-			return err
-		}
-		select {
-		case po <- posBytes:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		zap.L().Info("snapshot: table complete", zap.String("table", table))
-	}
-	return nil
-}
-
-// snapshotTable reads one table in keyset-paginated batches, handing rows off
-// as single-row proposals with inline stride checkpoints.
-func (d *SQLServerDialect) snapshotTable(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	table string,
-	batchSize int,
-	progress *dialectpb.SnapshotProgress,
-	version uint64,
-	epoch uint64,
-	snapshotted []string,
-	pr chan<- *cluster.Proposal,
-) error {
-	spec := config.SpecForTable(table)
-	if spec == nil {
-		return fmt.Errorf("no topic-spec routes table %q", table)
-	}
-	lastPK, haveLastPK := progress.LastPkByTable[table]
-
-	batchNum := 0
-	totalRows := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		batchNum++
-		if d.snapshotBatchHook != nil {
-			if err := d.snapshotBatchHook(table, batchNum); err != nil {
-				return err
-			}
-		}
-
-		entities, batchLastPK, count, err := readBatch(ctx, db, table, spec, lastPK, haveLastPK, batchSize)
-		if err != nil {
-			return err
-		}
-		if count == 0 {
-			break
-		}
-		stampGeneration(entities, epoch)
-
-		lastPK = batchLastPK
-		haveLastPK = true
-
-		stride := sql.SnapshotCheckpointStride
-		for ri, row := range entities {
-			p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
-			if ri == len(entities)-1 || (ri+1)%stride == 0 {
-				progress.LastPkByTable[table] = string(row.Key)
-				posBytes, err := encodePosition(version, progress, epoch, snapshotted)
-				if err != nil {
-					return err
-				}
-				p.Position = posBytes
-			}
-			select {
-			case pr <- p:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		totalRows += count
-
-		zap.L().Info("snapshot: batch flushed",
-			zap.String("table", table),
-			zap.Int("batch", batchNum),
-			zap.Int("rows_in_batch", count),
-			zap.Int("rows_total", totalRows))
-
-		if count < batchSize {
-			break
-		}
-	}
-	return nil
+func (r sqlserverSnapshotReader) ReadBatch(ctx context.Context, table string, spec *sql.TopicSpec, lastPK string, haveLastPK bool, batchSize int) ([]*cluster.Entity, string, int, error) {
+	return readBatch(ctx, r.db, table, spec, lastPK, haveLastPK, batchSize, r.canonicalUUID)
 }
 
 // readBatch reads up to batchSize rows past the keyset cursor in one short
@@ -216,6 +94,7 @@ func readBatch(
 	lastPK string,
 	haveLastPK bool,
 	batchSize int,
+	canonicalUUID bool,
 ) ([]*cluster.Entity, string, int, error) {
 	ref := resolveTableRef(table)
 	pkCols := spec.PrimaryKey
@@ -276,7 +155,7 @@ func readBatch(
 	var lastKey string
 	count := 0
 	for rows.Next() {
-		m, err := scanRowValues(rows, cols, uuidCols)
+		m, err := scanRowValues(rows, cols, uuidCols, canonicalUUID)
 		if err != nil {
 			return nil, "", 0, err
 		}
@@ -291,18 +170,6 @@ func readBatch(
 		return nil, "", 0, err
 	}
 	return entities, lastKey, count, nil
-}
-
-// batchSizeOption reads the snapshot batch size, defaulting to the shared
-// convention (mirrors the other dialects' parseBatchSize).
-func batchSizeOption(options map[string]string) int {
-	if v := options["batch_size"]; v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 1000
 }
 
 // snapshotBaseVersion captures the CT version the poll loop will resume from,

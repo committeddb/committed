@@ -4,11 +4,25 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 )
+
+// makeNodeBolt creates a minimal node metadata/bbolt.db and returns the data
+// dir. (The stopped-node lock's own tests live with the lock in datadir.)
+func makeNodeBolt(t *testing.T) string {
+	t.Helper()
+	dataDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(datadir.MetadataDir(dataDir), 0o700))
+	db, err := bolt.Open(datadir.BoltPath(datadir.MetadataDir(dataDir)), 0o600, &bolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	return dataDir
+}
 
 // makeCompleteNode extends makeNodeBolt into a full, backup-able node directory:
 // the four canonical subtrees backup.Create requires (event log, raft entry log,

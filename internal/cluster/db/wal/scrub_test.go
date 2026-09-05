@@ -312,7 +312,7 @@ func TestScrub_AsyncViaCommand(t *testing.T) {
 
 	// Apply a real Scrub command (bound 3) at idx 5 → handleScrub records the
 	// pending bound and signals the worker.
-	scrubEnt, err := cluster.NewScrubEntity(3)
+	scrubEnt, err := cluster.NewScrubEntity(3, false)
 	require.Nil(t, err)
 	saveEntity(t, scrubEnt, s, 1, 5)
 

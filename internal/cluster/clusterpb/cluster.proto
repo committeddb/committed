@@ -16,46 +16,40 @@ message TypeRef {
 
 message LogEntity {
     TypeRef type = 1;
-	bytes Key = 2;
-	bytes Data = 3;
-	// Field 4 was Timestamp (server-stamped wall-clock at propose time). A
-	// clock value in a consensus log is an anti-pattern — the raft index is
-	// the ordering authority and the timestamp was just one node's possibly-
-	// skewed clock — so it was removed. Reserved so the number is never
-	// reused with an incompatible meaning against any on-disk data.
-	reserved 4;
-	reserved "Timestamp";
-	// generation is the ingest refresh epoch that stamped this entity — a
-	// per-ingestable monotonic counter (starting at 1) the worker carries in
-	// its position and applies to EVERY emitted entity, snapshot and streaming
-	// alike. It drives reconciling ("full-refresh") snapshots: on a full
-	// re-snapshot the worker bumps the epoch, re-emits every live source row at
-	// the new epoch, and closes with a refresh-boundary marker; a keyed sink
-	// then sweeps any row still carrying an older generation (a row deleted at
-	// the source in a lost change-data window, which a positive re-enumeration
-	// can never signal). 0 means "not stamped by a refresh-managed ingest"
-	// (direct user writes, config records, pre-feature log entries) and is
-	// never swept. Backward compatible: old entries unmarshal as 0.
-	uint64 generation = 5;
-	// refresh_boundary marks this entity as a refresh-boundary MARKER rather
-	// than row data: it carries no Key/Data, and `generation` is the epoch G at
-	// which its topic was fully refreshed. A keyed sink reacts by sweeping every
-	// row of that topic whose generation is < G (>= 1). Emitted once per topic
-	// at the end of an all-tables full refresh — NEVER after a partial
-	// added-table backfill (that would delete the topic's sibling tables). A
-	// consumer that does not implement reconciliation treats it as a no-op.
-	bool refresh_boundary = 6;
+	// Fields 2/3/5/6 were the pre-envelope flat encoding (Key, Data,
+	// generation, refresh_boundary), written only by <= 0.7.2-beta binaries.
+	// The 0.8.0 data-dir support floor is 0.7.3-beta (the envelope era; no
+	// deployment ever ran the flat era), so the decode-only legacy path was
+	// removed with them: flat bytes now trip the unknown-wire-fields guard in
+	// cluster.logEntityView and fail decode loudly. Reserved so the numbers
+	// are never reused with an incompatible meaning against on-disk data.
+	// Field 4 was Timestamp (server-stamped wall-clock at propose time) — a
+	// clock value in a consensus log is an anti-pattern; the raft index is
+	// the ordering authority — removed long before the flat era ended.
+	reserved 2, 3, 4, 5, 6;
+	reserved "Key", "Data", "Timestamp", "generation", "refresh_boundary";
 
 	// body is the typed control envelope: exactly one variant per entity, so an
 	// entity's role — row datum, delete tombstone, refresh marker — is explicit
 	// on the wire, and impossible states (a refresh carrying a key, a row
 	// carrying keep_data) are unrepresentable. Writers encode EVERY entity as a
-	// body variant; the flat Key/Data/generation/refresh_boundary fields above
-	// are LEGACY (logs written by <= 0.7.2-beta), mapped into the same view at
-	// decode and never written again. Do not add new flat fields — add a new
-	// body variant instead: wire-level add-only (an old reader sees body unset),
-	// with its EMISSION feature-gated (db.featureEnabled) so the variant is only
-	// committed once every member can apply it. See docs/api-compatibility.md.
+	// body variant. Do not add flat fields — add a new body variant instead:
+	// wire-level add-only (an old reader sees body unset), with its EMISSION
+	// feature-gated (db.featureEnabled) so the variant is only committed once
+	// every member can apply it. See docs/api-compatibility.md.
+	//
+	// generation semantics (LogRow.generation / LogRefresh.generation): the
+	// ingest reconciling-refresh epoch — a per-ingestable monotonic counter
+	// (starting at 1) the worker carries in its position and stamps on every
+	// emitted entity, snapshot and streaming alike. On a full re-snapshot the
+	// worker bumps the epoch, re-emits every live source row at it, and closes
+	// with a refresh-boundary marker carrying the epoch G; a keyed sink then
+	// sweeps any row of that topic still below G (a row deleted at the source
+	// in a lost change-data window, which a positive re-enumeration can never
+	// signal). 0 means "not stamped by a refresh-managed ingest" and is never
+	// swept. Markers are emitted once per topic at the end of an all-tables
+	// full refresh — NEVER after a partial added-table backfill (that would
+	// delete the topic's sibling tables).
 	oneof body {
 		LogRow row = 7;
 		LogDelete delete = 8;
@@ -104,10 +98,15 @@ message LogProposal {
     // ingestableID + sourceSeq tag a proposal emitted by an ingest worker
     // for a given source event. sourceSeq is a per-ingestable monotonic
     // position (Postgres LSN, MySQL binlog file+offset) the dialect stamps
-    // on every emitted proposal. The apply path advances a per-ingestable
-    // highwater to max(highwater, sourceSeq), and the leader's worker
-    // skips re-emitted proposals (sourceSeq <= highwater) BEFORE they
-    // enter raft — giving effectively-once ingest. Empty ID / zero seq
+    // on every emitted proposal. For dialects that opt in (txnScopedDedup
+    // below), the apply path folds (sourceSeq, sourceTxnID) into a
+    // TRANSACTION-scoped dedup record — the seq highwater within the last
+    // applied source transaction — and the leader's worker skips a
+    // re-emitted proposal BEFORE raft only when it belongs to that same
+    // transaction at or below the highwater (effectively-once ingest); a
+    // different transaction resets the record. Without the opt-in (and for
+    // every pre-feature entry) the record keeps the legacy global-max
+    // semantics, so an old log replays bit-for-bit. Empty ID / zero seq
     // means "not an ingest proposal" and is never deduped. Backward
     // compatible: pre-feature entries unmarshal as "" / 0.
     string ingestableID = 3;
@@ -120,11 +119,47 @@ message LogProposal {
     // SourceSeq dedup cannot cover (snapshot rows have sourceSeq 0). Streaming
     // still checkpoints out-of-band. Empty means "no bundled position".
     bytes position = 5;
+    // sourceCommitUnixNano + sourceTxnID are capture provenance on a CDC
+    // proposal: when the SOURCE committed this change and which source
+    // transaction produced it. Stamped by the dialect from the change stream
+    // (MySQL binlog event-header timestamp + GTID, Postgres pgoutput
+    // Begin commit-time + xid, SQL Server change-tracking version +
+    // sys.dm_tran_commit_table — fidelity varies by dialect, see
+    // docs/operations/cdc-setup.md "How ingest works"). Proposal-level because all
+    // rows in one emitted proposal come from one source transaction context.
+    // Provenance only — nothing in apply or sync reads them; they preserve
+    // what becomes unrecoverable once the source's binlog/WAL retention
+    // expires (time→index translation, co-transaction evidence). Zero/empty
+    // means "not captured": pre-feature log entries, snapshot-phase proposals
+    // (a snapshot row has no source transaction), and direct user proposals
+    // all unmarshal compatibly as absent.
+    int64 sourceCommitUnixNano = 6;
+    string sourceTxnID = 7;
+    // txnScopedDedup is the emitting dialect's opt-in to TRANSACTION-scoped
+    // dedup: it declares that the dialect's resume granularity is
+    // per-source-transaction (its commit flush bundles the post-transaction
+    // position, so a resume can re-emit at most the single in-flight
+    // transaction). Only then does the apply fold scope the dedup record by
+    // sourceTxnID; unset (every pre-feature entry, and dialects whose
+    // checkpoint is coarser than their transaction stamps — SQL Server's
+    // per-poll-window checkpoint) keeps the legacy global-scalar semantics.
+    // Provenance (sourceTxnID) is thus decoupled from dedup scope: stamping
+    // an identity never changes dedup behavior without this flag.
+    bool txnScopedDedup = 8;
 }
 
 enum LogValidationStrategy {
     NoValidation = 0;
     ValidateSchema = 1;
+    // ValidateAnnounce is the tripwire, never a gate: a payload that diverges
+    // from the Type's schema still COMMITS (a non-conformant CDC row is a true
+    // fact about the source; refusing to record it makes the log less true),
+    // and the first occurrence of each distinct divergent shape emits a
+    // ContractExtension event to the Type's schemaChangeTopic so the data team
+    // learns the day reality diverges from the contract. Wire add-only: an
+    // older binary reads the unknown enum value, compiles no validator, and
+    // simply neither gates nor announces.
+    ValidateAnnounce = 2;
 }
 
 // LogEntityKind declares what the entities written under a type are —
@@ -182,6 +217,25 @@ message LogType {
     // EntityKindEvent; recorded so projection-style syncables can
     // default their match rules to it.
     string Discriminator = 9;
+    // SchemaChangeTopic is the Type ID of the topic that receives
+    // ContractExtension events when data claiming THIS type diverges from its
+    // schema under ValidateAnnounce. Type-level (not ingestable-level) so both
+    // arrival paths — CDC ingest and direct proposals — announce through one
+    // knob; the destination follows the contract it polices, beside Validate.
+    // Empty for non-announce types. Add-only: pre-feature types unmarshal "".
+    string SchemaChangeTopic = 10;
+    // NonConvertible declares the third migration intent (alongside
+    // transform / none): THIS version requires information the previous
+    // version's actuals never contained, so no program can upgrade old data
+    // — migration is view-side and PARTIAL by nature. Declared as
+    // `nonConvertible = true` in the [migration] section. Consequences:
+    // always-current syncables are refused at admission across the break
+    // (the stances that remain are version-pinned and version-aware), a
+    // ProposeType that strands existing always-current syncables requires
+    // force, and the runtime migration chain dead-letters old-stamped
+    // entities at the break instead of silently delivering unconverted
+    // data. Add-only: pre-feature versions unmarshal false.
+    bool NonConvertible = 11;
 }
 
 message LogConfiguration {
@@ -194,6 +248,115 @@ message LogConfiguration {
 message LogSyncableIndex {
     string ID = 1;
     uint64 Index = 2;
+    // interpretationIndex is the second half of the determinism pair
+    // (data index, interpretation index) every derived checkpoint is pinned
+    // to: the raft index of the last interpretation-registry record (see
+    // LogRestatement) folded into the readings this syncable's outputs were
+    // derived under. Same pair ⇒ same output — the replay-determinism
+    // statement the 0.8.x three-layer track hangs on. 0 means "no registry
+    // records folded", which is the only value until the restatement registry
+    // lands later in the 0.8.x series (the field ships early so the
+    // checkpoint format never migrates mid-series). Wire add-only:
+    // pre-feature checkpoints unmarshal as 0 and a 0 stamps no bytes.
+    uint64 interpretationIndex = 3;
+}
+
+// LogContractFingerprint is the validation tripwire's replicated dedupe mark:
+// "the divergent shape with this fingerprint has been announced for this type
+// version." Written in the SAME proposal as its ContractExtension event (the
+// event entity leads, under the operator's schemaChangeTopic type), so the
+// announcement and its dedupe mark commit atomically — the tripwire emits one
+// event per distinct divergent shape, surviving worker restarts and
+// leadership moves because the mark is consensus-replicated state, not a
+// node-local note. Keyed by (typeID, version, fingerprint). Its type UUID is
+// UNGATED in the system-type namespace: an older node skips it, which at
+// worst re-announces a shape later (consumers key on the fingerprint and
+// converge — the documented at-least-once contract).
+message LogContractFingerprint {
+    // typeID + version identify the contract the payload diverged from.
+    string typeID = 1;
+    uint32 version = 2;
+    // fingerprint is the payload's shape signature (cluster.JSONShapeSignature).
+    string fingerprint = 3;
+}
+
+// LogIngestableCensus is the JSON shape census an ingest worker takes during
+// its snapshot pass — the free census of every historical row the pass
+// already streams. One record per ingestable (Snapshot kind, upsert), carrying
+// the census content as JSON (see cluster.IngestableCensus): per topic, the
+// distinct payload shapes (fingerprint → count and first/last row ordinal),
+// and — only when the operator opts in — bounded distinct string values for
+// enum drafting. Types and paths only by default: the PII posture keeps
+// source VALUES out of replicated state unless censusValues is set. Published
+// with a throttle during the pass and at its end; replicated so ANY node's
+// status endpoint serves it. Ungated in the system-type namespace: an older
+// node skips it (stale census until upgrade — observability, not
+// correctness).
+message LogIngestableCensus {
+    string ID = 1;
+    // refreshEpoch is the ingest refresh epoch (entity Generation) the census
+    // observed. A fresh full snapshot bumps the epoch, so a worker seeing a
+    // HIGHER epoch resets rather than double-counting re-observed rows; a
+    // resume at the SAME epoch seeds from this record and continues.
+    uint64 refreshEpoch = 2;
+    // census is the JSON-encoded map[topicID]cluster.TopicCensus.
+    bytes census = 3;
+}
+
+// LogSyncableRematerialization records that a syncable is re-materializing:
+// its worker is replaying the topic from index 0 through the CURRENT
+// projection + interpretation, converging the keyed sink in place (the
+// non-destructive sibling of the rebuild verb). targetHead is the data head
+// at the moment the verb was accepted: when the replay's checkpoint reaches
+// it, the sink sweeps every row the replay never positively re-emitted and
+// this record is deleted. Upsert/delete keyed by syncable id; replicated so
+// a restart resumes the re-materialization from its checkpoint and any node
+// reports the progress. Ungated: an older node skips it (it just doesn't
+// show remat progress until upgraded — the worker actions are owner-local).
+message LogSyncableRematerialization {
+    string ID = 1;
+    uint64 targetHead = 2;
+}
+
+// LogRestatement is the restatement interpretation-registry record: an append-only,
+// consensus-ordered statement that rebinds how already-committed actuals are
+// READ — never their bytes. A stamped TypeRef is a cache of the default
+// reading in force at write time; the authoritative reading is the stamp ⊕
+// the restatement fold, where later-in-log wins (a wrong restatement is corrected by
+// another restatement, never edited).
+//
+// RESERVED SHAPE (0.8.x format groundwork): this release defines the record
+// and its type identity so the on-disk shape never migrates mid-series —
+// nothing emits or applies it yet; the registry semantics (fold, read-path
+// resolution, admission validation) land later in the 0.8.x series. The type
+// UUID (cluster.RestatementTypeID) is minted in the system-type namespace as
+// GATED (must-understand): a node that cannot fold restatements must not skip
+// them, or its syncables would emit stale readings — and emission will
+// additionally be FeatureLevel-gated so the record is never committed while
+// a member that can't apply it is present.
+message LogRestatement {
+    // typeID names the Type whose stamped readings are rebound.
+    string typeID = 1;
+    // fromIndex..toIndex is the INCLUSIVE raft-index range of actuals the
+    // restatement covers.
+    uint64 fromIndex = 2;
+    uint64 toIndex = 3;
+    // readAsVersion is the Type version matching actuals read as (the
+    // uint32 mirrors TypeRef.Version).
+    uint32 readAsVersion = 4;
+    // predicate, when non-empty, narrows the range to payloads matching a
+    // deterministic program (the interleaved-writers case); empty means the
+    // whole range rebinds (a range binding). The rule language is pinned to
+    // a deterministic subset — no now(), no env. Future restatement kinds
+    // (disavowal, enumerative) extend this message add-only.
+    string predicate = 5;
+    // fromVersion, when non-zero, narrows the restatement to entities STAMPED
+    // that version ("[n,m] under stamp v1 reads as v2" — the design's range
+    // binding); 0 applies to any stamp. Without it a restatement could not
+    // distinguish populations sharing a range once real version bumps exist,
+    // and rebinding DOWN ("wrongly stamped v2, read as v1") would be
+    // unexpressible safely.
+    uint32 fromVersion = 6;
 }
 
 message LogIngestablePosition {
@@ -322,6 +485,14 @@ message LogTypeMigrationDeadLetter {
 // § "Right-to-be-forgotten / deletes".
 message LogScrub {
     uint64 upperBound = 1;
+    // hashDeleteKeys authorizes the delete-key erasure pass for this rewrite:
+    // retained user-delete entries whose consumption gate has opened get their
+    // raw subject key rewritten to the erased-key sentinel. Set by the proposer
+    // only once the cluster minimum feature level supports it, so every replica
+    // (all running a binary that understands the pass) computes the identical
+    // rewrite. Old binaries ignore the field and never see it set to true (the
+    // feature gate holds it until they are gone).
+    bool hashDeleteKeys = 2;
 }
 
 // LogNodeAPIURL is a node's self-announcement of its advertised HTTP API
@@ -347,4 +518,17 @@ message LogNodeAPIURL {
 message LogNodeVersion {
     uint64 nodeID = 1;
     uint64 featureLevel = 2;
+}
+
+// LogNodeZone is a node's self-announcement of its zone (COMMITTED_ZONE) —
+// the placement identity zone-pinned syncables resolve their owner against.
+// Vendor-neutral "zone", never "az". Upsert keyed by node id (last writer
+// wins: a moved node re-announces; an empty zone clears the pin identity).
+// The apply path stores it in the memberZones bucket; ownership resolution
+// intersects it with CURRENT membership and is feature-gated so a mixed-
+// version cluster resolves leader-owns everywhere. See node_zone.go and
+// db/zone.go.
+message LogNodeZone {
+    uint64 nodeID = 1;
+    string zone = 2;
 }

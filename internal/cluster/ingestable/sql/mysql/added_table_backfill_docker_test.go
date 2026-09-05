@@ -61,29 +61,7 @@ func backfillPhase1(t *testing.T, tableA string) cluster.Position {
 	require.NoError(t, err)
 	db.Close()
 
-	deadline := time.After(20 * time.Second)
-	var lastPos cluster.Position
-	seenA1 := false
-	for !seenA1 || lastPos == nil {
-		select {
-		case p := <-pr:
-			for _, e := range p.Entities {
-				if string(e.Key) == "a1" {
-					seenA1 = true
-				}
-			}
-		case pos := <-po:
-			pp := &dialectpb.MySQLBinLogPosition{}
-			require.NoError(t, proto.Unmarshal(pos, pp))
-			// A streaming checkpoint: position present, snapshot done.
-			if pp.Name != "" && pp.SnapshotProgress == nil && seenA1 {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("phase 1: timed out waiting for a1 + a streaming checkpoint")
-		}
-	}
-	return lastPos
+	return awaitStreaming(t, pr, po, 20*time.Second, "a1").Position
 }
 
 // TestMysqlAddedTableBackfill is the MySQL twin of

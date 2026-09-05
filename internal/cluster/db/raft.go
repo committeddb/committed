@@ -74,7 +74,7 @@ type Raft struct {
 	compactionPressure atomic.Bool
 
 	node    raft.Node
-	storage Storage
+	storage raftStorage
 
 	// applyNotifier is invoked after each successful Storage.ApplyCommitted
 	// call with the raw entry data. db.New supplies db.notifyApplied here
@@ -139,7 +139,18 @@ type Raft struct {
 	metrics *metrics.Metrics
 }
 
-func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, opts ...Option) (<-chan error, *Raft) {
+// raftStorage is the raft layer's caller-site slice of Storage: the Ready
+// loop's persistence surface (ConsensusStorage) plus the membership-registry
+// writes applyConfChange makes as conf changes commit (MembershipStorage).
+// Narrower than Storage so the compiler enforces that the consensus loop
+// never reaches into configs, worker state, or event-log reads; any Storage
+// satisfies it.
+type raftStorage interface {
+	ConsensusStorage
+	MembershipStorage
+}
+
+func NewRaft(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, opts ...Option) (<-chan error, *Raft) {
 	cfg := defaultOptions()
 	for _, opt := range opts {
 		opt(&cfg)
@@ -147,7 +158,7 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
@@ -213,7 +224,7 @@ const raftElectionTicks = 10
 // implicit precondition that HardState.Term is at least the term of the last log
 // entry. See the call site in startRaft for why a violation is fatal: it makes a
 // pre-vote rejection emit a sub-term (down to 0) MsgPreVoteResp that panics raft.
-func assertStorageTermInvariant(id uint64, hs *raftpb.HardState, s Storage) error {
+func assertStorageTermInvariant(id uint64, hs *raftpb.HardState, s raft.Storage) error {
 	last, err := s.LastIndex()
 	if err != nil {
 		return fmt.Errorf("node %d: read last index: %w", id, err)
@@ -459,6 +470,10 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 			}
 			if err := n.storage.DeleteMemberVersion(ch.GetNodeId()); err != nil {
 				n.logger.Error("conf change: delete member version",
+					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
+			}
+			if err := n.storage.DeleteMemberZone(ch.GetNodeId()); err != nil {
+				n.logger.Error("conf change: delete member zone",
 					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
 			}
 		}
@@ -924,8 +939,9 @@ func (n *Raft) setCompactionPressure(on bool) {
 // the log, then sends it MsgTimeoutNow to start an immediate election; the
 // attempt silently expires after an election timeout if the target can't
 // catch up or is unreachable. Fire-and-forget by design — the caller
-// (db.maybeTransferLeadership, moving leadership off a disk-constrained
-// node) observes the outcome through the normal leader-change machinery and
+// (diskAdmission.maybeTransferLeadership, moving leadership off a
+// disk-constrained node) observes the outcome through the normal
+// leader-change machinery and
 // retries on a later cycle if leadership didn't move.
 func (n *Raft) transferLeadership(transferee uint64) {
 	if n.node == nil {

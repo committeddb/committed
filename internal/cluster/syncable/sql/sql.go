@@ -36,6 +36,14 @@ type Syncable struct {
 	// nil for keyless/append syncables, where a refresh marker is a no-op (there
 	// is no current-row identity to reconcile). See Init and applyEntity.
 	sweep *sql.Stmt
+	// rematEpoch, when non-zero, marks an active re-materialization: keyed
+	// applies switch to rematUpsert (which additionally stamps the epoch into
+	// RematerializationColumn) and CompleteRematerialization's rematSweep
+	// deletes rows whose stamp predates it. All three are touched only from
+	// the worker goroutine (Begin/apply/Complete are worker-serial).
+	rematEpoch  uint64
+	rematUpsert *sql.Stmt
+	rematSweep  *sql.Stmt
 }
 
 func New(d *DB, config *Config) *Syncable {
@@ -145,7 +153,7 @@ func (c *Syncable) Init() error {
 		jsonPaths = append(jsonPaths, mapping.JsonPath)
 	}
 
-	c.insert = &Insert{sqlString, stmt, jsonPaths}
+	c.insert = NewInsert(sqlString, stmt, jsonPaths)
 
 	// Prepare the DELETE-by-key statement so delete Actuals can be honored
 	// without a JSON unmarshal (the delete sentinel is not a payload). Only
@@ -393,21 +401,23 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 			values = append(values, string(e.Data))
 			continue
 		}
+		tr := c.insert.Trackers.At(i)
 		res, err := jsonpath.Get(path, jsonData)
 		if err != nil {
-			// NARROWED LIMITATION (ambiguous classification): a SYNTACTICALLY invalid
-			// path can no longer reach here — validateMappings compiles every mapping
-			// jsonpath at ParseSyncable, so a broken path is a 400 at config time. What
-			// remains is a syntactically-VALID path that is nonetheless wrong: either
-			// entry-specific (the field is genuinely absent in THIS row → permanent is
-			// right) or an operator typo wrong for the whole topic (fails every row →
-			// should be transient). Those two are indistinguishable per-row, so it
-			// stays Permanent (the same accepted asymmetry as Postgres 23502; the
-			// projection sink's jsonpath.Get sites share it). The remaining fix — flip
-			// to transient on a run of consecutive-DISTINCT-row misses — is the 0.8
-			// ticket classify-config-shaped-syncable-errors.
-			return cluster.Permanent(fmt.Errorf("jsonpath [%v]: %w", path, err))
+			// A syntactically invalid path cannot reach here (validateMappings
+			// compiles every mapping jsonpath at ParseSyncable — a broken path
+			// is a 400 at config time). What remains is a syntactically-VALID
+			// path that is nonetheless wrong: either entry-specific (the field
+			// is genuinely absent in THIS row → permanent is right) or an
+			// operator typo wrong for the whole topic (fails every row →
+			// transient is right). Indistinguishable per-row — the path's own
+			// tracker classifies from its history: isolated misses dead-letter,
+			// a consecutive-distinct-row run of misses with no success wedges
+			// loudly instead (see cluster.AmbiguityTracker). The projection
+			// sink's extraction sites classify the same way.
+			return tr.Classify(index, fmt.Errorf("jsonpath [%v]: %w", path, err))
 		}
+		tr.Succeeded()
 		// A typed payload carries JSON-native scalars; coerce each to the form
 		// its declared sink column expects (e.g. a numeric source value mapped
 		// into a TEXT column must bind as text). JsonPath and Mappings are built
@@ -424,6 +434,12 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 	// column and append nothing.
 	if c.config.Keyed() {
 		values = append(values, int64(e.Generation)) //nolint:gosec // G115: a refresh epoch is a small monotonic counter, far below 2^63
+		// An active re-materialization additionally stamps the replay's epoch
+		// (see Rematerializable): the completion sweep removes rows whose
+		// stamp predates it — the rows this replay never re-emitted.
+		if c.rematEpoch != 0 {
+			values = append(values, int64(c.rematEpoch)) //nolint:gosec // G115: a raft index, far below 2^63
+		}
 	}
 
 	// The dialect decides how values map to placeholders: MySQL repeats them
@@ -446,12 +462,18 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 		}
 	}
 
-	if _, err := tx.StmtContext(ctx, c.insert.Stmt).ExecContext(ctx, allValues...); err != nil {
+	upsert := c.insert.Stmt
+	upsertSQL := c.insert.SQL
+	if c.config.Keyed() && c.rematEpoch != 0 {
+		upsert = c.rematUpsert
+		upsertSQL = "rematerialization upsert"
+	}
+	if _, err := tx.StmtContext(ctx, upsert).ExecContext(ctx, allValues...); err != nil {
 		// The NUL hint names the offending payload field(s) when a PG sink
 		// rejects an embedded U+0000 — names only, never values (the message
 		// becomes a permanent replicated dead-letter record).
 		err = withNulFieldHint(err, c.dialect, jsonData)
-		return execFailure(fmt.Sprintf("[sql.apply] exec [%s]", c.insert.SQL), err, c.dialect.IsPermanent(err))
+		return execFailure(fmt.Sprintf("[sql.apply] exec [%s]", upsertSQL), err, c.dialect.IsPermanent(err))
 	}
 	return nil
 }
@@ -514,5 +536,62 @@ func (c *Syncable) closeStatements() error {
 		closeStmt(c.appliedMark.Stmt)
 	}
 	closeStmt(c.sweep)
+	closeStmt(c.rematUpsert)
+	closeStmt(c.rematSweep)
 	return err
+}
+
+// CanRematerialize implements cluster.Rematerializable: only a keyed sink can
+// converge a replay in place (a keyless/append sink would duplicate every
+// row).
+func (c *Syncable) CanRematerialize() bool {
+	return c.config.Keyed()
+}
+
+// BeginRematerialization implements cluster.Rematerializable: ensure the
+// committed-managed epoch column exists, prepare the marking upsert and the
+// completion sweep, and switch applies to marking mode. Idempotent — a
+// restart mid-re-materialization re-begins under the same epoch (the record's
+// target head), so rows marked before the crash keep counting.
+func (c *Syncable) BeginRematerialization(ctx context.Context, epoch uint64) error {
+	if !c.config.Keyed() {
+		return cluster.ErrNotRematerializable
+	}
+	if err := c.dialect.EnsureRematerializationColumn(ctx, c.db, c.config); err != nil {
+		return err
+	}
+	if c.rematUpsert == nil {
+		upsertSQL := c.dialect.CreateRematerializationUpsertSQL(c.config)
+		stmt, err := c.db.PrepareContext(ctx, upsertSQL)
+		if err != nil {
+			return fmt.Errorf("prepare rematerialization upsert [%s]: %w", upsertSQL, err)
+		}
+		c.rematUpsert = stmt
+	}
+	if c.rematSweep == nil {
+		sweepSQL := c.dialect.CreateRematerializationSweepSQL(c.config)
+		stmt, err := c.db.PrepareContext(ctx, sweepSQL)
+		if err != nil {
+			return fmt.Errorf("prepare rematerialization sweep [%s]: %w", sweepSQL, err)
+		}
+		c.rematSweep = stmt
+	}
+	c.rematEpoch = epoch
+	return nil
+}
+
+// CompleteRematerialization implements cluster.Rematerializable: delete every
+// row whose epoch stamp predates this replay's — the rows the current
+// projection never re-emitted — and switch applies back to normal.
+// Idempotent: after a completed sweep every surviving row carries the epoch,
+// so a re-run removes nothing.
+func (c *Syncable) CompleteRematerialization(ctx context.Context) error {
+	if c.rematSweep == nil || c.rematEpoch == 0 {
+		return nil // never begun (or already completed) — nothing to sweep
+	}
+	if _, err := c.rematSweep.ExecContext(ctx, int64(c.rematEpoch)); err != nil { //nolint:gosec // G115: a raft index, far below 2^63
+		return fmt.Errorf("rematerialization sweep: %w", err)
+	}
+	c.rematEpoch = 0
+	return nil
 }

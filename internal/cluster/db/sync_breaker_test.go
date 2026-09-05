@@ -12,26 +12,26 @@ import (
 // TestSyncBreakerTripsAtCap is the circuit-breaker regression: consecutive
 // permanent errors on one syncable count up and trip at the cap, so the worker
 // parks instead of dead-lettering the whole topic one blocking raft round-trip
-// at a time. A worker restart (resetSyncBreaker) clears the run.
+// at a time. A worker restart (reset) clears the run.
 func TestSyncBreakerTripsAtCap(t *testing.T) {
-	db := &DB{}
+	b := newSyncBreaker()
 	const id = "s1"
 
 	for i := 1; i < syncBreakerMaxConsecutivePermanent; i++ {
-		c, tripped := db.recordSyncPermanent(id, uint64(i))
+		c, tripped := b.recordPermanent(id, uint64(i))
 		require.Equal(t, i, c)
 		require.False(t, tripped, "must not trip before the cap")
 	}
-	require.False(t, db.syncBreakerTripped(id))
+	require.False(t, b.tripped(id))
 
-	c, tripped := db.recordSyncPermanent(id, uint64(syncBreakerMaxConsecutivePermanent))
+	c, tripped := b.recordPermanent(id, uint64(syncBreakerMaxConsecutivePermanent))
 	require.Equal(t, syncBreakerMaxConsecutivePermanent, c)
 	require.True(t, tripped, "the cap-th consecutive permanent error trips the breaker")
-	require.True(t, db.syncBreakerTripped(id))
+	require.True(t, b.tripped(id))
 
-	db.resetSyncBreaker(id)
-	require.False(t, db.syncBreakerTripped(id), "a worker restart clears the run")
-	c, tripped = db.recordSyncPermanent(id, 1)
+	b.reset(id)
+	require.False(t, b.tripped(id), "a worker restart clears the run")
+	c, tripped = b.recordPermanent(id, 1)
 	require.Equal(t, 1, c)
 	require.False(t, tripped)
 }
@@ -43,16 +43,16 @@ func TestSyncBreakerTripsAtCap(t *testing.T) {
 // a minute and permanently parked the worker with a "fix the config"
 // diagnosis; the breaker's premise is N DISTINCT entries.
 func TestSyncBreakerCountsDistinctEntriesNotRetries(t *testing.T) {
-	db := &DB{}
+	b := newSyncBreaker()
 	const id = "s1"
 
 	for range syncBreakerMaxConsecutivePermanent * 2 {
-		c, tripped := db.recordSyncPermanent(id, 42)
+		c, tripped := b.recordPermanent(id, 42)
 		require.Equal(t, 1, c, "retries of one index must count once")
 		require.False(t, tripped, "one poison entry must never trip the breaker")
 	}
 	// A NEW index resumes the run.
-	c, _ := db.recordSyncPermanent(id, 43)
+	c, _ := b.recordPermanent(id, 43)
 	require.Equal(t, 2, c)
 }
 

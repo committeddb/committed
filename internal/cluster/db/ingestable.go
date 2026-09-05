@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -30,6 +31,12 @@ func (db *DB) AddIngestableParser(name string, p cluster.IngestableParser) {
 	db.parser.AddIngestableParser(name, p)
 }
 
+// IngestableCensus implements cluster.Cluster: the latest applied shape
+// census for the ingestable, from replicated storage (see census.go).
+func (db *DB) IngestableCensus(id string) (*cluster.IngestableCensus, bool) {
+	return db.storage.IngestableCensus(id)
+}
+
 func (db *DB) ProposeIngestable(ctx context.Context, c *cluster.Configuration) error {
 	name, ingestable, err := db.ParseIngestable(c.MimeType, c.Data)
 	if err != nil {
@@ -48,6 +55,15 @@ func (db *DB) ProposeIngestable(ctx context.Context, c *cluster.Configuration) e
 		return err
 	}
 
+	// Producer guard: an ingestable mints its topics' refresh-epoch space, so
+	// each topic must not already have an epoch-stamping producer — another
+	// ingestable OR a loopback deriving into it. Loud at POST; the apply path
+	// re-checks deterministically (see wal.buildIngestable), so a config
+	// racing past this admission check degrades instead of cross-deleting.
+	if err := db.refuseIngestProducerHazards(c); err != nil {
+		return err
+	}
+
 	e, err := cluster.NewUpsertIngestableEntity(c)
 	if err != nil {
 		return err
@@ -55,6 +71,29 @@ func (db *DB) ProposeIngestable(ctx context.Context, c *cluster.Configuration) e
 
 	p := &cluster.Proposal{Entities: []*cluster.Entity{e}}
 	return db.Propose(ctx, p)
+}
+
+// refuseIngestProducerHazards refuses an ingestable config claiming a topic
+// that already has an epoch-stamping producer of either kind. The refusal
+// names the colliding config and why (epoch-space interleaving → one
+// producer's reconciling sweep can erase the other's rows downstream).
+// Kinds that report no topics contribute no claim and pass for free.
+func (db *DB) refuseIngestProducerHazards(c *cluster.Configuration) error {
+	topics, err := db.parser.IngestableTopics(c.MimeType, c.Data)
+	if err != nil || len(topics) == 0 {
+		return nil // kind reports no topics (an unparseable config was refused earlier)
+	}
+	stored, err := db.storage.ProducerEdges()
+	if err != nil {
+		// Fail-closed: the invariant must hold, so an unanswerable
+		// enumeration refuses instead of passing.
+		return fmt.Errorf("producer guard: enumerate producer edges: %w", err)
+	}
+	candidate := DerivationEdge{Kind: "ingestable", ID: c.ID, Targets: topics}
+	if err := ReplayWithCandidate(stored, candidate); err != nil {
+		return cluster.NewConfigError(err)
+	}
+	return nil
 }
 
 // guardIngestableConfigChange asks the newly-parsed ingestable whether replacing

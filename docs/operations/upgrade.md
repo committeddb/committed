@@ -22,8 +22,8 @@ Two properties make a rolling upgrade safe:
   permanent event log, and the BoltDB metadata are forward-compatible
   across a release within the same major line — a node upgraded in place
   reads everything its predecessor wrote, for data dirs created on
-  **0.7.2-beta or later** (the supported floor; an older dir must be
-  recreated, not upgraded — see
+  **0.7.3-beta or later** (the supported floor as of 0.8.0; an older dir must
+  be recreated, not upgraded — see
   [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)). This is a contract, documented
   in [api-compatibility.md → On-disk and wire compatibility](../api-compatibility.md#on-disk-and-wire-compatibility);
   read it before upgrading, especially the **one-way transitions** list.
@@ -163,6 +163,20 @@ After the last node:
 
 ## Rolling back
 
+> **Rolling back below 0.8.0?** Event-log segments compress at rest from
+> 0.8.0 on, and older binaries cannot read compressed segments. Stop each
+> node and run `committed wal decompress --data <datadir>` before starting
+> the older binary. Rollbacks within 0.8.x need nothing. Also note: 0.8.0's
+> RTBF delete-key erasure (feature level 4) pauses on an older binary —
+> already-erased tombstones stay erased, but new erasures resume only when
+> you upgrade again. And a SQL Server ingestable that has already re-keyed
+> to the canonical lowercase `uniqueidentifier` spelling (feature level 5,
+> see [cdc-setup.md](cdc-setup.md#uniqueidentifier-rendering)) keeps that
+> spelling in its checkpoint; an older binary would resume it rendering
+> uppercase again and spell new rows differently from the rows on the sink —
+> treat the re-key as a one-way transition and rebuild the sink if you must
+> roll back past it.
+
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:
 `SIGTERM`, put the **previous** binary back, start over the same data
@@ -179,6 +193,14 @@ same quorum rule applies in reverse.
 
 ## Notes and limits
 
+- **0.8.0 closes the config vocabulary.** A config key the parser does not
+  read — a typo, a misplaced field — is now rejected at POST instead of
+  being silently ignored (see [api-compatibility.md](../api-compatibility.md#config-vocabulary-is-closed)).
+  A *stored* config that carries such a key parks on the upgraded binary
+  when its worker is rebuilt (the status and the log name the key: "not
+  admissible under this binary"); re-POST it without the key. The setting
+  never took effect before, so nothing about its behavior changes except
+  that you now learn about it.
 - **Mixed-version window.** During the roll the cluster runs mixed
   versions (some nodes new, some old) for the duration of the procedure.
   That's expected and safe within a major line; the forward/backward
