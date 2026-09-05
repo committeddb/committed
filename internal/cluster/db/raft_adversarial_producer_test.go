@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -92,12 +93,23 @@ func TestAdversarial_RacedIngestableCreatesYieldOneProducer(t *testing.T) {
 	// guard on every node; and all nodes store the same committed set
 	// (consensus did its half). Poll to convergence — build listeners lag
 	// apply by design.
-	require.Eventually(t, func() bool {
+	//
+	// lastUnmet names the condition still failing at timeout so a starvation
+	// flake and an invariant violation read differently. (Convergence needs a
+	// functioning leader — followers learn the commit index from it — and a
+	// starved CI runner has been seen to lose quorum for ~20s straight after
+	// the proposals resolved: a CheckQuorum step-down and a dozen failed
+	// elections at a 200ms election timeout, 2026-09-05, shard 1/4. The
+	// budget stays at 30s on purpose: widening it would hide the next flake
+	// that is actually fixable.)
+	var lastUnmet string
+	converged := func() bool {
 		committed := map[string]bool{}
 		var want int
 		for n, d := range h.dbs {
 			cfgs, err := d.Ingestables()
 			if err != nil {
+				lastUnmet = fmt.Sprintf("node %d: Ingestables(): %v", n+1, err)
 				return false
 			}
 			if n == 0 {
@@ -106,31 +118,33 @@ func TestAdversarial_RacedIngestableCreatesYieldOneProducer(t *testing.T) {
 					committed[c.ID] = true
 				}
 			} else if len(cfgs) != want {
-				return false // replicas still converging on the committed set
+				lastUnmet = fmt.Sprintf("node %d stores %d ingestables, node 1 stores %d (replicas still converging on the committed set)", n+1, len(cfgs), want)
+				return false
 			}
 		}
-
 		winner := ""
-		for _, d := range h.dbs {
+		for n, d := range h.dbs {
 			registered := ""
 			for i := 0; i < attempts; i++ {
 				if !d.HasIngestWorkerForTest(racer(i)) {
 					continue
 				}
 				if registered != "" {
-					return false // two producers registered on one node
+					lastUnmet = fmt.Sprintf("node %d registered two producers: %s and %s", n+1, registered, racer(i))
+					return false
 				}
 				registered = racer(i)
 			}
 			if registered == "" {
-				return false // this node hasn't built the winner yet
+				lastUnmet = fmt.Sprintf("node %d has not built the winner yet", n+1)
+				return false
 			}
 			if winner == "" {
 				winner = registered
 			} else if winner != registered {
-				return false // nodes disagree on the winner — never acceptable
+				lastUnmet = fmt.Sprintf("nodes disagree on the winner: node 1 registered %s, node %d registered %s", winner, n+1, registered)
+				return false
 			}
-
 			refused := map[string]bool{}
 			for _, ce := range d.ConfigBuildErrors() {
 				if ce.Kind == "ingestable" {
@@ -138,15 +152,22 @@ func TestAdversarial_RacedIngestableCreatesYieldOneProducer(t *testing.T) {
 				}
 			}
 			if refused[registered] {
+				lastUnmet = fmt.Sprintf("node %d registered %s but also reports it refused", n+1, registered)
 				return false
 			}
 			for id := range committed {
 				if id != registered && !refused[id] {
-					return false // a committed loser not yet loudly degraded here
+					lastUnmet = fmt.Sprintf("node %d: committed loser %s not yet loudly degraded", n+1, id)
+					return false
 				}
 			}
 		}
-		return committed[winner]
-	}, 30*time.Second, 50*time.Millisecond,
-		"the cluster must converge on exactly one active producer, with every committed loser loudly degraded")
+		if !committed[winner] {
+			lastUnmet = fmt.Sprintf("winner %s is not in node 1's committed set", winner)
+			return false
+		}
+		return true
+	}
+	require.Truef(t, assert.Eventually(t, converged, 30*time.Second, 50*time.Millisecond),
+		"the cluster must converge on exactly one active producer, with every committed loser loudly degraded — last unmet: %s", lastUnmet)
 }
