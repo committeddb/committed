@@ -85,12 +85,30 @@ Rebuild is the right response when any of these hold:
   truncate a torn tail, after which the node restarts cleanly. The tool
   **refuses** anything that is not a torn tail — a bitflip in a committed
   record, mid-log — because that data is genuinely gone locally. *That* is
-  when you rebuild from a healthy peer (below), or restore/splice from a
-  backup on a single node.
+  when you rebuild from a healthy peer (below) — or, on a **single node**,
+  splice the bytes back from a backup of that node:
 
-  Logs written before checksums existed are read transparently
-  (trust-on-first-read) and are not flagged; new appends are always
-  checksummed, so coverage grows as the log compacts.
+  ```
+  committed wal repair --data <node-data-dir> --from <backup.tar.gz>
+  ```
+
+  The record at a given log position is byte-identical everywhere, so a
+  backup that covers it holds the correct bytes. The tool reports the plan
+  (which record, from which archived segment) and changes nothing; re-run
+  with `--commit` to apply it. A corrupt record in a plain segment is
+  spliced byte-for-byte; a corrupt compressed segment (one flipped byte
+  fails the whole zstd frame) is replaced by the backup's copy. Every
+  splice is verified before it is written — the archive entry matches the
+  backup's manifest, the two logs agree byte-for-byte on every other record
+  they share (so a backup taken before a scrub or a truncation can never
+  re-introduce rewritten bytes), the record's raft index continues its
+  neighbours, and the assembled segment re-scans clean — and is refused
+  otherwise, leaving the log untouched. Corruption the backup does not
+  cover (it predates the record) still needs a rebuild or a restore.
+
+  Every log a supported deployment can hold is checksummed end to end
+  (framing shipped in v0.5-beta, well below the data-directory floor);
+  unframed or torn bytes are corruption, never trusted content.
 
 - A node ran out of disk and you can't expand the volume in place.
   The cluster keeps admitting writes while a quorum of voters has disk

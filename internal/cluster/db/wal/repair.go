@@ -56,7 +56,26 @@ type Diagnosis struct {
 
 	truncateSeg string // torn-tail: segment file to truncate or remove
 	truncateOff int64  // torn-tail: byte offset to truncate to (0 => remove file)
+
+	// Corruption location for the backup splice (see splice.go). Set only when
+	// Status is LogCorrupt for a shape the splice can repair.
+	segs           []segFile   // the log's segment listing at scan time
+	corruptSeg     int         // index into segs of the corrupt segment
+	corruptShape   corruptKind // record (plain segment) or segment (compressed)
+	corruptOff     int         // record: byte offset of the record's size prefix
+	corruptPrefix  int         // record: size-prefix length in bytes
+	corruptLen     int         // record: framed record length (after the prefix)
+	corruptOrdinal int         // record: ordinal within its segment (0-based)
 }
+
+// corruptKind is the shape of a LogCorrupt diagnosis the splice can act on.
+type corruptKind int
+
+const (
+	corruptNone    corruptKind = iota // not splice-able (markers, incomplete prefix, …)
+	corruptRecord                     // a complete record in a PLAIN segment fails its frame
+	corruptSegment                    // a COMPRESSED segment fails its zstd frame checksum
+)
 
 type segFile struct {
 	index uint64
@@ -137,6 +156,7 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 	}
 
 	total := 0
+	d.segs = segs
 	for si, seg := range segs {
 		data, err := os.ReadFile(seg.path)
 		if err != nil {
@@ -153,11 +173,13 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 			if err != nil {
 				d.Status = LogCorrupt
 				d.Records = total
-				d.Detail = fmt.Sprintf("compressed segment %s fails its zstd frame checksum — data corruption, not a torn tail", seg.name)
+				d.corruptSeg, d.corruptShape = si, corruptSegment
+				d.Detail = fmt.Sprintf("compressed segment %s fails its zstd frame checksum — data corruption, not a torn tail (repairable from a backup: wal repair --from)", seg.name)
 				return d, nil
 			}
 		}
 		off := 0
+		ordinal := 0
 		for off < len(data) {
 			size, n := binary.Uvarint(data[off:])
 			// When n > 0, binary.Uvarint consumed n <= len(data)-off bytes, so
@@ -196,11 +218,16 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 				// Never truncate it — the operator rebuilds from a healthy replica.
 				d.Status = LogCorrupt
 				d.Records = total
-				d.Detail = fmt.Sprintf("checksum mismatch on complete record %d (segment %s, offset %d) — data corruption, not a torn tail", total, seg.name, off)
+				if !compressed {
+					d.corruptSeg, d.corruptShape = si, corruptRecord
+					d.corruptOff, d.corruptPrefix, d.corruptLen, d.corruptOrdinal = off, n, recLen, ordinal
+				}
+				d.Detail = fmt.Sprintf("checksum mismatch on complete record %d (segment %s, offset %d) — data corruption, not a torn tail (repairable from a backup: wal repair --from)", total, seg.name, off)
 				return d, nil
 			}
 			off += n + recLen
 			total++
+			ordinal++
 		}
 	}
 	d.Status = LogClean
