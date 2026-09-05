@@ -47,7 +47,7 @@ func TestSQLServerPrimaryKeyDrift_ParksInsteadOfCollapsing(t *testing.T) {
 	pr1 := make(chan *cluster.Proposal, 64)
 	po1 := make(chan cluster.Position, 64)
 	go func() { _ = (&sqlserver.SQLServerDialect{}).Ingest(ctx1, config, nil, 0, pr1, po1) }()
-	_, checkpoint := drainUntilPosition(t, pr1, po1, 1, 2*time.Minute)
+	checkpoint := awaitStreaming(t, pr1, po1, 2*time.Minute, "seed").Position
 	cancel1()
 	require.NotEmpty(t, checkpoint)
 
@@ -112,7 +112,7 @@ func TestSQLServerMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
 	pr1 := make(chan *cluster.Proposal, 64)
 	po1 := make(chan cluster.Position, 64)
 	go func() { _ = (&sqlserver.SQLServerDialect{}).Ingest(ctx1, config, nil, 0, pr1, po1) }()
-	_, checkpoint := drainUntilPosition(t, pr1, po1, 1, 2*time.Minute)
+	checkpoint := awaitStreaming(t, pr1, po1, 2*time.Minute, "seed").Position
 	cancel1()
 	require.NotEmpty(t, checkpoint)
 

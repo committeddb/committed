@@ -15,37 +15,6 @@ import (
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 )
 
-// drainUntilPosition collects entities until a position checkpoint arrives
-// AFTER at least `want` entities, returning the entities and the latest
-// position seen. Used to capture resume points between phases.
-func drainUntilPosition(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position, want int, deadline time.Duration) ([]*cluster.Entity, cluster.Position) {
-	t.Helper()
-	var got []*cluster.Entity
-	var lastPos cluster.Position
-	timeout := time.After(deadline)
-	for {
-		select {
-		case p := <-pr:
-			for _, e := range p.Entities {
-				if e.IsRefreshBoundary() {
-					continue
-				}
-				got = append(got, e)
-			}
-			if len(p.Position) > 0 {
-				lastPos = p.Position
-			}
-		case pos := <-po:
-			lastPos = pos
-			if len(got) >= want {
-				return got, lastPos
-			}
-		case <-timeout:
-			t.Fatalf("timed out with %d of %d entities (lastPos %d bytes)", len(got), want, len(lastPos))
-		}
-	}
-}
-
 // TestSQLServerResumeFromStreamingCheckpoint pins the third resume state
 // (fresh and mid-snapshot are covered by the e2e and hook tests): a worker
 // restarted with a streaming checkpoint must NOT re-snapshot — it resumes
@@ -77,8 +46,7 @@ func TestSQLServerResumeFromStreamingCheckpoint(t *testing.T) {
 	po1 := make(chan cluster.Position, 64)
 	d1 := &sqlserver.SQLServerDialect{}
 	go func() { _ = d1.Ingest(ctx1, config, nil, 0, pr1, po1) }()
-	run1, checkpoint := drainUntilPosition(t, pr1, po1, 1, 2*time.Minute)
-	require.Len(t, run1, 1, "run 1 snapshots the pre-existing row")
+	checkpoint := awaitStreaming(t, pr1, po1, 2*time.Minute, "1").Position
 	cancel1()
 	require.NotEmpty(t, checkpoint)
 
