@@ -104,44 +104,27 @@ func TestMysqlPurgedBinlogResnapshots(t *testing.T) {
 	defer zap.ReplaceGlobals(zap.New(core))()
 
 	// Run 2: resume from the stale checkpoint.
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	pr2 := make(chan *cluster.Proposal, 20)
 	po2 := make(chan cluster.Position, 20)
 	errCh := make(chan error, 1)
 	go func() { errCh <- (&mysql.MySQLDialect{}).Ingest(ctx2, config, checkpoint, 0, pr2, po2) }()
+	go func() {
+		if err := <-errCh; err != nil {
+			t.Errorf("Ingest exited instead of recovering from the purged binlog: %v", err)
+		}
+	}()
 
-	genByKey := map[string]uint64{}
-	var sawMarker bool
-	var markerEpoch uint64
-	for {
-		if _, haveLost := genByKey["lost"]; haveLost && sawMarker {
-			break
-		}
-		select {
-		case p := <-pr2:
-			for _, e := range p.Entities {
-				if e.IsRefreshBoundary() {
-					sawMarker = true
-					markerEpoch = e.Generation
-					continue
-				}
-				genByKey[string(e.Key)] = e.Generation
-			}
-		case <-po2:
-		case ingestErr := <-errCh:
-			t.Fatalf("Ingest exited instead of recovering from the purged binlog: %v", ingestErr)
-		case <-ctx2.Done():
-			t.Fatal("'lost' + a refresh-boundary marker never arrived — a purged binlog must re-snapshot and close with a reconciling marker")
-		}
-	}
+	// The recovery re-snapshot re-emits every row and closes with its marker.
+	res := ingesttest.AwaitRefresh(t, pr2, po2, 60*time.Second, nil, "seed", "before", "lost")
 	cancel2()
 
 	require.NotEmpty(t, observed.FilterMessageSnippet("binlog purged past consumed position").All(),
 		"recovery must take the error-1236 branch")
-	require.Greater(t, markerEpoch, uint64(1),
+	require.Greater(t, res.MarkerEpoch, uint64(1),
 		"the recovery re-snapshot closes with a marker strictly above run 1's generation")
 	for _, k := range []string{"seed", "before", "lost"} {
-		require.Equal(t, markerEpoch, genByKey[k], "row %q must re-snapshot at the marker's generation", k)
+		require.Equal(t, res.MarkerEpoch, res.Entity(k).Generation, "row %q must re-snapshot at the marker's generation", k)
 	}
 }

@@ -121,3 +121,63 @@ func TestAwait_NilPredicateIsAKeysOnlyWait(t *testing.T) {
 	require.Equal(t, cluster.Position("bundle"), res.Position,
 		"a bundle on the key-completing proposal itself is at-or-after the keys")
 }
+
+func marker(epoch uint64) *cluster.Proposal {
+	return &cluster.Proposal{Entities: []*cluster.Entity{cluster.NewRefreshBoundaryEntity(&cluster.Type{ID: "t"}, epoch)}}
+}
+
+// TestAwaitRefresh_ClosesOnKeysMarkerAndCheckpoint pins the primary shape: rows,
+// the closing marker, then the completion checkpoint on the position channel.
+func TestAwaitRefresh_ClosesOnKeysMarkerAndCheckpoint(t *testing.T) {
+	pr, po := feed(
+		event{p: proposalWith(nil, "a")},
+		event{p: proposalWith(nil, "b")},
+		event{p: marker(2)},
+		event{pos: cluster.Position("done")},
+	)
+	res := ingesttest.AwaitRefresh(t, pr, po, 2*time.Second, nonEmpty, "a", "b")
+	require.Equal(t, uint64(2), res.MarkerEpoch)
+	require.Equal(t, cluster.Position("done"), res.Position)
+	require.NotNil(t, res.Entity("a"))
+	require.Nil(t, res.Entity("zzz"))
+}
+
+// TestAwaitRefresh_CheckpointBeforeMarkerIsKept pins the ordering the two
+// buffered channels do not guarantee: the completion checkpoint can be
+// received before the marker proposal and must not be dropped — the flake
+// that motivated the primitive.
+func TestAwaitRefresh_CheckpointBeforeMarkerIsKept(t *testing.T) {
+	pr, po := feed(
+		event{p: proposalWith(nil, "a")},
+		event{pos: cluster.Position("done")},
+		event{p: marker(3)},
+	)
+	res := ingesttest.AwaitRefresh(t, pr, po, 2*time.Second, nonEmpty, "a")
+	require.Equal(t, uint64(3), res.MarkerEpoch)
+	require.Equal(t, cluster.Position("done"), res.Position)
+}
+
+// TestAwaitRefresh_EarlyMarkerIsNotTheClosingOne: a marker received before the
+// keys belongs to an earlier enumeration (a no-op resume, say) and is ignored;
+// the closing marker is the first one AFTER every key.
+func TestAwaitRefresh_EarlyMarkerIsNotTheClosingOne(t *testing.T) {
+	pr, po := feed(
+		event{p: marker(1)},
+		event{p: proposalWith(nil, "a")},
+		event{p: marker(2)},
+		event{pos: cluster.Position("done")},
+	)
+	res := ingesttest.AwaitRefresh(t, pr, po, 2*time.Second, nonEmpty, "a")
+	require.Equal(t, uint64(2), res.MarkerEpoch)
+}
+
+// TestAwaitRefresh_NilPredicateWaitsForKeysAndMarkerOnly.
+func TestAwaitRefresh_NilPredicateWaitsForKeysAndMarkerOnly(t *testing.T) {
+	pr, po := feed(
+		event{p: proposalWith(nil, "a")},
+		event{p: marker(5)},
+	)
+	res := ingesttest.AwaitRefresh(t, pr, po, 2*time.Second, nil, "a")
+	require.Equal(t, uint64(5), res.MarkerEpoch)
+	require.Nil(t, res.Position)
+}

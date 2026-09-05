@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/ingesttest"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 )
@@ -75,46 +76,27 @@ func TestSQLServerRetentionGapResnapshots(t *testing.T) {
 	core, observed := observer.New(zap.ErrorLevel)
 	defer zap.ReplaceGlobals(zap.New(core))()
 
-	// Run 2: resume from the stale checkpoint. The re-snapshot's rows arrive
-	// first and its closing marker after them, so the marker is counted only
-	// once 'lost' has been seen.
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Minute)
+	// Run 2: resume from the stale checkpoint. The re-snapshot re-emits every
+	// row and closes with its marker.
+	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	pr2 := make(chan *cluster.Proposal, 64)
 	po2 := make(chan cluster.Position, 64)
 	errCh := make(chan error, 1)
 	go func() { errCh <- (&sqlserver.SQLServerDialect{}).Ingest(ctx2, config, checkpoint, 0, pr2, po2) }()
-
-	genByKey := map[string]uint64{}
-	var sawMarker bool
-	var markerEpoch uint64
-	for !sawMarker {
-		select {
-		case p := <-pr2:
-			for _, e := range p.Entities {
-				if e.IsRefreshBoundary() {
-					if _, haveLost := genByKey["lost"]; haveLost {
-						sawMarker = true
-						markerEpoch = e.Generation
-					}
-					continue
-				}
-				genByKey[string(e.Key)] = e.Generation
-			}
-		case <-po2:
-		case ingestErr := <-errCh:
-			t.Fatalf("Ingest exited instead of recovering from the retention gap: %v", ingestErr)
-		case <-ctx2.Done():
-			t.Fatal("'lost' + its closing refresh-boundary marker never arrived — a retention gap must re-snapshot and close with a reconciling marker")
+	go func() {
+		if err := <-errCh; err != nil {
+			t.Errorf("Ingest exited instead of recovering from the retention gap: %v", err)
 		}
-	}
+	}()
+	res := ingesttest.AwaitRefresh(t, pr2, po2, 2*time.Minute, nil, "seed", "tracked", "lost")
 	cancel2()
 
 	require.NotEmpty(t, observed.FilterMessageSnippet("retention purged past the consumed version").All(),
 		"recovery must take the retention-gap branch")
-	require.Equal(t, uint64(2), markerEpoch,
+	require.Equal(t, uint64(2), res.MarkerEpoch,
 		"gap recovery bumps the epoch once above run 1's generation (1 → 2)")
 	for _, k := range []string{"seed", "tracked", "lost"} {
-		require.Equal(t, markerEpoch, genByKey[k], "row %q must re-snapshot at the marker's generation", k)
+		require.Equal(t, res.MarkerEpoch, res.Entity(k).Generation, "row %q must re-snapshot at the marker's generation", k)
 	}
 }

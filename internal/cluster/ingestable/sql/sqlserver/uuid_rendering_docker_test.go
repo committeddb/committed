@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/ingesttest"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 )
@@ -96,46 +97,23 @@ func TestSQLServerUniqueidentifierRenderingUpgrade(t *testing.T) {
 	go func() {
 		_ = (&sqlserver.SQLServerDialect{Features: gate(true)}).Ingest(ctx2, config, legacyCheckpoint, 0, pr2, po2)
 	}()
-	// Collect until the re-snapshot has fully closed: the re-keyed row, its
-	// closing marker (sent after the rows), and the completion checkpoint
-	// (sent after the marker, on the position channel). The buffered channels
-	// are not ordered against each other, so wait for all three explicitly.
-	var rekeyed *cluster.Entity
-	var markerEpoch uint64
-	var canonicalCheckpoint cluster.Position
-	deadline := time.After(90 * time.Second)
-	for rekeyed == nil || markerEpoch == 0 || canonicalCheckpoint == nil {
-		select {
-		case p := <-pr2:
-			for _, e := range p.Entities {
-				if e.IsRefreshBoundary() {
-					markerEpoch = e.Generation
-					continue
-				}
-				if string(e.Key) == guidLower {
-					rekeyed = e
-				}
-				require.NotEqual(t, guidUpper, string(e.Key), "gate open: no row may keep the uppercase key")
-			}
-		case pos := <-po2:
-			// The completion checkpoint is the only no-progress position this
-			// run emits (the table is idle after the re-snapshot), and it may
-			// be received before the marker proposal — the two buffered
-			// channels are not ordered against each other. Capture it whenever
-			// it arrives.
-			if canonicalCheckpoint == nil && isStreamingPosition(pos) {
-				canonicalCheckpoint = pos
-			}
-		case <-deadline:
-			t.Fatalf("re-key incomplete: rekeyed=%v marker=%d checkpoint=%v", rekeyed != nil, markerEpoch, canonicalCheckpoint != nil)
-		}
-	}
+	// The re-key is a re-snapshot: every row re-emits, the closing marker
+	// follows, and the completion checkpoint (the only no-progress position
+	// this idle run emits) arrives on the position channel in either order.
+	res := ingesttest.AwaitRefresh(t, pr2, po2, 90*time.Second, isStreamingPosition, guidLower)
 	cancel2()
 	restore()
+	for _, p := range res.Proposals {
+		for _, e := range p.Entities {
+			require.NotEqual(t, guidUpper, string(e.Key), "gate open: no row may keep the uppercase key")
+		}
+	}
+	rekeyed := res.Entity(guidLower)
 	require.Equal(t, guidLower, payload(rekeyed)["ref"], "payload fields re-render too")
 	require.Equal(t, uint64(2), rekeyed.Generation, "the re-key is a bumped-epoch re-snapshot")
-	require.Equal(t, uint64(2), markerEpoch, "and closes with the marker that sweeps the uppercase rows on keyed sinks")
+	require.Equal(t, uint64(2), res.MarkerEpoch, "and closes with the marker that sweeps the uppercase rows on keyed sinks")
 	require.NotEmpty(t, observed.FilterMessageSnippet("uniqueidentifier rendering changed").All(), "the re-key is announced")
+	canonicalCheckpoint := res.Position
 
 	// Run 3: the canonical checkpoint, gate reading closed (a member mid-join
 	// announces level 0 for a moment) — no re-snapshot, no marker, and the
@@ -150,7 +128,7 @@ func TestSQLServerUniqueidentifierRenderingUpgrade(t *testing.T) {
 	}()
 	_, err = db.Exec(`INSERT INTO dbo.ct_uuid (id, ref, v) VALUES ('` + newID + `', '` + guidUpper + `', 'live')`)
 	require.NoError(t, err)
-	deadline = time.After(90 * time.Second)
+	deadline := time.After(90 * time.Second)
 	for {
 		var live *cluster.Entity
 		select {

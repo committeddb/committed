@@ -1917,31 +1917,10 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	}()
 	waitForSlot(t, "slot_recreate")
 
-	deadline := time.After(20 * time.Second)
-	genByKey := map[string]uint64{}
-	var sawMarker bool
-	var markerEpoch uint64
-	for {
-		if _, haveGap := genByKey["gap"]; haveGap && sawMarker {
-			break
-		}
-		select {
-		case p := <-proposalChan2:
-			for _, e := range p.Entities {
-				// The re-snapshot closes with a refresh-boundary marker at the
-				// bumped epoch; a keyed sink sweeps rows left at an older one.
-				if e.IsRefreshBoundary() {
-					sawMarker = true
-					markerEpoch = e.Generation
-					continue
-				}
-				genByKey[string(e.Key)] = e.Generation
-			}
-		case <-positionChan2:
-		case <-deadline:
-			t.Fatal("phase 2: 'gap' + a refresh-boundary marker never arrived — a slot-recreate must re-snapshot and close with a reconciling marker")
-		}
-	}
+	// The gap re-snapshot re-emits every row and closes with its marker (a
+	// refresh-boundary entity at the bumped epoch; a keyed sink sweeps rows
+	// left at an older one).
+	res := ingesttest.AwaitRefresh(t, proposalChan2, positionChan2, 20*time.Second, nil, "before", "gap")
 	cancel2()
 
 	// The gap-recovery re-snapshot bumped the epoch to 2 (phase 1 was the
@@ -1950,9 +1929,9 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	// still at epoch 1 (a row deleted at the source in the lost window, which the
 	// upsert-only re-snapshot cannot signal). The row-level sweep itself is
 	// covered by the syncable dialect docker test.
-	require.Equal(t, uint64(2), markerEpoch, "gap-recovery re-snapshot must emit a refresh-boundary marker at the bumped epoch")
-	require.Equal(t, uint64(2), genByKey["gap"], "a re-snapshotted row carries the bumped epoch")
-	require.Equal(t, uint64(2), genByKey["before"], "a re-snapshotted row carries the bumped epoch")
+	require.Equal(t, uint64(2), res.MarkerEpoch, "gap-recovery re-snapshot must emit a refresh-boundary marker at the bumped epoch")
+	require.Equal(t, uint64(2), res.Entity("gap").Generation, "a re-snapshotted row carries the bumped epoch")
+	require.Equal(t, uint64(2), res.Entity("before").Generation, "a re-snapshotted row carries the bumped epoch")
 
 	select {
 	case err := <-ingestErr:
