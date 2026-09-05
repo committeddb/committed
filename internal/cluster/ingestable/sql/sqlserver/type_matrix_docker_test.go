@@ -76,7 +76,7 @@ func TestSQLServerTypeMatrixParity(t *testing.T) {
 	require.Contains(t, snapData, `"c_money":922337.1234`, "money renders as an exact number")
 	require.Contains(t, snapData, `"c_big":9223372036854775807`, "bigint exact at int64 max")
 	require.Contains(t, snapData, `"c_bin":"3q2+7w=="`, "varbinary renders base64 (0xDEADBEEF)")
-	require.Contains(t, snapData, `"c_guid":"3E11FA47-71CA-11E1-9E33-C80AA9429562"`, "guid canonical")
+	require.Contains(t, snapData, `"c_guid":"3e11fa47-71ca-11e1-9e33-c80aa9429562"`, "guid canonical RFC 4122 lowercase (the PostgreSQL uuid spelling)")
 	require.Contains(t, snapData, `"c_var":"text with 'quote'"`, "text with embedded quote survives")
 
 	// The parity rewrite: update the row to its exact same values (touch one

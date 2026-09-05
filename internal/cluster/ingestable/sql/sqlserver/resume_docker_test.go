@@ -5,6 +5,7 @@ package sqlserver_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,9 +138,9 @@ func TestSQLServerCompositePKAndUniqueidentifier(t *testing.T) {
 	require.Len(t, byKey, 3, "composite keyset pagination must enumerate every row exactly once")
 	require.Contains(t, byKey, `["1","b1"]`, "composite keys are the JSON-array encoding")
 	require.JSONEq(t,
-		fmt.Sprintf(`{"a":1,"b":"b1","g":"%s","v":"v1"}`, guid),
+		fmt.Sprintf(`{"a":1,"b":"b1","g":"%s","v":"v1"}`, strings.ToLower(guid)),
 		string(byKey[`["1","b1"]`].Data),
-		"uniqueidentifier must render as the canonical GUID string, not raw bytes")
+		"uniqueidentifier must render as the canonical RFC 4122 lowercase GUID, not raw bytes or the driver's uppercase")
 
 	// A delete keyed by the composite PK through the CT path.
 	_, err = db.Exec("DELETE FROM dbo.ct_comp WHERE a = 2 AND b = 'b2'")

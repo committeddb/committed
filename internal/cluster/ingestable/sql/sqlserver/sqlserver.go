@@ -40,6 +40,11 @@ import (
 // SQLServerDialect implements sql.Dialect for SQL Server sources via Change
 // Tracking. Stateless — per-worker state lives in Ingest's locals.
 type SQLServerDialect struct {
+	// Features is the cluster feature-level gate (db.FeatureEnabled), wired by
+	// the node. It decides the uniqueidentifier rendering for each session —
+	// see featureLevelCanonicalUUID. Nil (tests constructing the dialect
+	// directly) means the gate is open: the 0.8.0 rendering.
+	Features FeatureReader
 	// snapshotBatchHook is test-only failure injection for resume tests (the
 	// same seam the other dialects expose). Nil in production.
 	snapshotBatchHook func(table string, batch int) error
@@ -466,6 +471,59 @@ func (d *SQLServerDialect) TeardownSource(config *sql.Config) error {
 	return nil
 }
 
+// FeatureReader answers whether the whole cluster is at a feature level —
+// the db's cluster-minimum gate, sized to this dialect's one question.
+type FeatureReader interface {
+	FeatureEnabled(level uint64) bool
+}
+
+// featureLevelCanonicalUUID gates the canonical (RFC 4122 lowercase)
+// uniqueidentifier rendering. The spelling is in entity KEYS: a cluster where
+// one owner renders uppercase and the next lowercase would key the same row
+// twice, so every node keeps the pre-0.8.0 uppercase rendering until every
+// member announces level 5. See version.FeatureLevel and sessionUUIDRendering.
+const featureLevelCanonicalUUID uint64 = 5
+
+// The two uniqueidentifier renderings a checkpoint can record
+// (SQLServerPosition.uuid_rendering).
+const (
+	uuidRenderingLegacy    uint32 = 0 // the driver's UPPERCASE GUID; every pre-field checkpoint
+	uuidRenderingCanonical uint32 = 1 // RFC 4122 lowercase — what PostgreSQL's uuid ingests as
+)
+
+// canonicalUUIDEnabled reports whether this node may render canonically.
+func (d *SQLServerDialect) canonicalUUIDEnabled() bool {
+	return d.Features == nil || d.Features.FeatureEnabled(featureLevelCanonicalUUID)
+}
+
+// sessionUUIDRendering decides one session's uniqueidentifier rendering from
+// the checkpoint it resumes and the cluster gate, and whether the session must
+// first re-snapshot (rerender): the checkpoint was spelled the OTHER way, so
+// every uniqueidentifier key and payload field on the sink is the old spelling
+// and only a full re-emission at a bumped epoch (whose closing markers sweep
+// the old rows on keyed sinks) re-keys it. The promotion is one-way: a
+// canonical checkpoint stays canonical even if the gate reads closed (a
+// member mid-join announces level 0 for a moment), so a membership change can
+// never flip a sink back to uppercase.
+func sessionUUIDRendering(checkpoint uint32, hasCheckpoint, gateOpen bool) (rendering uint32, rerender bool) {
+	if checkpoint == uuidRenderingCanonical {
+		return uuidRenderingCanonical, false
+	}
+	if gateOpen {
+		return uuidRenderingCanonical, hasCheckpoint
+	}
+	return uuidRenderingLegacy, false
+}
+
+// renderUniqueidentifier spells a GUID for this session: the driver's
+// uppercase form (legacy), or RFC 4122 lowercase (canonical).
+func renderUniqueidentifier(u mssql.UniqueIdentifier, canonical bool) string {
+	if canonical {
+		return strings.ToLower(u.String())
+	}
+	return u.String()
+}
+
 // columnCategories maps a result set's driver type metadata onto the shared
 // JSON categories, keyed by LOWERCASED column name (the shared decode
 // contract). uniqueidentifier is flagged for the mixed-endian byte fix (see
@@ -498,9 +556,9 @@ func columnCategories(types []*gosql.ColumnType) (cats map[string]sql.JSONCatego
 // scanRowValues scans the current row into a lowercased-column value map,
 // fixing the uniqueidentifier representation: the driver hands GUIDs back as
 // their 16 raw mixed-endian bytes, which would render as garbage text —
-// convert to the canonical string form the same way on every read path so
-// snapshot and CT payloads agree byte-for-byte.
-func scanRowValues(rows *gosql.Rows, cols []string, uuidCols map[string]bool) (map[string]any, error) {
+// convert to the session's string form the same way on every read path so
+// snapshot and CT payloads agree byte-for-byte (see renderUniqueidentifier).
+func scanRowValues(rows *gosql.Rows, cols []string, uuidCols map[string]bool, canonicalUUID bool) (map[string]any, error) {
 	vals := make([]any, len(cols))
 	ptrs := make([]any, len(cols))
 	for i := range vals {
@@ -517,7 +575,7 @@ func scanRowValues(rows *gosql.Rows, cols []string, uuidCols map[string]bool) (m
 			if b, ok := v.([]byte); ok && len(b) == 16 {
 				var u mssql.UniqueIdentifier
 				if err := u.Scan(b); err == nil {
-					v = u.String()
+					v = renderUniqueidentifier(u, canonicalUUID)
 				}
 			}
 		}

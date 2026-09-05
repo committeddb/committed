@@ -422,7 +422,7 @@ image can be templated per-node by an orchestrator:
 		// NB: the database parser is registered earlier, before wal.Open (see
 		// above). These three need *d (the ingestable parser) or are simply
 		// fine to register here alongside it.
-		d.AddIngestableParser("sql", ingestableParser(d, d))
+		d.AddIngestableParser("sql", ingestableParser(d, d, d))
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
 		// One projection parser, two type spellings: "projection" is canonical,
 		// "sql-projection" is a deprecation alias (POST answers with a
@@ -613,11 +613,14 @@ func dbParser() *syncsql.DBParser {
 	return p
 }
 
-func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader) *ingestablesql.IngestableParser {
+func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader, features ingestablesqlserver.FeatureReader) *ingestablesql.IngestableParser {
 	p := ingestablesql.NewIngestableParser(t)
 	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
 	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{}
-	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{}
+	// The SQL Server dialect's uniqueidentifier rendering is gated on the
+	// cluster feature level (a mixed-version cluster must not spell one key
+	// two ways), so it reads the db's gate.
+	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{Features: features}
 	// Wire the delete-surviving per-topic refresh-epoch floor so a same-topic
 	// recreate resumes its generation above the rows still on the sink.
 	p.EpochFloor = epoch

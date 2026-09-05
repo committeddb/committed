@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	mssql "github.com/microsoft/go-mssqldb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -71,4 +72,38 @@ func TestPollInterval(t *testing.T) {
 	require.Equal(t, 10*time.Second, pollInterval(map[string]string{"poll_interval": "10s"}))
 	require.Equal(t, defaultPollInterval, pollInterval(map[string]string{"poll_interval": "-1s"}),
 		"a non-positive cadence falls back rather than busy-looping")
+}
+
+func TestRenderUniqueidentifier(t *testing.T) {
+	var u mssql.UniqueIdentifier
+	require.NoError(t, u.Scan("3E11FA47-71CA-11E1-9E33-C80AA9429562"))
+	require.Equal(t, "3E11FA47-71CA-11E1-9E33-C80AA9429562", renderUniqueidentifier(u, false),
+		"legacy is the driver's uppercase GUID — the pre-0.8.0 bytes, byte-for-byte")
+	require.Equal(t, "3e11fa47-71ca-11e1-9e33-c80aa9429562", renderUniqueidentifier(u, true),
+		"canonical is RFC 4122 lowercase — what PostgreSQL's uuid ingests as")
+}
+
+func TestSessionUUIDRendering(t *testing.T) {
+	cases := []struct {
+		name          string
+		checkpoint    uint32
+		hasCheckpoint bool
+		gateOpen      bool
+		rendering     uint32
+		rerender      bool
+	}{
+		{"fresh ingestable, gate closed: legacy", uuidRenderingLegacy, false, false, uuidRenderingLegacy, false},
+		{"fresh ingestable, gate open: canonical, nothing to re-key", uuidRenderingLegacy, false, true, uuidRenderingCanonical, false},
+		{"legacy checkpoint, gate closed: stay legacy (mixed-version cluster)", uuidRenderingLegacy, true, false, uuidRenderingLegacy, false},
+		{"legacy checkpoint, gate open: promote and re-snapshot once", uuidRenderingLegacy, true, true, uuidRenderingCanonical, true},
+		{"canonical checkpoint, gate open: no-op", uuidRenderingCanonical, true, true, uuidRenderingCanonical, false},
+		{"canonical checkpoint, gate reads closed (member mid-join): one-way, never back", uuidRenderingCanonical, true, false, uuidRenderingCanonical, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rendering, rerender := sessionUUIDRendering(c.checkpoint, c.hasCheckpoint, c.gateOpen)
+			require.Equal(t, c.rendering, rendering)
+			require.Equal(t, c.rerender, rerender)
+		})
+	}
 }

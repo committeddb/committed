@@ -904,6 +904,25 @@ batch_size = "1000"           # snapshot keyset batch
   and **automatically re-snapshots** — loud, and the data re-applies
   idempotently. Keep retention longer than your worst-case downtime.
 
+### uniqueidentifier rendering
+
+A `uniqueidentifier` renders as the RFC 4122 **lowercase** GUID
+(`3e11fa47-71ca-11e1-9e33-c80aa9429562`) — in entity keys and payload
+fields alike, on the snapshot and the change stream alike — the same bytes a
+PostgreSQL `uuid` ingests as, so one logical UUID keys and joins identically
+across engines. Releases before 0.8.0 rendered the driver's UPPERCASE form.
+
+**Upgrading from 0.7.x:** the change is gated on the cluster feature level
+(every node at 0.8.0). Until then every node keeps the uppercase spelling, so
+a mixed-version cluster never spells one key two ways. Once the cluster is
+fully upgraded, each SQL Server ingestable **re-snapshots once** the next
+time its worker starts (a restart or an ownership change): every row
+re-emits at a bumped refresh epoch with canonical keys, and the closing
+refresh-boundary marker sweeps the uppercase rows from keyed sinks. Keyless
+(append) sinks keep both spellings until rebuilt. The worker logs
+`uniqueidentifier rendering changed to canonical lowercase` when it does
+this.
+
 ### SQL Server troubleshooting
 
 - **Preflight fails, "has no primary key."** Change Tracking (and delete

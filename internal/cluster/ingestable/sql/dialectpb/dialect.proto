@@ -76,6 +76,14 @@ message SQLServerPosition {
     SnapshotProgress snapshot_progress = 2;
     uint64 refresh_epoch = 3;
     repeated string snapshotted_tables = 4;
+    // uuid_rendering records how this checkpoint's session spelled
+    // uniqueidentifier values (keys and payload fields): 0 = the pre-0.8.0
+    // driver rendering (UPPERCASE GUID; also every checkpoint written before
+    // this field existed), 1 = RFC 4122 canonical lowercase (cluster feature
+    // level 5). A session that renders canonically but resumes a checkpoint
+    // spelled the old way re-snapshots once at a bumped epoch so the sink
+    // re-keys. Once canonical, a checkpoint stays canonical.
+    uint32 uuid_rendering = 5;
 }
 
 // SnapshotProgress tracks where a chunked (keyset-paginated) snapshot

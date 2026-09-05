@@ -51,6 +51,7 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 	var resumeProgress *dialectpb.SnapshotProgress
 	var epoch uint64
 	var snapshotted []string
+	var checkpointRendering uint32
 	if len(pos) > 0 {
 		posProto := &dialectpb.SQLServerPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
@@ -60,7 +61,12 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 		resumeProgress = posProto.SnapshotProgress
 		epoch = posProto.RefreshEpoch
 		snapshotted = posProto.SnapshottedTables
+		checkpointRendering = posProto.UuidRendering
 	}
+	// The session's uniqueidentifier rendering, decided ONCE here so every row
+	// this session emits — snapshot or poll, across retries — spells a GUID
+	// the same way; a gate that opens mid-session is picked up by the next.
+	rendering, rerender := sessionUUIDRendering(checkpointRendering, len(pos) > 0, d.canonicalUUIDEnabled())
 	// epoch stays the RAW checkpoint epoch here (0 when none): the snapshot
 	// decisions (sql.PlanSnapshot) choose the generation from it and the
 	// sink's highwater, and the poll loop floors it before streaming.
@@ -77,7 +83,7 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 			return nil
 		}
 
-		err := d.ingestOnce(ctx, db, config, &version, &resumeProgress, &epoch, epochFloor, &snapshotted, backoff, pr, po)
+		err := d.ingestOnce(ctx, db, config, &version, &resumeProgress, &epoch, epochFloor, &snapshotted, rendering, &rerender, backoff, pr, po)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -115,12 +121,32 @@ func (d *SQLServerDialect) ingestOnce(
 	epoch *uint64,
 	epochFloor uint64,
 	snapshotted *[]string,
+	rendering uint32,
+	rerender *bool,
 	backoff *sql.Backoff,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
 	if err := ensureChangeTracking(ctx, db, config); err != nil {
 		return err
+	}
+
+	// --- rendering change: re-key the sink ---
+	// The checkpoint was written under the other uniqueidentifier spelling,
+	// so every GUID key and payload field on the sink is spelled the old way.
+	// Re-emit every row at a bumped epoch — the purge-hole contract applied to
+	// a rendering change: the closing refresh markers sweep the old spellings
+	// on keyed sinks (keyless/append sinks keep both until rebuilt). Cleared
+	// only once the re-snapshot completes, so a failed attempt retries it.
+	if *rerender {
+		zap.L().Warn("uniqueidentifier rendering changed to canonical lowercase (cluster feature level 5) — re-snapshotting so every key and payload re-keys; the closing refresh markers sweep the uppercase rows on keyed sinks",
+			zap.Uint64("consumedVersion", *version))
+		*resumeProgress = nil
+		*snapshotted = nil
+		if err := d.runSnapshot(ctx, db, config, sql.SnapshotGap, version, resumeProgress, epoch, epochFloor, snapshotted, nil, rendering, pr, po); err != nil {
+			return err
+		}
+		*rerender = false
 	}
 
 	// --- snapshot on first run, mid-snapshot resume, or added-table backfill ---
@@ -132,15 +158,15 @@ func (d *SQLServerDialect) ingestOnce(
 	added := addedTables(config.Tables, *snapshotted)
 	switch {
 	case *resumeProgress != nil:
-		if err := d.runSnapshot(ctx, db, config, sql.SnapshotResume, version, resumeProgress, epoch, epochFloor, snapshotted, nil, pr, po); err != nil {
+		if err := d.runSnapshot(ctx, db, config, sql.SnapshotResume, version, resumeProgress, epoch, epochFloor, snapshotted, nil, rendering, pr, po); err != nil {
 			return err
 		}
 	case needFull:
-		if err := d.runSnapshot(ctx, db, config, sql.SnapshotCold, version, resumeProgress, epoch, epochFloor, snapshotted, nil, pr, po); err != nil {
+		if err := d.runSnapshot(ctx, db, config, sql.SnapshotCold, version, resumeProgress, epoch, epochFloor, snapshotted, nil, rendering, pr, po); err != nil {
 			return err
 		}
 	case len(added) > 0:
-		if err := d.runSnapshot(ctx, db, config, sql.SnapshotBackfill, version, resumeProgress, epoch, epochFloor, snapshotted, added, pr, po); err != nil {
+		if err := d.runSnapshot(ctx, db, config, sql.SnapshotBackfill, version, resumeProgress, epoch, epochFloor, snapshotted, added, rendering, pr, po); err != nil {
 			return err
 		}
 	}
@@ -155,7 +181,8 @@ func (d *SQLServerDialect) ingestOnce(
 	// the poll resumes FROM is the first datum a re-delivery question needs.
 	zap.L().Info("change tracking poll started",
 		zap.Uint64("resumeVersion", *version),
-		zap.Duration("pollInterval", pollInterval(config.Options)))
+		zap.Duration("pollInterval", pollInterval(config.Options)),
+		zap.Bool("canonicalUUID", rendering == uuidRenderingCanonical))
 
 	// --- the poll loop ---
 	interval := pollInterval(config.Options)
@@ -179,7 +206,7 @@ func (d *SQLServerDialect) ingestOnce(
 				zap.Uint64("minValidVersion", minValid))
 			*resumeProgress = nil
 			*snapshotted = nil
-			if err := d.runSnapshot(ctx, db, config, sql.SnapshotGap, version, resumeProgress, epoch, epochFloor, snapshotted, nil, pr, po); err != nil {
+			if err := d.runSnapshot(ctx, db, config, sql.SnapshotGap, version, resumeProgress, epoch, epochFloor, snapshotted, nil, rendering, pr, po); err != nil {
 				return err
 			}
 			continue
@@ -191,12 +218,12 @@ func (d *SQLServerDialect) ingestOnce(
 			continue
 		}
 
-		if err := d.pollWindow(ctx, db, config, *version, current, *epoch, drift, pr); err != nil {
+		if err := d.pollWindow(ctx, db, config, *version, current, *epoch, rendering == uuidRenderingCanonical, drift, pr); err != nil {
 			return err
 		}
 
 		// Checkpoint the window: all tables consumed through `current`.
-		posBytes, err := encodePosition(current, nil, *epoch, *snapshotted)
+		posBytes, err := encodePosition(current, nil, *epoch, *snapshotted, rendering)
 		if err != nil {
 			return err
 		}
@@ -235,6 +262,7 @@ func (d *SQLServerDialect) runSnapshot(
 	epochFloor uint64,
 	snapshotted *[]string,
 	added []string,
+	rendering uint32,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
@@ -256,7 +284,7 @@ func (d *SQLServerDialect) runSnapshot(
 		*version = v
 	}
 
-	if err := d.snapshot(ctx, db, config, config.Tables, plan.Progress, *version, *epoch, config.Tables, pr, po); err != nil {
+	if err := d.snapshot(ctx, db, config, config.Tables, plan.Progress, *version, *epoch, config.Tables, rendering, pr, po); err != nil {
 		return err
 	}
 
@@ -264,7 +292,7 @@ func (d *SQLServerDialect) runSnapshot(
 	// checkpoint so a restart streams instead of re-snapshotting.
 	*resumeProgress = nil
 	*snapshotted = append([]string(nil), config.Tables...)
-	posBytes, err := encodePosition(*version, nil, *epoch, *snapshotted)
+	posBytes, err := encodePosition(*version, nil, *epoch, *snapshotted, rendering)
 	if err != nil {
 		return err
 	}
@@ -290,6 +318,7 @@ func (d *SQLServerDialect) pollWindow(
 	config *sql.Config,
 	consumed, current uint64,
 	epoch uint64,
+	canonicalUUID bool,
 	drift *schemaDriftGuard,
 	pr chan<- *cluster.Proposal,
 ) error {
@@ -360,7 +389,7 @@ func (d *SQLServerDialect) pollWindow(
 		if spec == nil {
 			return fmt.Errorf("no topic-spec routes table %q", table)
 		}
-		if err := d.pollTable(ctx, db, table, spec, consumed, current, drift, flush); err != nil {
+		if err := d.pollTable(ctx, db, table, spec, consumed, current, canonicalUUID, drift, flush); err != nil {
 			return fmt.Errorf("poll %s: %w", table, err)
 		}
 	}
@@ -376,6 +405,7 @@ func (d *SQLServerDialect) pollTable(
 	table string,
 	spec *sql.TopicSpec,
 	consumed, current uint64,
+	canonicalUUID bool,
 	drift *schemaDriftGuard,
 	flush func([]*cluster.Entity, int64) error,
 ) error {
@@ -447,7 +477,7 @@ func (d *SQLServerDialect) pollTable(
 		return pendingVer
 	}
 	for rows.Next() {
-		m, err := scanRowValues(rows, cols, uuidCols)
+		m, err := scanRowValues(rows, cols, uuidCols, canonicalUUID)
 		if err != nil {
 			return err
 		}
@@ -588,7 +618,7 @@ func rowEntity(spec *sql.TopicSpec, m map[string]any, cats map[string]sql.JSONCa
 // entity keys use — ONE function for the snapshot, upsert, and delete paths,
 // so the same row always keys identically (the keyed-convergence
 // requirement). []byte becomes string(b) (not fmt's byte-slice rendering);
-// uniqueidentifier was already canonicalized by scanRowValues.
+// uniqueidentifier was already spelled for the session by scanRowValues.
 func stringifyKeyValue(v any) string {
 	if b, ok := v.([]byte); ok {
 		return string(b)

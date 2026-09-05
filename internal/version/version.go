@@ -54,7 +54,18 @@ var (
 // scrubber would not do — diverging the rewritten logs. The proposer sets the
 // flag only once the cluster minimum reaches 4, so every member computes the
 // same rewrite.
-const FeatureLevel uint64 = 4
+//
+// Level 5: canonical uniqueidentifier rendering on SQL Server ingest
+// (sqlserver.featureLevelCanonicalUUID). Pre-0.8.0 binaries render a
+// uniqueidentifier as the driver's UPPERCASE GUID; from level 5 it renders
+// RFC 4122 lowercase — the same bytes PostgreSQL's uuid ingests, so one
+// logical UUID keys and joins identically across engines. The spelling is in
+// entity KEYS, so a mixed-version cluster must never produce both: every
+// node renders the old way until the cluster minimum reaches 5, then a
+// session resuming a checkpoint written the old way re-snapshots once at a
+// bumped epoch (its closing markers sweep the old spellings on keyed sinks).
+// The checkpoint records its rendering; once canonical it stays canonical.
+const FeatureLevel uint64 = 5
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

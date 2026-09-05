@@ -169,7 +169,13 @@ After the last node:
 > the older binary. Rollbacks within 0.8.x need nothing. Also note: 0.8.0's
 > RTBF delete-key erasure (feature level 4) pauses on an older binary —
 > already-erased tombstones stay erased, but new erasures resume only when
-> you upgrade again.
+> you upgrade again. And a SQL Server ingestable that has already re-keyed
+> to the canonical lowercase `uniqueidentifier` spelling (feature level 5,
+> see [cdc-setup.md](cdc-setup.md#uniqueidentifier-rendering)) keeps that
+> spelling in its checkpoint; an older binary would resume it rendering
+> uppercase again and spell new rows differently from the rows on the sink —
+> treat the re-key as a one-way transition and rebuild the sink if you must
+> roll back past it.
 
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:
