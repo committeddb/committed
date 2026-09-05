@@ -19,9 +19,6 @@ import (
 )
 
 const (
-	backoffMin = 1 * time.Second
-	backoffMax = 30 * time.Second
-
 	// ctSeqSubBits is the SourceSeq sub-counter width: SourceSeq =
 	// version<<16 | sub. The CT version increments per source transaction, so
 	// 2^47 versions (the headroom the shift leaves in uint64) is beyond any
@@ -74,13 +71,13 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 	}
 	defer func() { _ = db.Close() }()
 
-	backoff := backoffMin
+	backoff := sql.NewReconnectBackoff()
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
 
-		err := d.ingestOnce(ctx, db, config, &version, &resumeProgress, &epoch, epochFloor, &snapshotted, pr, po)
+		err := d.ingestOnce(ctx, db, config, &version, &resumeProgress, &epoch, epochFloor, &snapshotted, backoff, pr, po)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -98,11 +95,10 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 			return err
 		}
 		zap.L().Warn("[sqlserver] ingest error, retrying",
-			zap.Duration("backoff", backoff), zap.Error(err))
-		if werr := waitCtx(ctx, backoff); werr != nil {
+			zap.Duration("backoff", backoff.Delay()), zap.Error(err))
+		if backoff.Wait(ctx) != nil {
 			return nil
 		}
-		backoff = min(backoff*2, backoffMax)
 	}
 }
 
@@ -119,6 +115,7 @@ func (d *SQLServerDialect) ingestOnce(
 	epoch *uint64,
 	epochFloor uint64,
 	snapshotted *[]string,
+	backoff *sql.Backoff,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
@@ -149,6 +146,10 @@ func (d *SQLServerDialect) ingestOnce(
 	}
 	// The stream floor: never stamp below the sink's highwater, never below 1.
 	*epoch = sql.FloorEpoch(*epoch, epochFloor)
+
+	// The attempt reached streaming (any snapshot it needed is complete): the
+	// next failure is a fresh one, so the reconnect delay starts over.
+	backoff.Reset()
 
 	// The resume-time positioning line (the shared per-dialect contract): what
 	// the poll resumes FROM is the first datum a re-delivery question needs.

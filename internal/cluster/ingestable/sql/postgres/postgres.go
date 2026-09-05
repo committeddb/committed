@@ -64,9 +64,6 @@ type snapshotIntent struct {
 }
 
 const (
-	backoffMin = 1 * time.Second
-	backoffMax = 30 * time.Second
-
 	// standbyTimeout controls how often we send standby status updates
 	// to Postgres. Must be shorter than wal_sender_timeout (default 60s)
 	// to prevent the server from dropping the connection.
@@ -362,7 +359,7 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 		return err
 	}
 
-	backoff := backoffMin
+	backoff := sql.NewReconnectBackoff()
 
 	// intent is the pending-snapshot record that survives stream() retries —
 	// see snapshotIntent. stream() forms it before running a snapshot and
@@ -371,7 +368,7 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	var intent *snapshotIntent
 
 	for {
-		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, pr, po)
+		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, backoff, pr, po)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -391,19 +388,11 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 		}
 
 		zap.L().Warn("postgres replication stream exited, will reconnect",
-			zap.Duration("backoff", backoff),
+			zap.Duration("backoff", backoff.Delay()),
 			zap.Error(err),
 		)
-
-		select {
-		case <-ctx.Done():
+		if backoff.Wait(ctx) != nil {
 			return nil
-		case <-time.After(backoff):
-		}
-
-		backoff *= 2
-		if backoff > backoffMax {
-			backoff = backoffMax
 		}
 	}
 }
@@ -667,6 +656,7 @@ func (d *PostgreSQLDialect) stream(
 	epoch *uint64,
 	epochFloor uint64,
 	intent **snapshotIntent,
+	backoff *sql.Backoff,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) (err error) {
@@ -836,6 +826,7 @@ func (d *PostgreSQLDialect) stream(
 			return err
 		}
 		*intent = nil
+		backoff.Reset() // durable progress: a failure after this is a fresh one
 	}
 
 	// Any streaming path that did not snapshot still stamps entities, so ensure
@@ -853,6 +844,9 @@ func (d *PostgreSQLDialect) stream(
 	if err != nil {
 		return err
 	}
+	// The attempt reached streaming: the next failure is a fresh one, so the
+	// reconnect delay starts over rather than continuing an earlier climb.
+	backoff.Reset()
 	logResumePositioning(pgCfg.slotName, *lastLSN)
 
 	relations := make(map[uint32]*pglogrepl.RelationMessage)

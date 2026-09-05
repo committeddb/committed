@@ -42,9 +42,6 @@ type MySQLDialect struct{}
 // convenience. flushSub keeps the parts' SourceSeqs strictly monotonic.
 
 const (
-	syncerBackoffMin = 1 * time.Second
-	syncerBackoffMax = 30 * time.Second
-
 	// defaultSnapshotBatchSize is the number of rows read per snapshot
 	// batch when Config.Options has no "batch_size" override. The
 	// snapshot uses keyset pagination (SELECT ... WHERE pk > :last_pk
@@ -621,7 +618,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	// routing (SpecForTable, specFor, refSpecs) never has to lazily mutate the shared
 	// config concurrently — a dialect entered directly has only the flat fields.
 	config.EnsureTopics()
-	backoff := syncerBackoffMin
+	backoff := sql.NewReconnectBackoff()
 
 	// Parse the initial resume position, if any. snapshot_progress
 	// being non-nil means a prior run was interrupted mid-snapshot
@@ -715,24 +712,18 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 					return nil
 				}
 				zap.L().Warn("snapshot failed, retrying",
-					zap.Duration("backoff", backoff),
+					zap.Duration("backoff", backoff.Delay()),
 					zap.Error(err),
 				)
-				select {
-				case <-ctx.Done():
+				if backoff.Wait(ctx) != nil {
 					return nil
-				case <-time.After(backoff):
-				}
-				backoff *= 2
-				if backoff > syncerBackoffMax {
-					backoff = syncerBackoffMax
 				}
 				continue
 			}
 			lastPos = snapshotPos
 			lastGTID = snapshotGTID
 			resumeProgress = nil
-			backoff = syncerBackoffMin
+			backoff.Reset()
 			zap.L().Info("snapshot complete",
 				zap.String("binlog_file", lastPos.Name),
 				zap.Uint32("binlog_pos", lastPos.Pos),
@@ -796,25 +787,19 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				streamer, err = syncer.StartSync(*lastPos)
 			}
 			if err == nil {
-				backoff = syncerBackoffMin
+				// The attempt reached streaming: the next failure is a fresh
+				// one, so the reconnect delay starts over.
+				backoff.Reset()
 				break
 			}
 			syncer.Close()
 
 			zap.L().Warn("binlog sync start failed, retrying",
-				zap.Duration("backoff", backoff),
+				zap.Duration("backoff", backoff.Delay()),
 				zap.Error(err),
 			)
-
-			select {
-			case <-ctx.Done():
+			if backoff.Wait(ctx) != nil {
 				return nil
-			case <-time.After(backoff):
-			}
-
-			backoff *= 2
-			if backoff > syncerBackoffMax {
-				backoff = syncerBackoffMax
 			}
 		}
 		logResumePositioning(useGTID, gtidSet, lastPos)
@@ -828,17 +813,11 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			if err != nil {
 				syncer.Close()
 				zap.L().Warn("read source collation catalog failed, retrying",
-					zap.Duration("backoff", backoff),
+					zap.Duration("backoff", backoff.Delay()),
 					zap.Error(err),
 				)
-				select {
-				case <-ctx.Done():
+				if backoff.Wait(ctx) != nil {
 					return nil
-				case <-time.After(backoff):
-				}
-				backoff *= 2
-				if backoff > syncerBackoffMax {
-					backoff = syncerBackoffMax
 				}
 				continue
 			}
@@ -953,21 +932,14 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 				lastGTID = handler.consumedGTID.String()
 			}
 			zap.L().Warn("binlog stream exited, will reconnect",
-				zap.Duration("backoff", backoff),
+				zap.Duration("backoff", backoff.Delay()),
 				zap.Error(streamErr),
 			)
 		}
 
 		// --- backoff before reconnect ---
-		select {
-		case <-ctx.Done():
+		if backoff.Wait(ctx) != nil {
 			return nil
-		case <-time.After(backoff):
-		}
-
-		backoff *= 2
-		if backoff > syncerBackoffMax {
-			backoff = syncerBackoffMax
 		}
 	}
 }
