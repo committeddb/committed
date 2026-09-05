@@ -653,8 +653,9 @@ its data is then simply not replicated.
 Every other MySQL type is supported: numbers, `DECIMAL` (exact), `BIT`, `DATE`/
 `TIME`/`DATETIME`/`TIMESTAMP`, `CHAR`/`VARCHAR`/`TEXT`/`ENUM`/`SET`, `JSON`, and
 binary (`BLOB`/`BINARY`/`VARBINARY`, emitted as base64). (Postgres has no such
-gap — PostGIS `geometry`/`geography` and `pgvector` come through as their
-lossless `::text` form.)
+gap — PostGIS `geometry`/`geography`, `pgvector`, user composite types, and
+arrays all come through as their lossless `::text` form, spelled identically
+on the snapshot and the stream.)
 
 ### Configuration
 

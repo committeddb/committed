@@ -1656,6 +1656,14 @@ func readBatch(
 	// (time.Time/[]byte/float64) and json.Marshal renders it differently than the
 	// Postgres text form, so a column's bytes would flip on its first CDC update
 	// after snapshot. Categories must come from the real types, not the text cast.
+	//
+	// The cast is total and the parity is by construction, not per type: the
+	// `::text` I/O-conversion cast exists for EVERY data type (it calls the
+	// type's output function), and pgoutput renders each column with that same
+	// output function — under the same session GUCs, which buildPgConfig pins on
+	// both connections. So a composite, an array, an extension type all spell
+	// identically here and on the stream, and no column can fail this cast
+	// (pinned by TestPostgresCompositeAndArrayColumnsRoundTrip).
 	columns, cats, err := snapshotColumnMeta(ctx, tx, quotedTable)
 	if err != nil {
 		return nil, "", 0, err
