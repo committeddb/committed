@@ -133,7 +133,25 @@ func awaitCommit(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Po
 // while a leftover slot suppresses the initial snapshot. The slot drop
 // retries because the previous run's walsender dies asynchronously
 // after ctx cancel and an active slot cannot be dropped.
+//
+// It ALSO registers the same drop as a t.Cleanup, so the slot is released
+// when the test ends — after its deferred cancels have stopped the worker.
+// The container caps max_replication_slots at 16 and a full local run
+// creates more slots than that; tests that cleaned only BEFORE running
+// leaked their slot for the rest of the run, and once sixteen had
+// accumulated every later CreateReplicationSlot failed, its worker retried
+// under backoff, and the tail of the suite timed out waiting for rows
+// (the six "local-only" failures — CI ran fewer files and stayed under the
+// cap). Releasing at the seam every test already uses closes the leak for
+// all of them; a test that also cleans in its own defer just drops twice
+// (dropping an absent slot is a no-op).
 func cleanReplication(t *testing.T, slotName, pubName string) {
+	t.Helper()
+	dropReplication(t, slotName, pubName)
+	t.Cleanup(func() { dropReplication(t, slotName, pubName) })
+}
+
+func dropReplication(t *testing.T, slotName, pubName string) {
 	t.Helper()
 	db := createDB(t)
 	defer db.Close()

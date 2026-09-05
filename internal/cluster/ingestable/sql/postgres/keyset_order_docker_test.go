@@ -1,4 +1,4 @@
-//go:build docker
+//go:build docker || integration
 
 package postgres_test
 
