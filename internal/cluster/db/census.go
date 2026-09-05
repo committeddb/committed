@@ -85,19 +85,7 @@ func (db *DB) censusOptionsFor(id string) (cluster.CensusOptions, bool) {
 				zap.String("id", id), zap.Error(err))
 			return cluster.CensusOptions{Disabled: true}, true
 		}
-		opts := cluster.CensusOptions{ValueLimit: cluster.DefaultCensusValueLimit}
-		if v.IsSet("ingestable.census") && !v.GetBool("ingestable.census") {
-			opts.Disabled = true
-		}
-		if v.GetBool("ingestable.censusValues") {
-			opts.TrackValues = true
-		}
-		if v.IsSet("ingestable.censusValueLimit") {
-			if n := v.GetInt("ingestable.censusValueLimit"); n > 0 {
-				opts.ValueLimit = n
-			}
-		}
-		return opts, true
+		return cluster.ParseCensusOptions(v), true
 	}
 	return cluster.CensusOptions{}, false
 }

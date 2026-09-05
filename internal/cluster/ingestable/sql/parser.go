@@ -138,8 +138,17 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 	if !ok {
 		return nil, nil, cluster.UnknownDialectError(dialectName, dialectNames(p.Dialects))
 	}
+	// The [sql] vocabulary. `options` is the dialect-neutral option table the
+	// docs show; `[sql.<dialect>]` is its older spelling — both are free-form
+	// (dialect option names, validated by the dialect) and read wholesale.
+	if err := v.RejectUnknownKeys("sql", sqlSectionKeys(dialectName)...); err != nil {
+		return nil, nil, err
+	}
 	connectionString := v.GetString("sql.connectionString")
-	options := v.GetStringMapString("sql." + dialectName)
+	options, err := mergeOptions(v.GetStringMapString("sql.options"), v.GetStringMapString("sql."+dialectName), dialectName)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Two mutually-exclusive config shapes share the dialect / connectionString /
 	// sql.<dialect> options: the flat single-topic form (sql.topic + sql.tables +
@@ -255,6 +264,36 @@ func (p *IngestableParser) parseFlatConfig(v *cluster.ParsedConfig, dialect Dial
 // and topicSpecTOML's mapstructure tags are the same set — the
 // jsonColumns saga was a field added to the struct but not this list,
 // and a config in the mixed spelling silently hinted nothing for weeks.
+// sqlSectionKeys is the ingest [sql] vocabulary: what ParseConfig, its two
+// forms, and TopicsFromConfig read, plus the two free-form option tables.
+// Pinned to those reads by the vocabulary conformance test.
+func sqlSectionKeys(dialectName string) []string {
+	return []string{
+		"dialect", "connectionString", "topic", "tables", "primaryKey", "mappings",
+		"mapAllColumns", "excludeColumns", "jsonColumns", "topics", "options", dialectName,
+	}
+}
+
+// mergeOptions unions [sql.options] with the older [sql.<dialect>] table.
+// One option named in both is ambiguous — refused rather than silently
+// resolved one way.
+func mergeOptions(neutral, dialect map[string]string, dialectName string) (map[string]string, error) {
+	out := make(map[string]string, len(neutral)+len(dialect))
+	for k, val := range dialect {
+		out[k] = val
+	}
+	for k, val := range neutral {
+		if _, dup := out[k]; dup {
+			return nil, cluster.NotAdmissible(&cluster.FieldError{
+				Field: "sql.options." + k,
+				Issue: fmt.Sprintf("also set under [sql.%s]; set each option in one place", dialectName),
+			})
+		}
+		out[k] = val
+	}
+	return out, nil
+}
+
 var flatPerTopicFields = []string{
 	"sql.topic", "sql.tables", "sql.primaryKey", "sql.mappings",
 	"sql.mapAllColumns", "sql.excludeColumns", "sql.jsonColumns",

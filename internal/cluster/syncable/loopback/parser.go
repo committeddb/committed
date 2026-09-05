@@ -16,6 +16,11 @@ type SyncableParser struct {
 	Proposer Proposer
 }
 
+// loopbackKeys is the [loopback] vocabulary (ParseConfig's, TopicsFromConfig's,
+// and DerivedTopicsFromConfig's reads), pinned by the vocabulary conformance
+// test.
+var loopbackKeys = []string{"topic", "target", "keyPath", "acknowledgeAppendSemantics", "mappings"}
+
 func (p *SyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v)
 	if err != nil {
@@ -57,6 +62,9 @@ func (p *SyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.Database
 
 // ParseConfig validates the [loopback] section without touching storage.
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
+	if err := v.RejectUnknownKeys("loopback", loopbackKeys...); err != nil {
+		return nil, err
+	}
 	source := v.GetString("loopback.topic")
 	if source == "" {
 		return nil, &cluster.FieldError{Field: "loopback.topic", Issue: "required (the source topic to derive from)"}

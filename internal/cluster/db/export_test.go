@@ -639,3 +639,11 @@ func (r *workerRegistry) put(kind workerKind, id string, h *workerHandle) {
 	r.table(kind)[id] = h
 	r.mu.Unlock()
 }
+
+// The type and restatement vocabularies, exposed so the conformance test can
+// prove each equals the keys ParseType / ParseRestatement actually read.
+var (
+	TypeKeys        = typeKeys
+	MigrationKeys   = migrationKeys
+	RestatementKeys = restatementKeys
+)

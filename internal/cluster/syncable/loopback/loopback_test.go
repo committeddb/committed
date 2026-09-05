@@ -157,3 +157,30 @@ func (f proposerFunc) Propose(_ context.Context, p *cluster.Proposal) error {
 	}
 	return f(p)
 }
+
+func TestParseConfigRejectsUnknownKeys(t *testing.T) {
+	p := &loopback.SyncableParser{}
+	_, err := p.ParseConfig(parse(t, "[loopback]\ntopic = \"a\"\ntargt = \"b\"\n"))
+	require.Error(t, err)
+	require.Equal(t, "loopback.targt", cluster.NewConfigError(err).Field)
+	require.Contains(t, err.Error(), `did you mean "target"?`)
+}
+
+func TestLoopbackVocabulary_EqualsTheReads(t *testing.T) {
+	read := cluster.ObserveConfigReads(func() {
+		v := parse(t, "[loopback]\ntopic = \"a\"\ntarget = \"b\"\nacknowledgeAppendSemantics = true\n[[loopback.mappings]]\njsonPath = \"$.x\"\nfield = \"x\"\n")
+		p := &loopback.SyncableParser{}
+		_, err := p.ParseConfig(v)
+		require.NoError(t, err)
+		_ = p.TopicsFromConfig(v)
+		_ = p.DerivedTopicsFromConfig(v)
+		// keyPath is in the vocabulary only to be refused by name (re-keying
+		// is unsupported): a read whose outcome is a targeted error, not an
+		// "unknown key".
+		_, err = p.ParseConfig(parse(t, "[loopback]\ntopic = \"a\"\ntarget = \"b\"\nkeyPath = \"$.id\"\n"))
+		require.ErrorContains(t, err, "re-keying is not supported")
+	})
+	undeclared, unread := cluster.VocabularyDiff(loopback.LoopbackKeys, read["loopback"])
+	require.Empty(t, undeclared, "[loopback]: keys read but not declared")
+	require.Empty(t, unread, "[loopback]: keys declared but never read")
+}

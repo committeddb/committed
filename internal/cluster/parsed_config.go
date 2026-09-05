@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/pelletier/go-toml/v2"
@@ -68,6 +69,7 @@ func (c *ParsedConfig) Values() map[string]any {
 // (sorted order breaks ties deterministically) — tolerant on
 // committed's key names without rewriting anyone's data.
 func (c *ParsedConfig) lookup(path string) (any, bool) {
+	observeRead(path)
 	var current any = c.values
 	for _, segment := range strings.Split(path, ".") {
 		m, ok := current.(map[string]any)
@@ -295,4 +297,194 @@ func toString(v any) string {
 	default:
 		return fmt.Sprintf("%v", t)
 	}
+}
+
+// RejectUnknownKeys checks the immediate keys of the table at section
+// against the vocabulary the parser reads from it — the parser DECLARES
+// what it consumes, beside the reads, and everything else is a typo or a
+// probe for a feature that does not exist. Matching is case-insensitive
+// (the same tolerance lookup has). A key naming a nested table or array
+// counts as one key (its inside is the nested decode's concern: strict
+// UnmarshalKey for structs, wholesale reads for free-form maps). An absent
+// section is fine. The error is a NotAdmissible FieldError naming the key in
+// the document's own spelling, with the closest known key when one is near.
+func (c *ParsedConfig) RejectUnknownKeys(section string, known ...string) error {
+	m, ok := c.Get(section).(map[string]any)
+	if !ok {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !knownKey(k, known) {
+			return NotAdmissible(&FieldError{
+				Field: section + "." + k,
+				Issue: unknownKeyIssue(k, known, "key"),
+			})
+		}
+	}
+	return nil
+}
+
+// RejectUnknownSections is RejectUnknownKeys for the document's top-level
+// tables: a config kind reads a fixed set of sections ([ingestable] and the
+// type's own, say), and a table outside it is a misspelled section.
+func (c *ParsedConfig) RejectUnknownSections(known ...string) error {
+	keys := make([]string, 0, len(c.values))
+	for k := range c.values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !knownKey(k, known) {
+			return NotAdmissible(&FieldError{
+				Field: k,
+				Issue: unknownKeyIssue(k, known, "section"),
+			})
+		}
+	}
+	return nil
+}
+
+func knownKey(k string, known []string) bool {
+	for _, want := range known {
+		if want != "" && strings.EqualFold(k, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// unknownKeyIssue phrases the rejection, suggesting the nearest known name
+// when the typo is within two edits of one.
+func unknownKeyIssue(k string, known []string, what string) string {
+	msg := fmt.Sprintf("unknown %s — not part of this config's vocabulary (check the spelling against the docs; unknown %ss are rejected rather than silently ignored)", what, what)
+	if near := nearestName(k, known); near != "" {
+		msg += fmt.Sprintf("; did you mean %q?", near)
+	}
+	return msg
+}
+
+// nearestName returns the known name within two case-insensitive edits of
+// k (insert, delete, or replace one character), or "" when none is close.
+func nearestName(k string, known []string) string {
+	best, bestDist := "", 3
+	lk := strings.ToLower(k)
+	for _, want := range known {
+		if want == "" {
+			continue
+		}
+		if d := editDistance(lk, strings.ToLower(want)); d < bestDist {
+			best, bestDist = want, d
+		}
+	}
+	return best
+}
+
+func editDistance(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	cur := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(rb)]
+}
+
+// The read observer makes the keys a parser READS observable, so a test can
+// prove they equal the keys it DECLARES (RejectUnknownKeys' vocabulary) —
+// the two are otherwise separate specifications that drift silently in one
+// direction: a declared key nobody reads is a typo-tolerant hole again.
+// Test support only; nil in production, and one observation at a time.
+var (
+	readObserverMu sync.Mutex
+	readObserver   func(path string)
+)
+
+func observeRead(path string) {
+	readObserverMu.Lock()
+	fn := readObserver
+	readObserverMu.Unlock()
+	if fn != nil {
+		fn(path)
+	}
+}
+
+// ObserveConfigReads runs fn with every ParsedConfig lookup recorded and
+// returns, per top-level section, the keys any parser asked for during fn —
+// present in the document or not (a parser's vocabulary is what it asks
+// for), lowercased, sorted, unique. A lookup of a bare section ("sql", by
+// RejectUnknownKeys itself) names no key and is not counted.
+func ObserveConfigReads(fn func()) map[string][]string {
+	seen := map[string]map[string]bool{}
+	readObserverMu.Lock()
+	readObserver = func(path string) {
+		segs := strings.SplitN(strings.ToLower(path), ".", 3)
+		if len(segs) < 2 {
+			return
+		}
+		if seen[segs[0]] == nil {
+			seen[segs[0]] = map[string]bool{}
+		}
+		seen[segs[0]][segs[1]] = true
+	}
+	readObserverMu.Unlock()
+	defer func() {
+		readObserverMu.Lock()
+		readObserver = nil
+		readObserverMu.Unlock()
+	}()
+	fn()
+	out := make(map[string][]string, len(seen))
+	for sec, keys := range seen {
+		for k := range keys {
+			out[sec] = append(out[sec], k)
+		}
+		sort.Strings(out[sec])
+	}
+	return out
+}
+
+// VocabularyDiff compares a section's declared vocabulary with the keys
+// observed being read: undeclared are read but not declared (they would be
+// rejected at POST); unread are declared but never read (a typo-tolerant
+// hole). Both empty means the declaration is exactly the reads.
+func VocabularyDiff(declared, read []string) (undeclared, unread []string) {
+	d := map[string]bool{}
+	for _, k := range declared {
+		if k != "" {
+			d[strings.ToLower(k)] = true
+		}
+	}
+	r := map[string]bool{}
+	for _, k := range read {
+		r[strings.ToLower(k)] = true
+	}
+	for k := range r {
+		if !d[k] {
+			undeclared = append(undeclared, k)
+		}
+	}
+	for k := range d {
+		if !r[k] {
+			unread = append(unread, k)
+		}
+	}
+	sort.Strings(undeclared)
+	sort.Strings(unread)
+	return undeclared, unread
 }

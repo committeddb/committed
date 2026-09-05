@@ -736,6 +736,10 @@ batch_size       = "10000"   # rows per keyset batch (default 10000)
 snapshot_readers = "4"       # parallel PK-range readers per table (default 1)
 ```
 
+(`[sql.options]` is the dialect-neutral home for options; the older
+`[sql.mysql]` / `[sql.postgres]` / `[sql.sqlserver]` table reads the same
+way. Set each option in one place.)
+
 - `snapshot_readers` defaults to **1** (the single stream) on purpose: the
   snapshot target is usually a production replica, and every reader holds a
   connection running a range scan. Raise it deliberately, watching the
@@ -891,6 +895,8 @@ primaryKey = "id"
 poll_interval = "3s"          # CT poll cadence (default 3s) — read models trail by ~this
 batch_size = "1000"           # snapshot keyset batch
 ```
+
+(`[sql.sqlserver]` is accepted as an older spelling of `[sql.options]`.)
 
 ### Lag, retention, and the poll cadence
 

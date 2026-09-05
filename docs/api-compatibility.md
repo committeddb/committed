@@ -68,6 +68,24 @@ old and new behaviour. While something is deprecated:
 There are currently no deprecated endpoints. `/v1` is the first and only
 major version; there is no pre-`/v1` surface to keep alive.
 
+## Config vocabulary is closed
+
+A config document's keys are a closed vocabulary. Every section a config
+kind reads (`[ingestable]`, `[syncable]`, `[database]`, `[type]`,
+`[migration]`, `[restatement]`, and each type's own section such as `[sql]`,
+`[http]`, `[iceberg]`, `[loopback]`, `[projection]`) accepts exactly the keys
+its parser reads; a key outside that set — a typo, a misplaced field, or a
+probe for a feature that does not exist — is rejected at POST with a 400
+naming the key (and the nearest known one), and a misspelled section is
+rejected the same way. Free-form tables (`[sql.options]`, `[iceberg.props]`,
+`[http.headers]`) take any key: their contents are the source's or sink's
+vocabulary, not committed's. Matching stays case-insensitive.
+
+The alternative — accepting and ignoring — manufactured belief in settings
+that never took effect. Adding a key is an ordinary additive change; a config
+written for a newer binary is refused by an older one rather than half
+applied, which is the safe direction during a rolling upgrade.
+
 ## Operational endpoints are not API surface
 
 These endpoints are infrastructure for orchestrators and humans, not

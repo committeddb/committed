@@ -25,7 +25,7 @@ func TestDatabaseLifecycle(t *testing.T) {
 
 	e.addRecorderDatabase(t, "db-1")
 	mustStatus(t, e.doTOML(t, "POST", "/v1/database/db-1",
-		"[database]\nname = \"db-1\"\ntype = \"recorder\"\nnote = \"v2\"\n"), 200)
+		"[database]\nname = \"db-1\"\ntype = \"recorder\"\n[recorder]\nnote = \"v2\"\n"), 200)
 
 	var listing []struct {
 		ID string `json:"id"`

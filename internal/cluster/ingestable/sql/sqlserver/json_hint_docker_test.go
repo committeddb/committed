@@ -124,6 +124,8 @@ tables           = ["json_hint_parser"]
 primaryKey       = "pk"
 mapAllColumns    = true
 jsonColumns      = ["EventData"]
+
+[sql.options]
 poll_interval    = "300ms"
 `, ingestURL)
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))

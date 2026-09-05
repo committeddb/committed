@@ -156,3 +156,34 @@ func TestFlushTriggers(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	require.True(t, s.flushDue(), "age threshold reached")
 }
+
+func TestParseConfigRejectsUnknownKeys(t *testing.T) {
+	p := &SyncableParser{}
+	_, err := p.ParseConfig(parse(t, "[iceberg]\ntopic = \"a\"\ncatalog = \"http://c:8181\"\nnamespce = \"n\"\ntable = \"t\"\n"))
+	require.Error(t, err)
+	require.Equal(t, "iceberg.namespce", cluster.NewConfigError(err).Field)
+	require.Contains(t, err.Error(), `did you mean "namespace"?`)
+}
+
+func TestIcebergVocabulary_EqualsTheReads(t *testing.T) {
+	read := cluster.ObserveConfigReads(func() {
+		v := parse(t, `[iceberg]
+topic = "photos"
+catalog = "http://catalog:8181"
+warehouse = "s3://lake/warehouse"
+namespace = "committed"
+table = "photos"
+flushRows = 500
+flushInterval = "5s"
+[iceberg.props]
+"s3.endpoint" = "http://minio:9000"
+`)
+		p := &SyncableParser{}
+		_, err := p.ParseConfig(v)
+		require.NoError(t, err)
+		_ = p.TopicsFromConfig(v)
+	})
+	undeclared, unread := cluster.VocabularyDiff(icebergKeys, read["iceberg"])
+	require.Empty(t, undeclared, "[iceberg]: keys read but not declared")
+	require.Empty(t, unread, "[iceberg]: keys declared but never read")
+}

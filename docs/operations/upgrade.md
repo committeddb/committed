@@ -193,6 +193,14 @@ same quorum rule applies in reverse.
 
 ## Notes and limits
 
+- **0.8.0 closes the config vocabulary.** A config key the parser does not
+  read — a typo, a misplaced field — is now rejected at POST instead of
+  being silently ignored (see [api-compatibility.md](../api-compatibility.md#config-vocabulary-is-closed)).
+  A *stored* config that carries such a key parks on the upgraded binary
+  when its worker is rebuilt (the status and the log name the key: "not
+  admissible under this binary"); re-POST it without the key. The setting
+  never took effect before, so nothing about its behavior changes except
+  that you now learn about it.
 - **Mixed-version window.** During the roll the cluster runs mixed
   versions (some nodes new, some old) for the duration of the procedure.
   That's expected and safe within a major line; the forward/backward

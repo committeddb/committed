@@ -6,6 +6,11 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
+// syncableEnvelopeKeys is the [syncable] vocabulary: what ParseSyncable,
+// SyncableMode, SyncableZone, and cluster.ParseCheckpointPolicy read. Pinned
+// to those reads by the vocabulary conformance test.
+var syncableEnvelopeKeys = []string{"name", "type", "mode", "zone", "checkpointEvery", "checkpointMaxAge"}
+
 func (p *Parser) AddSyncableParser(name string, sp cluster.SyncableParser) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -176,6 +181,19 @@ func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseS
 
 	name := v.GetString("syncable.name")
 	tipe := v.GetString("syncable.type")
+	// The document's vocabulary is closed: the [syncable] header and the
+	// type's own section (both projection spellings stay admissible here so
+	// the projection parser can name a half-renamed config precisely).
+	sections := []string{"syncable", tipe}
+	if tipe == "projection" || tipe == "sql-projection" {
+		sections = append(sections, "projection", "sql-projection")
+	}
+	if err := v.RejectUnknownSections(sections...); err != nil {
+		return "", nil, 0, err
+	}
+	if err := v.RejectUnknownKeys("syncable", syncableEnvelopeKeys...); err != nil {
+		return "", nil, 0, err
+	}
 	p.mu.RLock()
 	parser, ok := p.syncableParsers[tipe]
 	p.mu.RUnlock()

@@ -253,6 +253,13 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 	return db.Propose(ctx, p)
 }
 
+// typeKeys and migrationKeys are the type document's vocabulary (ParseType's
+// reads), pinned by the vocabulary conformance test.
+var (
+	typeKeys      = []string{"name", "version", "schemaType", "schema", "validate", "schemaChangeTopic", "entityKind", "discriminator"}
+	migrationKeys = []string{"transform", "none", "nonConvertible", "validateAgainst"}
+)
+
 func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cluster.Type, error) {
 	// A user cannot author a type whose id collides with committed's internal
 	// system types — either the reserved system-type namespace (an older node
@@ -273,6 +280,15 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 	// schema document must not error on a missing env var.
 	v, err := cluster.ParseConfigBytes(c.MimeType, c.Data)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := v.RejectUnknownSections("type", "migration"); err != nil {
+		return "", nil, err
+	}
+	if err := v.RejectUnknownKeys("type", typeKeys...); err != nil {
+		return "", nil, err
+	}
+	if err := v.RejectUnknownKeys("migration", migrationKeys...); err != nil {
 		return "", nil, err
 	}
 

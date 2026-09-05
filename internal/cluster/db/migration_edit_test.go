@@ -73,7 +73,7 @@ func TestMigrationEditDependents(t *testing.T) {
 		if mode != "" {
 			toml = fmt.Sprintf("[syncable]\nname = %q\ntype = \"recorder\"\nmode = %q\n", id, mode)
 		}
-		toml += fmt.Sprintf("[sql]\ntopic = %q\n", topic)
+		toml += fmt.Sprintf("[recorder]\ntopic = %q\n", topic)
 		require.NoError(t, d.ProposeSyncable(testCtx(t), &cluster.Configuration{
 			ID: id, MimeType: "text/toml", Data: []byte(toml),
 		}))
@@ -100,7 +100,7 @@ func (p *recorderTopicParser) Parse(_ *cluster.ParsedConfig, _ cluster.DatabaseS
 }
 
 func (p *recorderTopicParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
-	if topic := v.GetString("sql.topic"); topic != "" {
+	if topic := v.GetString("recorder.topic"); topic != "" {
 		return []string{topic}
 	}
 	return nil
@@ -141,7 +141,7 @@ func TestMigrationEditThenRematerializeFixesHistory(t *testing.T) {
 	// current version's migration chain.
 	require.NoError(t, d.ProposeSyncable(testCtx(t), &cluster.Configuration{
 		ID: "mirror", MimeType: "text/toml",
-		Data: []byte("[syncable]\nname = \"mirror\"\ntype = \"recorder\"\nmode = \"always-current\"\n[sql]\ntopic = \"photos\"\n"),
+		Data: []byte("[syncable]\nname = \"mirror\"\ntype = \"recorder\"\nmode = \"always-current\"\n[recorder]\ntopic = \"photos\"\n"),
 	}))
 
 	for i := 1; i <= 3; i++ {
@@ -229,7 +229,7 @@ func TestMigrationEditStaleness_ScopeAndFreshPins(t *testing.T) {
 	// An as-stored consumer synced under the buggy transform era…
 	require.NoError(t, d.ProposeSyncable(testCtx(t), &cluster.Configuration{
 		ID: "stored", MimeType: "text/toml",
-		Data: []byte("[syncable]\nname = \"stored\"\ntype = \"recorder\"\n[sql]\ntopic = \"photos\"\n"),
+		Data: []byte("[syncable]\nname = \"stored\"\ntype = \"recorder\"\n[recorder]\ntopic = \"photos\"\n"),
 	}))
 	tp, err := s.ResolveType(cluster.LatestTypeRef("photos"))
 	require.NoError(t, err)
@@ -254,7 +254,7 @@ func TestMigrationEditStaleness_ScopeAndFreshPins(t *testing.T) {
 	// coordinate: from-0 replay reads the fixed chain — never stale.
 	require.NoError(t, d.ProposeSyncable(testCtx(t), &cluster.Configuration{
 		ID: "fresh-ac", MimeType: "text/toml",
-		Data: []byte("[syncable]\nname = \"fresh-ac\"\ntype = \"recorder\"\nmode = \"always-current\"\n[sql]\ntopic = \"photos\"\n"),
+		Data: []byte("[syncable]\nname = \"fresh-ac\"\ntype = \"recorder\"\nmode = \"always-current\"\n[recorder]\ntopic = \"photos\"\n"),
 	}))
 	require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: []*cluster.Entity{
 		cluster.NewUpsertEntity(tp, []byte("k2"), []byte(`{"v":2}`)),

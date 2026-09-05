@@ -6,6 +6,11 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
+// ingestableEnvelopeKeys is the [ingestable] vocabulary: what ParseIngestable
+// and cluster.ParseCensusOptions read. Pinned to those reads by the
+// vocabulary conformance test.
+var ingestableEnvelopeKeys = []string{"name", "type", "census", "censusValues", "censusValueLimit"}
+
 func (p *Parser) AddIngestableParser(name string, sp cluster.IngestableParser) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -48,6 +53,14 @@ func (p *Parser) ParseIngestable(mimeType string, data []byte) (string, cluster.
 
 	name := v.GetString("ingestable.name")
 	tipe := v.GetString("ingestable.type")
+	// The document's vocabulary is closed: the [ingestable] header and the
+	// type's own section; the sub-parser checks the latter's keys.
+	if err := v.RejectUnknownSections("ingestable", tipe); err != nil {
+		return "", nil, err
+	}
+	if err := v.RejectUnknownKeys("ingestable", ingestableEnvelopeKeys...); err != nil {
+		return "", nil, err
+	}
 	p.mu.RLock()
 	parser, ok := p.ingestableParsers[tipe]
 	p.mu.RUnlock()

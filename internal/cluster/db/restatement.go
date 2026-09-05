@@ -17,9 +17,19 @@ const featureLevelRestatements uint64 = 2
 
 // ParseRestatement reads the [restatement] TOML/JSON envelope into the record. The
 // storage-dependent admission checks live in ProposeRestatement.
+// restatementKeys is the [restatement] vocabulary (ParseRestatement's reads),
+// pinned by the vocabulary conformance test.
+var restatementKeys = []string{"type", "fromIndex", "toIndex", "fromVersion", "readAsVersion", "predicate"}
+
 func ParseRestatement(c *cluster.Configuration) (*cluster.Restatement, error) {
 	v, err := cluster.ParseConfigBytes(c.MimeType, c.Data)
 	if err != nil {
+		return nil, err
+	}
+	if err := v.RejectUnknownSections("restatement"); err != nil {
+		return nil, err
+	}
+	if err := v.RejectUnknownKeys("restatement", restatementKeys...); err != nil {
 		return nil, err
 	}
 	e := &cluster.Restatement{

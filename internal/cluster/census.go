@@ -463,3 +463,22 @@ func draftNode(v any) map[string]any {
 		return map[string]any{}
 	}
 }
+
+// ParseCensusOptions reads the census switches from an ingestable document's
+// [ingestable] section (see CensusOptions): the pure decode, shared by the
+// worker that builds a recorder and the vocabulary conformance test.
+func ParseCensusOptions(v *ParsedConfig) CensusOptions {
+	opts := CensusOptions{ValueLimit: DefaultCensusValueLimit}
+	if v.IsSet("ingestable.census") && !v.GetBool("ingestable.census") {
+		opts.Disabled = true
+	}
+	if v.GetBool("ingestable.censusValues") {
+		opts.TrackValues = true
+	}
+	if v.IsSet("ingestable.censusValueLimit") {
+		if n := v.GetInt("ingestable.censusValueLimit"); n > 0 {
+			opts.ValueLimit = n
+		}
+	}
+	return opts
+}

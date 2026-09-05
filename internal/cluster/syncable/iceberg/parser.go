@@ -12,6 +12,10 @@ import (
 // SyncableParser parses iceberg syncable TOML.
 type SyncableParser struct{}
 
+// icebergKeys is the [iceberg] vocabulary (ParseConfig's and
+// TopicsFromConfig's reads), pinned by the vocabulary conformance test.
+var icebergKeys = []string{"topic", "catalog", "warehouse", "namespace", "table", "flushRows", "flushInterval", "props"}
+
 func (p *SyncableParser) Parse(v *cluster.ParsedConfig, _ cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v)
 	if err != nil {
@@ -28,6 +32,9 @@ func (p *SyncableParser) Parse(v *cluster.ParsedConfig, _ cluster.DatabaseStorag
 
 // ParseConfig validates the [iceberg] section without touching the network.
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
+	if err := v.RejectUnknownKeys("iceberg", icebergKeys...); err != nil {
+		return nil, err
+	}
 	topic := v.GetString("iceberg.topic")
 	if topic == "" {
 		return nil, &cluster.FieldError{Field: "iceberg.topic", Issue: "required"}

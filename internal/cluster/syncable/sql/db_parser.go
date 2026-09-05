@@ -4,11 +4,17 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
+// databaseSQLKeys is the database-config [sql] vocabulary (Parse's reads).
+var databaseSQLKeys = []string{"dialect", "connectionString"}
+
 type DBParser struct {
 	Dialects map[string]Dialect
 }
 
 func (d *DBParser) Parse(v *cluster.ParsedConfig) (cluster.Database, error) {
+	if err := v.RejectUnknownKeys("sql", databaseSQLKeys...); err != nil {
+		return nil, err
+	}
 	dialectName := v.GetString("sql.dialect")
 	connectionString := v.GetString("sql.connectionString")
 

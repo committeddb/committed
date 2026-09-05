@@ -162,3 +162,46 @@ value = "${PARSED_CONFIG_TEST_TOKEN}"
 	require.True(t, ok)
 	require.Equal(t, "tok-123", headers[0].(map[string]any)["value"])
 }
+
+func TestRejectUnknownKeys(t *testing.T) {
+	c := parseTOML(t, `
+[sql]
+Dialect = "postgres"
+batchSiz = "10"
+[sql.postgres]
+slot_name = "s"
+`)
+	require.NoError(t, c.RejectUnknownKeys("sql", "dialect", "BATCHSIZ", "postgres"),
+		"case-variant known keys pass; a nested table counts as one known key")
+
+	err := c.RejectUnknownKeys("sql", "dialect", "postgres")
+	require.Error(t, err)
+	require.True(t, cluster.IsNotAdmissible(err), "a typo can never build; the build must park, not retry")
+	ce := cluster.NewConfigError(err)
+	require.Equal(t, "sql.batchSiz", ce.Field, "the key in the document's own spelling")
+	require.Contains(t, ce.Issue, "unknown key")
+	require.NotContains(t, ce.Issue, "did you mean", "no near name among the known ones")
+
+	err = c.RejectUnknownKeys("sql", "dialect", "postgres", "batchSize")
+	require.Error(t, err)
+	require.Contains(t, cluster.NewConfigError(err).Issue, `did you mean "batchSize"?`)
+
+	require.NoError(t, c.RejectUnknownKeys("absent", "x"), "an absent section has nothing to reject")
+}
+
+func TestRejectUnknownSections(t *testing.T) {
+	c := parseTOML(t, `
+[Ingestable]
+name = "n"
+[sqll]
+dialect = "postgres"
+`)
+	require.NoError(t, c.RejectUnknownSections("ingestable", "sqll"))
+	err := c.RejectUnknownSections("ingestable", "sql")
+	require.Error(t, err)
+	ce := cluster.NewConfigError(err)
+	require.Equal(t, "sqll", ce.Field)
+	require.Contains(t, ce.Issue, "unknown section")
+	require.Contains(t, ce.Issue, `did you mean "sql"?`)
+	require.True(t, cluster.IsNotAdmissible(err))
+}
