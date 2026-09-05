@@ -34,23 +34,16 @@ func encodePosition(version uint64, progress *dialectpb.SnapshotProgress, epoch 
 // version: the shared snapshot pass (sql.RunSnapshot) drives the
 // resume/complete bookkeeping and the inline checkpoints; this dialect
 // supplies the keyset batch SQL and the checkpoint encoding at version.
-func (d *SQLServerDialect) snapshot(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	tables []string,
-	progress *dialectpb.SnapshotProgress,
-	version uint64,
-	epoch uint64,
-	snapshotted []string,
-	rendering uint32,
-	pr chan<- *cluster.Proposal,
-	po chan<- cluster.Position,
-) error {
+func (d *SQLServerDialect) snapshot(ctx context.Context, s *session, progress *dialectpb.SnapshotProgress) error {
+	config := s.config
+	// The inline checkpoints record every configured table as snapshotted
+	// (the registry the completion checkpoint will carry), at the session's
+	// base version and epoch.
+	version, epoch, snapshotted, rendering := s.version, s.epoch, config.Tables, s.rendering
 	return sql.RunSnapshot(ctx, sql.SnapshotRun{
 		Config:    config,
-		Reader:    sqlserverSnapshotReader{db: db, canonicalUUID: rendering == uuidRenderingCanonical},
-		Tables:    tables,
+		Reader:    sqlserverSnapshotReader{db: s.db, canonicalUUID: s.canonicalUUID()},
+		Tables:    config.Tables,
 		Progress:  progress,
 		Epoch:     epoch,
 		BatchSize: sql.ParseBatchSize(config.Options, defaultSnapshotBatchSize),
@@ -59,8 +52,8 @@ func (d *SQLServerDialect) snapshot(
 			return encodePosition(version, p, epoch, snapshotted, rendering)
 		},
 		BatchHook: d.snapshotBatchHook,
-		Proposals: pr,
-		Positions: po,
+		Proposals: s.pr,
+		Positions: s.po,
 	})
 }
 

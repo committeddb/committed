@@ -47,26 +47,23 @@ func encodeCTSeq(version uint64, sub int) (seq uint64, ok bool) {
 func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	config.EnsureTopics()
 
-	var version uint64
-	var resumeProgress *dialectpb.SnapshotProgress
-	var epoch uint64
-	var snapshotted []string
+	s := &session{config: config, epochFloor: epochFloor, pr: pr, po: po}
 	var checkpointRendering uint32
 	if len(pos) > 0 {
 		posProto := &dialectpb.SQLServerPosition{}
 		if err := proto.Unmarshal(pos, posProto); err != nil {
 			return fmt.Errorf("[sqlserver] decode resume position: %w", err)
 		}
-		version = posProto.Version
-		resumeProgress = posProto.SnapshotProgress
-		epoch = posProto.RefreshEpoch
-		snapshotted = posProto.SnapshottedTables
+		s.version = posProto.Version
+		s.progress = posProto.SnapshotProgress
+		s.epoch = posProto.RefreshEpoch
+		s.snapshotted = posProto.SnapshottedTables
 		checkpointRendering = posProto.UuidRendering
 	}
 	// The session's uniqueidentifier rendering, decided ONCE here so every row
 	// this session emits — snapshot or poll, across retries — spells a GUID
 	// the same way; a gate that opens mid-session is picked up by the next.
-	rendering, rerender := sessionUUIDRendering(checkpointRendering, len(pos) > 0, d.canonicalUUIDEnabled())
+	s.rendering, s.rerender = sessionUUIDRendering(checkpointRendering, len(pos) > 0, d.canonicalUUIDEnabled())
 	// epoch stays the RAW checkpoint epoch here (0 when none): the snapshot
 	// decisions (sql.PlanSnapshot) choose the generation from it and the
 	// sink's highwater, and the poll loop floors it before streaming.
@@ -76,14 +73,15 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 		return err
 	}
 	defer func() { _ = db.Close() }()
+	s.db = db
 
-	backoff := sql.NewReconnectBackoff()
+	s.backoff = sql.NewReconnectBackoff()
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
 
-		err := d.ingestOnce(ctx, db, config, &version, &resumeProgress, &epoch, epochFloor, &snapshotted, rendering, &rerender, backoff, pr, po)
+		err := d.ingestOnce(ctx, s)
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
@@ -101,32 +99,52 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 			return err
 		}
 		zap.L().Warn("[sqlserver] ingest error, retrying",
-			zap.Duration("backoff", backoff.Delay()), zap.Error(err))
-		if backoff.Wait(ctx) != nil {
+			zap.Duration("backoff", s.backoff.Delay()), zap.Error(err))
+		if s.backoff.Wait(ctx) != nil {
 			return nil
 		}
 	}
+}
+
+// session is one Ingest call's state: the connection and channels it works
+// with, the durable cursor its checkpoints encode (version, snapshot
+// progress, refresh epoch, snapshotted-tables registry, uniqueidentifier
+// rendering), and the per-session controls (a pending re-key, the drift
+// guard, the reconnect backoff). One value per Ingest, threaded by pointer,
+// so a retried attempt resumes exactly where the durable checkpoints left
+// off and every helper reads the same facts.
+type session struct {
+	config     *sql.Config
+	db         *gosql.DB
+	epochFloor uint64
+	pr         chan<- *cluster.Proposal
+	po         chan<- cluster.Position
+
+	// The durable cursor — what encodePosition writes.
+	version     uint64
+	progress    *dialectpb.SnapshotProgress
+	epoch       uint64
+	snapshotted []string
+	rendering   uint32
+
+	rerender bool              // a legacy-rendered checkpoint must re-key before streaming
+	drift    *schemaDriftGuard // per attempt: dedups the divergence Warn
+	backoff  *sql.Backoff
+}
+
+func (s *session) canonicalUUID() bool { return s.rendering == uuidRenderingCanonical }
+
+// checkpoint encodes the cursor at version with the given snapshot progress.
+func (s *session) checkpoint(version uint64, progress *dialectpb.SnapshotProgress) (cluster.Position, error) {
+	return encodePosition(version, progress, s.epoch, s.snapshotted, s.rendering)
 }
 
 // ingestOnce is one supervised attempt: enablement, snapshot-if-needed, then
 // the poll loop until an error (returned for backoff) or ctx cancel. The
 // cursor state lives in the caller's pointers so a retry resumes exactly
 // where the durable checkpoints left off.
-func (d *SQLServerDialect) ingestOnce(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	version *uint64,
-	resumeProgress **dialectpb.SnapshotProgress,
-	epoch *uint64,
-	epochFloor uint64,
-	snapshotted *[]string,
-	rendering uint32,
-	rerender *bool,
-	backoff *sql.Backoff,
-	pr chan<- *cluster.Proposal,
-	po chan<- cluster.Position,
-) error {
+func (d *SQLServerDialect) ingestOnce(ctx context.Context, s *session) error {
+	db, config, po := s.db, s.config, s.po
 	if err := ensureChangeTracking(ctx, db, config); err != nil {
 		return err
 	}
@@ -138,15 +156,15 @@ func (d *SQLServerDialect) ingestOnce(
 	// a rendering change: the closing refresh markers sweep the old spellings
 	// on keyed sinks (keyless/append sinks keep both until rebuilt). Cleared
 	// only once the re-snapshot completes, so a failed attempt retries it.
-	if *rerender {
+	if s.rerender {
 		zap.L().Warn("uniqueidentifier rendering changed to canonical lowercase (cluster feature level 5) — re-snapshotting so every key and payload re-keys; the closing refresh markers sweep the uppercase rows on keyed sinks",
-			zap.Uint64("consumedVersion", *version))
-		*resumeProgress = nil
-		*snapshotted = nil
-		if err := d.runSnapshot(ctx, db, config, sql.SnapshotGap, version, resumeProgress, epoch, epochFloor, snapshotted, nil, rendering, pr, po); err != nil {
+			zap.Uint64("consumedVersion", s.version))
+		s.progress = nil
+		s.snapshotted = nil
+		if err := d.runSnapshot(ctx, s, sql.SnapshotGap, nil); err != nil {
 			return err
 		}
-		*rerender = false
+		s.rerender = false
 	}
 
 	// --- snapshot on first run, mid-snapshot resume, or added-table backfill ---
@@ -154,39 +172,39 @@ func (d *SQLServerDialect) ingestOnce(
 	// start at 0 on a fresh database, so the version alone can't mean "no
 	// checkpoint" — a completed snapshot on an idle fresh source checkpoints
 	// at version 0 WITH a populated registry, and must stream, not re-run.
-	needFull := *version == 0 && len(*snapshotted) == 0 && *resumeProgress == nil
-	added := addedTables(config.Tables, *snapshotted)
+	needFull := s.version == 0 && len(s.snapshotted) == 0 && s.progress == nil
+	added := addedTables(config.Tables, s.snapshotted)
 	switch {
-	case *resumeProgress != nil:
-		if err := d.runSnapshot(ctx, db, config, sql.SnapshotResume, version, resumeProgress, epoch, epochFloor, snapshotted, nil, rendering, pr, po); err != nil {
+	case s.progress != nil:
+		if err := d.runSnapshot(ctx, s, sql.SnapshotResume, nil); err != nil {
 			return err
 		}
 	case needFull:
-		if err := d.runSnapshot(ctx, db, config, sql.SnapshotCold, version, resumeProgress, epoch, epochFloor, snapshotted, nil, rendering, pr, po); err != nil {
+		if err := d.runSnapshot(ctx, s, sql.SnapshotCold, nil); err != nil {
 			return err
 		}
 	case len(added) > 0:
-		if err := d.runSnapshot(ctx, db, config, sql.SnapshotBackfill, version, resumeProgress, epoch, epochFloor, snapshotted, added, rendering, pr, po); err != nil {
+		if err := d.runSnapshot(ctx, s, sql.SnapshotBackfill, added); err != nil {
 			return err
 		}
 	}
 	// The stream floor: never stamp below the sink's highwater, never below 1.
-	*epoch = sql.FloorEpoch(*epoch, epochFloor)
+	s.epoch = sql.FloorEpoch(s.epoch, s.epochFloor)
 
 	// The attempt reached streaming (any snapshot it needed is complete): the
 	// next failure is a fresh one, so the reconnect delay starts over.
-	backoff.Reset()
+	s.backoff.Reset()
 
 	// The resume-time positioning line (the shared per-dialect contract): what
 	// the poll resumes FROM is the first datum a re-delivery question needs.
 	zap.L().Info("change tracking poll started",
-		zap.Uint64("resumeVersion", *version),
+		zap.Uint64("resumeVersion", s.version),
 		zap.Duration("pollInterval", pollInterval(config.Options)),
-		zap.Bool("canonicalUUID", rendering == uuidRenderingCanonical))
+		zap.Bool("canonicalUUID", s.canonicalUUID()))
 
 	// --- the poll loop ---
 	interval := pollInterval(config.Options)
-	drift := &schemaDriftGuard{}
+	s.drift = &schemaDriftGuard{}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -196,34 +214,34 @@ func (d *SQLServerDialect) ingestOnce(
 		if err != nil {
 			return err
 		}
-		if minValid > *version {
+		if minValid > s.version {
 			// Retention purged changes we never consumed — streaming can never
 			// close the gap. Loud automatic recovery: full re-snapshot at a
 			// bumped epoch so the closing markers sweep rows deleted in the
 			// purged window (the shared purge-hole contract).
 			zap.L().Error("change tracking retention purged past the consumed version — re-snapshotting",
-				zap.Uint64("consumedVersion", *version),
+				zap.Uint64("consumedVersion", s.version),
 				zap.Uint64("minValidVersion", minValid))
-			*resumeProgress = nil
-			*snapshotted = nil
-			if err := d.runSnapshot(ctx, db, config, sql.SnapshotGap, version, resumeProgress, epoch, epochFloor, snapshotted, nil, rendering, pr, po); err != nil {
+			s.progress = nil
+			s.snapshotted = nil
+			if err := d.runSnapshot(ctx, s, sql.SnapshotGap, nil); err != nil {
 				return err
 			}
 			continue
 		}
-		if current <= *version {
+		if current <= s.version {
 			if err := waitCtx(ctx, interval); err != nil {
 				return nil
 			}
 			continue
 		}
 
-		if err := d.pollWindow(ctx, db, config, *version, current, *epoch, rendering == uuidRenderingCanonical, drift, pr); err != nil {
+		if err := d.pollWindow(ctx, s, current); err != nil {
 			return err
 		}
 
 		// Checkpoint the window: all tables consumed through `current`.
-		posBytes, err := encodePosition(current, nil, *epoch, *snapshotted, rendering)
+		posBytes, err := s.checkpoint(current, nil)
 		if err != nil {
 			return err
 		}
@@ -232,7 +250,7 @@ func (d *SQLServerDialect) ingestOnce(
 		case <-ctx.Done():
 			return nil
 		}
-		*version = current
+		s.version = current
 	}
 }
 
@@ -251,56 +269,43 @@ func addedTables(configured, snapshotted []string) []string {
 // snapshot, a mid-snapshot resume, an added-table backfill, or a gap
 // re-snapshot — then closes it: the per-topic refresh-boundary markers when
 // the plan carries them, and the completion checkpoint.
-func (d *SQLServerDialect) runSnapshot(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	kind sql.SnapshotKind,
-	version *uint64,
-	resumeProgress **dialectpb.SnapshotProgress,
-	epoch *uint64,
-	epochFloor uint64,
-	snapshotted *[]string,
-	added []string,
-	rendering uint32,
-	pr chan<- *cluster.Proposal,
-	po chan<- cluster.Position,
-) error {
+func (d *SQLServerDialect) runSnapshot(ctx context.Context, s *session, kind sql.SnapshotKind, added []string) error {
+	config := s.config
 	if kind == sql.SnapshotBackfill {
 		zap.L().Info("config change added tables; backfilling their existing rows (a partial backfill — no refresh sweep)",
 			zap.Strings("added", added))
 	}
-	plan := sql.PlanSnapshot(kind, *resumeProgress, *epoch, epochFloor, config.Tables, added)
-	*epoch = plan.Epoch
+	plan := sql.PlanSnapshot(kind, s.progress, s.epoch, s.epochFloor, config.Tables, added)
+	s.epoch = plan.Epoch
 
 	// The convergent boundary: capture the poll's resume version BEFORE the
 	// first snapshot read. A mid-snapshot resume keeps the version its
 	// checkpoint recorded.
-	if *resumeProgress == nil {
-		v, err := snapshotBaseVersion(ctx, db)
+	if s.progress == nil {
+		v, err := snapshotBaseVersion(ctx, s.db)
 		if err != nil {
 			return err
 		}
-		*version = v
+		s.version = v
 	}
 
-	if err := d.snapshot(ctx, db, config, config.Tables, plan.Progress, *version, *epoch, config.Tables, rendering, pr, po); err != nil {
+	if err := d.snapshot(ctx, s, plan.Progress); err != nil {
 		return err
 	}
 
 	// Completed: clear progress, record every configured table snapshotted,
 	// checkpoint so a restart streams instead of re-snapshotting.
-	*resumeProgress = nil
-	*snapshotted = append([]string(nil), config.Tables...)
-	posBytes, err := encodePosition(*version, nil, *epoch, *snapshotted, rendering)
+	s.progress = nil
+	s.snapshotted = append([]string(nil), config.Tables...)
+	posBytes, err := s.checkpoint(s.version, nil)
 	if err != nil {
 		return err
 	}
-	if err := sql.CompleteSnapshot(ctx, config, plan.Marker, *epoch, posBytes, pr, po); err != nil {
+	if err := sql.CompleteSnapshot(ctx, config, plan.Marker, s.epoch, posBytes, s.pr, s.po); err != nil {
 		return err
 	}
 	zap.L().Info("snapshot complete",
-		zap.Uint64("version", *version), zap.Uint64("refresh_epoch", *epoch))
+		zap.Uint64("version", s.version), zap.Uint64("refresh_epoch", s.epoch))
 	return nil
 }
 
@@ -312,16 +317,9 @@ func (d *SQLServerDialect) runSnapshot(
 // last-write-wins converges (the net-change contract). A changed row missing
 // from the base table was deleted after changing — skipped here, because its
 // own delete entry keys a tombstone in this or a later window.
-func (d *SQLServerDialect) pollWindow(
-	ctx context.Context,
-	db *gosql.DB,
-	config *sql.Config,
-	consumed, current uint64,
-	epoch uint64,
-	canonicalUUID bool,
-	drift *schemaDriftGuard,
-	pr chan<- *cluster.Proposal,
-) error {
+func (d *SQLServerDialect) pollWindow(ctx context.Context, s *session, current uint64) error {
+	db, config, pr := s.db, s.config, s.pr
+	epoch := s.epoch
 	sub := 0
 	subOverflowed := false
 
@@ -389,7 +387,7 @@ func (d *SQLServerDialect) pollWindow(
 		if spec == nil {
 			return fmt.Errorf("no topic-spec routes table %q", table)
 		}
-		if err := d.pollTable(ctx, db, table, spec, consumed, current, canonicalUUID, drift, flush); err != nil {
+		if err := d.pollTable(ctx, s, table, spec, current, flush); err != nil {
 			return fmt.Errorf("poll %s: %w", table, err)
 		}
 	}
@@ -399,16 +397,8 @@ func (d *SQLServerDialect) pollWindow(
 // pollTable streams one table's CHANGETABLE window through the flush
 // callback, soft-flushing on the shared byte budget so a large catch-up
 // window never materializes wholesale in memory.
-func (d *SQLServerDialect) pollTable(
-	ctx context.Context,
-	db *gosql.DB,
-	table string,
-	spec *sql.TopicSpec,
-	consumed, current uint64,
-	canonicalUUID bool,
-	drift *schemaDriftGuard,
-	flush func([]*cluster.Entity, int64) error,
-) error {
+func (d *SQLServerDialect) pollTable(ctx context.Context, s *session, table string, spec *sql.TopicSpec, current uint64, flush func([]*cluster.Entity, int64) error) error {
+	db, consumed, canonicalUUID, drift := s.db, s.version, s.canonicalUUID(), s.drift
 	ref := resolveTableRef(table)
 
 	pkJoin := make([]string, len(spec.PrimaryKey))

@@ -118,7 +118,12 @@ func TestSQLServerUniqueidentifierRenderingUpgrade(t *testing.T) {
 				require.NotEqual(t, guidUpper, string(e.Key), "gate open: no row may keep the uppercase key")
 			}
 		case pos := <-po2:
-			if markerEpoch != 0 && isStreamingPosition(pos) {
+			// The completion checkpoint is the only no-progress position this
+			// run emits (the table is idle after the re-snapshot), and it may
+			// be received before the marker proposal — the two buffered
+			// channels are not ordered against each other. Capture it whenever
+			// it arrives.
+			if canonicalCheckpoint == nil && isStreamingPosition(pos) {
 				canonicalCheckpoint = pos
 			}
 		case <-deadline:
