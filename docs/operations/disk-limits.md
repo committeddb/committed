@@ -80,10 +80,12 @@ treats a rejection as backpressure — it pauses (retries) rather than
 dropping the proposal, so a full disk never advances an ingestable's
 resume position past data that didn't commit.
 
-**Recovery is automatic**: when free space climbs back above the warn
-threshold the node returns to `ok` and re-enables writes, logging the
-transition. Every state change is logged (critical/full at error
-level), and three gauges track it for alerting:
+**Recovery is automatic**: the moment free space climbs back above the
+critical threshold the node drops to `warn` and re-enables writes
+(there is no hysteresis, so resume follows within one poll of space
+being freed), and above the warn threshold it returns to `ok`. Every
+state change is logged (critical/full at error level), and three
+gauges track it for alerting:
 
 - `committed_disk_free_bytes`
 - `committed_disk_free_percent`
@@ -95,6 +97,20 @@ level), and three gauges track it for alerting:
 | `COMMITTED_DISK_WARN_PERCENT` | `20` | Free-space percent for the warn state. |
 | `COMMITTED_DISK_CRITICAL_PERCENT` | `10` | Free-space percent at which user-data writes start returning 507. |
 | `COMMITTED_DISK_FULL_PERCENT` | `3` | Free-space percent at which config writes are also frozen. |
+
+**Sizing on large disks.** The thresholds are a percent of the
+disk's total size, so a bigger disk demands more free gigabytes before
+writes resume: the default critical band pauses ingest with 15 GB free
+on a 150 GB disk and with 184 GB free on a 1.8 TB one. Committed's own
+headroom need does not grow with the disk — a scrub cycle needs up to
+~2× the event log (below), a snapshot roughly the size of the bbolt
+store — so on a large disk the defaults are safe but conservative.
+Lower the percents there (warn `5` / critical `2.5` / full `1` on a
+2 TB disk pauses ingest at ~50 GB free), keeping the critical band
+above the scrub headroom for your event log. There is no
+absolute-bytes floor: a fixed floor cannot know how large your event
+log is, and the percents already express any floor you choose for a
+given disk.
 
 Thresholds must be descending (`warn > critical > full`). A value
 outside `(0, 100)`, or a set that is not descending, logs a warning
