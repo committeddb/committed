@@ -191,13 +191,13 @@ func (h *HTTP) RemoveMember(w httpgo.ResponseWriter, r *httpgo.Request) {
 func writeMembershipError(w httpgo.ResponseWriter, err error, action string) {
 	switch {
 	case errors.Is(err, cluster.ErrInvalidMember):
-		writeError(w, httpgo.StatusBadRequest, "invalid_member", err.Error())
+		writeError(w, httpgo.StatusBadRequest, "invalid_member", redactedMessage(err))
 	case errors.Is(err, cluster.ErrNotLearner):
-		writeError(w, httpgo.StatusBadRequest, "not_a_learner", err.Error())
+		writeError(w, httpgo.StatusBadRequest, "not_a_learner", redactedMessage(err))
 	case errors.Is(err, cluster.ErrWouldRemoveLastVoter):
-		writeError(w, httpgo.StatusConflict, "would_remove_last_voter", err.Error())
+		writeError(w, httpgo.StatusConflict, "would_remove_last_voter", redactedMessage(err))
 	case errors.Is(err, db.ErrMembershipUnsettled):
-		writeError(w, httpgo.StatusServiceUnavailable, "membership_unsettled", err.Error())
+		writeError(w, httpgo.StatusServiceUnavailable, "membership_unsettled", redactedMessage(err))
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeError(w, httpgo.StatusServiceUnavailable, "membership_unconfirmed",
 			"membership change submitted but not confirmed before the request deadline; it may still take effect once a quorum is reachable")

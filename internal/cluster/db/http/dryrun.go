@@ -94,7 +94,7 @@ func (h *HTTP) DryRunSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		// The dry-run IS the authoring loop: a rejection must carry the
 		// parser's actual words, not a generic label (field-reported —
 		// authors had to POST to the real endpoint to learn the error).
-		writeErrorf(w, httpgo.StatusBadRequest, "invalid_config", "dry-run: %s", err)
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_config", "dry-run: %s", redactedMessage(err))
 		return
 	}
 	writeJSONStatus(w, httpgo.StatusOK, rep)

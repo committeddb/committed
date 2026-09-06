@@ -47,7 +47,7 @@ func (h *HTTP) DryRunRestatement(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if err != nil {
 		// The dry-run IS the authoring loop: a rejection carries the
 		// admission path's actual words.
-		writeErrorf(w, httpgo.StatusBadRequest, "invalid_config", "dry-run: %s", err)
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_config", "dry-run: %s", redactedMessage(err))
 		return
 	}
 	writeJSONStatus(w, httpgo.StatusOK, rep)

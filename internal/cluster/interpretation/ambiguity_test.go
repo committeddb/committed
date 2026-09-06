@@ -127,3 +127,22 @@ func (okInner) Sync(context.Context, *cluster.Actual) (cluster.ShouldSnapshot, e
 	return true, nil
 }
 func (okInner) Close() error { return nil }
+
+// TestPredicateError_RedactsEntityValues: a predicate erroring on an entity's
+// data yields a cluster.RedactedError. The gojq text names the offending value
+// (entity PII), so the replicated dead-letter and the restatement dry-run
+// report get only the classifier; the node log keeps the full text. The
+// ambiguity classification still travels through the wrapper.
+func TestPredicateError_RedactsEntityValues(t *testing.T) {
+	r := brokenPredicateReg(t, 0)
+	_, err := r.EffectiveVersion(context.Background(), "person", 7, 0, []byte(`{"contact": 5551234}`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `restatement "e1" predicate:`)
+	require.Contains(t, err.Error(), "5551234", "the full text is the node-local diagnostic")
+
+	safe, redacted := cluster.RedactedMessage(err)
+	require.True(t, redacted)
+	require.NotContains(t, safe, "5551234")
+	require.Contains(t, safe, `restatement "e1" predicate`)
+	require.ErrorIs(t, err, cluster.ErrPermanent)
+}

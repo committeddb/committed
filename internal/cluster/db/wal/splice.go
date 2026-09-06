@@ -19,6 +19,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster/backup"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Backup splice: repair mid-log corruption from a backup of the same node.
@@ -259,7 +261,8 @@ func SpliceNode(baseDir string, archive io.Reader, commit bool) ([]*SpliceReport
 		bstart, _ := segmentIndexOf(path.Base(x.Name))
 		brecs, err := parseClean(bdata)
 		if err != nil {
-			t.rep.Refused = fmt.Sprintf("backup segment %s is not clean (%v) — the backup itself is damaged", x.Name, err)
+			msg, _ := cluster.RedactedMessage(err)
+			t.rep.Refused = fmt.Sprintf("backup segment %s is not clean (%s) — the backup itself is damaged", x.Name, msg)
 			continue
 		}
 		var repaired []byte
@@ -271,7 +274,7 @@ func SpliceNode(baseDir string, archive io.Reader, commit bool) ([]*SpliceReport
 			repaired, target, err = planSegmentReplace(t, x.Name, x.Data, bdata, bstart, brecs)
 		}
 		if err != nil {
-			t.rep.Refused = err.Error()
+			t.rep.Refused, _ = cluster.RedactedMessage(err)
 			continue
 		}
 		if !commit {

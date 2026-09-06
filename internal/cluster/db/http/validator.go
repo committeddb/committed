@@ -108,7 +108,8 @@ func (v *SchemaValidator) ValidateEntityData(t *cluster.Type, data []byte) (*clu
 func divergenceFrom(vErr *schemaValidationError) *cluster.SchemaDivergence {
 	var je *jsonschema.ValidationError
 	if !errors.As(vErr.err, &je) {
-		return &cluster.SchemaDivergence{Causes: []cluster.SchemaDivergenceCause{{Message: vErr.Error()}}}
+		msg, _ := cluster.RedactedMessage(vErr)
+		return &cluster.SchemaDivergence{Causes: []cluster.SchemaDivergenceCause{{Message: msg}}}
 	}
 	d := &cluster.SchemaDivergence{}
 	flattenValidationError(je, d)

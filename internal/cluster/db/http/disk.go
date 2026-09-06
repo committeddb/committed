@@ -78,5 +78,5 @@ func writeDiskReportError(w httpgo.ResponseWriter, verdict cluster.DiskVerdict, 
 			"disk reports are aggregated on the leader; re-resolve the leader and retry")
 		return
 	}
-	writeError(w, httpgo.StatusBadRequest, "invalid_disk_report", err.Error())
+	writeError(w, httpgo.StatusBadRequest, "invalid_disk_report", redactedMessage(err))
 }

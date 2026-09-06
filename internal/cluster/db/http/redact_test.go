@@ -3,6 +3,7 @@ package http
 import (
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,4 +33,23 @@ func TestRedactedDetail(t *testing.T) {
 	// A committed-authored error (no RedactedError in the chain) is used verbatim.
 	require.Equal(t, "not a dead letter for this syncable",
 		redactedDetail(errors.New("not a dead letter for this syncable")))
+}
+
+// TestWriteProposeError_RedactsWrappedCause: every error that becomes a
+// response message goes through redactedMessage, so a ConfigError whose cause
+// chain carries a RedactedError (a driver error echoing connection identity)
+// exposes only the safe text, while committed-authored errors keep their exact
+// words. The redaction analyzer (internal/lint/redaction) keeps it that way.
+func TestWriteProposeError_RedactsWrappedCause(t *testing.T) {
+	inner := &fakeRedacted{full: "dial tcp: user=app password=hunter2", safe: "driver error (full detail in this node's logs)"}
+	w := httptest.NewRecorder()
+	writeProposeError(w, cluster.NewConfigError(fmt.Errorf("preflight: %w", inner)), "database", "create database")
+	require.Equal(t, 400, w.Code)
+	require.NotContains(t, w.Body.String(), "hunter2")
+	require.Contains(t, w.Body.String(), inner.safe)
+
+	w = httptest.NewRecorder()
+	writeProposeError(w, cluster.NewConfigError(errors.New("database.url is required")), "database", "create database")
+	require.Equal(t, 400, w.Code)
+	require.Contains(t, w.Body.String(), "database.url is required")
 }

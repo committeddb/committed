@@ -75,7 +75,7 @@ func writeError(w httpgo.ResponseWriter, status int, code string, message string
 	)
 }
 
-// writeInternalError writes a 500 with a sanitized, client-safe message
+// writeInternalError writes a 500 with a redacted, client-safe message
 // and logs the underlying cause server-side at Error. A 500 is the
 // server's fault and its cause is deliberately withheld from the client
 // (the message stays generic to avoid leaking internals), so the server
@@ -107,6 +107,18 @@ func writeInternalError(w httpgo.ResponseWriter, message string, cause error) {
 	zap.L().Error("http internal error", fields...)
 }
 
+// redactedMessage is err's text for a response body, routed through
+// cluster.RedactedMessage — the one redaction choke point: a chain carrying a
+// cluster.RedactedError (a driver or migration error that may echo entity PII
+// or connection identity) yields only its PII-free message, committed-authored
+// text passes through unchanged. Every error that reaches a response goes
+// through here or redactedDetail (its capped form); the redaction analyzer
+// (internal/lint/redaction) fails the build otherwise.
+func redactedMessage(err error) string {
+	msg, _ := cluster.RedactedMessage(err)
+	return msg
+}
+
 // writeErrorf is a convenience wrapper around writeError that formats
 // the message with fmt.Sprintf.
 func writeErrorf(w httpgo.ResponseWriter, status int, code string, format string, args ...any) {
@@ -127,30 +139,30 @@ func writeProposeError(w httpgo.ResponseWriter, err error, resource, action stri
 		// 503 (retryable): the config is fine, the cluster isn't fully
 		// upgraded for the record it would commit — retry after the rolling
 		// upgrade completes.
-		writeError(w, httpgo.StatusServiceUnavailable, "cluster_below_feature_level", levelErr.Error())
+		writeError(w, httpgo.StatusServiceUnavailable, "cluster_below_feature_level", redactedMessage(levelErr))
 	case errors.As(err, &strandedErr):
 		// 409 Conflict: the nonConvertible bump conflicts with standing
 		// always-current consumers. Their ids ride as structured details so a
 		// deploy pipeline can act on them; re-POST with ?force=true to
 		// acknowledge the stranding deliberately.
-		writeErrorWithDetails(w, httpgo.StatusConflict, "stranded_always_current", strandedErr.Error(),
+		writeErrorWithDetails(w, httpgo.StatusConflict, "stranded_always_current", redactedMessage(strandedErr),
 			map[string]any{"type": strandedErr.TypeID, "version": strandedErr.Version, "syncables": strandedErr.Syncables})
 	case errors.As(err, &rebuildErr):
 		// 409 Conflict: this config change can't be applied in place and needs
 		// a rebuild. Code + details are destination-defined (e.g. table +
 		// changed columns) so a deploy pipeline can branch programmatically;
 		// this layer stays agnostic to what they contain.
-		writeErrorWithDetails(w, httpgo.StatusConflict, rebuildErr.Code(), rebuildErr.Error(), rebuildErr.Details())
+		writeErrorWithDetails(w, httpgo.StatusConflict, rebuildErr.Code(), redactedMessage(rebuildErr), rebuildErr.Details())
 	case errors.As(err, &configErr):
 		// 400 Bad Request: the config didn't parse/validate. When the parser
 		// pinned the failure to a specific TOML field, surface it as structured
 		// details ({field, issue}) so a deploy pipeline can point at the offending
 		// key without scraping the message.
 		if configErr.Field != "" {
-			writeErrorWithDetails(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error(),
+			writeErrorWithDetails(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", redactedMessage(configErr),
 				map[string]string{"field": configErr.Field, "issue": configErr.Issue})
 		} else {
-			writeError(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", configErr.Error())
+			writeError(w, httpgo.StatusBadRequest, "invalid_"+resource+"_config", redactedMessage(configErr))
 		}
 	case errors.Is(err, cluster.ErrProposalTooLarge):
 		writeError(w, httpgo.StatusRequestEntityTooLarge, "proposal_too_large", resource+" exceeds the configured proposal size limit")

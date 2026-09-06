@@ -119,7 +119,7 @@ func (h *HTTP) leaderRead(next httpgo.HandlerFunc) httpgo.HandlerFunc {
 			// still ours to write. Leader-only state has no local fallback —
 			// this wrapper's hard-fail contract (vs. the syncable status
 			// handler's soft degrade, which serves replicated fields instead).
-			writeLeaderUnavailable(w, leaderID, "could not reach the leader: "+err.Error())
+			writeLeaderUnavailable(w, leaderID, "could not reach the leader: "+redactedMessage(err))
 		}
 	}
 }

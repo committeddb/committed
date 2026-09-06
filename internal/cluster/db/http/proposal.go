@@ -82,7 +82,7 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 				var vErr *schemaValidationError
 				if errors.As(err, &vErr) {
 					writeErrorWithDetails(w, httpgo.StatusBadRequest, "schema_validation_failed",
-						fmt.Sprintf("entity data does not match schema for type %q", t.ID), vErr.Error())
+						fmt.Sprintf("entity data does not match schema for type %q", t.ID), redactedMessage(vErr))
 					return
 				}
 				writeInternalError(w, fmt.Sprintf("validation error for type %q", t.ID), err)
@@ -153,5 +153,5 @@ func (h *HTTP) compiledValidator(t *cluster.Type) (entityValidator, error) {
 // real engine precisely because of that admission check.
 func writeSchemaCompileError(w httpgo.ResponseWriter, typeID string, err error) {
 	writeErrorf(w, httpgo.StatusUnprocessableEntity, "type_schema_invalid",
-		"type %q has an invalid schema that cannot be compiled (re-POST the type with a valid schema): %v", typeID, err)
+		"type %q has an invalid schema that cannot be compiled (re-POST the type with a valid schema): %s", typeID, redactedMessage(err))
 }

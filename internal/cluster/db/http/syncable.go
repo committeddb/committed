@@ -248,7 +248,7 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 }
 
 // RematerializeSyncable handles POST /syncable/{id}/rematerialize: the
-// NON-destructive replay — the sink keeps serving while the worker replays
+// NON-destructive replay — the surface keeps serving while the worker replays
 // from index 0 through the current projection + interpretation, converging
 // keyed rows in place and sweeping never-re-emitted rows at the end. The
 // destructive sibling (drop + replay) is /rebuild. Leader-pinned like
@@ -359,7 +359,7 @@ type SyncableStatusResponse struct {
 	// DeadLetters is how many proposals this syncable has skipped
 	// (dead-lettered), permanently or manually; LastDeadLetterIndex is the
 	// raft index of the most recent skip (omitted when none). ALWAYS
-	// present: a sink can be caught up AND have skipped rows, so the honest
+	// present: a surface can be caught up AND have skipped rows, so the honest
 	// completeness check is caughtUp && deadLetters == 0 — without this
 	// field that state reads as fully green. List the records via
 	// GET /syncable/{id}/errors; re-drive one after fixing the
@@ -612,7 +612,7 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		exists, ok, err := h.db.SyncableStageKeyExists(id, probeStage, probeKeyParts)
 		if err != nil {
 			// A typo'd stage name must not read as "key absent".
-			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", err.Error())
+			writeError(w, httpgo.StatusBadRequest, "invalid_parameter", redactedMessage(err))
 			return
 		}
 		if ok {
@@ -631,7 +631,7 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 // AcknowledgeSyncableDeadLetter marks a dead-letter record resolved
 // out-of-band (POST /syncable/{id}/deadletter/{index}/acknowledge). The third
 // verb the superseded case needs: REPLAY re-applies the stale proposal —
-// regressing a sink row a later event already corrected — and leaving the
+// regressing a surface row a later event already corrected — and leaving the
 // record inflates deadLetters forever, so a resolved incident reads
 // permanently red. Acknowledge attests "resolved out-of-band": the record
 // leaves the completeness count, stays listable as an audit trail, and a
@@ -731,16 +731,16 @@ func writeRebuildError(w httpgo.ResponseWriter, err error) {
 	case errors.Is(err, cluster.ErrResourceNotFound):
 		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
 	case errors.Is(err, cluster.ErrZonePinUnsatisfiable):
-		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", redactedMessage(err))
 	case errors.Is(err, cluster.ErrNotSyncableOwner):
 		// Stale routing view (ownership just moved): retryable, the next
 		// attempt's hop lands on the current owner.
-		writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+		writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", redactedMessage(err))
 	case errors.Is(err, cluster.ErrWorkerWedged):
 		// A wedged worker aborts the rebuild before anything changed — a
 		// retryable condition (wait out the destination, or re-POST the config
 		// to replace the worker), so 503 rather than a generic failure.
-		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", redactedMessage(err))
 	default:
 		writeProposeError(w, err, "syncable", "rebuild syncable")
 	}
@@ -753,17 +753,17 @@ func writeRematerializeError(w httpgo.ResponseWriter, err error) {
 	case errors.Is(err, cluster.ErrResourceNotFound):
 		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
 	case errors.Is(err, cluster.ErrNotRematerializable):
-		// 409: the config is fine, but this sink shape cannot converge a
+		// 409: the config is fine, but this surface shape cannot converge a
 		// replay in place — the message names the alternatives.
-		writeError(w, httpgo.StatusConflict, "not_rematerializable", err.Error())
+		writeError(w, httpgo.StatusConflict, "not_rematerializable", redactedMessage(err))
 	case errors.Is(err, cluster.ErrZonePinUnsatisfiable):
-		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", err.Error())
+		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", redactedMessage(err))
 	case errors.Is(err, cluster.ErrNotSyncableOwner):
 		// Stale routing view (ownership just moved): retryable, the next
 		// attempt's hop lands on the current owner.
-		writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", err.Error())
+		writeError(w, httpgo.StatusServiceUnavailable, "not_syncable_owner", redactedMessage(err))
 	case errors.Is(err, cluster.ErrWorkerWedged):
-		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", err.Error())
+		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", redactedMessage(err))
 	default:
 		writeProposeError(w, err, "syncable", "rematerialize syncable")
 	}
@@ -799,13 +799,12 @@ func capString(s string) string {
 }
 
 // redactedDetail returns an error string safe to put in a response body: it
-// routes through cluster.RedactedMessage (the shared sink choke point), so an
+// routes through cluster.RedactedMessage (the shared surface choke point), so an
 // error chain carrying a cluster.RedactedError (a driver or migration error that
 // may echo entity PII or connection identity) exposes only its PII-free
 // RedactedMessage, while committed-authored text passes through. The full detail
 // is kept in this node's logs (see the db replay path). Use this for any detail
 // derived from a Sync/apply error, then cap it for the response body.
 func redactedDetail(err error) string {
-	msg, _ := cluster.RedactedMessage(err)
-	return capString(msg)
+	return capString(redactedMessage(err))
 }

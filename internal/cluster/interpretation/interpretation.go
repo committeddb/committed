@@ -157,13 +157,13 @@ func (r *Registry) EffectiveVersion(ctx context.Context, typeID string, dataInde
 					// Classified through the forcing candidate's tracker: one
 					// malformed row is entry-specific; a predicate restatement
 					// admitted against a non-JSON topic fails every gated row.
-					return 0, c.tracker.Classify(dataIndex, fmt.Errorf("restatement %q predicate: payload is not valid JSON: %w", c.ID, err))
+					return 0, c.tracker.Classify(dataIndex, &predicateError{ID: c.ID, Stage: "payload is not valid JSON", Err: err})
 				}
 				docReady = true
 			}
 			match, err := evalPredicate(ctx, c.query, doc)
 			if err != nil {
-				return 0, c.tracker.Classify(dataIndex, fmt.Errorf("restatement %q predicate: %w", c.ID, err))
+				return 0, c.tracker.Classify(dataIndex, &predicateError{ID: c.ID, Err: err})
 			}
 			// A clean evaluation — match or not — proves the predicate can
 			// read this data; reset its evidence.
@@ -180,6 +180,37 @@ func (r *Registry) EffectiveVersion(ctx context.Context, typeID string, dataInde
 // evalPredicate runs a compiled predicate on the decoded payload; only a
 // literal true is a match (jq's truthiness would make `.field` alone match
 // any non-null value — too easy to write an accidental match-all).
+// predicateError is a restatement predicate failing on one entity. It
+// satisfies cluster.RedactedError: the wrapped gojq runtime error inlines the
+// entity's field values (`cannot iterate over: string ("…")`), so only the
+// classifier — which restatement, which stage — is safe to replicate into a
+// dead-letter or expose in a dry-run report; the full text stays in this
+// node's logs. Error() keeps the historical "restatement %q predicate: …"
+// wording.
+type predicateError struct {
+	ID    string
+	Stage string // "" for evaluation itself; otherwise the failing step
+	Err   error
+}
+
+func (e *predicateError) Error() string {
+	if e.Stage != "" {
+		return fmt.Sprintf("restatement %q predicate: %s: %v", e.ID, e.Stage, e.Err)
+	}
+	return fmt.Sprintf("restatement %q predicate: %v", e.ID, e.Err)
+}
+
+func (e *predicateError) RedactedMessage() string {
+	if e.Stage != "" {
+		return fmt.Sprintf("restatement %q predicate: %s (full detail in this node's logs)", e.ID, e.Stage)
+	}
+	return fmt.Sprintf("restatement %q predicate failed on this entity (full detail in this node's logs)", e.ID)
+}
+
+func (e *predicateError) Unwrap() error { return e.Err }
+
+var _ cluster.RedactedError = (*predicateError)(nil)
+
 func evalPredicate(ctx context.Context, q *gojq.Query, doc any) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, predicateTimeout)
 	defer cancel()

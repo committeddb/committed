@@ -11,7 +11,7 @@ import (
 
 // SyncableParser parses loopback syncable TOML. Proposer is the write seam
 // back into the cluster (the node wires db.DB in); a nil Proposer refuses to
-// build rather than producing a sink that fails on first Sync.
+// build rather than producing a surface that fails on first Sync.
 type SyncableParser struct {
 	Proposer Proposer
 }
@@ -120,9 +120,10 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 			}
 		}
 		if _, err := jsonpath.New(m.JsonPath); err != nil {
+			msg, _ := cluster.RedactedMessage(err)
 			return nil, &cluster.FieldError{
 				Field: "loopback.mappings",
-				Issue: fmt.Sprintf("mapping for field %q: invalid jsonpath %q: %v", field, m.JsonPath, err),
+				Issue: fmt.Sprintf("mapping for field %q: invalid jsonpath %q: %s", field, m.JsonPath, msg),
 			}
 		}
 	}

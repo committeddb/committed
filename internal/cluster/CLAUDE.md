@@ -13,6 +13,17 @@ contracts here are the domain types and the PLUGIN seams:
 - **Database** (database.go): External database connection config
 - **SyncableParser / IngestableParser / DatabaseParser** (syncable.go, ingestable.go, database.go): Parse config documents into typed structs. They receive a `*cluster.ParsedConfig` (parsed_config.go) — committed's own decode seam (go-toml/v2 + mapstructure, no third-party type in the contract). Committed's field names match case-insensitively (`Topic =` works; load-bearing compat, pinned by the tolerance_test.go corpus); user data — including map keys like jsonpaths — is preserved byte-exact. `${VAR}` secret interpolation runs at the parse boundary in db/parser, not here; type configs deliberately skip it.
 
+## Redaction contract (enforced)
+
+Error text reaches a persisted or exposed surface — a replicated dead-letter /
+stuck record, an HTTP body, the config-build-error list — only through
+`cluster.RedactedMessage` (db/http wraps it as `redactedMessage` /
+`redactedDetail`, db as `safeDeadLetterMessage`). A driver/migration/predicate
+error that may echo entity values implements `cluster.RedactedError`; the full
+text stays in the node log. `internal/lint/redaction` is a taint analyzer run
+by `go test` (`TestNoUnredactedTextReachesASurface`) that fails CI on a bypass —
+route the text through the choke point rather than working around a finding.
+
 ## Package layout
 
 - **db/**: Raft consensus, WAL storage, sync/ingest processing. `db.go` anchors `db.DB`, the engine. `raft.go` handles Raft node lifecycle. `sync.go` handles syncable processing. `ingest.go` handles ingestable processing.

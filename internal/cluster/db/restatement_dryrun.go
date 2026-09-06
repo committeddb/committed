@@ -129,7 +129,7 @@ scan:
 			if perr != nil {
 				rep.PredicateErrors++
 				if firstPredicateErr == "" {
-					firstPredicateErr = perr.Error()
+					firstPredicateErr, _ = cluster.RedactedMessage(perr)
 				}
 				continue
 			}
@@ -149,7 +149,7 @@ scan:
 					if cerr == nil {
 						cerr = derr
 					}
-					firstPredicateErr = cerr.Error()
+					firstPredicateErr, _ = cluster.RedactedMessage(cerr)
 				}
 				continue
 			}
