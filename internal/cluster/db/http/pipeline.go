@@ -170,8 +170,8 @@ func (h *HTTP) GetPipelineStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 // topicsOf extracts the topic(s) a stored config references. kind is the config
 // kind ("ingestable" or "syncable"); the config's type lives at {kind}.type and
 // its topic at {type}.topic (sql → sql.topic, http → http.topic, projection
-// → projection.topic — the section always follows the type spelling, so the
-// deprecated "sql-projection" reads [sql-projection]). A multi-source
+// → projection.topic — the section always follows the type spelling). A
+// multi-source
 // projection lists its topics in [[{type}.source]] blocks, so those are
 // included too. Returns nil if the config can't be parsed — a degraded config
 // drops out of the linkage rather than erroring the whole view.
@@ -205,7 +205,7 @@ func topicsOf(c *cluster.Configuration, kind string) []string {
 	for _, s := range multiTopics {
 		add(s.Topic)
 	}
-	if typ == "projection" || typ == "sql-projection" {
+	if typ == "projection" {
 		var srcs []struct {
 			Topic string `mapstructure:"topic"`
 		}

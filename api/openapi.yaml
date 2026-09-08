@@ -746,10 +746,9 @@ paths:
         equals, null, notEquals, or greaterThan/lessThan — SQL
         comparison semantics: null matches no comparison); see README § SQL
         projections and docs/read-models.md), or `http` (webhook). The former projection
-        spelling `sql-projection` (type and `[sql-projection]` section
-        together — the section name always follows the type spelling)
-        remains accepted for a deprecation period; posting it succeeds
-        and the response carries a `warnings[]` entry naming the rename.
+        spelling `sql-projection` was removed in 0.8.0: posting it is
+        refused (`invalid_syncable_config`) with a message naming the
+        rename to `projection` / `[projection]`.
         For `projection`, config
         misuse (a `set` entry without exactly one of `from`/`value`/`null`,
         a `when` entry without exactly one of `equals`/`null`, an unknown
@@ -2722,10 +2721,10 @@ components:
           items:
             type: string
           description: |
-            Non-fatal deprecation notices about the config document as posted —
-            currently, the `sql-projection` syncable type spelling (canonical:
-            `projection`). The write succeeded exactly as posted; each warning
-            names what to rename before the deprecated form is removed.
+            Non-fatal deprecation notices about the config document as posted.
+            The write succeeded exactly as posted; each warning names what to
+            rename before the deprecated form is removed. Nothing is deprecated
+            at present (0.8.0 removed the last, the `sql-projection` spelling).
 
     ConfigurationResponse:
       type: object

@@ -55,11 +55,37 @@ func TestParse_RejectsUnknownEnvelopeKeysAndSections(t *testing.T) {
 		})
 	}
 
-	// The projection type keeps both section spellings admissible at this
-	// level so the projection parser can name a half-renamed config itself.
+	// A section under a removed spelling is refused by the removal ledger
+	// with the rename named, not as an anonymous unknown section.
 	sp2 := &clusterfakes.FakeSyncableParser{}
 	sp2.ParseReturns(&clusterfakes.FakeSyncable{}, nil)
 	p.AddSyncableParser("projection", sp2)
 	_, _, _, err := p.ParseSyncable("text/toml", []byte("[syncable]\nname = \"a\"\ntype = \"projection\"\n[sql-projection]\ntopic = \"t\"\n"), nil)
+	require.Error(t, err)
+	require.True(t, cluster.IsNotAdmissible(err))
+	require.Contains(t, err.Error(), `"sql-projection" was removed in 0.8.0`)
+	require.Contains(t, err.Error(), "[projection]")
+}
+
+// TestParseSyncable_RemovedSpellingIsRefusedAndParks: the removed
+// "sql-projection" type is refused at admission as not-admissible (a stored
+// config under it parks rather than retrying), naming the rename; the
+// config-only extractors report nothing for it instead of erroring, so a
+// parked legacy config cannot wedge the type, restatement, and database
+// writes that enumerate every stored syncable.
+func TestParseSyncable_RemovedSpellingIsRefusedAndParks(t *testing.T) {
+	p := parser.New()
+	doc := []byte("[syncable]\nname = \"legacy\"\ntype = \"sql-projection\"\n[sql-projection]\ntopic = \"t\"\ndb = \"d\"\ntable = \"x\"\n")
+	_, _, _, err := p.ParseSyncable("text/toml", doc, nil)
+	require.Error(t, err)
+	require.True(t, cluster.IsNotAdmissible(err), "a removed spelling cannot heal by retry")
+	require.Contains(t, err.Error(), `rename the type to "projection"`)
+
+	topics, err := p.SyncableTopics("text/toml", doc)
 	require.NoError(t, err)
+	require.Nil(t, topics)
+	derived, err := p.SyncableDerivedTopics("text/toml", doc)
+	require.NoError(t, err)
+	require.Nil(t, derived)
+	require.NoError(t, p.SyncableSchemaChange("text/toml", doc, doc, nil), "the guard fails open across the rename")
 }

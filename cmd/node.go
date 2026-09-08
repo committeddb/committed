@@ -424,9 +424,8 @@ image can be templated per-node by an orchestrator:
 		// fine to register here alongside it.
 		d.AddIngestableParser("sql", ingestableParser(d, d, d))
 		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
-		// One projection parser, two type spellings: "projection" is canonical,
-		// "sql-projection" is a deprecation alias (POST answers with a
-		// deprecation warning; the config section follows the type spelling).
+		// The projection parser. The "sql-projection" spelling was removed in
+		// 0.8.0; db/parser's removal ledger names the rename at POST.
 		projectionParser := &syncsql.ProjectionSyncableParser{
 			Metrics: m,
 			// Stage stores (internal-stage state) live beside the node's
@@ -434,7 +433,6 @@ image can be templated per-node by an orchestrator:
 			StoreDir: filepath.Join(dataDir, "projections"),
 		}
 		d.AddSyncableParser("projection", projectionParser)
-		d.AddSyncableParser("sql-projection", projectionParser)
 		d.AddSyncableParser("http", &synchttp.SyncableParser{})
 		d.AddSyncableParser("loopback", &loopback.SyncableParser{Proposer: d})
 		d.AddSyncableParser("iceberg", &synciceberg.SyncableParser{})

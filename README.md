@@ -408,12 +408,12 @@ from index 0. Use `sql` for event-log/history tables (and for
 use `projection` to maintain current-state tables from an
 `event`-kind topic. One topic typically feeds both.
 
-> **Renamed from `sql-projection`.** The projection language is not
-> SQL-specific in principle, so the type is now `projection` with a
-> `[projection]` section. The old spelling — `type = "sql-projection"`
-> with a `[sql-projection]` section, always renamed together — remains
-> accepted for a deprecation period; posting it succeeds and the
-> response carries a `warnings[]` entry naming the rename.
+> **The former `sql-projection` spelling was removed in 0.8.0.** The type
+> is `projection` with a `[projection]` section. Posting the old spelling is
+> refused with a message naming the rename, and a config stored under it
+> parks on an upgraded node until re-POSTed renamed — its declared content is
+> unchanged, so it resumes with its stores and checkpoint (see
+> [upgrade.md](docs/operations/upgrade.md#before-you-upgrade)).
 
 ```toml
 [syncable]

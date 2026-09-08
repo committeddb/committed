@@ -18,7 +18,7 @@ Zone-pinned syncables drop that to zero:
    ```toml
    [syncable]
    name = "reader-east-1c"
-   type = "sql-projection"
+   type = "projection"
    zone = "us-east-1c"
    # … the rest of the config is unchanged
    ```

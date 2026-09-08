@@ -80,22 +80,22 @@ func TestParseConfigJSONMimeType(t *testing.T) {
 // names around them.
 func TestParseProjectionToleratesCaseVariantKeys(t *testing.T) {
 	variant := `
-[SQL-PROJECTION]
+[PROJECTION]
 Topic      = "t"
 DB         = "testdb"
 Table      = "rows"
 PrimaryKey = "id"
 KeyPath    = "$.Meta.ID"
 
-[[SQL-PROJECTION.Columns]]
+[[PROJECTION.Columns]]
 Name = "id"
 Type = "TEXT"
 
-[[SQL-PROJECTION.Columns]]
+[[PROJECTION.Columns]]
 Name = "v"
 Type = "TEXT"
 
-[[SQL-PROJECTION.Rules]]
+[[PROJECTION.Rules]]
 When = [ { Path = "$.eventType", Equals = "x" } ]
 Set  = [ { Column = "v", From = "$.camelCase" } ]
 `

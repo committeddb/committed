@@ -127,3 +127,38 @@ func TestRetryDegradedBuilds_NotAdmissibleParks(t *testing.T) {
 	}
 	require.Equal(t, 1, s.ConfigBuildErrorCount(), "the evidence stays loudly visible")
 }
+
+// TestRetryDegradedBuilds_RemovedSpellingParksNamingTheRename: a config
+// stored by an older binary under the removed "sql-projection" spelling
+// parks on this one as not-admissible (never retried), and the recorded
+// build error tells the operator exactly what to re-POST.
+func TestRetryDegradedBuilds_RemovedSpellingParksNamingTheRename(t *testing.T) {
+	syncCh := make(chan *db.SyncableWithID, 8)
+	s := OpenStorage(t, t.TempDir(), parser.New(), syncCh, nil)
+	defer s.Cleanup()
+
+	ent, err := cluster.NewUpsertSyncableEntity(&cluster.Configuration{
+		ID: "legacy", MimeType: "text/toml",
+		Data: []byte("[syncable]\nname = \"legacy\"\ntype = \"sql-projection\"\n[sql-projection]\ntopic = \"t\"\ndb = \"d\"\ntable = \"x\"\n"),
+	})
+	require.NoError(t, err)
+	saveEntity(t, ent, s, 1, 1)
+	select {
+	case msg := <-syncCh:
+		require.Nil(t, msg.Build(), "the build degrades — the spelling is gone from this binary")
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply path did not queue the build")
+	}
+	require.Equal(t, 1, s.ConfigBuildErrorCount())
+	rec := s.ConfigBuildErrors()[0]
+	require.True(t, rec.NotAdmissible, "a removed spelling cannot heal by retry")
+	require.Contains(t, rec.Error, `"sql-projection" was removed in 0.8.0`)
+	require.Contains(t, rec.Error, "[projection]")
+
+	s.RetryDegradedBuildsForTest()
+	select {
+	case msg := <-syncCh:
+		t.Fatalf("a removed spelling must never be retried, but %v was queued", msg.ID)
+	case <-time.After(100 * time.Millisecond):
+	}
+}

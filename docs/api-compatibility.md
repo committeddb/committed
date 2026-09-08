@@ -65,6 +65,11 @@ old and new behaviour. While something is deprecated:
 - The removal is called out in the release notes for the release that
   introduces the deprecation and again for the release that removes it.
 
+A removed config spelling is refused at POST with a message naming its
+replacement, and a config stored under it parks (not admissible) on the
+upgraded binary until re-POSTed under the current spelling. 0.8.0 removed
+the `sql-projection` syncable spelling this way (deprecated since 0.7.x).
+
 There are currently no deprecated endpoints. `/v1` is the first and only
 major version; there is no pre-`/v1` surface to keep alive.
 

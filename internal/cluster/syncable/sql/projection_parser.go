@@ -11,9 +11,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
-// ProjectionSyncableParser parses projection syncable TOML. The canonical
-// type is "projection"; "sql-projection" is accepted as a deprecation
-// alias (both registered in cmd/node.go). Metrics is optional (nil skips
+// ProjectionSyncableParser parses projection syncable TOML (type
+// "projection", registered in cmd/node.go). Metrics is optional (nil skips
 // instrumentation); when set it counts entity-kind misuse at parse time
 // and is handed to the Projection for unmatched-rule ticks at sync time.
 type ProjectionSyncableParser struct {
@@ -25,33 +24,11 @@ type ProjectionSyncableParser struct {
 	StoreDir string
 }
 
-const (
-	canonicalProjectionType  = "projection"
-	deprecatedProjectionType = "sql-projection"
-)
-
-// projectionSection resolves which TOML table this config's projection
-// vocabulary lives in. The section name follows the syncable type string
-// (the {type}.topic convention the pipeline linkage relies on): canonical
-// `type = "projection"` reads [projection]; the deprecated
-// `type = "sql-projection"` keeps reading [sql-projection] for the
-// deprecation period. When no type is in scope (direct parser callers
-// hand in bare documents), whichever section spelling is present wins,
-// canonical by default. A half-renamed config (type of one spelling,
-// section of the other) is caught by parseProjectionConfigFields with a
-// targeted error rather than a cascade of missing-field failures.
-func projectionSection(v *cluster.ParsedConfig) string {
-	switch v.GetString("syncable.type") {
-	case deprecatedProjectionType:
-		return deprecatedProjectionType
-	case canonicalProjectionType:
-		return canonicalProjectionType
-	}
-	if len(v.SectionKeys(canonicalProjectionType)) == 0 && len(v.SectionKeys(deprecatedProjectionType)) > 0 {
-		return deprecatedProjectionType
-	}
-	return canonicalProjectionType
-}
+// projectionSection is the TOML table the projection vocabulary lives in. It
+// follows the syncable type string (the {type}.topic convention the pipeline
+// linkage relies on). The former "sql-projection" spelling was removed in
+// 0.8.0; db/parser's removal ledger refuses it with the rename named.
+const projectionSection = "projection"
 
 func (p *ProjectionSyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v, storage)
@@ -138,7 +115,7 @@ func (p *ProjectionSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []s
 		}
 	}
 
-	section := projectionSection(v)
+	section := projectionSection
 	var rawSources []rawProjectionSource
 	if err := v.UnmarshalKeyLenient(section+".source", &rawSources); err == nil { // topic peek — admission strictness lives in parseProjectionSources
 		for _, rs := range rawSources {
@@ -156,7 +133,7 @@ func (p *ProjectionSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []s
 // straight from the config so a database connection change can enumerate the
 // syncables that captured its pool.
 func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) []string {
-	db := v.GetString(projectionSection(v) + ".db")
+	db := v.GetString(projectionSection + ".db")
 	if db == "" {
 		return nil
 	}
@@ -169,9 +146,8 @@ func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) 
 // unresolvable on this node. storage is used only for type resolution (a `when`
 // discriminator shorthand), never for storage.Database. Database is left nil;
 // ParseConfig resolves and sets it.
-// projectionSectionKeys is the complete vocabulary of the flat projection
-// table — [projection], or [sql-projection] under the deprecated spelling
-// (lowercased; key matching is case-insensitive).
+// projectionSectionKeys is the complete vocabulary of the flat [projection]
+// table (lowercased; key matching is case-insensitive).
 // The struct-decoded subtrees (columns/rules/source) enforce their own
 // vocabularies via the strict UnmarshalKey; this set covers the keys the
 // parser reads flatly — a key outside it is rejected loudly rather than
@@ -271,30 +247,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 }
 
 func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
-	section := projectionSection(v)
-
-	// One config uses one spelling — both sections at once is never right.
-	if len(v.SectionKeys(canonicalProjectionType)) > 0 && len(v.SectionKeys(deprecatedProjectionType)) > 0 {
-		return nil, &cluster.FieldError{
-			Field: deprecatedProjectionType,
-			Issue: "both [projection] and [sql-projection] sections are present — a config uses one spelling; delete the deprecated [sql-projection] section",
-		}
-	}
-
-	// A half-renamed config — type of one spelling, section of the other —
-	// would otherwise read an absent table and die on missing required
-	// fields; name the actual mistake instead.
-	other := canonicalProjectionType
-	if section == canonicalProjectionType {
-		other = deprecatedProjectionType
-	}
-	if len(v.SectionKeys(section)) == 0 && len(v.SectionKeys(other)) > 0 {
-		return nil, &cluster.FieldError{
-			Field: other,
-			Issue: fmt.Sprintf("section spelling does not match syncable type %q — rename the section to [%s] (type and section always use the same spelling)", v.GetString("syncable.type"), section),
-		}
-	}
-
+	section := projectionSection
 	for _, k := range v.SectionKeys(section) {
 		if !projectionSectionKeys[k] {
 			return nil, &cluster.FieldError{

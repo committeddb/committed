@@ -156,10 +156,10 @@ func newEngineFull(t *testing.T, dbOpts []db.Option, httpOpts []http.Option) *en
 	recParser := recorderSyncableParser{&clusterfakes.FakeSyncableParser{}}
 	recParser.ParseReturns(sink, nil)
 	p.AddSyncableParser("recorder", recParser)
-	// The projection spellings admit through the same recorder sink so the
-	// http-layer deprecation warning is testable against a real admission.
+	// The projection type admits through the same recorder sink so the
+	// http layer's handling of projection configs is testable against a
+	// real admission.
 	p.AddSyncableParser("projection", recParser)
-	p.AddSyncableParser("sql-projection", recParser)
 
 	// Database and ingestable plugin seams, same pattern: a "recorder" kind
 	// whose parser admits real configs and hands the engine controllable

@@ -15,39 +15,39 @@ import (
 const projectionTOML = `
 [syncable]
 name = "tenants"
-type = "sql-projection"
+type = "projection"
 mode = "always-current"
 
-[sql-projection]
+[projection]
 topic      = "controlplane-event"
 db         = "testdb"
 table      = "tenants"
 primaryKey = "tenant_id"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tenant_id"
 type = "VARCHAR(256)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tier"
 type = "VARCHAR(32)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "state"
 type = "VARCHAR(32)"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "allocs"
 type = "JSONB"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.created" } ]
 set  = [
   { column = "tier",  from  = "$.tier" },
   { column = "state", value = "pending" },
 ]
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [
   { path = "$.event_type", equals = "tenant.provisioned" },
   { path = "$.tier",       equals = "prod" },
@@ -57,7 +57,7 @@ set  = [
   { column = "allocs", from  = "$.allocs" },
 ]
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.event_type", equals = "tenant.deprovisioned" } ]
 set  = [
   { column = "state",  value = "deprovisioning" },
@@ -141,21 +141,21 @@ func TestParseProjectionConfig(t *testing.T) {
 // `when = { "$.eventType" = … }` does not exist).
 func TestParseProjectionConfigPreservesPathCase(t *testing.T) {
 	toml := `
-[sql-projection]
+[projection]
 topic      = "t"
 db         = "testdb"
 table      = "rows"
 primaryKey = "id"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "TEXT"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "v"
 type = "TEXT"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.eventType", equals = "x" } ]
 set  = [ { column = "v", from = "$.camelCase" } ]
 `
@@ -171,21 +171,21 @@ set  = [ { column = "v", from = "$.camelCase" } ]
 // error here, not a deferred driver failure at Init.
 func TestParseProjectionRejectsUnsafeType(t *testing.T) {
 	toml := `
-[sql-projection]
+[projection]
 topic      = "t"
 db         = "testdb"
 table      = "rows"
 primaryKey = "id"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "TEXT"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "v"
 type = "TEXT; DROP TABLE x"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v := readConfig(t, "toml", strings.NewReader(toml))
@@ -199,21 +199,21 @@ set = [ { column = "v", from = "$.v" } ]
 // reject them.
 func TestParseProjectionAcceptsSpecialIdentifiers(t *testing.T) {
 	toml := `
-[sql-projection]
+[projection]
 topic      = "t"
 db         = "testdb"
 table      = "order"
 primaryKey = "id"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "TEXT"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "user-name"
 type = "TEXT"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 set = [ { column = "user-name", from = "$.n" } ]
 `
 	v := readConfig(t, "toml", strings.NewReader(toml))
@@ -238,21 +238,21 @@ func TestParseProjectionConfigKeyPathOverride(t *testing.T) {
 // set side.
 func TestParseProjectionWhenNull(t *testing.T) {
 	toml := `
-[sql-projection]
+[projection]
 topic      = "t"
 db         = "testdb"
 table      = "rows"
 primaryKey = "id"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "TEXT"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "state"
 type = "TEXT"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.allocs", null = true } ]
 set  = [ { column = "state", value = "unallocated" } ]
 `
@@ -266,17 +266,17 @@ set  = [ { column = "state", value = "unallocated" } ]
 // the worker at sync time.
 func TestParseProjectionConfigRejectsMisuse(t *testing.T) {
 	base := `
-[sql-projection]
+[projection]
 topic      = "t"
 db         = "testdb"
 table      = "rows"
 primaryKey = "id"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "TEXT"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "v"
 type = "TEXT"
 `
@@ -287,82 +287,82 @@ type = "TEXT"
 	}{
 		{
 			"both from and value",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", value = \"y\" } ]",
 			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"neither from nor value nor null",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\" } ]",
 			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"both value and null",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"y\", null = true } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"y\", null = true } ]",
 			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"both from and null",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", null = true } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", from = \"$.v\", null = true } ]",
 			"exactly one of from, value, null, expr, or lookup",
 		},
 		{
 			"unknown column",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"nope\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"nope\", value = \"y\" } ]",
 			`sets unknown column "nope"`,
 		},
 		{
 			"sets primary key",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"id\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"id\", value = \"y\" } ]",
 			"may not set the primary-key column",
 		},
 		{
 			"duplicate column in one rule",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"a\" }, { column = \"v\", value = \"b\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = \"a\" }, { column = \"v\", value = \"b\" } ]",
 			`sets column "v" twice`,
 		},
 		{
 			"empty set",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]",
 			"set is required",
 		},
 		{
 			"unknown when key",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equal = \"x\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equal = \"x\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
 			`unknown key "equal"`,
 		},
 		{
 			"when missing equals and null",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
 			"exactly one of equals, null, notNull, notEquals, greaterThan, lessThan, or expr",
 		},
 		{
 			"when with both equals and null",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\", null = true } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\", null = true } ]\nset = [ { column = \"v\", value = \"y\" } ]",
 			"exactly one of equals, null, notNull, notEquals, greaterThan, lessThan, or expr",
 		},
 		{
 			"when null false",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", null = false } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", null = false } ]\nset = [ { column = \"v\", value = \"y\" } ]",
 			"null = false is not a predicate",
 		},
 		{
 			"when null not a boolean",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", null = \"yes\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", null = \"yes\" } ]\nset = [ { column = \"v\", value = \"y\" } ]",
 			"when null must be a boolean",
 		},
 		{
 			"non-scalar equals",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = { a = 1 } } ]\nset = [ { column = \"v\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = { a = 1 } } ]\nset = [ { column = \"v\", value = \"y\" } ]",
 			"equals must be a scalar",
 		},
 		{
 			"non-scalar value",
-			"[[sql-projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = [1, 2] } ]",
+			"[[projection.rules]]\nwhen = [ { path = \"$.t\", equals = \"x\" } ]\nset = [ { column = \"v\", value = [1, 2] } ]",
 			"value must be a scalar",
 		},
 		{
 			"when wrong shape",
-			"[[sql-projection.rules]]\nwhen = 42\nset = [ { column = \"v\", value = \"y\" } ]",
+			"[[projection.rules]]\nwhen = 42\nset = [ { column = \"v\", value = \"y\" } ]",
 			"when must be a string",
 		},
 		{
@@ -384,17 +384,17 @@ type = "TEXT"
 
 func TestParseProjectionConfigRejectsPrimaryKeyNotDeclared(t *testing.T) {
 	toml := `
-[sql-projection]
+[projection]
 topic      = "t"
 db         = "testdb"
 table      = "rows"
 primaryKey = "missing"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "TEXT"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = [ { path = "$.t", equals = "x" } ]
 set  = [ { column = "id", value = "y" } ]
 `
@@ -408,21 +408,21 @@ set  = [ { column = "id", value = "y" } ]
 // declared discriminator (type-kinds).
 func TestParseProjectionWhenShorthand(t *testing.T) {
 	toml := `
-[sql-projection]
+[projection]
 topic      = "tenant-topic"
 db         = "testdb"
 table      = "rows"
 primaryKey = "id"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "TEXT"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "state"
 type = "TEXT"
 
-[[sql-projection.rules]]
+[[projection.rules]]
 when = "tenant.created"
 set  = [ { column = "state", value = "pending" } ]
 `
@@ -496,36 +496,36 @@ func TestParseProjectionWarnsOnSnapshotKindTopic(t *testing.T) {
 	require.Empty(t, logs.All())
 }
 
-// TestParseMultiSourceProjection covers the [[sql-projection.source]] decode:
+// TestParseMultiSourceProjection covers the [[projection.source]] decode:
 // two source blocks each with its own topic, onDelete, and (match-all) rules
 // fold into one table. This is the multisource read-model config shape.
 func TestParseMultiSourceProjection(t *testing.T) {
 	const toml = `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "movie_card"
 primaryKey = "tconst"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tconst"
 type = "VARCHAR(16)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "primary_title"
 type = "VARCHAR(255)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "average_rating"
 type = "NUMERIC"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "title"
 onDelete = "delete-row"
-[[sql-projection.source.rules]]
+[[projection.source.rules]]
 set = [ { column = "primary_title", from = "$.primary_title" } ]
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "rating"
 onDelete = "clear"
-[[sql-projection.source.rules]]
+[[projection.source.rules]]
 set = [ { column = "average_rating", from = "$.average_rating" } ]
 `
 	v := readConfig(t, "toml", strings.NewReader(toml))
@@ -546,27 +546,27 @@ set = [ { column = "average_rating", from = "$.average_rating" } ]
 // validation: an invalid onDelete and two sources writing one column.
 func TestParseMultiSourceProjectionErrors(t *testing.T) {
 	const head = `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "t"
 primaryKey = "k"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "k"
 type = "TEXT"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "v"
 type = "TEXT"
 `
 	for _, tc := range []struct{ name, sources, wantErr string }{
 		{
 			"invalid onDelete",
-			"[[sql-projection.source]]\ntopic = \"a\"\nonDelete = \"nope\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
+			"[[projection.source]]\ntopic = \"a\"\nonDelete = \"nope\"\n[[projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
 			`onDelete "nope" is invalid`,
 		},
 		{
 			"two sources write one column",
-			"[[sql-projection.source]]\ntopic = \"a\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n" +
-				"[[sql-projection.source]]\ntopic = \"b\"\n[[sql-projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
+			"[[projection.source]]\ntopic = \"a\"\n[[projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n" +
+				"[[projection.source]]\ntopic = \"b\"\n[[projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
 			`column "v" is already written by source 1`,
 		},
 	} {
@@ -579,50 +579,50 @@ type = "TEXT"
 	}
 }
 
-// TestParseAggregateProjection covers the [sql-projection.source.aggregate]
+// TestParseAggregateProjection covers the [projection.source.aggregate]
 // decode and the split: two sources share the principal topic, filtered by
 // when, folding into two different array columns. The element is an
 // array-of-tables so its field names survive viper byte-exact.
 func TestParseAggregateProjection(t *testing.T) {
 	const toml = `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "movie_card"
 primaryKey = "tconst"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tconst"
 type = "VARCHAR(16)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "top_cast"
 type = "JSONB"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "directors"
 type = "JSONB"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "principal"
 keyPath = "$.tconst"
 when = [ { path = "$.category", equals = "actor" } ]
-[sql-projection.source.aggregate]
+[projection.source.aggregate]
 column = "top_cast"
 elementKey = "$.ordering"
 elementKeyType = "number"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "nconst"
 from = "$.nconst"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "billingOrder"
 from = "$.ordering"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "principal"
 keyPath = "$.tconst"
 when = [ { path = "$.category", equals = "director" } ]
-[sql-projection.source.aggregate]
+[projection.source.aggregate]
 column = "directors"
 elementKey = "$.ordering"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "nconst"
 from = "$.nconst"
 `
@@ -654,48 +654,48 @@ from = "$.nconst"
 // TestParseAggregateProjectionErrors covers aggregate-specific validation.
 func TestParseAggregateProjectionErrors(t *testing.T) {
 	const head = `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "movie_card"
 primaryKey = "tconst"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tconst"
 type = "VARCHAR(16)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "top_cast"
 type = "JSONB"
 `
-	const elem = "[[sql-projection.source.aggregate.element]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n"
+	const elem = "[[projection.source.aggregate.element]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n"
 	for _, tc := range []struct{ name, source, wantErr string }{
 		{
 			"rules and aggregate together",
-			"[[sql-projection.source]]\ntopic = \"principal\"\n[[sql-projection.source.rules]]\nset = [ { column = \"top_cast\", from = \"$.x\" } ]\n" +
-				"[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
+			"[[projection.source]]\ntopic = \"principal\"\n[[projection.source.rules]]\nset = [ { column = \"top_cast\", from = \"$.x\" } ]\n" +
+				"[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
 			"exactly one of rules, an aggregate, or a lookup",
 		},
 		{
 			"unknown aggregate column",
-			"[[sql-projection.source]]\ntopic = \"principal\"\n[sql-projection.source.aggregate]\ncolumn = \"nope\"\nelementKey = \"$.ordering\"\n" + elem,
+			"[[projection.source]]\ntopic = \"principal\"\n[projection.source.aggregate]\ncolumn = \"nope\"\nelementKey = \"$.ordering\"\n" + elem,
 			`aggregate column "nope" is not a declared column`,
 		},
 		{
 			"missing elementKey",
-			"[[sql-projection.source]]\ntopic = \"principal\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\n" + elem,
+			"[[projection.source]]\ntopic = \"principal\"\n[projection.source.aggregate]\ncolumn = \"top_cast\"\n" + elem,
 			"aggregate elementKey is required",
 		},
 		{
 			"invalid elementKeyType",
-			"[[sql-projection.source]]\ntopic = \"principal\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\nelementKeyType = \"int\"\n" + elem,
+			"[[projection.source]]\ntopic = \"principal\"\n[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\nelementKeyType = \"int\"\n" + elem,
 			`elementKeyType "int" is invalid`,
 		},
 		{
 			"empty element",
-			"[[sql-projection.source]]\ntopic = \"principal\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n",
+			"[[projection.source]]\ntopic = \"principal\"\n[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n",
 			"aggregate element needs at least one field",
 		},
 		{
 			"invalid onDelete for aggregate",
-			"[[sql-projection.source]]\ntopic = \"principal\"\nonDelete = \"clear\"\n[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
+			"[[projection.source]]\ntopic = \"principal\"\nonDelete = \"clear\"\n[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
 			`onDelete "clear" is invalid for an aggregate source`,
 		},
 	} {
@@ -713,36 +713,36 @@ type = "JSONB"
 // names dimension, pulling primary_name into the cast element.
 func TestParseLookupEnrichmentProjection(t *testing.T) {
 	const toml = `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "movie_card"
 primaryKey = "tconst"
 
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tconst"
 type = "VARCHAR(16)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "top_cast"
 type = "JSONB"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "name"
-[sql-projection.source.lookup]
+[projection.source.lookup]
 name = "names"
-[[sql-projection.source.lookup.field]]
+[[projection.source.lookup.field]]
 field = "primary_name"
 from = "$.primary_name"
 
-[[sql-projection.source]]
+[[projection.source]]
 topic = "principal"
 keyPath = "$.tconst"
-[sql-projection.source.aggregate]
+[projection.source.aggregate]
 column = "top_cast"
 elementKey = "$.ordering"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "nconst"
 from = "$.nconst"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "name"
 lookup = "names"
 on = "nconst"
@@ -768,27 +768,27 @@ select = "primary_name"
 // TestParseLookupEnrichmentErrors covers lookup/enrichment validation.
 func TestParseLookupEnrichmentErrors(t *testing.T) {
 	const head = `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "movie_card"
 primaryKey = "tconst"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "tconst"
 type = "VARCHAR(16)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "top_cast"
 type = "JSONB"
 `
 	// A principal aggregate enriched from a (maybe-absent) lookup.
 	agg := func(enrich string) string {
-		return "[[sql-projection.source]]\ntopic = \"principal\"\nkeyPath = \"$.tconst\"\n" +
-			"[sql-projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" +
-			"[[sql-projection.source.aggregate.element]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n" + enrich
+		return "[[projection.source]]\ntopic = \"principal\"\nkeyPath = \"$.tconst\"\n" +
+			"[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" +
+			"[[projection.source.aggregate.element]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n" + enrich
 	}
-	lookupNames := "[[sql-projection.source]]\ntopic = \"name\"\n[sql-projection.source.lookup]\nname = \"names\"\n" +
-		"[[sql-projection.source.lookup.field]]\nfield = \"primary_name\"\nfrom = \"$.primary_name\"\n"
+	lookupNames := "[[projection.source]]\ntopic = \"name\"\n[projection.source.lookup]\nname = \"names\"\n" +
+		"[[projection.source.lookup.field]]\nfield = \"primary_name\"\nfrom = \"$.primary_name\"\n"
 	enriched := func(body string) string {
-		return "[[sql-projection.source.aggregate.element]]\nfield = \"name\"\n" + body
+		return "[[projection.source.aggregate.element]]\nfield = \"name\"\n" + body
 	}
 	for _, tc := range []struct{ name, source, wantErr string }{
 		{
@@ -813,7 +813,7 @@ type = "JSONB"
 		},
 		{
 			"lookup without field",
-			"[[sql-projection.source]]\ntopic = \"name\"\n[sql-projection.source.lookup]\nname = \"names\"\n" + agg(""),
+			"[[projection.source]]\ntopic = \"name\"\n[projection.source.lookup]\nname = \"names\"\n" + agg(""),
 			`lookup "names" needs at least one field`,
 		},
 	} {
@@ -832,21 +832,21 @@ type = "JSONB"
 // (single-key back-compat).
 func TestParseProjectionCompositePrimaryKey(t *testing.T) {
 	toml := `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "visit_workarea_statuses"
 primaryKey = ["visit_id", "workarea_id"]
 topic = "visit-workarea-event"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "visit_id"
 type = "VARCHAR(64)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "workarea_id"
 type = "VARCHAR(64)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "status"
 type = "VARCHAR(32)"
-[[sql-projection.rules]]
+[[projection.rules]]
 set = [ { column = "status", from = "$.status" } ]
 `
 	v := readConfig(t, "toml", strings.NewReader(toml))
@@ -870,17 +870,17 @@ set = [ { column = "status", from = "$.status" } ]
 // single-key, and silently mis-keying them is the silent-divergence class.
 func TestParseProjectionCompositeGates(t *testing.T) {
 	base := `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "t"
 primaryKey = ["a", "b"]
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "a"
 type = "VARCHAR(64)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "b"
 type = "VARCHAR(64)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "v"
 type = "VARCHAR(64)"
 `
@@ -893,10 +893,10 @@ type = "VARCHAR(64)"
 
 	t.Run("keyPath arity mismatch", func(t *testing.T) {
 		err := parse(t, base+`
-[[sql-projection.source]]
+[[projection.source]]
 topic = "e"
 keyPath = "$.only_one"
-[[sql-projection.source.rules]]
+[[projection.source.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `)
 		require.ErrorContains(t, err, "keyPath has 1 path(s) but primaryKey has 2 column(s)")
@@ -904,13 +904,13 @@ set = [ { column = "v", from = "$.v" } ]
 
 	t.Run("aggregate source rejected", func(t *testing.T) {
 		err := parse(t, base+`
-[[sql-projection.source]]
+[[projection.source]]
 topic = "e"
 keyPath = "$.a"
-[sql-projection.source.aggregate]
+[projection.source.aggregate]
 column = "v"
 elementKey = "$.k"
-[[sql-projection.source.aggregate.element]]
+[[projection.source.aggregate.element]]
 field = "f"
 from = "$.f"
 `)
@@ -919,12 +919,12 @@ from = "$.f"
 
 	t.Run("lookup source rejected", func(t *testing.T) {
 		err := parse(t, base+`
-[[sql-projection.source]]
+[[projection.source]]
 topic = "dim"
 keyPath = "$.id"
-[sql-projection.source.lookup]
+[projection.source.lookup]
 name = "dim"
-[[sql-projection.source.lookup.field]]
+[[projection.source.lookup.field]]
 field = "name"
 from = "$.name"
 `)
@@ -939,18 +939,18 @@ from = "$.name"
 // believing a feature exists. "The parser accepted it" must mean something.
 func TestParseProjectionRejectsUnknownKeys(t *testing.T) {
 	base := `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "t"
 primaryKey = "id"
 topic = "e"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "VARCHAR(64)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "v"
 type = "VARCHAR(64)"
-[[sql-projection.rules]]
+[[projection.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	parse := func(t *testing.T, toml string) error {
@@ -964,7 +964,7 @@ set = [ { column = "v", from = "$.v" } ]
 		require.NoError(t, parse(t, base))
 	})
 
-	// The probes insert into the FLAT [sql-projection] table (appending
+	// The probes insert into the FLAT [projection] table (appending
 	// after a [[rules]] block would land inside that block — which the
 	// strict struct decode also catches, but the flat-section check is
 	// what these two pin).
@@ -989,20 +989,20 @@ set = [ { column = "v", from = "$.v" } ]
 
 	t.Run("unknown key inside a source block (the latestBy probe)", func(t *testing.T) {
 		toml := `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "t"
 primaryKey = "id"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "VARCHAR(64)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "v"
 type = "VARCHAR(64)"
-[[sql-projection.source]]
+[[projection.source]]
 topic = "e"
 latestBy = "$.Timestamp"
-[[sql-projection.source.rules]]
+[[projection.source.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 		err := parse(t, toml)
@@ -1020,20 +1020,20 @@ set = [ { column = "v", from = "$.v" } ]
 
 	t.Run("single-source shorthand mixed with source blocks", func(t *testing.T) {
 		toml := `
-[sql-projection]
+[projection]
 db = "testdb"
 table = "t"
 primaryKey = "id"
 topic = "e"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "id"
 type = "VARCHAR(64)"
-[[sql-projection.columns]]
+[[projection.columns]]
 name = "v"
 type = "VARCHAR(64)"
-[[sql-projection.source]]
+[[projection.source]]
 topic = "e"
-[[sql-projection.source.rules]]
+[[projection.source.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 		err := parse(t, toml)
@@ -1042,65 +1042,30 @@ set = [ { column = "v", from = "$.v" } ]
 	})
 }
 
-// The canonical spelling — type = "projection" with a [projection] section —
-// must parse to the exact config the deprecated sql-projection spelling
-// produces: one language, two spellings, byte-equal semantics.
-func TestParseProjectionCanonicalSpellingParity(t *testing.T) {
-	canonical := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
-
-	oldCfg, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
-		readConfig(t, "toml", strings.NewReader(projectionTOML)), projectionStorage())
-	require.NoError(t, err)
-	newCfg, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
-		readConfig(t, "toml", strings.NewReader(canonical)), projectionStorage())
-	require.NoError(t, err)
-	require.Equal(t, oldCfg, newCfg, "the two spellings must produce identical configs")
-
-	// The config-only extractors resolve the section from the spelling too.
+// The config-only extractors read the [projection] section: topics and
+// databases resolve from the document alone.
+func TestProjectionConfigExtractors(t *testing.T) {
 	p := &sql.ProjectionSyncableParser{}
-	v := readConfig(t, "toml", strings.NewReader(canonical))
+	v := readConfig(t, "toml", strings.NewReader(projectionTOML))
 	require.Equal(t, []string{"controlplane-event"}, p.TopicsFromConfig(v))
 	require.Equal(t, []string{"testdb"}, p.DatabasesFromConfig(v))
 }
 
-// Spelling guards: both sections at once, a half-renamed config, and the
-// unknown-key rejection naming the section the config actually used.
-func TestParseProjectionSpellingGuards(t *testing.T) {
-	parse := func(toml string) error {
-		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
-			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
-		return err
-	}
-
-	t.Run("both sections present", func(t *testing.T) {
-		both := projectionTOML + "\n[projection]\ndb = \"testdb\"\n"
-		err := parse(both)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "both [projection] and [sql-projection]")
-	})
-
-	t.Run("type projection with a sql-projection section", func(t *testing.T) {
-		half := strings.Replace(projectionTOML, `type = "sql-projection"`, `type = "projection"`, 1)
-		err := parse(half)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "rename the section to [projection]")
-	})
-
-	t.Run("unknown key names the canonical section", func(t *testing.T) {
-		canonical := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
-		canonical = strings.Replace(canonical, "[projection]\n", "[projection]\nemitTopic = \"x\"\n", 1)
-		err := parse(canonical)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "projection.emittopic")
-		require.NotContains(t, err.Error(), "sql-projection.emittopic")
-	})
+// An unknown key in the flat [projection] table is rejected naming the
+// section and key, never silently ignored.
+func TestParseProjectionUnknownKeyNamesSection(t *testing.T) {
+	doc := strings.Replace(projectionTOML, "[projection]\n", "[projection]\nemitTopic = \"x\"\n", 1)
+	_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
+		readConfig(t, "toml", strings.NewReader(doc)), projectionStorage())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "projection.emittopic")
 }
 
 // expr set entries: the TOML surface parses, admission rejects a bad
 // expression as a config error naming the column, and expr is mutually
 // exclusive with the other set arms.
 func TestParseProjectionExpr(t *testing.T) {
-	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+	base := projectionTOML
 
 	t.Run("parses and validates", func(t *testing.T) {
 		toml := strings.Replace(base,
@@ -1196,7 +1161,7 @@ of = "nope"`))
 // the field-verified parallel-arrays trap (a wildcard "looks like data,
 // unusable, silently wrong") stays unrepresentable until forEach exists.
 func TestParseProjectionRejectsMultiValuedPaths(t *testing.T) {
-	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+	base := projectionTOML
 	parse := func(toml string) error {
 		_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
 			readConfig(t, "toml", strings.NewReader(toml)), projectionStorage())
@@ -1270,7 +1235,7 @@ set = [ { column = "amount", from = "$.amount" } ]
 func TestUnregisteredDatabaseNamesIdAndRemedy(t *testing.T) {
 	noDB := &TestDatabaseStorage{dbs: map[string]cluster.Database{}}
 
-	base := strings.ReplaceAll(projectionTOML, "sql-projection", "projection")
+	base := projectionTOML
 	withDB := strings.Replace(base, `db         = "testdb"`, `db         = "analytics-teamup"`, 1)
 	_, err := (&sql.ProjectionSyncableParser{}).ParseConfig(
 		readConfig(t, "toml", strings.NewReader(withDB)), noDB)
