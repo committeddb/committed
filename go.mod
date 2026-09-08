@@ -19,15 +19,15 @@ replace github.com/tidwall/wal => ./third_party/forked/tidwall-wal
 require (
 	github.com/PaesslerAG/jsonpath v0.1.1
 	github.com/bufbuild/protocompile v0.14.1
-	github.com/go-sql-driver/mysql v1.10.0
+	github.com/go-sql-driver/mysql v1.10.1
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/google/go-cmp v0.7.0
 	github.com/itchyny/gojq v0.12.19
 	github.com/jackc/pglogrepl v0.0.0-20260401131349-e37c41485510
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.12.2
 	github.com/microsoft/go-mssqldb v1.11.0
-	github.com/moby/moby/api v1.55.0
-	github.com/moby/moby/client v0.5.1
+	github.com/moby/moby/api v1.56.0
+	github.com/moby/moby/client v0.6.0
 	github.com/pb33f/libopenapi v0.38.7
 	github.com/pb33f/libopenapi-validator v0.14.0
 	github.com/pelletier/go-toml/v2 v2.4.3
