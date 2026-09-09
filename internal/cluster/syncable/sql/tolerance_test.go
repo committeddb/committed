@@ -11,7 +11,7 @@ import (
 )
 
 // These tests pin decode tolerances that deployed configs may depend on
-// (the golden corpus from .claude-scratch/tickets/viper-containment.md):
+// (the reference corpus from .claude-scratch/tickets/viper-containment.md):
 // the parser must keep accepting case-variant section and field names —
 // historical viper behavior, load-bearing because stored configs are
 // re-parsed from the log on every node restart. They are written against

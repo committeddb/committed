@@ -13,7 +13,7 @@ import (
 )
 
 // Pins decode tolerances deployed ingestable configs may depend on
-// (the golden corpus from .claude-scratch/tickets/viper-containment.md):
+// (the reference corpus from .claude-scratch/tickets/viper-containment.md):
 // case-variant field names keep decoding, the tables list keeps its
 // order and case (table names are user data), and dialect option keys
 // are matched case-insensitively. Written against the current pipeline;

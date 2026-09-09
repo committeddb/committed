@@ -11,7 +11,7 @@ import (
 )
 
 // Pins decode tolerances deployed webhook configs may depend on (the
-// golden corpus from .claude-scratch/tickets/viper-containment.md):
+// reference corpus from .claude-scratch/tickets/viper-containment.md):
 // case-variant section/field names — including inside header entries —
 // keep decoding, while header values keep their case (they are user
 // data). Written against the current pipeline; must stay green across

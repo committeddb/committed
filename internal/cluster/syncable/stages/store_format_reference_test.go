@@ -19,10 +19,10 @@ import (
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
-// TestStoreFormatGolden pins the stage store's bytes — every bucket, key,
-// and value a fixture pipeline leaves behind — against a golden chosen by
+// TestStoreFormatReference pins the stage store's bytes — every bucket, key,
+// and value a fixture pipeline leaves behind — against a reference chosen by
 // the format number the store itself records. The config fingerprint
-// resets a store when the DECLARATION changes; this golden covers what the
+// resets a store when the DECLARATION changes; this reference covers what the
 // engine chooses on its own (key framing, fan-element identity, retained
 // input shape, synthetic stage names, bucket names, key-part rendering, the
 // collect/min/max order, canonical output JSON). A change to any of those
@@ -32,17 +32,17 @@ import (
 //
 // So the rule is structural: the bytes and the format number move
 // together. A changed dump under the current number fails here. Bumping
-// stagestore.formatVersion makes this test look for a golden that does not
+// stagestore.formatVersion makes this test look for a reference that does not
 // exist yet, which is generated deliberately:
 //
-//	UPDATE_STORE_GOLDEN=1 go test ./internal/cluster/syncable/stages -run TestStoreFormatGolden
+//	UPDATE_STORE_REFERENCE=1 go test ./internal/cluster/syncable/stages -run TestStoreFormatReference
 //
 // and committed alongside the bump. The bump is what resets every existing
 // store on upgrade (stagestore/format_reset_test.go), so the two rules never
-// mix. Coverage is structural too: TestStoreGoldenFixtureCoversTheVocabulary
+// mix. Coverage is structural too: TestStoreReferenceFixtureCoversTheVocabulary
 // fails when the fixture leaves any vocabulary field unset.
-func TestStoreFormatGolden(t *testing.T) {
-	sts := storeGoldenFixture()
+func TestStoreFormatReference(t *testing.T) {
+	sts := storeReferenceFixture()
 	require.NoError(t, ValidateShapes(sts))
 	g := BuildGraph(sts)
 
@@ -76,28 +76,28 @@ func TestStoreFormatGolden(t *testing.T) {
 			return g.FoldTopicDeleteNow(tx, topic, []byte(key))
 		}))
 	}
-	storeGoldenFeed(fold, sweep, del)
+	storeReferenceFeed(fold, sweep, del)
 	require.NoError(t, store.Update(func(tx *stagestore.Tx) error { return tx.SetFrontier(14) }))
 	require.NoError(t, store.Close())
 
 	dump, format := dumpStore(t, stagestore.FilePath(dir, "fixture"))
-	goldenPath := filepath.Join("testdata", fmt.Sprintf("store_format_%d.golden", format))
-	if os.Getenv("UPDATE_STORE_GOLDEN") == "1" {
-		require.NoError(t, os.WriteFile(goldenPath, []byte(dump), 0o644))
-		t.Logf("wrote %s", goldenPath)
+	referencePath := filepath.Join("testdata", fmt.Sprintf("store_format_%d.reference", format))
+	if os.Getenv("UPDATE_STORE_REFERENCE") == "1" {
+		require.NoError(t, os.WriteFile(referencePath, []byte(dump), 0o644))
+		t.Logf("wrote %s", referencePath)
 	}
-	want, err := os.ReadFile(goldenPath)
-	require.NoError(t, err, "no golden for store format %d: the format number was bumped — generate its golden deliberately (UPDATE_STORE_GOLDEN=1) and commit it with the bump", format)
+	want, err := os.ReadFile(referencePath)
+	require.NoError(t, err, "no reference for store format %d: the format number was bumped — generate its reference deliberately (UPDATE_STORE_REFERENCE=1) and commit it with the bump", format)
 	require.Equal(t, string(want), dump,
-		"the stage store's bytes changed under format %d. Existing stores would silently mix two rules; bump stagestore.formatVersion (resetting them on upgrade) and regenerate the golden for the new number", format)
+		"the stage store's bytes changed under format %d. Existing stores would silently mix two rules; bump stagestore.formatVersion (resetting them on upgrade) and regenerate the reference for the new number", format)
 }
 
-// storeGoldenFixture is the pipeline TestStoreFormatGolden folds. It sets
+// storeReferenceFixture is the pipeline TestStoreFormatReference folds. It sets
 // every field of the stage vocabulary somewhere (enforced by
-// TestStoreGoldenFixtureCoversTheVocabulary), so a new construct cannot be
+// TestStoreReferenceFixtureCoversTheVocabulary), so a new construct cannot be
 // added to the grammar without being added here, where its store bytes get
 // pinned.
-func storeGoldenFixture() []Stage {
+func storeReferenceFixture() []Stage {
 	return []Stage{
 		// Reshape: when-expr, computed emit, a NUMBER-typed key (canonical
 		// rendering: "5.0000" and 5 are one key).
@@ -176,12 +176,12 @@ func storeGoldenFixture() []Stage {
 	}
 }
 
-// storeGoldenFeed drives the fixture: every topic, a filtered-out input, a
+// storeReferenceFeed drives the fixture: every topic, a filtered-out input, a
 // key that canonicalizes, both fan arms, mixed collect families, an argmax
 // tie, real refresh epochs (generation 0 = a direct write, never swept;
 // 1 and 2 = ingest epochs) with one refresh-boundary sweep, and one
 // tombstone.
-func storeGoldenFeed(fold func(topic, key, payload string, gen uint64), sweep func(topic string, marker uint64), del func(topic, key string)) {
+func storeReferenceFeed(fold func(topic, key, payload string, gen uint64), sweep func(topic string, marker uint64), del func(topic, key string)) {
 	fold("proposals", "p1", `{"id":"5.0000","projectId":"J1","amount":10}`, 1)
 	fold("proposals", "p2", `{"id":7,"projectId":"J2","amount":0}`, 1) // filtered by the when-expr
 	fold("proposals", "p3", `{"id":8,"projectId":"J2","amount":3}`, 1)
@@ -209,12 +209,12 @@ func storeGoldenFeed(fold func(topic, key, payload string, gen uint64), sweep fu
 	del("proposals", "p3")
 }
 
-// TestStoreGoldenFixtureCoversTheVocabulary makes the golden's coverage
+// TestStoreReferenceFixtureCoversTheVocabulary makes the reference's coverage
 // structural: every exported, config-tagged field of Stage, FanArm,
 // MergeEntry, Join, Emit, and WhenClause must be set (non-zero) somewhere in
-// storeGoldenFixture. A new vocabulary word therefore fails here until the
+// storeReferenceFixture. A new vocabulary word therefore fails here until the
 // fixture exercises it, which is the moment its store bytes get pinned.
-func TestStoreGoldenFixtureCoversTheVocabulary(t *testing.T) {
+func TestStoreReferenceFixtureCoversTheVocabulary(t *testing.T) {
 	seen := map[string]bool{}
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
@@ -242,7 +242,7 @@ func TestStoreGoldenFixtureCoversTheVocabulary(t *testing.T) {
 			}
 		}
 	}
-	walk(reflect.ValueOf(storeGoldenFixture()))
+	walk(reflect.ValueOf(storeReferenceFixture()))
 
 	var missing []string
 	for _, tp := range []reflect.Type{
@@ -260,13 +260,13 @@ func TestStoreGoldenFixtureCoversTheVocabulary(t *testing.T) {
 		}
 	}
 	sort.Strings(missing)
-	require.Empty(t, missing, "vocabulary fields the store-golden fixture never sets — add a stage that uses each, so its store bytes are pinned")
+	require.Empty(t, missing, "vocabulary fields the store-reference fixture never sets — add a stage that uses each, so its store bytes are pinned")
 }
 
 // dumpStore renders every bucket, key, and value of a closed store file in
 // bucket order — bucket names and keys Go-quoted (they carry framing and
 // namespace bytes), values raw when printable and quoted otherwise — so the
-// golden is plain text and a diff names the entry that moved. It also
+// reference is plain text and a diff names the entry that moved. It also
 // returns the format number the store recorded in its meta bucket.
 func dumpStore(t *testing.T, path string) (string, uint64) {
 	t.Helper()

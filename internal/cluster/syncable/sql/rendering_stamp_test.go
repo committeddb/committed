@@ -55,8 +55,8 @@ func TestRenderingStamp_ReadWriteDelete(t *testing.T) {
 }
 
 // The production dialects' stamp statements are pinned verbatim: they are
-// DDL and DML committed runs in the customer's database, and the golden
-// destination dumps (sink_rendering_golden_test.go) depend on their shape.
+// DDL and DML committed runs in the customer's database, and the reference
+// destination dumps (sink_rendering_reference_test.go) depend on their shape.
 func TestRenderingStamp_DialectStatements(t *testing.T) {
 	pg := &dialects.PostgreSQLDialect{}
 	require.Equal(t, `SELECT rendering_version FROM "committed__sink_meta" WHERE table_name = $1`, pg.SinkMetaSelectSQL())

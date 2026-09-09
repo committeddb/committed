@@ -1138,7 +1138,7 @@ func KeyTypeAt(kts []string, i int) string {
 // that don't use them — the field lesson: a spurious reset is not "one
 // harmless rebuild", it is a silent ~30-minute (hours at scale)
 // re-derivation with live-tail latency degraded the whole way. The
-// golden contract test pins this stability; a DELIBERATE semantic
+// reference contract test pins this stability; a DELIBERATE semantic
 // change that must reset unchanged configs gets an upgrade-notes
 // callout, never an accident.
 func Fingerprint(stages []Stage) string {

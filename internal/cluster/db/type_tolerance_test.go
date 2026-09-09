@@ -10,7 +10,7 @@ import (
 )
 
 // These tests pin decode tolerances that deployed type configs may
-// depend on (the golden corpus from
+// depend on (the reference corpus from
 // .claude-scratch/tickets/viper-containment.md). They are written
 // against the current pipeline and must stay green across any decoder
 // change. ParseType's storage parameter is unused, so nil is fine.

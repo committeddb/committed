@@ -10,13 +10,13 @@ import (
 // SinkRenderingVersion is the version of every rendering the SQL sink family
 // writes into a destination: projected column values, the aggregate and
 // forEach sidecars, the keyless applied log. It is the destination's twin of
-// the stage store's format version (stages/store_format_golden_test.go):
+// the stage store's format version (stages/store_format_reference_test.go):
 // the config fingerprint covers what the operator declared, this number
 // covers what the engine chose. Bump it when any rendering changes; a
 // destination stamped with another version parks until it is converged
 // again — rematerialize for a keyed sink, delete + re-POST otherwise — so
-// rows rendered under two rules never share a table. The docker golden
-// (sink_rendering_golden_test.go) fails when the bytes change under the
+// rows rendered under two rules never share a table. The docker reference
+// (sink_rendering_reference_test.go) fails when the bytes change under the
 // current number.
 const SinkRenderingVersion uint64 = 1
 

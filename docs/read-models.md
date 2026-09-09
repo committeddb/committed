@@ -622,7 +622,7 @@ set = [ { column = "total", from = "$.total" },
   VALUES; keys are identity.
 - **Upgrades never reset unchanged configs**: the store fingerprint
   covers DECLARED content only, so new vocabulary in a new binary
-  leaves untouched configs' stores intact (pinned by a golden contract
+  leaves untouched configs' stores intact (pinned by a reference contract
   test). When a store genuinely resets (a stage edit, an ownership
   move), the worker re-derives before consuming and the status endpoint
   says so: `workerState: "re-deriving"` with `stageRecovery {folded,
