@@ -210,16 +210,18 @@ same quorum rule applies in reverse.
   admissible under this binary"); re-POST it without the key. The setting
   never took effect before, so nothing about its behavior changes except
   that you now learn about it.
-- **0.8.0 stamps SQL destinations with a rendering version** (a
-  `committed__sink_meta` row per destination table, in the destination
-  database — see
+- **0.8.0 leaves a note in each SQL destination** saying which version of
+  committed wrote its rows: one row per projected table in a small
+  `committed__sink_meta` table in the destination database (see
   [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
-  Existing destinations are stamped on first contact; nothing parks on
-  this upgrade. In a future release that changes a rendering, a syncable
-  whose destination was rendered by the older binary parks on the new one
-  until it is rematerialized (or deleted and re-POSTed); during the roll,
-  ownership moving between old and new nodes then shows as lag, never as
-  mixed rows — rematerialize once the whole cluster is upgraded.
+  Nothing stops on this upgrade: existing tables get the note the first
+  time 0.8.0 touches them. The note matters when a later release changes
+  how rows are written: a syncable whose table was written by the older
+  binary stops on the new one, with its status naming the fix
+  (rematerialize, or delete and re-POST), rather than mixing the two. While
+  such a roll is in progress and ownership moves between old and new
+  nodes, that shows as sync lag, never as mixed rows; rematerialize once
+  the whole cluster is upgraded.
 - **Mixed-version window.** During the roll the cluster runs mixed
   versions (some nodes new, some old) for the duration of the procedure.
   That's expected and safe within a major line; the forward/backward

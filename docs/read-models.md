@@ -80,10 +80,12 @@ table name, a keyless syncable's table must be short enough that
 `<table>__committed_applied` fits the database's 63-char identifier limit;
 committed rejects a longer one at config time.
 
-Every SQL destination also carries one row in `committed__sink_meta`, a
-committed-managed table in the destination database recording the
-rendering version the table was last converged under; the worker checks it
-before serving and parks on a mismatch rather than mixing renderings (see
+You will also find a small table called `committed__sink_meta` in the
+destination database: one row per projected table, a note saying which
+rendering version of committed wrote its rows. A worker reads it before
+serving, and if a newer committed writes rows differently than the note
+says, the syncable stops and tells you how to bring the table forward
+instead of mixing two renderings in one table (see
 [api-compatibility.md](api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
 
 The sidecar keys on the event's *raft index*, so it makes re-applying the **same

@@ -143,34 +143,55 @@ changes the bytes.
 
 ### Derived state: stage stores and destination renderings
 
-Committed derives two kinds of state by rules the config never mentions,
-and each carries a **stamp** beside it so a binary never writes by one rule
-into state produced by another.
+Committed decides many details of the data it derives that your config
+never mentions: whether a UUID is written lowercase, whether a decimal is
+`5` or `5.00`, what order an array column's elements are in, how a fanned
+element is identified inside a stage store, the shape of the helper tables
+committed keeps next to yours. They are simply how this version of
+committed behaves.
 
-**Projection stage stores** (`<dataDir>/projections/`, node-local, derived
-from the log) carry two stamps: the **config fingerprint** (what the
-operator declared — a changed config resets the store) and the store
-**format version** (the bytes the engine chooses: key framing, fan-element
-identity, retained-input shape, synthetic stage names, key-part rendering,
-the order `collect`, `min`, and `max` impose). A binary that changes any of
-those bumps the format version, so an existing store resets and replays on
-upgrade — and on rollback — automatically; the cost is one cold replay of
-that projection, invisible to readers.
+That creates one risk at upgrade time. Suppose a release changes one of
+them — UUIDs become uppercase. Rows written before the upgrade are
+lowercase, rows written after are uppercase, in the same table, under the
+same config, and nothing notices, because from committed's point of view
+nothing changed. Committed prevents this with a **label** on each piece of
+derived state saying which version wrote it, so a binary never writes by
+one rule into state produced by another.
 
-**SQL destinations** (the projected rows and the helper tables committed
-keeps beside them) carry a **sink rendering version**, stored in the
-destination database itself in `committed__sink_meta` — one row per
-destination table — so it moves, drops, and restores with the rows. Before
-a syncable serves, its worker reads the stamp: a match serves; a mismatch
-**parks** the syncable (status `parked`, message naming the remedy) rather
-than mixing two renderings in one table. The remedy is deliberate, because
-it touches a table your readers use: `POST /v1/syncable/{id}/rematerialize`
-for a keyed sink (converges in place and re-stamps on completion), or
-`DELETE` and re-POST for one that cannot. 0.8.0 introduces the stamp and
-writes it on first contact with a destination that predates it.
+**Projection stage stores** (`<dataDir>/projections/`, one file per
+projection, node-local, rebuilt from the log) carry two labels: the
+**config fingerprint** (what you declared — change the config and the
+store rebuilds) and the store **format version** (the engine's own
+choices: key framing, fan-element identity, retained-input shape, synthetic
+stage names, key-part rendering, the order `collect`, `min`, and `max`
+impose). A release that changes any of those bumps the format version, and
+an existing store rebuilds from the log on the next start — on upgrade and
+on rollback alike — with no action from you. The cost is one cold replay of
+that projection, and readers never see it.
 
-Both stamps are pinned by tests, so a change to either is a deliberate
-bump, never a forgotten one.
+**SQL destinations** (the projected rows and the helper tables beside
+them) carry a **rendering version**, written as a note into your
+database: the table `committed__sink_meta`, one row per projected table,
+saying "these rows were written by rendering version N". The note lives
+next to the rows it describes, so it moves, drops, and restores with them
+— restore the database from a backup and the note from that backup comes
+along, still correct.
+
+Every time a worker starts serving a syncable it reads the note first:
+
+- The note matches the version this binary writes: serve normally.
+- The note is older: the syncable **stops** rather than mixing two
+  renderings. Its status shows `parked` with a message naming both
+  versions and the fix: `POST /v1/syncable/{id}/rematerialize` for a keyed
+  table (rewrites every row from the log under the new version, then
+  updates the note), or `DELETE` and re-POST for a table that cannot be
+  rewritten in place. This is deliberate rather than automatic because it
+  touches a table your readers are using.
+
+0.8.0 introduces the note. Existing tables have none, so 0.8.0 writes
+"version 1" the first time it touches each one; nothing stops on this
+upgrade. The note matters the first time a later release changes how rows
+are written — that release bumps the number, and tests hold it to that.
 
 ### Cluster feature level (semantic compatibility gate)
 
