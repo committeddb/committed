@@ -170,6 +170,22 @@ func (d *SQLMockDialect) CreateRematerializationSweepSQL(config *sql.Config) str
 	return (&dialects.MySQLDialect{}).CreateRematerializationSweepSQL(config)
 }
 
+// The rendering-stamp statements mirror MySQL's; EnsureSinkMeta is a no-op
+// like EnsureRematerializationColumn (the mock pins statement sequences).
+func (d *SQLMockDialect) EnsureSinkMeta(_ context.Context, _ *gosql.DB) error { return nil }
+
+func (d *SQLMockDialect) SinkMetaSelectSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaSelectSQL()
+}
+
+func (d *SQLMockDialect) SinkMetaUpsertSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaUpsertSQL()
+}
+
+func (d *SQLMockDialect) SinkMetaDeleteSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaDeleteSQL()
+}
+
 func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {
 	return d.db, nil
 }

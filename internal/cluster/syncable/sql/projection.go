@@ -324,7 +324,9 @@ func (p *Projection) Teardown() error {
 	if _, err := p.db.ExecContext(ctx, dropString); err != nil {
 		return fmt.Errorf("teardown [%s]: %w", dropString, err)
 	}
-	return nil
+	// The rendering stamp describes the rows just dropped; a recreated table
+	// must not inherit it.
+	return deleteRenderingStamp(ctx, p.db, p.dialect, p.config.Table)
 }
 
 func (p *Projection) Init() error {

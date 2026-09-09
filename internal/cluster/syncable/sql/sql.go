@@ -91,7 +91,9 @@ func (c *Syncable) Teardown() error {
 			return fmt.Errorf("teardown applied-sidecar [%s]: %w", sidecarDrop, err)
 		}
 	}
-	return nil
+	// The rendering stamp describes the rows just dropped; a recreated table
+	// must not inherit it.
+	return deleteRenderingStamp(ctx, c.db, c.dialect, c.config.Table)
 }
 
 func (c *Syncable) Init() error {

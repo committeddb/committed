@@ -50,6 +50,18 @@ type Dialect interface {
 	// RematerializationColumn stamp predates the bound epoch — the completion
 	// sweep of a re-materialization.
 	CreateRematerializationSweepSQL(config *Config) string
+
+	// EnsureSinkMeta creates the per-database rendering-stamp table
+	// (SinkMetaTable) if it is absent. Idempotent.
+	EnsureSinkMeta(ctx context.Context, db *gosql.DB) error
+	// SinkMetaSelectSQL selects rendering_version by table_name (one
+	// placeholder).
+	SinkMetaSelectSQL() string
+	// SinkMetaUpsertSQL inserts or replaces (table_name, rendering_version),
+	// placeholders in that order.
+	SinkMetaUpsertSQL() string
+	// SinkMetaDeleteSQL deletes the row for table_name (one placeholder).
+	SinkMetaDeleteSQL() string
 	// CreateEnrichedUpsertSQL is CreateSQL for a projection rule with spine
 	// lookup enrichments: enriched columns' VALUES entries are scalar
 	// subqueries against the lookup dimension table — `(SELECT

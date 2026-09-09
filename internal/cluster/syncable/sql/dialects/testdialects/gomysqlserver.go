@@ -51,6 +51,22 @@ func (d *GoMySQLServerDialect) CreateRematerializationSweepSQL(config *sql.Confi
 	return (&dialects.MySQLDialect{}).CreateRematerializationSweepSQL(config)
 }
 
+func (d *GoMySQLServerDialect) EnsureSinkMeta(ctx context.Context, db *gosql.DB) error {
+	return (&dialects.MySQLDialect{}).EnsureSinkMeta(ctx, db)
+}
+
+func (d *GoMySQLServerDialect) SinkMetaSelectSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaSelectSQL()
+}
+
+func (d *GoMySQLServerDialect) SinkMetaUpsertSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaUpsertSQL()
+}
+
+func (d *GoMySQLServerDialect) SinkMetaDeleteSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaDeleteSQL()
+}
+
 func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }

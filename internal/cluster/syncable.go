@@ -548,6 +548,26 @@ type StageStat struct {
 // Resolved through the Unwrap chain (SyncableAs), so mode wrappers
 // forward it.
 //
+// RenderingStamped is the capability of a sink that holds derived state in
+// its destination — the rendered rows and the helper tables committed keeps
+// beside them. Their shape is chosen by the engine, not the config, so a
+// binary that renders differently must not write into rows rendered by an
+// older one under the same config. The destination carries a STAMP, the
+// rendering version it was last converged under, next to those rows (so it
+// moves, drops, and restores with them). The worker verifies the stamp before
+// it syncs and parks on a mismatch; a rematerialization re-stamps on
+// completion (db/rendering_stamp.go). Resolved through the Unwrap chain
+// (SyncableAs), so mode wrappers forward it.
+type RenderingStamped interface {
+	// RenderingVersion is the version this binary renders.
+	RenderingVersion() uint64
+	// RenderingStamp reads the destination's stamp; present is false when
+	// the destination has never been stamped.
+	RenderingStamp(ctx context.Context) (version uint64, present bool, err error)
+	// StampRendering records RenderingVersion as the destination's stamp.
+	StampRendering(ctx context.Context) error
+}
+
 //counterfeiter:generate . SyncableParser
 type StageRecoverer interface {
 	// StageFrontier reports the highest log index folded into the local

@@ -669,6 +669,14 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 					break // idle backoff, then retry — never a hot loop
 				}
 			}
+			// The destination's rendering stamp gates serving: rows rendered
+			// by another version must not be written into (rendering_stamp.go).
+			// A pending rematerialization is exempt — its replay converges them.
+			if v := db.verifyRenderingStamp(ctx, id, s); v == renderingPark {
+				return nil
+			} else if v == renderingRetry {
+				break // idle backoff, then retry — never a hot loop
+			}
 			// An in-progress re-materialization: begin epoch marking so the
 			// replay converges the sink (see rematerialize.go). After stage
 			// recovery, so a recovery retry never double-begins.
@@ -1163,6 +1171,14 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 					}
 					break // idle backoff, then retry — never a hot loop
 				}
+			}
+			// The destination's rendering stamp gates serving: rows rendered
+			// by another version must not be written into (rendering_stamp.go).
+			// A pending rematerialization is exempt — its replay converges them.
+			if v := db.verifyRenderingStamp(ctx, id, s); v == renderingPark {
+				return nil
+			} else if v == renderingRetry {
+				break // idle backoff, then retry — never a hot loop
 			}
 			// An in-progress re-materialization: begin epoch marking so the
 			// replay converges the sink (see rematerialize.go). After stage

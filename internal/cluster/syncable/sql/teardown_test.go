@@ -34,6 +34,7 @@ func TestSyncable_Teardown(t *testing.T) {
 	syncable := sql.New(db, config)
 
 	mock.ExpectExec(dialect.DropDDL(config)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs(config.Table).WillReturnResult(driver.ResultNoRows)
 
 	require.NoError(t, syncable.Teardown())
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -70,7 +71,9 @@ func TestSyncable_Teardown_Idempotent(t *testing.T) {
 	syncable := sql.New(db, config)
 
 	mock.ExpectExec(dialect.DropDDL(config)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs(config.Table).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(dialect.DropDDL(config)).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs(config.Table).WillReturnResult(sqlmock.NewResult(0, 0))
 
 	require.NoError(t, syncable.Teardown())
 	require.NoError(t, syncable.Teardown())

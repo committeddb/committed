@@ -164,6 +164,11 @@ func (db *DB) completeRematerializationIfDone(ctx context.Context, id string, s 
 			zap.String("id", id), zap.Error(err))
 		return
 	}
+	if err := db.stampAfterRematerialization(ctx, id, s); err != nil {
+		db.logger.Error("re-materialization converged but the rendering stamp failed to write; will retry (the record stays until it is stamped)",
+			zap.String("id", id), zap.Error(err))
+		return
+	}
 	db.proposeDeleteRematerialization(ctx, id)
 	st.active = false
 	db.logger.Info("re-materialization complete: sink converged and swept", zap.String("id", id))

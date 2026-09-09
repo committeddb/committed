@@ -362,6 +362,32 @@ func (d *PostgreSQLDialect) EnsureRematerializationColumn(ctx context.Context, d
 	return nil
 }
 
+// EnsureSinkMeta implements Dialect: the per-database rendering-stamp table.
+func (d *PostgreSQLDialect) EnsureSinkMeta(ctx context.Context, db *gosql.DB) error {
+	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (table_name TEXT PRIMARY KEY, rendering_version BIGINT NOT NULL, materialized_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+		pgIdent.Table(sql.SinkMetaTable))
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("ensure sink meta [%s]: %w", stmt, err)
+	}
+	return nil
+}
+
+// SinkMetaSelectSQL implements Dialect.
+func (d *PostgreSQLDialect) SinkMetaSelectSQL() string {
+	return fmt.Sprintf("SELECT rendering_version FROM %s WHERE table_name = $1", pgIdent.Table(sql.SinkMetaTable))
+}
+
+// SinkMetaUpsertSQL implements Dialect.
+func (d *PostgreSQLDialect) SinkMetaUpsertSQL() string {
+	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, materialized_at) VALUES ($1, $2, now()) ON CONFLICT (table_name) DO UPDATE SET rendering_version = EXCLUDED.rendering_version, materialized_at = now()",
+		pgIdent.Table(sql.SinkMetaTable))
+}
+
+// SinkMetaDeleteSQL implements Dialect.
+func (d *PostgreSQLDialect) SinkMetaDeleteSQL() string {
+	return fmt.Sprintf("DELETE FROM %s WHERE table_name = $1", pgIdent.Table(sql.SinkMetaTable))
+}
+
 // CreateRematerializationSweepSQL implements Dialect: delete rows this
 // replay never re-emitted (stamp below the epoch).
 func (d *PostgreSQLDialect) CreateRematerializationSweepSQL(config *sql.Config) string {

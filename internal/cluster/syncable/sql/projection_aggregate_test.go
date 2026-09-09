@@ -865,6 +865,7 @@ func TestProjectionTeardownResetsStageStore(t *testing.T) {
 
 	// Teardown: sink drops AND the stage store file goes with them.
 	mock.ExpectExec(dialect.DropDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs(ddlConfig.Table).WillReturnResult(driver.ResultNoRows)
 	require.NoError(t, p.Teardown())
 	_, statErr := os.Stat(stagestore.FilePath(storeDir, "job_totals"))
 	require.True(t, os.IsNotExist(statErr), "teardown must remove the stage store")

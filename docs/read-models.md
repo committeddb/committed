@@ -80,6 +80,12 @@ table name, a keyless syncable's table must be short enough that
 `<table>__committed_applied` fits the database's 63-char identifier limit;
 committed rejects a longer one at config time.
 
+Every SQL destination also carries one row in `committed__sink_meta`, a
+committed-managed table in the destination database recording the
+rendering version the table was last converged under; the worker checks it
+before serving and parks on a mismatch rather than mixing renderings (see
+[api-compatibility.md](api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+
 The sidecar keys on the event's *raft index*, so it makes re-applying the **same
 committed event** a no-op — but each *distinct* event is still its own row. A
 history table records one row per event by design, so the same logical data

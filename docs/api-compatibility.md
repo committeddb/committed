@@ -141,20 +141,36 @@ it is present. The one-way-transitions list must grow whenever an additive
 change alters how an *older* consumer has to behave — not only when it
 changes the bytes.
 
-### Projection stage stores
+### Derived state: stage stores and destination renderings
 
-A projection with internal stages keeps its folded state in a node-local
-store (`<dataDir>/projections/`) that is derived from the log and rebuilt
-from it whenever it cannot be trusted. Two stamps decide that: the
-**config fingerprint** (what the operator declared — a changed config
-resets the store) and the store **format version** (the bytes the engine
-chooses on its own: key framing, fan-element identity, retained-input
-shape, synthetic stage names, key-part rendering, and the order `collect`,
-`min`, and `max` impose). A binary that changes any of those bumps the
-format version, so an existing store resets and replays on upgrade — and
-on rollback — rather than mixing state folded under two rules. Both
-stamps are pinned by tests, so the reset is deliberate, never forgotten;
-the cost of either reset is one cold replay of that projection.
+Committed derives two kinds of state by rules the config never mentions,
+and each carries a **stamp** beside it so a binary never writes by one rule
+into state produced by another.
+
+**Projection stage stores** (`<dataDir>/projections/`, node-local, derived
+from the log) carry two stamps: the **config fingerprint** (what the
+operator declared — a changed config resets the store) and the store
+**format version** (the bytes the engine chooses: key framing, fan-element
+identity, retained-input shape, synthetic stage names, key-part rendering,
+the order `collect`, `min`, and `max` impose). A binary that changes any of
+those bumps the format version, so an existing store resets and replays on
+upgrade — and on rollback — automatically; the cost is one cold replay of
+that projection, invisible to readers.
+
+**SQL destinations** (the projected rows and the helper tables committed
+keeps beside them) carry a **sink rendering version**, stored in the
+destination database itself in `committed__sink_meta` — one row per
+destination table — so it moves, drops, and restores with the rows. Before
+a syncable serves, its worker reads the stamp: a match serves; a mismatch
+**parks** the syncable (status `parked`, message naming the remedy) rather
+than mixing two renderings in one table. The remedy is deliberate, because
+it touches a table your readers use: `POST /v1/syncable/{id}/rematerialize`
+for a keyed sink (converges in place and re-stamps on completion), or
+`DELETE` and re-POST for one that cannot. 0.8.0 introduces the stamp and
+writes it on first contact with a destination that predates it.
+
+Both stamps are pinned by tests, so a change to either is a deliberate
+bump, never a forgotten one.
 
 ### Cluster feature level (semantic compatibility gate)
 
