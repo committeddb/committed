@@ -1,0 +1,90 @@
+"meta"	"fingerprint"	bba37c5465c8cbb84102bfe17835a0dbb3f0cc3691445428976d65b20e8ba507
+"meta"	"format"	"\x00\x00\x00\x00\x00\x00\x00\x02"
+"meta"	"frontier"	"\x00\x00\x00\x00\x00\x00\x00\x0e"
+"stage:cand:dim:blocks"	"j2"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"blocked\":true}"
+"stage:cand:dim:owners"	"o3"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"id\":\"o3\",\"name\":null}"
+"stage:cand:dim:props[$.pid]"	"J1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
+"stage:cand:in"	"\x02j1j1"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"id\":\"J1\",\"ownerId\":\"O1\",\"status\":\"open\"}"
+"stage:cand:in"	"\x02j2j2"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"id\":\"J2\",\"ownerId\":\"o2\",\"status\":\"open\"}"
+"stage:cand:in"	"\x02j4j4"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"id\":\"J4\",\"ownerId\":\"o4\",\"status\":\"open\"}"
+"stage:cand:out"	"j1"	{"amount":11,"owner":null}
+"stage:cand:out"	"j4"	{"amount":0,"owner":null}
+"stage:cand:rev:blocks"	"\x02j1j1"	
+"stage:cand:rev:blocks"	"\x02j2j2"	
+"stage:cand:rev:blocks"	"\x02j4j4"	
+"stage:cand:rev:owners"	"\x02o1j1"	
+"stage:cand:rev:owners"	"\x02o2j2"	
+"stage:cand:rev:owners"	"\x02o4j4"	
+"stage:cand:rev:props[$.pid]"	"\x02J1j1"	
+"stage:cand:rev:props[$.pid]"	"\x02J2j2"	
+"stage:cand:rev:props[$.pid]"	"\x02J4j4"	
+"stage:cand:src"	"j1"	j1
+"stage:cand:src"	"j2"	j2
+"stage:cand:src"	"j4"	j4
+"stage:els:in"	"\x02w1\x02e1\x00\x00a"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"e\":{\"amount\":10,\"id\":\"a\",\"tag\":\"m\",\"v\":10,\"wa\":\"W1\"},\"p\":{\"elements\":[{\"amount\":10,\"id\":\"a\",\"tag\":\"m\",\"v\":10,\"wa\":\"W1\"},{\"amount\":5,\"id\":\"b\",\"tag\":\"b\",\"v\":\"b\",\"wa\":\"w1\"}],\"txn\":\"t1\",\"type\":\"created\"}}"
+"stage:els:in"	"\x02w1\x02e1\x00\x00b"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"e\":{\"amount\":5,\"id\":\"b\",\"tag\":\"b\",\"v\":\"b\",\"wa\":\"w1\"},\"p\":{\"elements\":[{\"amount\":10,\"id\":\"a\",\"tag\":\"m\",\"v\":10,\"wa\":\"W1\"},{\"amount\":5,\"id\":\"b\",\"tag\":\"b\",\"v\":\"b\",\"wa\":\"w1\"}],\"txn\":\"t1\",\"type\":\"created\"}}"
+"stage:els:in"	"\x02w1\x02e2\x00\x01a"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"e\":{\"amount\":7,\"id\":\"a\",\"tag\":\"z\",\"v\":2,\"wa\":\"w1\"},\"p\":{\"added\":[{\"amount\":7,\"id\":\"a\",\"tag\":\"z\",\"v\":2,\"wa\":\"w1\"},{\"amount\":1,\"id\":\"c\",\"tag\":\"a\",\"v\":\"B\",\"wa\":\"w1\"}],\"txn\":\"t1\",\"type\":\"elements-added\"}}"
+"stage:els:in"	"\x02w1\x02e2\x00\x01c"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"e\":{\"amount\":1,\"id\":\"c\",\"tag\":\"a\",\"v\":\"B\",\"wa\":\"w1\"},\"p\":{\"added\":[{\"amount\":7,\"id\":\"a\",\"tag\":\"z\",\"v\":2,\"wa\":\"w1\"},{\"amount\":1,\"id\":\"c\",\"tag\":\"a\",\"v\":\"B\",\"wa\":\"w1\"}],\"txn\":\"t1\",\"type\":\"elements-added\"}}"
+"stage:els:in"	"\x02w1\x02e3\x00\x00d"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"e\":{\"amount\":6,\"id\":\"d\",\"tag\":\"k\",\"v\":true,\"wa\":\"w1\"},\"p\":{\"elements\":[{\"amount\":6,\"id\":\"d\",\"tag\":\"k\",\"v\":true,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"e\",\"tag\":\"k\",\"v\":2.5,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"f\",\"tag\":\"k\",\"v\":false,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"g\",\"tag\":\"k\",\"v\":\"a\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"h\",\"tag\":\"k\",\"v\":\"\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"i\",\"tag\":\"k\",\"v\":2,\"wa\":\"w1\"}],\"txn\":\"t2\",\"type\":\"created\"}}"
+"stage:els:in"	"\x02w1\x02e3\x00\x00e"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"e\":{\"amount\":6,\"id\":\"e\",\"tag\":\"k\",\"v\":2.5,\"wa\":\"w1\"},\"p\":{\"elements\":[{\"amount\":6,\"id\":\"d\",\"tag\":\"k\",\"v\":true,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"e\",\"tag\":\"k\",\"v\":2.5,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"f\",\"tag\":\"k\",\"v\":false,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"g\",\"tag\":\"k\",\"v\":\"a\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"h\",\"tag\":\"k\",\"v\":\"\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"i\",\"tag\":\"k\",\"v\":2,\"wa\":\"w1\"}],\"txn\":\"t2\",\"type\":\"created\"}}"
+"stage:els:in"	"\x02w1\x02e3\x00\x00f"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"e\":{\"amount\":6,\"id\":\"f\",\"tag\":\"k\",\"v\":false,\"wa\":\"w1\"},\"p\":{\"elements\":[{\"amount\":6,\"id\":\"d\",\"tag\":\"k\",\"v\":true,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"e\",\"tag\":\"k\",\"v\":2.5,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"f\",\"tag\":\"k\",\"v\":false,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"g\",\"tag\":\"k\",\"v\":\"a\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"h\",\"tag\":\"k\",\"v\":\"\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"i\",\"tag\":\"k\",\"v\":2,\"wa\":\"w1\"}],\"txn\":\"t2\",\"type\":\"created\"}}"
+"stage:els:in"	"\x02w1\x02e3\x00\x00g"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"e\":{\"amount\":6,\"id\":\"g\",\"tag\":\"k\",\"v\":\"a\",\"wa\":\"w1\"},\"p\":{\"elements\":[{\"amount\":6,\"id\":\"d\",\"tag\":\"k\",\"v\":true,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"e\",\"tag\":\"k\",\"v\":2.5,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"f\",\"tag\":\"k\",\"v\":false,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"g\",\"tag\":\"k\",\"v\":\"a\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"h\",\"tag\":\"k\",\"v\":\"\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"i\",\"tag\":\"k\",\"v\":2,\"wa\":\"w1\"}],\"txn\":\"t2\",\"type\":\"created\"}}"
+"stage:els:in"	"\x02w1\x02e3\x00\x00h"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"e\":{\"amount\":6,\"id\":\"h\",\"tag\":\"k\",\"v\":\"\",\"wa\":\"w1\"},\"p\":{\"elements\":[{\"amount\":6,\"id\":\"d\",\"tag\":\"k\",\"v\":true,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"e\",\"tag\":\"k\",\"v\":2.5,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"f\",\"tag\":\"k\",\"v\":false,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"g\",\"tag\":\"k\",\"v\":\"a\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"h\",\"tag\":\"k\",\"v\":\"\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"i\",\"tag\":\"k\",\"v\":2,\"wa\":\"w1\"}],\"txn\":\"t2\",\"type\":\"created\"}}"
+"stage:els:in"	"\x02w1\x02e3\x00\x00i"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"e\":{\"amount\":6,\"id\":\"i\",\"tag\":\"k\",\"v\":2,\"wa\":\"w1\"},\"p\":{\"elements\":[{\"amount\":6,\"id\":\"d\",\"tag\":\"k\",\"v\":true,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"e\",\"tag\":\"k\",\"v\":2.5,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"f\",\"tag\":\"k\",\"v\":false,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"g\",\"tag\":\"k\",\"v\":\"a\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"h\",\"tag\":\"k\",\"v\":\"\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"i\",\"tag\":\"k\",\"v\":2,\"wa\":\"w1\"}],\"txn\":\"t2\",\"type\":\"created\"}}"
+"stage:els:out"	"w1"	{"big":8,"first":"a","last":"z","small":2,"total":59,"vals":[2,2.5,10,"","B","a","b",false,true]}
+"stage:els:rev:\x00fan"	"\x02e1\x02e1\x00\x00a"	
+"stage:els:rev:\x00fan"	"\x02e1\x02e1\x00\x00b"	
+"stage:els:rev:\x00fan"	"\x02e2\x02e2\x00\x01a"	
+"stage:els:rev:\x00fan"	"\x02e2\x02e2\x00\x01c"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00d"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00e"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00f"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00g"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00h"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00i"	
+"stage:els:src"	"\x02e1\x00\x00a"	w1
+"stage:els:src"	"\x02e1\x00\x00b"	w1
+"stage:els:src"	"\x02e2\x00\x01a"	w1
+"stage:els:src"	"\x02e2\x00\x01c"	w1
+"stage:els:src"	"\x02e3\x00\x00d"	w1
+"stage:els:src"	"\x02e3\x00\x00e"	w1
+"stage:els:src"	"\x02e3\x00\x00f"	w1
+"stage:els:src"	"\x02e3\x00\x00g"	w1
+"stage:els:src"	"\x02e3\x00\x00h"	w1
+"stage:els:src"	"\x02e3\x00\x00i"	w1
+"stage:job:in"	"\x02j1c\x00j1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"owner\":null}"
+"stage:job:in"	"\x02j1wa\x00j1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"Id\":\"J1\",\"name\":\"east\"}"
+"stage:job:in"	"\x02j4c\x00j4"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":0,\"owner\":null}"
+"stage:job:out"	"j1"	{"amount":11,"area":"east"}
+"stage:job:out"	"j4"	{"amount":0,"area":null}
+"stage:latest-status:in"	"\x02j1s1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"job\":\"j1\",\"seq\":1,\"status\":\"open\",\"ts\":20260102}"
+"stage:latest-status:in"	"\x02j1s2"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"job\":\"j1\",\"seq\":2,\"status\":\"done\",\"ts\":20260102}"
+"stage:latest-status:in"	"\x02j1s3"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"job\":\"j1\",\"seq\":9,\"status\":\"stale\",\"ts\":20260101}"
+"stage:latest-status:out"	"j1"	{"status":"done"}
+"stage:latest-status:src"	"s1"	j1
+"stage:latest-status:src"	"s2"	j1
+"stage:latest-status:src"	"s3"	j1
+"stage:lines:in"	"\x02r1\x02r1s1"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"e\":{\"note\":null,\"order\":\"r1\",\"qty\":2,\"sku\":\"s1\"},\"p\":{\"lines\":[{\"note\":null,\"order\":\"r1\",\"qty\":2,\"sku\":\"s1\"},{\"note\":null,\"order\":\"r1\",\"qty\":0,\"sku\":\"s2\"},{\"order\":\"r1\",\"qty\":4,\"sku\":\"s3\"}]}}"
+"stage:lines:out"	"r1"	{"qty":2}
+"stage:lines:rev:\x00fan"	"\x02r1\x02r1s1"	
+"stage:lines:rev:\x00fan"	"\x02r1\x02r1s2"	
+"stage:lines:rev:\x00fan"	"\x02r1\x02r1s3"	
+"stage:lines:src"	"\x02r1s1"	r1
+"stage:props:in"	"\x015p1"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"amount\":10,\"id\":\"5.0000\",\"projectId\":\"J1\"}"
+"stage:props:out"	"5"	{"amount":11,"pid":"J1"}
+"stage:props:src"	"p1"	5
+"stage:props[$.pid]:in"	"\x02J15"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
+"stage:props[$.pid]:out"	"J1"	{"amount":11,"pid":"J1"}
+"stage:props[$.pid]:src"	"5"	J1
+"stage:txn-live:in"	"\x02t1e1"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"elements\":[{\"amount\":10,\"id\":\"a\",\"tag\":\"m\",\"v\":10,\"wa\":\"W1\"},{\"amount\":5,\"id\":\"b\",\"tag\":\"b\",\"v\":\"b\",\"wa\":\"w1\"}],\"txn\":\"t1\",\"type\":\"created\"}"
+"stage:txn-live:in"	"\x02t1e2"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"added\":[{\"amount\":7,\"id\":\"a\",\"tag\":\"z\",\"v\":2,\"wa\":\"w1\"},{\"amount\":1,\"id\":\"c\",\"tag\":\"a\",\"v\":\"B\",\"wa\":\"w1\"}],\"txn\":\"t1\",\"type\":\"elements-added\"}"
+"stage:txn-live:in"	"\x02t2e3"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"elements\":[{\"amount\":6,\"id\":\"d\",\"tag\":\"k\",\"v\":true,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"e\",\"tag\":\"k\",\"v\":2.5,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"f\",\"tag\":\"k\",\"v\":false,\"wa\":\"w1\"},{\"amount\":6,\"id\":\"g\",\"tag\":\"k\",\"v\":\"a\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"h\",\"tag\":\"k\",\"v\":\"\",\"wa\":\"w1\"},{\"amount\":6,\"id\":\"i\",\"tag\":\"k\",\"v\":2,\"wa\":\"w1\"}],\"txn\":\"t2\",\"type\":\"created\"}"
+"stage:txn-live:in"	"\x02t2e4"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"txn\":\"t2\",\"type\":\"deleted\"}"
+"stage:txn-live:out"	"t1"	{"kind":"elements-added"}
+"stage:txn-live:src"	"e1"	t1
+"stage:txn-live:src"	"e2"	t1
+"stage:txn-live:src"	"e3"	t2
+"stage:txn-live:src"	"e4"	t2
+"stage:work-areas[$.Id]:in"	"\x02j1w1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"Id\":\"J1\",\"name\":\"east\"}"
+"stage:work-areas[$.Id]:out"	"j1"	{"Id":"J1","name":"east"}
+"stage:work-areas[$.Id]:src"	"w1"	j1

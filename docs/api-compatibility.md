@@ -141,6 +141,21 @@ it is present. The one-way-transitions list must grow whenever an additive
 change alters how an *older* consumer has to behave — not only when it
 changes the bytes.
 
+### Projection stage stores
+
+A projection with internal stages keeps its folded state in a node-local
+store (`<dataDir>/projections/`) that is derived from the log and rebuilt
+from it whenever it cannot be trusted. Two stamps decide that: the
+**config fingerprint** (what the operator declared — a changed config
+resets the store) and the store **format version** (the bytes the engine
+chooses on its own: key framing, fan-element identity, retained-input
+shape, synthetic stage names, key-part rendering, and the order `collect`,
+`min`, and `max` impose). A binary that changes any of those bumps the
+format version, so an existing store resets and replays on upgrade — and
+on rollback — rather than mixing state folded under two rules. Both
+stamps are pinned by tests, so the reset is deliberate, never forgotten;
+the cost of either reset is one cold replay of that projection.
+
 ### Cluster feature level (semantic compatibility gate)
 
 `version.FeatureLevel` is a monotonic integer each binary supports and
