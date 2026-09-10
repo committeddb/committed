@@ -315,12 +315,13 @@ func newMockEnrichedProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock, 
 	}
 
 	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
-	// lookup source
+	// phase one: every table, in source order, before any source prepares
 	mock.ExpectExec(dialect.CreateLookupDimensionDDL(dimSpec)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(aggSpec)).WillReturnResult(driver.ResultNoRows)
+	// lookup source: prepares only
 	p := enrichedPrepares{dimUpsert: mock.ExpectPrepare(dialect.CreateSQL(dimConfig))}
 	p.dimDelete = mock.ExpectPrepare(dialect.CreateDeleteSQL(dimConfig))
-	// aggregate source
-	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(aggSpec)).WillReturnResult(driver.ResultNoRows)
+	// aggregate source: prepares only
 	mock.ExpectPrepare(dialect.CreateSQL(scConfig))
 	mock.ExpectPrepare(dialect.CreateDeleteSQL(scConfig))
 	mock.ExpectPrepare(dialect.CreateAggregateParentLookupSQL(aggSpec))
@@ -643,8 +644,8 @@ func TestProjectionForEach(t *testing.T) {
 	spec := sql.AggregateSpec{Table: "txn_elements", PrimaryKey: "element_id", Sidecar: sidecar}
 
 	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(spec)).WillReturnResult(driver.ResultNoRows) // phase one: tables first
 	rulePrepare := mock.ExpectPrepare(dialect.CreateSQL(ruleConfig))
-	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(spec)).WillReturnResult(driver.ResultNoRows)
 	scUpsert := mock.ExpectPrepare(dialect.CreateSQL(scConfig))
 	scDelete := mock.ExpectPrepare(dialect.CreateDeleteSQL(scConfig))
 	children := mock.ExpectPrepare(dialect.CreateForEachChildrenSQL(sidecar))
@@ -922,5 +923,136 @@ func TestProjectionAggregateNormalizesParentKey(t *testing.T) {
 	)}}
 	_, err = projection.Sync(context.Background(), lower)
 	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestProjectionAggregateElementLookupDeclaredAfterInits: an aggregate whose
+// element fields enrich from a lookup declared AFTER it still prepares —
+// Init's phase one creates every table (dimensions and sidecars) before any
+// source prepares, so the aggregate's materialize statement (which
+// subqueries the dimension) finds it. Before, a pre-pass gated on an
+// enumeration of enrichment kinds missed element fields, and this order
+// failed Init on Postgres with "relation does not exist".
+func TestProjectionAggregateElementLookupDeclaredAfterInits(t *testing.T) {
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ddlConfig := &sql.Config{
+		Table:      "movie_card",
+		PrimaryKey: []string{"tconst"},
+		Mappings:   []sql.Mapping{{Column: "tconst", SQLType: "VARCHAR(16)"}, {Column: "top_cast", SQLType: "JSONB"}},
+	}
+	dimSpec := sql.LookupSpec{Dimension: "movie_card__lookup_names"}
+	dimConfig := &sql.Config{
+		Table:      "movie_card__lookup_names",
+		PrimaryKey: []string{sql.LookupKey},
+		Mappings:   []sql.Mapping{{Column: sql.LookupKey}, {Column: sql.LookupFields}},
+	}
+	aggSpec := sql.AggregateSpec{
+		Table: "movie_card", PrimaryKey: "tconst", Column: "top_cast",
+		Sidecar: "movie_card__top_cast",
+		Enrichments: []sql.AggregateEnrichment{{
+			Dimension: "movie_card__lookup_names", OnField: "nconst",
+			Selects: []sql.AggregateEnrichmentField{{Output: "name", Source: "primary_name"}},
+		}},
+	}
+	scConfig := &sql.Config{
+		Table: "movie_card__top_cast", PrimaryKey: []string{sql.SidecarChildKey},
+		Mappings: []sql.Mapping{{Column: sql.SidecarChildKey}, {Column: sql.SidecarParentKey}, {Column: sql.SidecarElementKey}, {Column: sql.SidecarElement}},
+	}
+	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	// phase one: every table, in source order (aggregate sidecar, then the
+	// dimension), before any source prepares
+	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(aggSpec)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.CreateLookupDimensionDDL(dimSpec)).WillReturnResult(driver.ResultNoRows)
+	// aggregate source (declared first): prepares only
+	mock.ExpectPrepare(dialect.CreateSQL(scConfig))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(scConfig))
+	mock.ExpectPrepare(dialect.CreateAggregateParentLookupSQL(aggSpec))
+	mock.ExpectPrepare(dialect.CreateAggregateMaterializeSQL(aggSpec))
+	mock.ExpectPrepare(dialect.CreateAggregateRebuildSQL(aggSpec))
+	// lookup source (declared second): prepares only
+	mock.ExpectPrepare(dialect.CreateSQL(dimConfig))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(dimConfig))
+	// fan-out wiring + shared row-delete
+	mock.ExpectPrepare(dialect.CreateAggregateAffectedParentsSQL(aggSpec, "nconst"))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+
+	cfg := enrichedConfig()
+	cfg.Sources = []sql.ProjectionSource{cfg.Sources[1], cfg.Sources[0]} // aggregate before its lookup
+	projection := sql.NewProjection(db, cfg, nil, "movie_card")
+	require.NoError(t, projection.Init())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestProjectionTeardownDropsScalarsOnlySidecar: a scalars-only aggregate
+// (no array column) names its sidecar after its first scalar column, and
+// Teardown drops that exact table. Init's phase one and Teardown read one
+// list of the tables a projection keeps; before that, Teardown named this
+// sidecar by the (empty) aggregate column and left it orphaned in the
+// destination database.
+func TestProjectionTeardownDropsScalarsOnlySidecar(t *testing.T) {
+	config := &sql.ProjectionConfig{
+		Table:      "jobs",
+		PrimaryKey: []string{"job_id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "job_id", SQLType: "VARCHAR(16)"},
+			{Name: "visit_count", SQLType: "INT"},
+		},
+		Sources: []sql.ProjectionSource{{
+			Topic:   "visit",
+			KeyPath: []string{"$.job_id"},
+			Aggregate: &sql.ProjectionAggregate{
+				ElementKey: "$.id",
+				Element:    []sql.ProjectionElementField{{Field: "hours", From: "$.hours"}},
+				Scalars:    []sql.ProjectionScalar{{Column: "visit_count", Fn: "count"}},
+			},
+		}},
+	}
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ddlConfig := &sql.Config{
+		Table:      "jobs",
+		PrimaryKey: []string{"job_id"},
+		Mappings: []sql.Mapping{
+			{Column: "job_id", SQLType: "VARCHAR(16)"},
+			{Column: "visit_count", SQLType: "INT"},
+		},
+	}
+	spec := sql.AggregateSpec{
+		Table: "jobs", PrimaryKey: "job_id", Sidecar: "jobs__visit_count",
+		Scalars: []sql.AggregateScalar{{Column: "visit_count", Fn: "count"}},
+	}
+	scConfig := &sql.Config{
+		Table:      "jobs__visit_count",
+		PrimaryKey: []string{sql.SidecarChildKey},
+		Mappings: []sql.Mapping{
+			{Column: sql.SidecarChildKey},
+			{Column: sql.SidecarParentKey},
+			{Column: sql.SidecarElementKey},
+			{Column: sql.SidecarElement},
+		},
+	}
+	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.CreateAggregateSidecarDDL(spec)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectPrepare(dialect.CreateSQL(scConfig))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(scConfig))
+	mock.ExpectPrepare(dialect.CreateAggregateParentLookupSQL(spec))
+	mock.ExpectPrepare(dialect.CreateAggregateMaterializeSQL(spec))
+	mock.ExpectPrepare(dialect.CreateAggregateRebuildSQL(spec))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+	projection := sql.NewProjection(db, config, nil, "jobs")
+	require.NoError(t, projection.Init())
+
+	// Teardown: the sidecar under its real name, the table, the stamp.
+	mock.ExpectExec(dialect.DropDDL(&sql.Config{Table: "jobs__visit_count"})).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.DropDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs("jobs").WillReturnResult(driver.ResultNoRows)
+	require.NoError(t, projection.Teardown())
 	require.NoError(t, mock.ExpectationsWereMet())
 }

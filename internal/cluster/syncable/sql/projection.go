@@ -281,25 +281,14 @@ func (p *Projection) Teardown() error {
 	defer cancel()
 
 	p.config.applyDefaults()
-	// Drop each aggregate source's sidecar, then the projection table. Order is
-	// not load-bearing (DROP IF EXISTS is independent), but dropping sidecars
-	// first keeps teardown's footprint a strict subset of Init's.
-	for _, src := range p.config.Sources {
-		var housekeeping string
-		switch {
-		case src.Aggregate != nil:
-			housekeeping = sidecarName(p.config.Table, src.Aggregate.Column)
-		case src.Lookup != nil:
-			housekeeping = dimensionName(p.config.Table, src.Lookup.Name)
-		case src.ForEach != "":
-			// The forEach reconciliation sidecar: left behind, a rebuilt
-			// projection would inherit stale parent→element mappings and
-			// mis-reconcile from its first event.
-			housekeeping = ForEachSidecarName(p.config.Table, src.Topic)
-		default:
-			continue
-		}
-		drop := p.dialect.DropDDL(&Config{Table: housekeeping})
+	// Drop every table the projection keeps (the same list Init's phase one
+	// creates — a left-behind sidecar would make a rebuilt projection inherit
+	// stale state and mis-reconcile from its first event), then the
+	// projection table. Order is not load-bearing (DROP IF EXISTS is
+	// independent), but dropping the kept tables first keeps teardown's
+	// footprint a strict subset of Init's.
+	for _, kt := range p.keptTables() {
+		drop := p.dialect.DropDDL(&Config{Table: kt.name})
 		if _, err := p.db.ExecContext(ctx, drop); err != nil {
 			return fmt.Errorf("teardown [%s]: %w", drop, err)
 		}
@@ -368,30 +357,19 @@ func (p *Projection) Init() error {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
 
-	// Dimension-DDL pre-pass: enriched RULE statements subquery dimension
-	// tables at prepare time, and a rule source may precede its lookup source
-	// in manifest order — so every dimension table must exist before any rule
-	// prepares. initLookup's own DDL exec later is IF NOT EXISTS-idempotent.
-	// Conditional on enrichment so an enrichment-free config's SQL traffic
-	// stays byte-identical to before the feature (compat, and the sqlmock
-	// suites pin exact sequences).
-	hasEnrichment := false
-	for _, src := range p.config.Sources {
-		for _, r := range src.Rules {
-			for _, s := range r.Set {
-				if s.IsEnrichment() {
-					hasEnrichment = true
-				}
-			}
-		}
-	}
-	for _, src := range p.config.Sources {
-		if !hasEnrichment || src.Lookup == nil {
-			continue
-		}
-		dimDDL := p.dialect.CreateLookupDimensionDDL(p.config.lookupSpec(src.Lookup))
-		if _, err := p.db.ExecContext(ctx, dimDDL); err != nil {
-			return fmt.Errorf("dimension ddl [%s]: %w", dimDDL, err)
+	// Phase one: every table this projection keeps — the lookup dimensions,
+	// the aggregate and forEach sidecars — exists before any statement is
+	// prepared. Prepared statements reference tables across sources (an
+	// enriched rule or element field subqueries a dimension; a lookup's
+	// fan-out reads an aggregate's sidecar), and sources come in manifest
+	// order, so ordering the work by KIND rather than by source removes the
+	// dependency structurally: nothing has to enumerate which construct
+	// references which table, and a construct added later inherits the
+	// guarantee. The per-source initializers below prepare only, so a
+	// config's DDL count is unchanged — only its position.
+	for _, kt := range p.keptTables() {
+		if _, err := p.db.ExecContext(ctx, kt.create); err != nil {
+			return fmt.Errorf("%s ddl [%s]: %w", kt.name, kt.create, err)
 		}
 	}
 
@@ -610,11 +588,9 @@ func (p *Projection) initLookup(si int, src ProjectionSource) (*lookupRuntime, e
 	spec := p.config.lookupSpec(lk)
 	where := fmt.Sprintf("source %d (topic %q) lookup %q", si+1, src.Topic, lk.Name)
 
-	ddl := p.dialect.CreateLookupDimensionDDL(spec)
-	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
-		return nil, fmt.Errorf("%s dimension ddl [%s]: %w", where, ddl, err)
-	}
-
+	// The dimension table already exists: Init's phase one created every
+	// lookup's dimension before any source initialized. This initializer
+	// prepares only.
 	rt := &lookupRuntime{
 		name: lk.Name,
 		// A copy: the trackers attached below are runtime state, and the
@@ -658,11 +634,7 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 	ag := src.Aggregate
 	where := fmt.Sprintf("source %d (topic %q) aggregate %q", si+1, src.Topic, ag.Column)
 
-	ddl := p.dialect.CreateAggregateSidecarDDL(spec)
-	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
-		return nil, fmt.Errorf("%s sidecar ddl [%s]: %w", where, ddl, err)
-	}
-
+	// The sidecar exists: Init's phase one created it. Prepares only.
 	rt := &aggregateRuntime{
 		column:            ag.Column,
 		elementKey:        ag.ElementKey,
@@ -1352,17 +1324,40 @@ func (p *Projection) removeFromAggregate(ctx context.Context, tx *gosql.Tx, src 
 // shape (child_key PK, parent_key indexed; element columns unused) so it
 // adds zero DDL surface; its name derives from the source topic, stable
 // across config edits that reorder sources.
+// keptTable is one table a projection keeps beside its own — a lookup's
+// dimension, an aggregate's or a forEach's sidecar. Init's phase one creates
+// every one before any source prepares; Teardown drops every one. Both read
+// this list, so which tables a source keeps is stated exactly once: a
+// construct that keeps a table registers it here and is thereby created
+// early and torn down, or it is neither.
+type keptTable struct {
+	name   string
+	create string
+}
+
+func (p *Projection) keptTables() []keptTable {
+	var out []keptTable
+	for _, src := range p.config.Sources {
+		switch {
+		case src.Lookup != nil:
+			spec := p.config.lookupSpec(src.Lookup)
+			out = append(out, keptTable{name: spec.Dimension, create: p.dialect.CreateLookupDimensionDDL(spec)})
+		case src.Aggregate != nil:
+			spec := p.config.aggregateSpec(src.Aggregate)
+			out = append(out, keptTable{name: spec.Sidecar, create: p.dialect.CreateAggregateSidecarDDL(spec)})
+		case src.ForEach != "":
+			spec := p.config.forEachSidecarSpec(src)
+			out = append(out, keptTable{name: spec.Sidecar, create: p.dialect.CreateAggregateSidecarDDL(spec)})
+		}
+	}
+	return out
+}
+
 func (p *Projection) initForEach(si int, src ProjectionSource) (*forEachRuntime, error) {
 	where := fmt.Sprintf("source %d (topic %q) forEach", si+1, src.Topic)
 	sidecar := ForEachSidecarName(p.config.Table, src.Topic)
 
-	ddl := p.dialect.CreateAggregateSidecarDDL(AggregateSpec{
-		Table: p.config.Table, PrimaryKey: p.config.PrimaryKey[0], Sidecar: sidecar,
-	})
-	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
-		return nil, fmt.Errorf("%s sidecar ddl [%s]: %w", where, ddl, err)
-	}
-
+	// The sidecar exists: Init's phase one created it. Prepares only.
 	rt := &forEachRuntime{sidecar: sidecar}
 	success := false
 	defer func() {

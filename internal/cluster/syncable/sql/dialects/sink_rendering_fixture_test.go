@@ -109,10 +109,9 @@ func sinkReferenceFixture(prefix, jsonType, floatType string) sinkFixture {
 			{Name: "unnamed", SQLType: "INT"},
 		},
 		Sources: []sql.ProjectionSource{
-			// The lookup source is declared before the aggregate that enriches
-			// from it: Init's dimension pre-pass covers rule enrichment only, so
-			// an element-field lookup declared later fails to prepare (ticket:
-			// element-lookup-dimension-prepass).
+			// The lookup source the aggregate's element fields enrich from.
+			// Declaration order does not matter (Init's dimension pre-pass
+			// covers element-field lookups); it is first here for reading.
 			{
 				Topic:  "name",
 				Lookup: &sql.ProjectionLookup{Name: "names", Fields: []sql.ProjectionElementField{{Field: "primary_name", From: "$.primary_name"}}},

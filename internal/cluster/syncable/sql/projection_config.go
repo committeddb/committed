@@ -1313,6 +1313,15 @@ func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec 
 	return spec
 }
 
+// forEachSidecarSpec is the forEach reconciliation sidecar's shape: the
+// aggregate sidecar's, with the element columns unused. Beside aggregateSpec
+// and lookupSpec so the config alone says which tables a source keeps.
+func (c *ProjectionConfig) forEachSidecarSpec(src ProjectionSource) AggregateSpec {
+	return AggregateSpec{
+		Table: c.Table, PrimaryKey: c.PrimaryKey[0], Sidecar: ForEachSidecarName(c.Table, src.Topic),
+	}
+}
+
 // lookupSpec builds the dialect-facing spec for one lookup source.
 func (c *ProjectionConfig) lookupSpec(lk *ProjectionLookup) LookupSpec {
 	return LookupSpec{Dimension: dimensionName(c.Table, lk.Name)}
