@@ -1023,6 +1023,26 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, stx *stagest
 // each value coerced to its primary-key column's declared type — shared by
 // applyRowFold and the row owner's decoration pull.
 func (p *Projection) resolveRowKeys(src *projectionSource, data, parent any) ([]any, error) {
+	keys, err := p.resolveKeyValues(src, data, parent, "[projection.apply]")
+	if err != nil {
+		return nil, err
+	}
+	for i := range keys {
+		// Coercion is per destination column; the fold happened in the
+		// resolver. NormalizeKeyValue only touches strings, so folding
+		// before coercing is the same as after.
+		keys[i] = coerceForColumn(keys[i], p.columnType(p.config.PrimaryKey[i]))
+	}
+	return keys, nil
+}
+
+// resolveKeyValues is THE extraction of a source's key from a payload: each
+// keyPath resolved (tracker-classified on failure) and folded through the
+// source's normalize. Every payload-keyed write — rule rows, the aggregate
+// parent — obtains its key here, and the tombstone path folds through the
+// same foldKeys, so no site can bind a key the source's normalize never saw
+// (the aggregate path once did, and "TT1" and "tt1" became two rows).
+func (p *Projection) resolveKeyValues(src *projectionSource, data, parent any, where string) ([]any, error) {
 	keys := make([]any, len(src.keyPaths))
 	for i, kp := range src.keyPaths {
 		tr := src.keyTrackers.At(i)
@@ -1031,12 +1051,21 @@ func (p *Projection) resolveRowKeys(src *projectionSource, data, parent any) ([]
 			// Entry-specific (this matched row is missing its key field) or a
 			// keyPath typo failing every matched row — the tracker classifies
 			// from this path's own history (see cluster.AmbiguityTracker).
-			return nil, tr.Classify(p.syncIndex, fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
+			return nil, tr.Classify(p.syncIndex, fmt.Errorf("%s keyPath [%s]: %w", where, kp, err))
 		}
 		tr.Succeeded()
-		keys[i] = stages.NormalizeKeyValue(src.normalize, coerceForColumn(v, p.columnType(p.config.PrimaryKey[i])))
+		keys[i] = v
 	}
-	return keys, nil
+	return src.foldKeys(keys), nil
+}
+
+// foldKeys applies the source's normalize to key values in place and
+// returns them: the one fold every row-key binding shares.
+func (src *projectionSource) foldKeys(keys []any) []any {
+	for i, v := range keys {
+		keys[i] = stages.NormalizeKeyValue(src.normalize, v)
+	}
+	return keys
 }
 
 // applyRowFold matches src's rules against data and applies the matched
@@ -1203,14 +1232,15 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 			"[projection.apply] delete tombstone key does not decode for this projection's %d-column primaryKey (topic %q) — producer and projection key shapes disagree: %w",
 			n, src.topic, derr))
 	}
-	args := make([]any, len(keyVals))
+	// The tombstone carries the PRODUCER's key rendering; the rows were
+	// keyed through the source's normalize — bind through the same fold or
+	// an UPPERCASE tombstone silently misses the lowercased row (the worst
+	// outcome for an RTBF delete).
+	vals := make([]any, len(keyVals))
 	for i, v := range keyVals {
-		// The tombstone carries the PRODUCER's key rendering; the rows
-		// were keyed through the source's normalize — bind through the
-		// same fold or an UPPERCASE tombstone silently misses the
-		// lowercased row (the worst outcome for an RTBF delete).
-		args[i] = stages.NormalizeKeyValue(src.normalize, v)
+		vals[i] = v
 	}
+	args := src.foldKeys(vals)
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
 		return execFailure(fmt.Sprintf("[projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
@@ -1234,13 +1264,15 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	if len(src.keyPaths) == 0 {
 		return cluster.Permanent(fmt.Errorf("[projection.aggregate] no keyPath configured (topic %q)", src.topic))
 	}
-	keyTr := src.keyTrackers.At(0)
-	parentKey, err := jsonpath.Get(src.keyPaths[0], jsonData)
+	// The parent key is this source's row key, obtained the way every
+	// payload-keyed write obtains its key (extraction + the source's
+	// normalize). It is bound as text — the sidecar's parent_key column is
+	// text — so the per-column coercion resolveRowKeys adds does not apply.
+	keys, err := p.resolveKeyValues(src, jsonData, nil, "[projection.aggregate]")
 	if err != nil {
-		return keyTr.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
+		return err
 	}
-	keyTr.Succeeded()
-
+	parentKey := keys[0]
 	// Capture the child's prior parent before the sidecar upsert overwrites it. A
 	// child re-delivered under a different parent (re-parenting) must have its old
 	// parent rebuilt too, or that parent's array keeps an element the child no

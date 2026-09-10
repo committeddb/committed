@@ -237,6 +237,17 @@ set = [ { column = "w", from = "$.v" } ]
 	err = validateProjectionConfig(cfg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `normalize "upper" is not supported (want "lower")`)
+
+	// A lookup source has no keyPath rendering for normalize to fold; the
+	// knob would be accepted and inert, so admission refuses it.
+	cfg.Sources[0].Normalize = ""
+	cfg.Sources = append(cfg.Sources, ProjectionSource{
+		Topic: "tenant", Normalize: "lower",
+		Lookup: &ProjectionLookup{Name: "tenants", Fields: []ProjectionElementField{{Field: "name", From: "$.name"}}},
+	})
+	err = validateProjectionConfig(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "a lookup source has none")
 }
 
 // The pilot's lsprobe: reduce = "liveSet" was unreachable from TOML —

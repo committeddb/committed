@@ -669,6 +669,12 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		if !stages.ValidNormalize(src.Normalize) {
 			return fmt.Errorf("%s: normalize %q is not supported (want %q)", where, src.Normalize, stages.NormalizeLower)
 		}
+		if src.Normalize != "" && src.Lookup != nil {
+			// A lookup source is keyed by the entity key it is looked up BY;
+			// there is no keyPath rendering for normalize to fold, and an
+			// accepted-but-inert knob is the silent kind of misconfiguration.
+			return fmt.Errorf("%s: normalize applies to a source's keyPath rendering, and a lookup source has none (its dimension is keyed by the entity key) — remove normalize here", where)
+		}
 		if src.RowOwner && (src.Aggregate != nil || src.Lookup != nil || src.ForEach != "") {
 			return fmt.Errorf("%s: rowOwner = true declares row admission; only a plain rules source (topic or stage-fed) can own rows", where)
 		}

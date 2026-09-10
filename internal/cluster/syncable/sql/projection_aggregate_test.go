@@ -57,7 +57,8 @@ type aggregatePrepares struct {
 // them (main DDL, sidecar DDL, the five aggregate prepares, the shared
 // row-delete prepare) and returning the prepare handles. Expected SQL is
 // computed through the same dialect, so the strings match byte-for-byte.
-func newMockAggregateProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock, aggregatePrepares) {
+// mutate, when given, edits the config before Init (a test's one knob).
+func newMockAggregateProjection(t *testing.T, mutate ...func(*sql.ProjectionConfig)) (*sql.Projection, sqlmock.Sqlmock, aggregatePrepares) {
 	t.Helper()
 	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.NoError(t, err)
@@ -102,7 +103,11 @@ func newMockAggregateProjection(t *testing.T) (*sql.Projection, sqlmock.Sqlmock,
 	}
 	mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
 
-	projection := sql.NewProjection(db, topCastConfig(), nil, "movie_card")
+	cfg := topCastConfig()
+	for _, m := range mutate {
+		m(cfg)
+	}
+	projection := sql.NewProjection(db, cfg, nil, "movie_card")
 	require.NoError(t, projection.Init())
 	return projection, mock, p
 }
@@ -875,5 +880,47 @@ func TestProjectionTeardownResetsStageStore(t *testing.T) {
 	// and LANDS again — no suppression from stale state.
 	p2 := boot()
 	require.NoError(t, p2.Close())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestProjectionAggregateNormalizesParentKey: an aggregate source's
+// normalize folds the PARENT key like every other row-key binding — the
+// sidecar stores and the materialize binds the lowercased key — and a child
+// re-delivered under the same parent spelled differently is not a re-parent
+// (no rebuild), because the comparison sees one rendering. Before the fix
+// "TT1" and "tt1" materialized as two rows.
+func TestProjectionAggregateNormalizesParentKey(t *testing.T) {
+	projection, mock, p := newMockAggregateProjection(t, func(c *sql.ProjectionConfig) {
+		c.Sources[0].Normalize = "lower"
+	})
+	child := `["TT1","1"]`
+	sidecarArgs := []driver.Value{child, "tt1", "1", `{"nconst":"nm1"}`}
+	sidecarArgs = append(sidecarArgs, sidecarArgs...) // mock dialect doubles like MySQL
+	mock.ExpectBegin()
+	p.lookup.ExpectQuery().WithArgs(child).WillReturnRows(sqlmock.NewRows([]string{"parent_key"}))
+	p.upsertSidecar.ExpectExec().WithArgs(sidecarArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
+	p.materialize.ExpectExec().WithArgs("tt1", "tt1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	upper := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
+		principalType, []byte(child),
+		[]byte(`{"tconst":"TT1","ordering":1,"nconst":"nm1","category":"actor"}`),
+	)}}
+	_, err := projection.Sync(context.Background(), upper)
+	require.NoError(t, err)
+
+	// The same child again, parent spelled lowercase this time: the sidecar
+	// already holds "tt1", so this is an in-place update — no rebuild of a
+	// phantom old parent.
+	mock.ExpectBegin()
+	p.lookup.ExpectQuery().WithArgs(child).WillReturnRows(sqlmock.NewRows([]string{"parent_key"}).AddRow("tt1"))
+	p.upsertSidecar.ExpectExec().WithArgs(sidecarArgs...).WillReturnResult(sqlmock.NewResult(0, 1))
+	p.materialize.ExpectExec().WithArgs("tt1", "tt1").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	lower := &cluster.Actual{Entities: []*cluster.Entity{cluster.NewUpsertEntity(
+		principalType, []byte(child),
+		[]byte(`{"tconst":"tt1","ordering":1,"nconst":"nm1","category":"actor"}`),
+	)}}
+	_, err = projection.Sync(context.Background(), lower)
+	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

@@ -15,13 +15,12 @@
 == T_keyed (id, owner, balance, tags, committed_generation)
 "k1"	"ada"	"5.25"	"[\"a\"]"	0
 == T_movies (tconst, primary_title, top_cast, n_cast, max_order, actors, unnamed)
-"TT1"	NULL	"[{\"name\": \"Bea Arthur\", \"nick\": \"B\", \"nconst\": \"nm2\", \"category\": \"actor\", \"ordering\": 2}]"	1	2	1	0
-"tt1"	"The Engine"	"[{\"name\": \"Ada Lovelace\", \"nick\": null, \"nconst\": \"nm1\", \"category\": \"actor\", \"ordering\": 1}]"	1	1	1	1
+"tt1"	"The Engine"	"[{\"name\": \"Ada Lovelace\", \"nick\": null, \"nconst\": \"nm1\", \"category\": \"actor\", \"ordering\": 1}, {\"name\": \"Bea Arthur\", \"nick\": \"B\", \"nconst\": \"nm2\", \"category\": \"actor\", \"ordering\": 2}]"	2	2	2	1
 == T_movies__lookup_names (lookup_key, lookup_fields)
 "nm1"	"{\"primary_name\": \"Ada Lovelace\"}"
 "nm2"	"{\"primary_name\": \"Bea Arthur\"}"
 == T_movies__top_cast (child_key, parent_key, element_key, element)
-"p1"	"TT1"	"2"	"{\"nick\": \"B\", \"nconst\": \"nm2\", \"category\": \"actor\", \"ordering\": 2}"
+"p1"	"tt1"	"2"	"{\"nick\": \"B\", \"nconst\": \"nm2\", \"category\": \"actor\", \"ordering\": 2}"
 "p2"	"tt1"	"1"	"{\"nick\": null, \"nconst\": \"nm1\", \"category\": \"actor\", \"ordering\": 1}"
 == T_single (tenant_id, tier, state, seats, allocs)
 "t1"	"dev"	"active"	6	"{\"cpu\": 4, \"gpu\": null}"
