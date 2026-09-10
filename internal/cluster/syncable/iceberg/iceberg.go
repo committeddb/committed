@@ -60,6 +60,56 @@ import (
 // it can never collide with engine or user properties.
 const propertyCheckpoint = "committed.checkpoint-index"
 
+// RenderingVersion is the version of every rendering this sink writes into
+// a table — the envelope schema, the row encoding, the sweep semantics. Its
+// stamp is the TABLE property propertyRenderingVersion (the checkpoint is a
+// snapshot-summary property; the rendering is a property of the table), so
+// it moves, drops, and restores with the table. The worker reads it before
+// serving and parks on a mismatch (db/rendering_stamp.go); this sink cannot
+// converge in place, so the remedy is a fresh table. sql.SinkRenderingVersion
+// is the SQL family's twin, versioned separately: the two render nothing in
+// common.
+const RenderingVersion uint64 = 1
+
+const propertyRenderingVersion = "committed.rendering-version"
+
+// RenderingVersion implements cluster.RenderingStamped.
+func (s *Syncable) RenderingVersion() uint64 { return RenderingVersion }
+
+// RenderingStamp implements cluster.RenderingStamped: the table property,
+// read from the current metadata.
+func (s *Syncable) RenderingStamp(ctx context.Context) (uint64, bool, error) {
+	if err := s.tbl.Refresh(ctx); err != nil {
+		return 0, false, fmt.Errorf("[iceberg] refresh table: %w", err)
+	}
+	v, ok := s.tbl.Properties()[propertyRenderingVersion]
+	if !ok {
+		return 0, false, nil
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("[iceberg] rendering stamp %q is not a version: %w", v, err)
+	}
+	return n, true, nil
+}
+
+// StampRendering implements cluster.RenderingStamped: a metadata-only
+// commit setting the table property.
+func (s *Syncable) StampRendering(ctx context.Context) error {
+	tx := s.tbl.NewTransaction()
+	if err := tx.SetProperties(iceberggo.Properties{propertyRenderingVersion: strconv.FormatUint(RenderingVersion, 10)}); err != nil {
+		return fmt.Errorf("[iceberg] set rendering stamp: %w", err)
+	}
+	newTbl, err := tx.Commit(ctx)
+	if err != nil {
+		return fmt.Errorf("[iceberg] commit rendering stamp: %w", err)
+	}
+	s.tbl = newTbl
+	return nil
+}
+
+var _ cluster.RenderingStamped = (*Syncable)(nil)
+
 const (
 	defaultFlushRows     = 10000
 	defaultFlushInterval = 60 * time.Second

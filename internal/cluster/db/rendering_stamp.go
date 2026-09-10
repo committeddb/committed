@@ -75,13 +75,18 @@ func (db *DB) verifyRenderingStamp(ctx context.Context, id string, s cluster.Syn
 }
 
 // renderingRemedy names the verb that converges this sink: rematerialize
-// where the sink can converge in place, otherwise delete (dropping the
-// table) and re-POST.
+// where the sink can converge in place; otherwise delete and re-POST, which
+// drops the destination for a sink that tears down (the SQL family) — and
+// for one that does not (Iceberg keeps its table on delete), the operator
+// recreates the destination first, or the re-POST meets the same stamp.
 func renderingRemedy(id string, s cluster.Syncable) string {
 	if rm, ok := cluster.SyncableAs[cluster.Rematerializable](s); ok && rm.CanRematerialize() {
 		return "POST /v1/syncable/" + id + "/rematerialize"
 	}
-	return "DELETE /v1/syncable/" + id + " (drops the table), then re-POST the config"
+	if _, ok := cluster.SyncableAs[cluster.Teardownable](s); ok {
+		return "DELETE /v1/syncable/" + id + " (drops the table), then re-POST the config"
+	}
+	return "this sink cannot drop its destination: recreate the table by hand, then DELETE /v1/syncable/" + id + " and re-POST the config"
 }
 
 // stampAfterRematerialization records the current rendering version once a

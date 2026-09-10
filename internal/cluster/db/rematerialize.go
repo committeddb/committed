@@ -57,7 +57,7 @@ func (db *DB) RematerializeSyncable(ctx context.Context, id string) error {
 		return cluster.NewConfigError(fmt.Errorf("build syncable for admission: %w", err))
 	}
 	canRemat := false
-	if rm, ok := probe.(cluster.Rematerializable); ok {
+	if rm, ok := cluster.SyncableAs[cluster.Rematerializable](probe); ok {
 		canRemat = rm.CanRematerialize()
 	}
 	_ = probe.Close()
@@ -119,7 +119,7 @@ func (db *DB) beginRematerializationIfRequested(ctx context.Context, id string, 
 	if !ok {
 		return rematState{}
 	}
-	rm, isRM := s.(cluster.Rematerializable)
+	rm, isRM := cluster.SyncableAs[cluster.Rematerializable](s)
 	if !isRM || !rm.CanRematerialize() {
 		// Admission prevents this; a config re-POST to a non-keyed shape
 		// mid-remat could still reach it. Clear the record loudly: the sweep
@@ -154,7 +154,7 @@ func (db *DB) completeRematerializationIfDone(ctx context.Context, id string, s 
 	if max(lastSeen, cp) < st.target {
 		return
 	}
-	rm, ok := s.(cluster.Rematerializable)
+	rm, ok := cluster.SyncableAs[cluster.Rematerializable](s)
 	if !ok {
 		st.active = false
 		return

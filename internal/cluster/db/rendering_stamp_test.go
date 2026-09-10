@@ -44,9 +44,21 @@ func (f *stampedFakeSyncable) stampState() (stamp uint64, stamped int, synced in
 
 var _ cluster.RenderingStamped = (*stampedFakeSyncable)(nil)
 
-func startStampedSyncable(t *testing.T, sink *stampedFakeSyncable) (parkedMessage func() (string, bool)) {
+// teardownFakeSyncable is a stamped sink that drops its destination on
+// delete (the SQL family's shape) but cannot converge in place.
+type teardownFakeSyncable struct{ stampedFakeSyncable }
+
+func (f *teardownFakeSyncable) Teardown() error { return nil }
+
+var _ cluster.Teardownable = (*teardownFakeSyncable)(nil)
+
+// startStampedSyncable wires sink into a DB: state is the fake's stamp
+// bookkeeping; syncable is the value handed to the engine (a wrapper type
+// when the test needs an extra capability).
+func startStampedSyncable(t *testing.T, state *stampedFakeSyncable, syncable cluster.Syncable) (parkedMessage func() (string, bool)) {
 	t.Helper()
-	d, s := newWalDBRemat(t, sink)
+	_ = state
+	d, s := newWalDBRemat(t, syncable)
 	proposeTypeTOML(t, d, "photos", "photos", "", "")
 	tp, err := s.ResolveType(cluster.LatestTypeRef("photos"))
 	require.NoError(t, err)
@@ -73,7 +85,7 @@ func startStampedSyncable(t *testing.T, sink *stampedFakeSyncable) (parkedMessag
 // keyed sink converges in place.
 func TestRenderingStamp_MismatchParksNamingRematerialize(t *testing.T) {
 	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: true}, renders: 2, stamp: 1}
-	parked := startStampedSyncable(t, sink)
+	parked := startStampedSyncable(t, sink, sink)
 	require.Eventually(t, func() bool { _, ok := parked(); return ok }, 10*time.Second, 10*time.Millisecond, "the worker never parked")
 	msg, _ := parked()
 	require.Contains(t, msg, "rendered under sink rendering version 1")
@@ -87,18 +99,29 @@ func TestRenderingStamp_MismatchParksNamingRematerialize(t *testing.T) {
 // A keyless sink cannot converge in place, so the remedy it names is the
 // destructive one: delete (dropping the table) and re-POST.
 func TestRenderingStamp_MismatchNamesDeleteForNonConvergingSinks(t *testing.T) {
-	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: false}, renders: 2, stamp: 1}
-	parked := startStampedSyncable(t, sink)
+	sink := &teardownFakeSyncable{stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: false}, renders: 2, stamp: 1}}
+	parked := startStampedSyncable(t, &sink.stampedFakeSyncable, sink)
 	require.Eventually(t, func() bool { _, ok := parked(); return ok }, 10*time.Second, 10*time.Millisecond)
 	msg, _ := parked()
 	require.Contains(t, msg, "DELETE /v1/syncable/photos-mirror (drops the table), then re-POST the config")
+}
+
+// A sink that neither converges in place nor drops its destination on
+// delete (Iceberg keeps its table) names the by-hand step, or the re-POST
+// would meet the same stamp.
+func TestRenderingStamp_MismatchNamesRecreateForSinksThatKeepTheirTable(t *testing.T) {
+	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: false}, renders: 2, stamp: 1}
+	parked := startStampedSyncable(t, sink, sink)
+	require.Eventually(t, func() bool { _, ok := parked(); return ok }, 10*time.Second, 10*time.Millisecond)
+	msg, _ := parked()
+	require.Contains(t, msg, "cannot drop its destination: recreate the table by hand, then DELETE /v1/syncable/photos-mirror and re-POST")
 }
 
 // 0.8.0 introduces the stamp: a never-stamped destination is stamped with
 // the current version on first contact, then served.
 func TestRenderingStamp_FirstContactStampsThenSyncs(t *testing.T) {
 	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: true}, renders: 2}
-	parked := startStampedSyncable(t, sink)
+	parked := startStampedSyncable(t, sink, sink)
 	require.Eventually(t, func() bool { _, _, synced := sink.stampState(); return synced >= 2 }, 10*time.Second, 10*time.Millisecond, "never synced")
 	stamp, stamped, _ := sink.stampState()
 	require.Equal(t, uint64(2), stamp)

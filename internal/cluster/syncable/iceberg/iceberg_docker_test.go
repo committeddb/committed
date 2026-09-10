@@ -318,3 +318,30 @@ func readAll(t *testing.T, rc interface{ Read([]byte) (int, error) }) string {
 		}
 	}
 }
+
+// The rendering stamp is a table property: absent on a fresh table, written
+// by StampRendering as a metadata-only commit, read back by any sink that
+// loads the table, and untouched by data commits.
+func TestIcebergSinkRenderingStamp(t *testing.T) {
+	st := startIcebergStack(t)
+	s := st.sink(t, "photos_stamp", 2)
+	ctx := context.Background()
+	_, present, err := s.RenderingStamp(ctx)
+	require.NoError(t, err)
+	require.False(t, present, "a fresh table carries no stamp")
+
+	require.NoError(t, s.StampRendering(ctx))
+	v, present, err := s.RenderingStamp(ctx)
+	require.NoError(t, err)
+	require.True(t, present)
+	require.Equal(t, iceberg.RenderingVersion, v)
+
+	require.False(t, syncOne(t, s, 10, upsert("k1", `{"v":1}`, 1)))
+	require.True(t, syncOne(t, s, 11, upsert("k2", `{"v":2}`, 1)), "row threshold flushes")
+	s2 := st.sink(t, "photos_stamp", 2)
+	v, present, err = s2.RenderingStamp(ctx)
+	require.NoError(t, err)
+	require.True(t, present, "the stamp belongs to the table, not to the sink instance")
+	require.Equal(t, iceberg.RenderingVersion, v)
+	require.Equal(t, map[string]string{"k1": `{"v":1}`, "k2": `{"v":2}`}, s2.ReadRowsForTest(t), "a data commit leaves the stamp and the rows intact")
+}

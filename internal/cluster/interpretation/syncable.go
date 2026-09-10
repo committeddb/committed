@@ -74,50 +74,13 @@ func (s *single) Close() error { return s.inner.Close() }
 // inherits this.
 func (s *single) Unwrap() cluster.Syncable { return s.inner }
 
-// CheckpointPolicy forwards the wrapped syncable's checkpoint cadence (see
-// the migration wrapper's identical forward).
-func (s *single) CheckpointPolicy() cluster.CheckpointPolicy {
-	if cc, ok := s.inner.(cluster.CheckpointConfigurable); ok {
-		return cc.CheckpointPolicy()
-	}
-	return cluster.CheckpointPolicy{}
-}
-
-// Teardown forwards destination teardown. Unlike migration.Wrap — which only
-// decorates always-current syncables — this wrapper decorates EVERY syncable,
-// so the delete/rebuild paths' Teardownable type-assertion must keep working
-// through it: forward when inner tears down, no-op when it owns no external
-// state (the same outcome as not implementing the interface).
-func (s *single) Teardown() error {
-	if td, ok := s.inner.(cluster.Teardownable); ok {
-		return td.Teardown()
-	}
-	return nil
-}
-
-// CanRematerialize / Begin / Complete forward the re-materialization
-// extension, preserving the innermost sink's answer (a sink that doesn't
-// implement it reports false, and the verbs refuse).
-func (s *single) CanRematerialize() bool {
-	if rm, ok := s.inner.(cluster.Rematerializable); ok {
-		return rm.CanRematerialize()
-	}
-	return false
-}
-
-func (s *single) BeginRematerialization(ctx context.Context, epoch uint64) error {
-	if rm, ok := s.inner.(cluster.Rematerializable); ok {
-		return rm.BeginRematerialization(ctx, epoch)
-	}
-	return cluster.ErrNotRematerializable
-}
-
-func (s *single) CompleteRematerialization(ctx context.Context) error {
-	if rm, ok := s.inner.(cluster.Rematerializable); ok {
-		return rm.CompleteRematerialization(ctx)
-	}
-	return cluster.ErrNotRematerializable
-}
+// No capability interface is implemented here — not Teardownable, not
+// Rematerializable, not RenderingStamped. The engine resolves every
+// capability through the Unwrap chain (cluster.SyncableAs), which reaches
+// the sink; a forwarding-with-fallback method on the wrapper would make
+// every wrapped syncable LOOK capable, and the engine asks exactly those
+// questions (does delete drop the destination? can this sink converge in
+// place?) of the sink itself. Pinned by TestWrapExposesNoCapabilities.
 
 type batchSyncable struct {
 	single

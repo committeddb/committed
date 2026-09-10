@@ -84,3 +84,18 @@ func TestSyncable_ChainSuccessKeepsEntrySpecific(t *testing.T) {
 		}
 	}
 }
+
+// TestWrapExposesNoCapabilities: the migration wrapper implements Sync,
+// Close, and Unwrap — never a capability interface on the sink's behalf; the
+// engine resolves capabilities through the Unwrap chain (cluster.SyncableAs).
+func TestWrapExposesNoCapabilities(t *testing.T) {
+	w := migration.Wrap(okSync{}, downcaseResolver(), nil)
+	_, td := any(w).(cluster.Teardownable)
+	_, rm := any(w).(cluster.Rematerializable)
+	_, rs := any(w).(cluster.RenderingStamped)
+	_, cc := any(w).(cluster.CheckpointConfigurable)
+	require.False(t, td, "a wrapper must not claim Teardownable")
+	require.False(t, rm, "a wrapper must not claim Rematerializable")
+	require.False(t, rs, "a wrapper must not claim RenderingStamped")
+	require.False(t, cc, "a wrapper must not claim CheckpointConfigurable")
+}

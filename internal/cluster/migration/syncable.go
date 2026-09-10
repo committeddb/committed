@@ -100,44 +100,6 @@ func (s *single) Close() error { return s.inner.Close() }
 // batchSyncable embeds single, so it inherits this.
 func (s *single) Unwrap() cluster.Syncable { return s.inner }
 
-// CheckpointPolicy forwards the wrapped syncable's checkpoint cadence so a
-// ModeAlwaysCurrent syncable keeps the cadence parsed from its TOML — the
-// worker only sees this wrapper, so without the forward the policy would be
-// lost and the syncable would silently run at the default cadence. A wrapped
-// syncable that doesn't configure cadence yields the zero policy, which the
-// worker resolves to its default. batchSyncable embeds single, so it inherits
-// this. See cluster.CheckpointConfigurable.
-func (s *single) CheckpointPolicy() cluster.CheckpointPolicy {
-	if cc, ok := s.inner.(cluster.CheckpointConfigurable); ok {
-		return cc.CheckpointPolicy()
-	}
-	return cluster.CheckpointPolicy{}
-}
-
-// CanRematerialize / Begin / Complete forward the re-materialization
-// extension through the migration wrapper (the interpretation wrapper — the
-// outermost — forwards to this), preserving the innermost sink's answer.
-func (s *single) CanRematerialize() bool {
-	if rm, ok := s.inner.(cluster.Rematerializable); ok {
-		return rm.CanRematerialize()
-	}
-	return false
-}
-
-func (s *single) BeginRematerialization(ctx context.Context, epoch uint64) error {
-	if rm, ok := s.inner.(cluster.Rematerializable); ok {
-		return rm.BeginRematerialization(ctx, epoch)
-	}
-	return cluster.ErrNotRematerializable
-}
-
-func (s *single) CompleteRematerialization(ctx context.Context) error {
-	if rm, ok := s.inner.(cluster.Rematerializable); ok {
-		return rm.CompleteRematerialization(ctx)
-	}
-	return cluster.ErrNotRematerializable
-}
-
 type batchSyncable struct {
 	single
 	batch cluster.BatchSyncable
