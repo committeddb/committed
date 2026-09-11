@@ -29,34 +29,37 @@ order, same replicated checkpoint, zero extra crossings. A leader failover
 does not move it. Without `zone`, behavior is exactly today's: the leader
 serves.
 
-## Strict pins: stall, never fall back
+## Strict pins: what happens when the owner dies
 
-Ownership is a pure function of replicated state: the lowest-numbered
-current **member** announcing the pinned zone owns the syncable. Liveness
-plays no part, on purpose — a resolution that depended on who each node
-believes is alive could name two owners at once, which is the one thing a
-pin must never do. So a pinned syncable stalls in two shapes, and no other
-node ever takes over in either:
+Nothing happens to the syncable, and that is by design.
 
-- **No member in the zone** (the zone's last node was removed from the
-  cluster). The pin is unsatisfiable: `pinUnsatisfiable: true` and
-  `ownerNode: 0` on `GET /v1/syncable/{id}/status`.
-- **The owner is down but still a member** (crashed, partitioned, powered
-  off). The pin still resolves to it: `ownerNode` names the dead node and
-  `pinUnsatisfiable` stays `false`. The status endpoint answers from any
-  node, and this is the shape it cannot flag by itself: what you see is
-  `lag` growing with no `stuck` and no park, and `GET /v1/membership`
-  showing `active: false` for that node.
+**What the cluster does.** Ownership is decided from cluster membership:
+the lowest-numbered current member announcing the zone owns the pin.
+Whether a node is alive never enters that decision, because a decision
+based on liveness could name two owners at once, and two nodes writing to
+one destination is the one thing a pin must never allow. So a dead node
+that is still a member keeps the pin. No other node takes over, and the
+leader does not step in, since that fallback would silently reintroduce
+the cross-zone cost the pin exists to avoid.
 
-Both are deliberate: a silent leader fallback would quietly reintroduce the
-cross-zone cost the pin exists to avoid, and hide the topology problem. The
-event log is permanent, so a stalled syncable always catches up completely
-when the owner returns: **lag, never loss**.
+**What you see.** The syncable's `lag` grows and nothing else changes.
+`GET /v1/syncable/{id}/status` shows no park and no `stuck`, because there
+is no worker anywhere to report either. `ownerNode` still names the dead
+node, and `pinUnsatisfiable` stays `false`: that flag means "no member
+announces this zone", which is a different situation (the zone's last node
+was removed), and shows as `pinUnsatisfiable: true` with `ownerNode: 0`.
+`GET /v1/membership` shows the dead node as `active: false`. **Alert on
+lag that stops shrinking**; it is the one signal both situations share.
 
-**Alert on lag that stops shrinking**, not only on `pinUnsatisfiable`; a
-pinned syncable's lag is the one signal both shapes share. When the owner
-is gone for good, `committed member remove` it: ownership moves to the next
-member announcing the zone, or the pin becomes unsatisfiable and says so.
+**What is at risk.** Nothing is lost. The event log is permanent and the
+checkpoint is replicated, so when the node returns the syncable resumes
+where it left off and catches up completely: lag, never loss. The cost is
+latency on that one syncable for as long as the node is away.
+
+**What you can do.** Wait for the node to return, or, if it is gone for
+good, remove it with `committed member remove`. Ownership then moves to
+the next member announcing the zone, or, if there is none, the pin becomes
+unsatisfiable and says so on status.
 
 ## Admission and upgrades
 

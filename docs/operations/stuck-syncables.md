@@ -221,7 +221,7 @@ Its `lag` simply grows, `ownerNode` names the dead node, and
 `GET /v1/membership` shows that node `active: false`. Nothing is lost — the
 log is permanent — and it catches up when the node returns; if the node is
 gone for good, `committed member remove` it and ownership moves on. See
-[zones.md](zones.md#strict-pins-stall-never-fall-back).
+[zones.md](zones.md#strict-pins-what-happens-when-the-owner-dies).
 
 ## Unsticking it
 
