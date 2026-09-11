@@ -348,10 +348,13 @@ type SyncableStatusResponse struct {
 
 	// PinnedZone is the zone this syncable is pinned to (`zone` in its
 	// config); omitted for unpinned syncables. PinUnsatisfiable is true when
-	// NO current member announces that zone — the strict pin's loud stall:
-	// nobody serves the syncable (never a silent leader fallback), and it
-	// catches up completely when a node in the zone returns. ownerNode shows
-	// who serves it (0 while unsatisfiable).
+	// NO current member announces that zone — the strict pin's stall: nobody
+	// serves the syncable (never a silent leader fallback), and it catches up
+	// completely when a node in the zone returns. Ownership follows
+	// replicated membership, not liveness, so a pinned owner that is down but
+	// still a member keeps the pin: that stall reads as false here with
+	// OwnerNode naming the dead node (lag grows; membership shows it
+	// inactive). OwnerNode is 0 while unsatisfiable.
 	PinnedZone       string `json:"pinnedZone,omitempty"`
 	PinUnsatisfiable bool   `json:"pinUnsatisfiable,omitempty"`
 
@@ -382,9 +385,10 @@ type SyncableStatusResponse struct {
 
 	// OwnerNode is the raft node ID whose worker does this syncable's work:
 	// the pinned node when the config names one, otherwise the current leader
-	// (0 when no leader is known). ALWAYS present — it tells an operator
-	// whose logs to read, and which node a degraded readPosition answer is
-	// missing (see ReadPosition).
+	// (0 when no leader is known). Resolved from replicated membership, never
+	// from liveness (see PinUnsatisfiable). ALWAYS present — it tells an
+	// operator whose logs to read, and which node a degraded readPosition
+	// answer is missing (see ReadPosition).
 	OwnerNode uint64 `json:"ownerNode"`
 	// ReadPosition is the raft index of the last log entry the worker's
 	// reader examined — it advances per entry SCANNED, including entries

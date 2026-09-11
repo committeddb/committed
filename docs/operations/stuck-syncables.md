@@ -213,6 +213,16 @@ through (and skips) other topics to advance its consumed cursor. It returns to
 `0` at rest. The number answers "is it caught up?" correctly; it is not a
 per-topic backlog count.
 
+## Lag with no park and no stuck: a pinned owner is down
+
+A zone-pinned syncable whose owning node is down but still a cluster member
+shows neither `stuck` nor a park: there is no worker anywhere to report.
+Its `lag` simply grows, `ownerNode` names the dead node, and
+`GET /v1/membership` shows that node `active: false`. Nothing is lost — the
+log is permanent — and it catches up when the node returns; if the node is
+gone for good, `committed member remove` it and ownership moves on. See
+[zones.md](zones.md#strict-pins-stall-never-fall-back).
+
 ## Unsticking it
 
 When you've decided a proposal will genuinely never apply — the destination

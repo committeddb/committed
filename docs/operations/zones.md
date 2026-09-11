@@ -29,16 +29,34 @@ order, same replicated checkpoint, zero extra crossings. A leader failover
 does not move it. Without `zone`, behavior is exactly today's: the leader
 serves.
 
-## Strict pins: stall loudly, never fall back
+## Strict pins: stall, never fall back
 
-If no current member announces the pinned zone (the node died, or was
-removed), the syncable **stalls** — visibly (`pinUnsatisfiable: true` on
-`GET /v1/syncable/{id}/status`, `ownerNode: 0`) — and no other node takes
-over. This is deliberate: a silent leader fallback would quietly reintroduce
-the cross-zone cost the pin exists to avoid, and hide the topology problem.
-The event log is permanent, so a stalled syncable always catches up completely
-when a node in the zone returns: **lag, never loss**. Alert on
-`pinUnsatisfiable` like you alert on a stuck syncable.
+Ownership is a pure function of replicated state: the lowest-numbered
+current **member** announcing the pinned zone owns the syncable. Liveness
+plays no part, on purpose — a resolution that depended on who each node
+believes is alive could name two owners at once, which is the one thing a
+pin must never do. So a pinned syncable stalls in two shapes, and no other
+node ever takes over in either:
+
+- **No member in the zone** (the zone's last node was removed from the
+  cluster). The pin is unsatisfiable: `pinUnsatisfiable: true` and
+  `ownerNode: 0` on `GET /v1/syncable/{id}/status`.
+- **The owner is down but still a member** (crashed, partitioned, powered
+  off). The pin still resolves to it: `ownerNode` names the dead node and
+  `pinUnsatisfiable` stays `false`. The status endpoint answers from any
+  node, and this is the shape it cannot flag by itself: what you see is
+  `lag` growing with no `stuck` and no park, and `GET /v1/membership`
+  showing `active: false` for that node.
+
+Both are deliberate: a silent leader fallback would quietly reintroduce the
+cross-zone cost the pin exists to avoid, and hide the topology problem. The
+event log is permanent, so a stalled syncable always catches up completely
+when the owner returns: **lag, never loss**.
+
+**Alert on lag that stops shrinking**, not only on `pinUnsatisfiable`; a
+pinned syncable's lag is the one signal both shapes share. When the owner
+is gone for good, `committed member remove` it: ownership moves to the next
+member announcing the zone, or the pin becomes unsatisfiable and says so.
 
 ## Admission and upgrades
 

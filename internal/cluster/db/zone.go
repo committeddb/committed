@@ -14,12 +14,14 @@ import (
 // the same zone never pays a redundant cross-zone crossing (the data already
 // lives on every node's event log; raft replication paid the crossing once).
 //
-// Semantics are STRICT-PIN-ONLY (decided 2026-08-12): when no current member
-// announces the pinned zone, the syncable STALLS loudly — visible in status
-// as unsatisfiable — and never silently falls back to the leader, because a
-// silent fallback quietly reintroduces the exact cost the pin exists to
-// avoid. The event log is permanent, so a stalled sink always catches up:
-// lag, never loss.
+// Semantics are STRICT-PIN-ONLY (decided 2026-08-12): the syncable is served
+// only by a member announcing the pinned zone and never falls back to the
+// leader, because a silent fallback quietly reintroduces the exact cost the
+// pin exists to avoid. It STALLS in two shapes: no member announces the zone
+// (status: unsatisfiable, owner 0), or the owner is down but still a member
+// (status names it as owner; liveness is deliberately not consulted — see
+// zoneOwner). The event log is permanent, so a stalled syncable always
+// catches up: lag, never loss.
 //
 // Ownership is a pure function of replicated state (the stored config's
 // zone, the announced member zones, current membership), so every node
