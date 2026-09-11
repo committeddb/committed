@@ -29,7 +29,7 @@ func (p *Parser) AddSyncableParser(name string, sp cluster.SyncableParser) {
 // nothing: a parked config must not wedge unrelated type, restatement, or
 // database writes that enumerate every stored syncable.
 var removedSyncableTypes = map[string]string{
-	"sql-projection": `syncable type "sql-projection" was removed in 0.8.0: rename the type to "projection" and the [sql-projection] section to [projection], then re-POST the config (its declared content is unchanged, so the syncable resumes where it left off)`,
+	"sql-projection": `syncable type "sql-projection" was removed in 0.8.0: rename the type to "projection", the [sql-projection] section to [projection], and its array tables to their plural names ([[projection.sources]], [[projection.stages]], [[...aggregate.fields]], [[...aggregate.scalars]], [[...lookup.fields]], [[...stages.joins]]), then re-POST the config (its declared content is unchanged, so the syncable resumes where it left off)`,
 }
 
 // removedSpelling reports the removal message when the document's type, or

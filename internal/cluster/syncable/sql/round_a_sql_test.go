@@ -25,7 +25,7 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "els"
 from    = "txn-events"
 keyPath = "$.wa"
@@ -38,34 +38,34 @@ normalize  = "lower"
 reduce  = "aggregate"
 emit    = [ { field = "total", sum = "$.amount" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "latest-prop"
 from    = "proposals"
 keyPath = "$.id"
 emit    = [ { field = "pid", from = "$.projectId" }, { field = "amount", from = "$.amount" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "cand"
 from    = "projects"
 keyPath = "$.id"
 emit    = [ { field = "amount", expr = "coalesce($.lp.amount, 0)" } ]
 
-[[projection.stage.join]]
+[[projection.stages.joins]]
 from     = "latest-prop"
 on       = "$.id"
 field    = "$.pid"
 as       = "lp"
 optional = true
 
-[[projection.stage]]
+[[projection.stages]]
 name  = "quoted"
 merge = [ "els", { topic = "workareas", keyPath = "$.Id", normalize = "lower", as = "wa" } ]
 emit  = [ { field = "v", expr = "coalesce($.wa.quotedPrice, 0) - coalesce($.els.total, 0)" } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))

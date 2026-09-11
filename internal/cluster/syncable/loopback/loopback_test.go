@@ -42,10 +42,10 @@ func TestTransform_PassthroughAndProjection(t *testing.T) {
 	// Mappings: number-exact, sorted-key canonical output.
 	src := []byte(`{"id":"a1","meta":{"title":"T"},"n":90071992547409919,"price":1.10,"zz":"drop me"}`)
 	out, err = loopback.Transform(src, []loopback.Mapping{
-		{JsonPath: "$.n", Field: "n"},
-		{JsonPath: "$.id", Field: "id"},
-		{JsonPath: "$.meta.title", Field: "title"},
-		{JsonPath: "$.price", Field: "price"},
+		{JsonPath: "$.n", JsonName: "n"},
+		{JsonPath: "$.id", JsonName: "id"},
+		{JsonPath: "$.meta.title", JsonName: "title"},
+		{JsonPath: "$.price", JsonName: "price"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, `{"id":"a1","n":90071992547409919,"price":1.10,"title":"T"}`, string(out),
@@ -53,20 +53,20 @@ func TestTransform_PassthroughAndProjection(t *testing.T) {
 
 	// Deterministic: the same input yields the same bytes.
 	again, err := loopback.Transform(src, []loopback.Mapping{
-		{JsonPath: "$.n", Field: "n"},
-		{JsonPath: "$.id", Field: "id"},
-		{JsonPath: "$.meta.title", Field: "title"},
-		{JsonPath: "$.price", Field: "price"},
+		{JsonPath: "$.n", JsonName: "n"},
+		{JsonPath: "$.id", JsonName: "id"},
+		{JsonPath: "$.meta.title", JsonName: "title"},
+		{JsonPath: "$.price", JsonName: "price"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, string(out), string(again))
 }
 
 func TestTransform_Errors(t *testing.T) {
-	_, err := loopback.Transform([]byte(`not json`), []loopback.Mapping{{JsonPath: "$.a", Field: "a"}})
+	_, err := loopback.Transform([]byte(`not json`), []loopback.Mapping{{JsonPath: "$.a", JsonName: "a"}})
 	require.Error(t, err, "mapped transforms require a JSON payload")
 
-	_, err = loopback.Transform([]byte(`{"a":1}`), []loopback.Mapping{{JsonPath: "$.missing", Field: "m"}})
+	_, err = loopback.Transform([]byte(`{"a":1}`), []loopback.Mapping{{JsonPath: "$.missing", JsonName: "m"}})
 	require.Error(t, err, "a missing path is an error (dead-letter), not a silent null")
 }
 
@@ -89,17 +89,17 @@ func TestParseConfig_Validation(t *testing.T) {
 		},
 		{
 			"duplicate field",
-			"[loopback]\ntopic = \"a\"\ntarget = \"b\"\n[[loopback.mappings]]\njsonPath = \"$.x\"\nfield = \"x\"\n[[loopback.mappings]]\njsonPath = \"$.y\"\nfield = \"x\"\n",
+			"[loopback]\ntopic = \"a\"\ntarget = \"b\"\n[[loopback.mappings]]\njsonPath = \"$.x\"\njsonName = \"x\"\n[[loopback.mappings]]\njsonPath = \"$.y\"\njsonName = \"x\"\n",
 			"mapped twice",
 		},
 		{
 			"missing jsonPath",
-			"[loopback]\ntopic = \"a\"\ntarget = \"b\"\n[[loopback.mappings]]\nfield = \"x\"\n",
+			"[loopback]\ntopic = \"a\"\ntarget = \"b\"\n[[loopback.mappings]]\njsonName = \"x\"\n",
 			"jsonPath is required",
 		},
 		{
 			"invalid jsonPath",
-			"[loopback]\ntopic = \"a\"\ntarget = \"b\"\n[[loopback.mappings]]\njsonPath = \"$[\"\nfield = \"x\"\n",
+			"[loopback]\ntopic = \"a\"\ntarget = \"b\"\n[[loopback.mappings]]\njsonPath = \"$[\"\njsonName = \"x\"\n",
 			"invalid jsonpath",
 		},
 	}
@@ -111,7 +111,7 @@ func TestParseConfig_Validation(t *testing.T) {
 	}
 
 	cfg, err := p.ParseConfig(parse(t,
-		"[loopback]\ntopic = \"a\"\ntarget = \"b\"\nacknowledgeAppendSemantics = true\n[[loopback.mappings]]\njsonPath = \"$.x\"\nfield = \"x\"\n"))
+		"[loopback]\ntopic = \"a\"\ntarget = \"b\"\nacknowledgeAppendSemantics = true\n[[loopback.mappings]]\njsonPath = \"$.x\"\njsonName = \"x\"\n"))
 	require.NoError(t, err)
 	require.Equal(t, "a", cfg.SourceTopic)
 	require.Equal(t, "b", cfg.TargetTopic)
@@ -168,7 +168,7 @@ func TestParseConfigRejectsUnknownKeys(t *testing.T) {
 
 func TestLoopbackVocabulary_EqualsTheReads(t *testing.T) {
 	read := cluster.ObserveConfigReads(func() {
-		v := parse(t, "[loopback]\ntopic = \"a\"\ntarget = \"b\"\nacknowledgeAppendSemantics = true\n[[loopback.mappings]]\njsonPath = \"$.x\"\nfield = \"x\"\n")
+		v := parse(t, "[loopback]\ntopic = \"a\"\ntarget = \"b\"\nacknowledgeAppendSemantics = true\n[[loopback.mappings]]\njsonPath = \"$.x\"\njsonName = \"x\"\n")
 		p := &loopback.SyncableParser{}
 		_, err := p.ParseConfig(v)
 		require.NoError(t, err)

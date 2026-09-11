@@ -43,15 +43,15 @@ db = "mydb"
 table = "denorm"
 primaryKey = "id"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "movies"
 keyPath = "$.id"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "ratings"
 keyPath = "$.movieId"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "movies"
 keyPath = "$.id"
 `))

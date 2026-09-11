@@ -496,7 +496,7 @@ func TestParseProjectionWarnsOnSnapshotKindTopic(t *testing.T) {
 	require.Empty(t, logs.All())
 }
 
-// TestParseMultiSourceProjection covers the [[projection.source]] decode:
+// TestParseMultiSourceProjection covers the [[projection.sources]] decode:
 // two source blocks each with its own topic, onDelete, and (match-all) rules
 // fold into one table. This is the multisource read-model config shape.
 func TestParseMultiSourceProjection(t *testing.T) {
@@ -516,16 +516,16 @@ type = "VARCHAR(255)"
 name = "average_rating"
 type = "NUMERIC"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "title"
 onDelete = "delete-row"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "primary_title", from = "$.primary_title" } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic = "rating"
 onDelete = "clear"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "average_rating", from = "$.average_rating" } ]
 `
 	v := readConfig(t, "toml", strings.NewReader(toml))
@@ -560,13 +560,13 @@ type = "TEXT"
 	for _, tc := range []struct{ name, sources, wantErr string }{
 		{
 			"invalid onDelete",
-			"[[projection.source]]\ntopic = \"a\"\nonDelete = \"nope\"\n[[projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
+			"[[projection.sources]]\ntopic = \"a\"\nonDelete = \"nope\"\n[[projection.sources.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
 			`onDelete "nope" is invalid`,
 		},
 		{
 			"two sources write one column",
-			"[[projection.source]]\ntopic = \"a\"\n[[projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n" +
-				"[[projection.source]]\ntopic = \"b\"\n[[projection.source.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
+			"[[projection.sources]]\ntopic = \"a\"\n[[projection.sources.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n" +
+				"[[projection.sources]]\ntopic = \"b\"\n[[projection.sources.rules]]\nset = [ { column = \"v\", from = \"$.v\" } ]\n",
 			`column "v" is already written by source 1`,
 		},
 	} {
@@ -579,7 +579,7 @@ type = "TEXT"
 	}
 }
 
-// TestParseAggregateProjection covers the [projection.source.aggregate]
+// TestParseAggregateProjection covers the [projection.sources.aggregate]
 // decode and the split: two sources share the principal topic, filtered by
 // when, folding into two different array columns. The element is an
 // array-of-tables so its field names survive viper byte-exact.
@@ -600,29 +600,29 @@ type = "JSONB"
 name = "directors"
 type = "JSONB"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "principal"
 keyPath = "$.tconst"
 when = [ { path = "$.category", equals = "actor" } ]
-[projection.source.aggregate]
+[projection.sources.aggregate]
 column = "top_cast"
 elementKey = "$.ordering"
 elementKeyType = "number"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "nconst"
 from = "$.nconst"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "billingOrder"
 from = "$.ordering"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "principal"
 keyPath = "$.tconst"
 when = [ { path = "$.category", equals = "director" } ]
-[projection.source.aggregate]
+[projection.sources.aggregate]
 column = "directors"
 elementKey = "$.ordering"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "nconst"
 from = "$.nconst"
 `
@@ -665,37 +665,37 @@ type = "VARCHAR(16)"
 name = "top_cast"
 type = "JSONB"
 `
-	const elem = "[[projection.source.aggregate.element]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n"
+	const elem = "[[projection.sources.aggregate.fields]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n"
 	for _, tc := range []struct{ name, source, wantErr string }{
 		{
 			"rules and aggregate together",
-			"[[projection.source]]\ntopic = \"principal\"\n[[projection.source.rules]]\nset = [ { column = \"top_cast\", from = \"$.x\" } ]\n" +
-				"[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
+			"[[projection.sources]]\ntopic = \"principal\"\n[[projection.sources.rules]]\nset = [ { column = \"top_cast\", from = \"$.x\" } ]\n" +
+				"[projection.sources.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
 			"exactly one of rules, an aggregate, or a lookup",
 		},
 		{
 			"unknown aggregate column",
-			"[[projection.source]]\ntopic = \"principal\"\n[projection.source.aggregate]\ncolumn = \"nope\"\nelementKey = \"$.ordering\"\n" + elem,
+			"[[projection.sources]]\ntopic = \"principal\"\n[projection.sources.aggregate]\ncolumn = \"nope\"\nelementKey = \"$.ordering\"\n" + elem,
 			`aggregate column "nope" is not a declared column`,
 		},
 		{
 			"missing elementKey",
-			"[[projection.source]]\ntopic = \"principal\"\n[projection.source.aggregate]\ncolumn = \"top_cast\"\n" + elem,
+			"[[projection.sources]]\ntopic = \"principal\"\n[projection.sources.aggregate]\ncolumn = \"top_cast\"\n" + elem,
 			"aggregate elementKey is required",
 		},
 		{
 			"invalid elementKeyType",
-			"[[projection.source]]\ntopic = \"principal\"\n[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\nelementKeyType = \"int\"\n" + elem,
+			"[[projection.sources]]\ntopic = \"principal\"\n[projection.sources.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\nelementKeyType = \"int\"\n" + elem,
 			`elementKeyType "int" is invalid`,
 		},
 		{
 			"empty element",
-			"[[projection.source]]\ntopic = \"principal\"\n[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n",
+			"[[projection.sources]]\ntopic = \"principal\"\n[projection.sources.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n",
 			"aggregate element needs at least one field",
 		},
 		{
 			"invalid onDelete for aggregate",
-			"[[projection.source]]\ntopic = \"principal\"\nonDelete = \"clear\"\n[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
+			"[[projection.sources]]\ntopic = \"principal\"\nonDelete = \"clear\"\n[projection.sources.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" + elem,
 			`onDelete "clear" is invalid for an aggregate source`,
 		},
 	} {
@@ -725,24 +725,24 @@ type = "VARCHAR(16)"
 name = "top_cast"
 type = "JSONB"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "name"
-[projection.source.lookup]
+[projection.sources.lookup]
 name = "names"
-[[projection.source.lookup.field]]
+[[projection.sources.lookup.fields]]
 field = "primary_name"
 from = "$.primary_name"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "principal"
 keyPath = "$.tconst"
-[projection.source.aggregate]
+[projection.sources.aggregate]
 column = "top_cast"
 elementKey = "$.ordering"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "nconst"
 from = "$.nconst"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "name"
 lookup = "names"
 on = "nconst"
@@ -781,14 +781,14 @@ type = "JSONB"
 `
 	// A principal aggregate enriched from a (maybe-absent) lookup.
 	agg := func(enrich string) string {
-		return "[[projection.source]]\ntopic = \"principal\"\nkeyPath = \"$.tconst\"\n" +
-			"[projection.source.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" +
-			"[[projection.source.aggregate.element]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n" + enrich
+		return "[[projection.sources]]\ntopic = \"principal\"\nkeyPath = \"$.tconst\"\n" +
+			"[projection.sources.aggregate]\ncolumn = \"top_cast\"\nelementKey = \"$.ordering\"\n" +
+			"[[projection.sources.aggregate.fields]]\nfield = \"nconst\"\nfrom = \"$.nconst\"\n" + enrich
 	}
-	lookupNames := "[[projection.source]]\ntopic = \"name\"\n[projection.source.lookup]\nname = \"names\"\n" +
-		"[[projection.source.lookup.field]]\nfield = \"primary_name\"\nfrom = \"$.primary_name\"\n"
+	lookupNames := "[[projection.sources]]\ntopic = \"name\"\n[projection.sources.lookup]\nname = \"names\"\n" +
+		"[[projection.sources.lookup.fields]]\nfield = \"primary_name\"\nfrom = \"$.primary_name\"\n"
 	enriched := func(body string) string {
-		return "[[projection.source.aggregate.element]]\nfield = \"name\"\n" + body
+		return "[[projection.sources.aggregate.fields]]\nfield = \"name\"\n" + body
 	}
 	for _, tc := range []struct{ name, source, wantErr string }{
 		{
@@ -813,7 +813,7 @@ type = "JSONB"
 		},
 		{
 			"lookup without field",
-			"[[projection.source]]\ntopic = \"name\"\n[projection.source.lookup]\nname = \"names\"\n" + agg(""),
+			"[[projection.sources]]\ntopic = \"name\"\n[projection.sources.lookup]\nname = \"names\"\n" + agg(""),
 			`lookup "names" needs at least one field`,
 		},
 	} {
@@ -893,10 +893,10 @@ type = "VARCHAR(64)"
 
 	t.Run("keyPath arity mismatch", func(t *testing.T) {
 		err := parse(t, base+`
-[[projection.source]]
+[[projection.sources]]
 topic = "e"
 keyPath = "$.only_one"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `)
 		require.ErrorContains(t, err, "keyPath has 1 path(s) but primaryKey has 2 column(s)")
@@ -904,13 +904,13 @@ set = [ { column = "v", from = "$.v" } ]
 
 	t.Run("aggregate source rejected", func(t *testing.T) {
 		err := parse(t, base+`
-[[projection.source]]
+[[projection.sources]]
 topic = "e"
 keyPath = "$.a"
-[projection.source.aggregate]
+[projection.sources.aggregate]
 column = "v"
 elementKey = "$.k"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "f"
 from = "$.f"
 `)
@@ -919,12 +919,12 @@ from = "$.f"
 
 	t.Run("lookup source rejected", func(t *testing.T) {
 		err := parse(t, base+`
-[[projection.source]]
+[[projection.sources]]
 topic = "dim"
 keyPath = "$.id"
-[projection.source.lookup]
+[projection.sources.lookup]
 name = "dim"
-[[projection.source.lookup.field]]
+[[projection.sources.lookup.fields]]
 field = "name"
 from = "$.name"
 `)
@@ -999,10 +999,10 @@ type = "VARCHAR(64)"
 [[projection.columns]]
 name = "v"
 type = "VARCHAR(64)"
-[[projection.source]]
+[[projection.sources]]
 topic = "e"
 latestBy = "$.Timestamp"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 		err := parse(t, toml)
@@ -1031,9 +1031,9 @@ type = "VARCHAR(64)"
 [[projection.columns]]
 name = "v"
 type = "VARCHAR(64)"
-[[projection.source]]
+[[projection.sources]]
 topic = "e"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 		err := parse(t, toml)
@@ -1116,13 +1116,13 @@ type = "VARCHAR(64)"
 name = "visit_count"
 type = "INT"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "visits"
 keyPath = "$.job_id"
 onDelete = "remove-from-aggregate"
-[projection.source.aggregate]
+[projection.sources.aggregate]
 elementKey = "$.id"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "hours"
 from = "$.hours"
 ` + scalarToml
@@ -1133,23 +1133,23 @@ from = "$.hours"
 		return err
 	}
 
-	require.NoError(t, parse(config(`[[projection.source.aggregate.scalar]]
+	require.NoError(t, parse(config(`[[projection.sources.aggregate.scalars]]
 column = "visit_count"
 fn = "count"`)))
 
-	err := parse(config(`[[projection.source.aggregate.scalar]]
+	err := parse(config(`[[projection.sources.aggregate.scalars]]
 column = "visit_count"
 fn = "median"`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), `fn "median" is invalid`)
 
-	err = parse(config(`[[projection.source.aggregate.scalar]]
+	err = parse(config(`[[projection.sources.aggregate.scalars]]
 column = "visit_count"
 fn = "sum"`))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "sum needs of")
 
-	err = parse(config(`[[projection.source.aggregate.scalar]]
+	err = parse(config(`[[projection.sources.aggregate.scalars]]
 column = "visit_count"
 fn = "sum"
 of = "nope"`))
@@ -1202,11 +1202,11 @@ type = "VARCHAR(64)"
 name = "amount"
 type = "DECIMAL(12,2)"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "txn"
 keyPath = "$.id"
 ` + extra + `
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "amount", from = "$.amount" } ]
 `
 	}

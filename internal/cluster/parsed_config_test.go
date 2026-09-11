@@ -189,6 +189,28 @@ slot_name = "s"
 	require.NoError(t, c.RejectUnknownKeys("absent", "x"), "an absent section has nothing to reject")
 }
 
+// A spelling the vocabulary refuses on purpose carries its own reason (a
+// rename, a removal, a knob that cannot be honored), matched in any case and
+// named in the document's spelling; an absent section or key refuses nothing.
+func TestRejectKeys(t *testing.T) {
+	c := parseTOML(t, `
+[sql]
+dialect = "postgres"
+[sql.options]
+Slot_Name = "s"
+`)
+	reasons := map[string]string{"slot_name": `renamed: spell it "slotName"`, "postgres": "removed"}
+	err := c.RejectKeys("sql.options", reasons)
+	require.Error(t, err)
+	require.True(t, cluster.IsNotAdmissible(err))
+	ce := cluster.NewConfigError(err)
+	require.Equal(t, "sql.options.Slot_Name", ce.Field, "the document's own spelling")
+	require.Equal(t, `renamed: spell it "slotName"`, ce.Issue)
+
+	require.NoError(t, c.RejectKeys("sql", map[string]string{"mysql": "removed"}), "no refused spelling present")
+	require.NoError(t, c.RejectKeys("absent", reasons), "an absent section has nothing to refuse")
+}
+
 func TestRejectUnknownSections(t *testing.T) {
 	c := parseTOML(t, `
 [Ingestable]

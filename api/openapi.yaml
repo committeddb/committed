@@ -706,7 +706,7 @@ paths:
         the whole-payload `"$"` event-log shape), `projection`
         (a fold into one row per entity — current-state tables,
         optionally folding several source topics into one denormalized
-        row via `[[projection.source]]` blocks with a per-source
+        row via `[[projection.sources]]` blocks with a per-source
         `onDelete`; a source folds scalar columns via `rules` (each set
         entry copies with `from`, fixes with `value`, clears with
         `null`, enriches with `lookup`, or computes with `expr` — a
@@ -718,7 +718,7 @@ paths:
         rows via `forEach` (rules apply per element, `$parent.` paths
         reach the enclosing event, re-emitted parents reconcile
         absolutely, and `onDelete = "delete-rows"` cascades a parent
-        tombstone), chains internal stages via `[[projection.stage]]`
+        tombstone), chains internal stages via `[[projection.stages]]`
         (private keyed refolds — reshape or aggregate — consumed by a
         stage-fed source's `from`; a stage join's `on` takes one path
         or a list addressing a composite-keyed dimension; `merge`

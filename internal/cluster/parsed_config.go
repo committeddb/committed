@@ -329,6 +329,35 @@ func (c *ParsedConfig) RejectUnknownKeys(section string, known ...string) error 
 	return nil
 }
 
+// RejectKeys refuses, by name and each with its own reason, a spelling this
+// vocabulary knows about but never accepts: a removed table or key with its
+// rename, or a knob that can never be honored. Run it BEFORE RejectUnknownKeys
+// so the reason beats the generic typo message. reasons is keyed by the
+// refused spelling (matched case-insensitively); the error names the key in
+// the document's own spelling. Like RejectUnknownKeys it reads the table's
+// own keys rather than probing dotted paths, so a refused spelling never
+// registers as a read of the vocabulary (the conformance tests pin the
+// declared keys to the reads).
+func (c *ParsedConfig) RejectKeys(section string, reasons map[string]string) error {
+	m, ok := c.Get(section).(map[string]any)
+	if !ok {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for refused, reason := range reasons {
+			if strings.EqualFold(k, refused) {
+				return NotAdmissible(&FieldError{Field: section + "." + k, Issue: reason})
+			}
+		}
+	}
+	return nil
+}
+
 // RejectUnknownSections is RejectUnknownKeys for the document's top-level
 // tables: a config kind reads a fixed set of sections ([ingestable] and the
 // type's own, say), and a table outside it is a misspelled section.

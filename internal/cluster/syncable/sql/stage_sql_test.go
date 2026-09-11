@@ -54,23 +54,23 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "live"
 from    = "txns"
 keyPath = "$.id"
 emit    = [ { field = "job", from = "$.jobId" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "by-job"
 from    = "live"
 keyPath = "$.job"
 reduce  = "aggregate"
 emit    = [ { field = "n", count = true } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
@@ -139,29 +139,29 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "pairs"
 from    = "billing"
 keyPath = [ "$.job", "$.wa" ]
 emit    = [ { field = "job", from = "$.job" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "unbilled"
 from    = "candidates"
 keyPath = "$.id"
 emit    = [ { field = "id", from = "$.id" } ]
-[[projection.stage.join]]
+[[projection.stages.joins]]
 topic = "wgs"
 on    = "$.wgsId"
-[[projection.stage.join]]
+[[projection.stages.joins]]
 from   = "pairs"
 on     = [ "$.jobId", "$.waId" ]
 absent = true
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
@@ -197,29 +197,29 @@ type = "VARCHAR(64)"
 name = "w"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name      = "st"
 from      = "tp"
 keyPath   = "$.guid"
 normalize = "lower"
 emit      = [ { field = "v", from = "$.v" } ]
-[[projection.stage.join]]
+[[projection.stages.joins]]
 topic     = "billed"
 on        = "$.pairId"
 absent    = true
 normalize = "lower"
 
-[[projection.source]]
+[[projection.sources]]
 topic     = "x"
 keyPath   = "$.id"
 normalize = "lower"
 rowOwner  = true
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 
-[[projection.source]]
+[[projection.sources]]
 from = "st"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "w", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
@@ -271,7 +271,7 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name       = "txn-live"
 from       = "txn-events"
 keyPath    = "$.TransactionId"
@@ -279,10 +279,10 @@ reduce     = "liveSet"
 deleteWhen = [ { path = "$.EventType", equals = "delete" } ]
 emit       = [ { field = "id", from = "$.TransactionId" } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
@@ -329,27 +329,27 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "by-wa"
 from    = "billing"
 keyPath = [ "$.job", "$.wa" ]
 keyType = [ "text", "NUMBER" ]
 emit    = [ { field = "job", from = "$.job" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "gate"
 from    = "pairs"
 keyPath = "$.id"
 emit    = [ { field = "id", from = "$.id" } ]
-[[projection.stage.join]]
+[[projection.stages.joins]]
 topic  = "was"
 on     = "$.waRef"
 onType = "number"
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
@@ -379,29 +379,29 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "quoted"
 from    = "quotes"
 keyPath = "$.jobId"
 reduce  = "aggregate"
 emit    = [ { field = "total", sum = "$.amount" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "invoiced-sums"
 from    = "invoices"
 keyPath = "$.jobId"
 reduce  = "aggregate"
 emit    = [ { field = "total", sum = "$.amount" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name  = "open"
 merge = [ "quoted", { stage = "invoiced-sums", as = "invoiced" } ]
 when  = [ { path = "$.quoted", notNull = true } ]
 emit  = [ { field = "open", expr = "coalesce($.quoted.total, 0) - coalesce($.invoiced.total, 0)" } ]
 
-[[projection.source]]
+[[projection.sources]]
 from = "open"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.open" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))

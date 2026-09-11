@@ -62,7 +62,10 @@ use `projection` to maintain current-state tables from an
 `event`-kind topic. One topic typically feeds both.
 
 > **The former `sql-projection` spelling was removed in 0.8.0.** The type
-> is `projection` with a `[projection]` section. Posting the old spelling is
+> is `projection` with a `[projection]` section, and the array tables are
+> plural (`[[projection.sources]]`, `[[projection.stages]]`,
+> `[[…aggregate.fields]]`, `[[…aggregate.scalars]]`, `[[…lookup.fields]]`,
+> `[[…stages.joins]]`). Posting the old spelling is
 > refused with a message naming the rename, and a config stored under it
 > parks on an upgraded node until re-POSTed renamed — its declared content is
 > unchanged, so it resumes with its stores and checkpoint (see
@@ -298,7 +301,7 @@ escape hatches (`nullif(x, 0)` is the division-by-zero guard).
 A projection can consume more than one topic and fold them into a single
 denormalized "BFF" row — e.g. a `movie_card` built from a normalized `movie`
 topic and a `rating` topic, one row per `movie_id`. Replace the single top-level
-`topic`/`rules` with a `[[projection.source]]` block per topic. The
+`topic`/`rules` with a `[[projection.sources]]` block per topic. The
 **topic is the discriminator** (an event only ever runs its own source's
 rules), and because each rule sets only its own columns, two sources fold
 into one row without clobbering. Each source also declares what its delete
@@ -311,19 +314,19 @@ columns it owns, the row survives), or `ignore`.
 db = "bff"; table = "movie_card"; primaryKey = "movie_id"
 # … columns: movie_id, title, year, genres, score, votes …
 
-[[projection.source]]
+[[projection.sources]]
 topic    = "movie"          # this source's discriminator
 keyPath  = "$.movie_id"     # correlate by the shared aggregate key
 onDelete = "delete-row"     # movie is the spine: its delete drops the row
-  [[projection.source.rules]]
+  [[projection.sources.rules]]
   set = [ { column = "title",  from = "$.title" },
           { column = "year",   from = "$.year" },
           { column = "genres", from = "$.genres" } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic    = "rating"
 onDelete = "clear"          # a contributor: its delete NULLs its columns, keeps the row
-  [[projection.source.rules]]
+  [[projection.sources.rules]]
   set = [ { column = "score", from = "$.score" },
           { column = "votes", from = "$.votes" } ]
 ```
@@ -348,7 +351,7 @@ instead of `rules`:
   entity identity, not by `elementKey`.)
 - **`elementKeyType`** — `number` (sort 1, 2, …, 10) or `text` (lexical, the
   default).
-- **`element`** — an array-of-tables naming the per-child object's fields (an
+- **`fields`** — an array-of-tables naming the per-child object's fields (an
   array, not an inline map, so field names survive byte-exact).
 
 A child delete removes exactly its element via `onDelete = "remove-from-aggregate"`,
@@ -360,29 +363,29 @@ different columns. Here the `credit` topic feeds `top_cast` (actors) and
 `directors` (directors):
 
 ```toml
-[[projection.source]]
+[[projection.sources]]
 topic   = "credit"
 keyPath = "$.movie_id"               # which movie row this child folds into
 when    = [ { path = "$.role", equals = "actor" } ]
-  [projection.source.aggregate]
+  [projection.sources.aggregate]
   column         = "top_cast"
   elementKey     = "$.billing"       # billing order: identity + numeric sort
   elementKeyType = "number"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "person_id"
     from  = "$.person_id"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "billing"
     from  = "$.billing"
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "credit"
 keyPath = "$.movie_id"
 when    = [ { path = "$.role", equals = "director" } ]
-  [projection.source.aggregate]
+  [projection.sources.aggregate]
   column     = "directors"
   elementKey = "$.billing"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "person_id"
     from  = "$.person_id"
 ```
@@ -403,22 +406,22 @@ min, max, countDistinct — recomputed absolutely from the sidecar at every
 child change (never incremented, so redelivery and rebuild converge):
 
 ```toml
-  [projection.source.aggregate]
+  [projection.sources.aggregate]
   elementKey = "$.id"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "hours"
     from  = "$.hours"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "status"
     from  = "$.status"
-    [[projection.source.aggregate.scalar]]
+    [[projection.sources.aggregate.scalars]]
     column = "visit_count"
     fn     = "count"
-    [[projection.source.aggregate.scalar]]
+    [[projection.sources.aggregate.scalars]]
     column = "hours_sum"
     fn     = "sum"
     of     = "hours"
-    [[projection.source.aggregate.scalar]]
+    [[projection.sources.aggregate.scalars]]
     column = "done_count"
     fn     = "count"
     where  = [ { field = "status", equals = "done" } ]
@@ -440,20 +443,20 @@ NULL when no children qualify.
 ## Staged computation (internal stages)
 
 Some read models are a *pipeline*: filter, then aggregate, then aggregate
-again. `[[projection.stage]]` blocks declare internal stages — private
+again. `[[projection.stages]]` blocks declare internal stages — private
 keyed refolds held in a node-local stage store, never topics, never sink
 writes (only the table is outward-facing) — and a table source consumes a
 stage with `from = "<stage name>"`:
 
 ```toml
-[[projection.stage]]
+[[projection.stages]]
 name    = "live"                    # private label; stages chain by name
 from    = "txns"                    # a topic — or a PRIOR stage's name
 keyPath = "$.id"
 emit    = [ { field = "job", from = "$.jobId" },
             { field = "amt", from = "$.amount" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "by-job"
 from    = "live"                    # chained: consumes the stage above
 keyPath = "$.job"
@@ -461,9 +464,9 @@ reduce  = "aggregate"
 emit    = [ { field = "total", sum = "$.amt" },
             { field = "n",     count = true } ]
 
-[[projection.source]]
+[[projection.sources]]
 from    = "by-job"                  # a stage-fed table source
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "total", from = "$.total" },
         { column = "n",     from = "$.n" } ]
 ```
@@ -523,7 +526,7 @@ set = [ { column = "total", from = "$.total" },
   fans ZERO elements, silently — decode it at ingest with
   `jsonColumns`); a legitimately empty array is healthy and never
   warns.
-- **Joins FILTER** (`[[projection.stage.join]]`): an input participates
+- **Joins FILTER** (`[[projection.stages.joins]]`): an input participates
   only while the joined topic's row — addressed by the input's `on`
   value against the joined entity's key — exists and matches every
   `where` clause. `on` takes one path, or a list addressing a
@@ -656,16 +659,16 @@ When several sources fold one row and any of them is stage-fed, the
 table must declare which source owns row existence:
 
 ```toml
-[[projection.source]]              # the row owner: admits and removes rows
+[[projection.sources]]              # the row owner: admits and removes rows
 topic    = "jobs"
 keyPath  = "$.id"
 rowOwner = true
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "name", from = "$.name" } ]
 
-[[projection.source]]              # a decorator: fills its own columns
+[[projection.sources]]              # a decorator: fills its own columns
 from = "latest-proposal"           # decorators must be stage-fed
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "latest_proposal_id", from = "$.pid" } ]
 ```
 
@@ -699,12 +702,12 @@ Some events *contain* the rows you want: a transaction event whose
 element into its own row:
 
 ```toml
-[[projection.source]]
+[[projection.sources]]
 topic    = "txn"
 forEach  = "$.items[*]"            # deliberately multi-valued
 keyPath  = "$.sku"                 # resolves against EACH ELEMENT
 onDelete = "delete-rows"           # the default: parent delete cascades
-  [[projection.source.rules]]
+  [[projection.sources.rules]]
   set = [
     { column = "amount",  from = "$.amount" },     # element scope
     { column = "txn_id",  from = "$parent.id" },   # the enclosing event
@@ -733,30 +736,30 @@ name, which lives in a `person` topic keyed by `person_id`. A **lookup source**
 ingests that topic into a keyed dimension table, and an aggregate element
 resolves the key into it by a join — so the column carries the name and the
 query needs no join of its own. A lookup source declares a `lookup` block (its
-`name`, referenced by enrichments, and the `field`s it stores) instead of
+`name`, referenced by enrichments, and the `fields` it stores) instead of
 `rules`/`aggregate`; an element field then declares `lookup`/`on`/`select`
 instead of `from` (`on` names the plain element field holding the foreign key).
 Several enriched fields sharing a dimension coalesce into one join:
 
 ```toml
-[[projection.source]]
+[[projection.sources]]
 topic = "person"                       # the dimension topic, keyed by person_id
-  [projection.source.lookup]
+  [projection.sources.lookup]
   name = "people"                      # referenced by element enrichments below
-    [[projection.source.lookup.field]]
+    [[projection.sources.lookup.fields]]
     field = "name"
     from  = "$.name"
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "credit"
 keyPath = "$.movie_id"
-  [projection.source.aggregate]
+  [projection.sources.aggregate]
   column     = "top_cast"
   elementKey = "$.billing"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "person_id"                # the foreign key, stored
     from  = "$.person_id"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field  = "name"                    # resolved from the people dimension
     lookup = "people"
     on     = "person_id"               # join the element's person_id …
@@ -861,11 +864,11 @@ target = "photos"              # derived topic (its type must exist)
 
 [[loopback.mappings]]
 jsonPath = "$.id"
-field    = "photo_id"
+jsonName    = "photo_id"
 
 [[loopback.mappings]]
 jsonPath = "$.meta.title"
-field    = "title"
+jsonName    = "title"
 ```
 
 No mappings means whole-payload passthrough — with `always-current`, that is

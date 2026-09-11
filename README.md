@@ -409,7 +409,10 @@ use `projection` to maintain current-state tables from an
 `event`-kind topic. One topic typically feeds both.
 
 > **The former `sql-projection` spelling was removed in 0.8.0.** The type
-> is `projection` with a `[projection]` section. Posting the old spelling is
+> is `projection` with a `[projection]` section, and the array tables are
+> plural (`[[projection.sources]]`, `[[projection.stages]]`,
+> `[[…aggregate.fields]]`, `[[…aggregate.scalars]]`, `[[…lookup.fields]]`,
+> `[[…stages.joins]]`). Posting the old spelling is
 > refused with a message naming the rename, and a config stored under it
 > parks on an upgraded node until re-POSTed renamed — its declared content is
 > unchanged, so it resumes with its stores and checkpoint (see

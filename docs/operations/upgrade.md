@@ -58,13 +58,18 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
    orchestrator's kill grace period are set per
    [shutdown.md](shutdown.md) so the graceful path isn't `SIGKILL`ed
    mid-drain.
-5. **Rename any `sql-projection` syncable before upgrading to 0.8.0.**
-   0.8.0 removes that deprecated spelling: a config stored under it parks
-   (not admissible, never retried) on the upgraded binary until it is
-   re-POSTed as `type = "projection"` with a `[projection]` section. 0.7.10
-   accepts the new spelling, so re-POST each one first — same id, same
-   declared content, so the stage store and checkpoint carry over — and the
-   upgrade is a non-event. Do the rename in its own POST; the
+5. **Plan to re-POST every `sql-projection` syncable right after upgrading
+   to 0.8.0.** 0.8.0 removes that deprecated spelling: a config stored
+   under it parks (not admissible, never retried) on the upgraded binary
+   until it is re-POSTed as `type = "projection"` with a `[projection]`
+   section and its array tables under their plural names
+   (`[[projection.sources]]`, `[[projection.stages]]`,
+   `[[…aggregate.fields]]`, `[[…aggregate.scalars]]`, `[[…lookup.fields]]`,
+   `[[…stages.joins]]`). 0.7.10 rejects the plural tables, so the re-POST
+   comes after the upgrade, not before; between the two the projection is
+   parked (its table lags, nothing is lost), and the re-POST — same id, same
+   declared content — resumes it with its stage store and checkpoint. Do the
+   rename in its own POST; the
    rebuild-required guard cannot compare across the removed spelling, so a
    rename combined with a schema change would not be caught.
 

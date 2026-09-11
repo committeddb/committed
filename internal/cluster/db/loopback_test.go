@@ -117,7 +117,7 @@ func TestLoopback_DerivesAndForwards(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, proposeLoopback(t, d, "canonizer", "raw", "canon",
-		"[[loopback.mappings]]\njsonPath = \"$.id\"\nfield = \"id\"\n[[loopback.mappings]]\njsonPath = \"$.deep.title\"\nfield = \"title\"\n"))
+		"[[loopback.mappings]]\njsonPath = \"$.id\"\njsonName = \"id\"\n[[loopback.mappings]]\njsonPath = \"$.deep.title\"\njsonName = \"title\"\n"))
 	require.NoError(t, d.ProposeSyncable(testCtx(t), &cluster.Configuration{
 		ID: "canon-sink", MimeType: "text/toml",
 		Data: []byte("[syncable]\nname = \"canon-sink\"\ntype = \"recorder\"\n"),
@@ -193,7 +193,7 @@ func TestLoopback_GraphGuardsAtAdmission(t *testing.T) {
 
 	// A re-POST of an existing config does not collide with its own edges.
 	require.NoError(t, proposeLoopback(t, d, "ab", "a", "b",
-		"[[loopback.mappings]]\njsonPath = \"$.id\"\nfield = \"id\"\n"))
+		"[[loopback.mappings]]\njsonPath = \"$.id\"\njsonName = \"id\"\n"))
 }
 
 // TestLoopback_RaceCommittedCycleDegradesDeterministically: a config that

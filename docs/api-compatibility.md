@@ -87,6 +87,14 @@ take any key: their contents are the catalog's or the receiver's
 vocabulary, not committed's. `[sql.options]` is committed's own and is
 closed like everything else, per dialect. Matching stays case-insensitive.
 
+The vocabulary keeps three spellings: keys are camelCase; an enum is a word
+(`validate = "announce"`, `mode = "always-current"`), never a number; and an
+array of tables takes a plural noun (`[[projection.sources]]`,
+`[[sql.mappings]]`) while a single table takes a singular one
+(`[projection.sources.aggregate]`). A spelling the vocabulary refuses on
+purpose — a removed table, a renamed key — is refused naming its
+replacement rather than as a typo.
+
 The alternative — accepting and ignoring — manufactured belief in settings
 that never took effect. Adding a key is an ordinary additive change; a config
 written for a newer binary is refused by an older one rather than half

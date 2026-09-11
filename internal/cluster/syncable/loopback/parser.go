@@ -19,7 +19,7 @@ type SyncableParser struct {
 // loopbackKeys is the [loopback] vocabulary (ParseConfig's, TopicsFromConfig's,
 // and DerivedTopicsFromConfig's reads), pinned by the vocabulary conformance
 // test.
-var loopbackKeys = []string{"topic", "target", "keyPath", "acknowledgeAppendSemantics", "mappings"}
+var loopbackKeys = []string{"topic", "target", "acknowledgeAppendSemantics", "mappings"}
 
 func (p *SyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v)
@@ -62,6 +62,13 @@ func (p *SyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.Database
 
 // ParseConfig validates the [loopback] section without touching storage.
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
+	// keyPath is deliberately NOT in the vocabulary (no value of it is ever
+	// valid), but its refusal explains why rather than calling it a typo.
+	if err := v.RejectKeys("loopback", map[string]string{
+		"keyPath": "re-keying is not supported: loopback transforms preserve the source key so RTBF deletes chase the derivation chain; remove keyPath",
+	}); err != nil {
+		return nil, err
+	}
 	if err := v.RejectUnknownKeys("loopback", loopbackKeys...); err != nil {
 		return nil, err
 	}
@@ -84,12 +91,6 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 	// derivation chain — the RTBF guarantee. Refuse the key loudly rather
 	// than silently ignoring it (the admission-validation rule: silent
 	// acceptance of an unhonored intent is the dangerous kind).
-	if v.GetString("loopback.keyPath") != "" {
-		return nil, &cluster.FieldError{
-			Field: "loopback.keyPath",
-			Issue: "re-keying is not supported: loopback transforms preserve the source key so RTBF deletes chase the derivation chain; remove keyPath",
-		}
-	}
 
 	var mappings []Mapping
 	if err := v.UnmarshalKey("loopback.mappings", &mappings); err != nil {
@@ -97,7 +98,7 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 	}
 	seen := make(map[string]bool, len(mappings))
 	for i, m := range mappings {
-		field := strings.TrimSpace(m.Field)
+		field := strings.TrimSpace(m.JsonName)
 		if field == "" {
 			return nil, &cluster.FieldError{
 				Field: "loopback.mappings",

@@ -96,24 +96,11 @@ func (o Options) Readers() int {
 // with the rename, before the generic unknown-key rejection would name them
 // as typos.
 func rejectRemovedOptionTables(v *cluster.ParsedConfig) error {
-	// The [sql] table's own keys, not dotted probes: a removed spelling is
-	// not part of the vocabulary, so it must not register as a read of it.
-	m, ok := v.Get("sql").(map[string]any)
-	if !ok {
-		return nil
+	reasons := make(map[string]string, len(removedOptionTables))
+	for _, name := range removedOptionTables {
+		reasons[name] = fmt.Sprintf("the [sql.%s] table was removed in 0.8.0 (it was the older spelling of [sql.options]): move its keys to [sql.options] under their 0.8.0 names (%s), then re-POST the config — the ingestable resumes from its checkpoint", name, renameList())
 	}
-	for k := range m {
-		for _, name := range removedOptionTables {
-			if !strings.EqualFold(k, name) {
-				continue
-			}
-			return cluster.NotAdmissible(&cluster.FieldError{
-				Field: "sql." + k,
-				Issue: fmt.Sprintf("the [sql.%s] table was removed in 0.8.0 (it was the older spelling of [sql.options]): move its keys to [sql.options] under their 0.8.0 names (%s), then re-POST the config — the ingestable resumes from its checkpoint", name, renameList()),
-			})
-		}
-	}
-	return nil
+	return v.RejectKeys("sql", reasons)
 }
 
 func renameList() string {
@@ -124,23 +111,18 @@ func renameList() string {
 	return strings.Join(parts, ", ")
 }
 
-// parseOptions reads [sql.options]: the removed spellings park with the
-// rename, the vocabulary is closed, every value is typed and validated, and
-// a key the configured dialect does not read is refused rather than
-// accepted and ignored.
+// parseOptions reads [sql.options] (ParseConfig has already refused the
+// removed [sql.<dialect>] tables): the renamed keys park with the rename,
+// the vocabulary is closed, every value is typed and validated, and a key
+// the configured dialect does not read is refused rather than accepted and
+// ignored.
 func parseOptions(v *cluster.ParsedConfig, dialectName string, dialect Dialect) (Options, error) {
-	if err := rejectRemovedOptionTables(v); err != nil {
-		return Options{}, err
+	renamed := make(map[string]string, len(renamedOptions))
+	for old, now := range renamedOptions {
+		renamed[old] = fmt.Sprintf("renamed in 0.8.0: spell it %q, then re-POST the config — the ingestable resumes from its checkpoint", now)
 	}
-	if m, ok := v.Get("sql.options").(map[string]any); ok {
-		for k := range m {
-			if renamed, was := renamedOptions[strings.ToLower(k)]; was {
-				return Options{}, cluster.NotAdmissible(&cluster.FieldError{
-					Field: "sql.options." + k,
-					Issue: fmt.Sprintf("renamed in 0.8.0: spell it %q, then re-POST the config — the ingestable resumes from its checkpoint", renamed),
-				})
-			}
-		}
+	if err := v.RejectKeys("sql.options", renamed); err != nil {
+		return Options{}, err
 	}
 	if err := v.RejectUnknownKeys("sql.options", optionKeys...); err != nil {
 		return Options{}, err

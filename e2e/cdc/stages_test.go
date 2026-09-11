@@ -46,16 +46,16 @@ type = "TEXT"
 name = "n"
 type = "INT"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "by-name"
 from    = "region"
 keyPath = "$.r_name"
 reduce  = "aggregate"
 emit    = [ { field = "n", count = true } ]
 
-[[projection.source]]
+[[projection.sources]]
 from = "by-name"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "n", from = "$.n" } ]
 `, harness.SinkDatabaseID())
 	harness.PostSyncableTOML(t, "region-stats", toml)

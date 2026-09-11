@@ -53,12 +53,13 @@ type Proposer interface {
 	Propose(ctx context.Context, p *cluster.Proposal) error
 }
 
-// Mapping projects one jsonPath of the source payload into one field of the
-// derived payload. The mapstructure tags mirror the sql syncable's mappings
-// (jsonPath is camelCase in TOML).
+// Mapping projects one jsonPath of the source payload into one key of the
+// derived payload. jsonName is the ingest mappings' word for the key a
+// payload is written under; jsonPath is the sql syncable's for the path
+// read from one.
 type Mapping struct {
 	JsonPath string `mapstructure:"jsonPath"`
-	Field    string `mapstructure:"field"`
+	JsonName string `mapstructure:"jsonName"`
 }
 
 // Config is the parsed [loopback] section.
@@ -205,9 +206,9 @@ func Transform(data []byte, mappings []Mapping) ([]byte, error) {
 	for _, m := range mappings {
 		v, err := jsonpath.Get(m.JsonPath, doc)
 		if err != nil {
-			return nil, fmt.Errorf("jsonpath %q for field %q: %w", m.JsonPath, m.Field, err)
+			return nil, fmt.Errorf("jsonpath %q for jsonName %q: %w", m.JsonPath, m.JsonName, err)
 		}
-		out[m.Field] = v
+		out[m.JsonName] = v
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
