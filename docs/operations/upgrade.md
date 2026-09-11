@@ -184,7 +184,11 @@ After the last node:
 > spelling in its checkpoint; an older binary would resume it rendering
 > uppercase again and spell new rows differently from the rows on the sink —
 > treat the re-key as a one-way transition and rebuild the sink if you must
-> roll back past it.
+> roll back past it. Finally, do not roll a node back while a
+> re-materialization is in progress (`rematerializing` on the syncable's
+> status): the verb only starts once every member is 0.8.0 (feature level
+> 6), and an older owner resuming the replay would write rows the completion
+> sweep then deletes — let it finish, or run the verb again after upgrading.
 
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:

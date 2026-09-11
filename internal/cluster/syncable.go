@@ -265,6 +265,12 @@ var ErrWorkerWedged = errors.New("syncable worker did not stop in time (wedged o
 // It is a destructive side effect and therefore owner-gated and live-only —
 // never run on a replaying or non-owner node. Syncables that own no external
 // state do not implement it.
+// ErrDestinationNotOwned refuses a verb that would drop a destination
+// committed did not create (the ownership protocol: delete what we created,
+// leave what we did not). The remedies are the operator's: drop the
+// destination by hand and re-POST, or converge a keyed sink in place.
+var ErrDestinationNotOwned = errors.New("the destination was not created by committed, so it cannot be dropped for a clean rebuild: drop it yourself and re-POST the config, or POST /syncable/{id}/rematerialize to converge a keyed sink in place")
+
 type Teardownable interface {
 	// Teardown removes the destination state committed OWNS — the tables it
 	// created (recorded next to them at creation), always its helper tables
@@ -274,6 +280,14 @@ type Teardownable interface {
 	// over instead: ownership is relinquished (committed will not drop it on
 	// a later delete either), nothing is removed, and dropped is false.
 	Teardown(keep bool) (dropped bool, err error)
+	// OwnsDestination is the same question asked BEFORE anything changes:
+	// false when a destination exists that committed did not create — a
+	// Teardown(false) would leave it in place — so a verb that promises a
+	// clean slate (rebuild) can refuse instead of replaying over rows it
+	// cannot remove. A destination that does not exist yet counts as owned:
+	// the re-init creates and claims it. Part of the contract rather than an
+	// optional extension so no sink can tear down without answering it.
+	OwnsDestination(ctx context.Context) (owned bool, err error)
 }
 
 // SyncableUnwrapper is implemented by decorating wrappers (the

@@ -34,6 +34,13 @@ import (
 //     restart resumes the re-materialization and any node reports progress.
 //  5. Re-apply the unchanged config: the worker restarts, observes the
 //     record, begins epoch marking, replays from 0, and sweeps at the target.
+//
+// featureLevelRematerialization gates the re-materialization verb: every
+// member must announce version.FeatureLevel >= 6 before a replay may start,
+// so no older binary can own the syncable while epoch-stamped rows and the
+// closing sweep are in flight.
+const featureLevelRematerialization uint64 = 6
+
 func (db *DB) RematerializeSyncable(ctx context.Context, id string) error {
 	cfg := db.currentSyncableConfig(id)
 	if cfg == nil {
@@ -63,6 +70,15 @@ func (db *DB) RematerializeSyncable(ctx context.Context, id string) error {
 	_ = probe.Close()
 	if !canRemat {
 		return cluster.ErrNotRematerializable
+	}
+
+	// Mixed-version safety: an older owner resuming this replay would write
+	// unstamped rows the completion sweep then deletes (see
+	// version.FeatureLevel, level 6). Refuse until every member is past that.
+	if !db.featureEnabled(featureLevelRematerialization) {
+		return &cluster.ClusterBelowFeatureLevelError{
+			Feature: "rematerialization", Required: featureLevelRematerialization, ClusterMin: db.clusterMinFeatureLevel(),
+		}
 	}
 
 	// 2. Drain the worker (see RebuildSyncable for why this must precede the

@@ -3,11 +3,13 @@ package http_test
 import (
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 )
 
@@ -120,7 +122,7 @@ func TestRebuildSyncable(t *testing.T) {
 	// The ack body: an empty 202 field-read as a routing failure (an operator
 	// spent half an hour disbelieving a success next to wrong-verb 405s). The
 	// body confirms the trigger and names the poll target.
-	var body http.SyncableRebuildResponse
+	var body http.SyncableVerbAcceptedResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	require.Equal(t, "rec-1", body.ID)
 	require.Equal(t, "rebuilding", body.Status)
@@ -146,6 +148,44 @@ func TestRematerializeSyncable_NotRematerializable(t *testing.T) {
 
 	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/rematerialize")
 	requireEnvelope(t, w, 409, "not_rematerializable")
+}
+
+// The accepted path answers exactly like rebuild: 202, the ack body naming
+// the trigger and the status endpoint, and the same pointer as Location. The
+// verb is gated on the cluster feature level, so the test waits out the
+// node's async self-announce (503 cluster_below_feature_level until then).
+func TestRematerializeSyncable_Accepted(t *testing.T) {
+	e := newEngineOpts(t, db.WithVersionAnnounce())
+	e.addType(t, "photos", "photos")
+	e.addSyncableOfKind(t, "mirror", "remat", "photos")
+
+	var w *httptest.ResponseRecorder
+	require.Eventually(t, func() bool {
+		w = e.doEmpty(t, "POST", "/v1/syncable/mirror/rematerialize")
+		var env struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &env)
+		return w.Code != 503 || env.Code != "cluster_below_feature_level"
+	}, 10*time.Second, 10*time.Millisecond, "feature level never announced")
+	require.Equal(t, 202, w.Code, w.Body.String())
+	var body http.SyncableVerbAcceptedResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, http.SyncableVerbAcceptedResponse{ID: "mirror", Status: "rematerializing", Poll: "/v1/syncable/mirror/status"}, body)
+	require.Equal(t, "/v1/syncable/mirror/status", w.Header().Get("Location"))
+}
+
+// A rebuild on a destination committed did not create is refused with the
+// remedies, before anything changes: the ownership protocol never drops what
+// it did not create, and a rebuild that replays over rows it cannot remove
+// would be a silent no-op on the rows that matter.
+func TestRebuildSyncable_DestinationNotOwned(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addSyncableOfKind(t, "theirs", "attached", "photos")
+
+	w := e.doEmpty(t, "POST", "/v1/syncable/theirs/rebuild")
+	requireEnvelope(t, w, 409, "destination_not_owned")
 }
 
 // TestSyncableDeadLetterJourney is the operator's whole incident, end to end

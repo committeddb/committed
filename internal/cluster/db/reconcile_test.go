@@ -27,7 +27,8 @@ func (f *reconcileFakeSyncable) Init(context.Context) error { return nil }
 func (f *reconcileFakeSyncable) Sync(context.Context, *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	return false, nil
 }
-func (f *reconcileFakeSyncable) Close() error { return nil }
+func (f *reconcileFakeSyncable) Close() error                                  { return nil }
+func (f *reconcileFakeSyncable) OwnsDestination(context.Context) (bool, error) { return true, nil }
 func (f *reconcileFakeSyncable) Teardown(bool) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

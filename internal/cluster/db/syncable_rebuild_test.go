@@ -184,3 +184,31 @@ func TestRebuildSyncable_AbortsOnWedgedWorker(t *testing.T) {
 		t.Fatal("RebuildSyncable blocked on a wedged worker's unbounded drain — the HTTP request would hang forever")
 	}
 }
+
+// A destination committed did not create is never dropped, so a rebuild there
+// would replay over rows it cannot remove. The verb refuses before anything
+// changes: the checkpoint stands, no teardown ran, the config is kept.
+func TestRebuildSyncable_RefusesDestinationNotOwned(t *testing.T) {
+	dir := t.TempDir()
+	const id = "rebuild-attached"
+	rec := &teardownRecorder{notOwned: true}
+	d, s := newDeleteTestDB(t, dir, rec)
+	t.Cleanup(func() { _ = d.Close() })
+
+	configureDeleteSyncable(t, d, id)
+	seedUserProposals(t, d, s, "evt", []string{"a", "b"})
+	require.Eventually(t, func() bool { return rec.syncedCount() == 2 },
+		10*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		cp, _ := s.GetSyncableIndex(id)
+		return cp > 0
+	}, 10*time.Second, 10*time.Millisecond)
+	before, _ := s.GetSyncableIndex(id)
+
+	require.ErrorIs(t, d.RebuildSyncable(testCtx(t), id), cluster.ErrDestinationNotOwned)
+
+	after, _ := s.GetSyncableIndex(id)
+	require.Equal(t, before, after, "the checkpoint must stand")
+	require.Zero(t, rec.count(), "no teardown ran")
+	require.True(t, hasSyncable(t, s, id), "the config is kept")
+}

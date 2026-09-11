@@ -258,7 +258,10 @@ error handling, deletes, and schema evolution:
   dropped, and committed no longer counts the table as its own. To
   re-materialize a drifted or corrupted projection *without* a schema change,
   `POST /v1/syncable/{id}/rebuild` does the drop + replay-from-0 in place
-  under the same name. The log is permanent, so replay is cheap.
+  under the same name, for a table committed created. On a table you
+  created it refuses (409 `destination_not_owned`) rather than replay over
+  rows it cannot drop: drop the table yourself and re-POST, or rematerialize
+  a keyed sink. The log is permanent, so replay is cheap.
 
 ### Computed columns (`expr`)
 
@@ -1052,7 +1055,11 @@ current mappings + type migrations + restatements, keyed upserts overwrite rows 
 place while the table keeps serving reads, and a completion sweep removes
 rows the replay never re-emitted. Restart-resumable, and it refreshes the
 syncable's `interpretationPin` (clearing `interpretationStale`). Projections
-and keyless sinks refuse the verb — for those, use the patterns below.
+and keyless sinks refuse the verb — for those, use the patterns below. The
+verb also needs every member of the cluster on 0.8.0 or later: on a
+mixed-version cluster it answers 503 `cluster_below_feature_level` until the
+rolling upgrade completes, because an older node taking ownership
+mid-replay would write rows the completion sweep then deletes.
 
 **Changing one projection's own rules — blue-green.** Because a projection
 replays from index 0 and the log stays the source of truth, the clean way to fix

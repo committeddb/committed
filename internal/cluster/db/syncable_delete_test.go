@@ -26,6 +26,7 @@ type teardownRecorder struct {
 	handovers int // Teardown(true): keepData — disown, remove nothing
 	closes    int
 	failWith  error
+	notOwned  bool // the destination is one committed did not create
 	synced    []string
 }
 
@@ -77,6 +78,12 @@ func (s *teardownSyncable) Close() error {
 	s.rec.closes++
 	s.rec.mu.Unlock()
 	return nil
+}
+
+func (s *teardownSyncable) OwnsDestination(context.Context) (bool, error) {
+	s.rec.mu.Lock()
+	defer s.rec.mu.Unlock()
+	return !s.rec.notOwned, nil
 }
 
 func (s *teardownSyncable) Teardown(keep bool) (bool, error) {

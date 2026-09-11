@@ -13,6 +13,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // rematFakeSyncable is a keyed in-memory sink implementing Rematerializable:
@@ -59,8 +60,14 @@ func (f *rematFakeSyncable) snapshot() (synced []string, began []uint64, complet
 }
 
 // newWalDBRemat wires a fixture whose "fake" syncable kind builds the given
-// sink, with real pump channels so workers run.
+// sink, with real pump channels so workers run, announcing its version so
+// the gated verb opens (awaitVersionAnnounced waits for the async announce).
 func newWalDBRemat(t *testing.T, sink cluster.Syncable) (*db.DB, *wal.Storage) {
+	t.Helper()
+	return newWalDBRematOpts(t, sink, db.WithVersionAnnounce())
+}
+
+func newWalDBRematOpts(t *testing.T, sink cluster.Syncable, opts ...db.Option) (*db.DB, *wal.Storage) {
 	t.Helper()
 	dir := t.TempDir()
 	p := parser.New()
@@ -71,9 +78,17 @@ func newWalDBRemat(t *testing.T, sink cluster.Syncable) (*db.DB, *wal.Storage) {
 	ingestCh := make(chan *db.IngestableWithID, 32)
 	s, err := wal.Open(dir, p, syncCh, ingestCh, wal.WithoutFsync())
 	require.NoError(t, err)
-	d := db.New(uint64(1), db.Peers{1: ""}, s, p, syncCh, ingestCh, db.WithTickInterval(testTickInterval))
+	d := db.New(uint64(1), db.Peers{1: ""}, s, p, syncCh, ingestCh, append([]db.Option{db.WithTickInterval(testTickInterval)}, opts...)...)
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 	return d, s
+}
+
+// awaitVersionAnnounced waits for the node's async self-announce, after
+// which every feature-gated verb this binary knows is open.
+func awaitVersionAnnounced(t *testing.T, d *db.DB) {
+	t.Helper()
+	require.Eventually(t, func() bool { return d.FeatureEnabled(version.FeatureLevel) },
+		10*time.Second, 10*time.Millisecond, "feature level never announced")
 }
 
 // TestRematerialize_FullLifecycle drives the verb through the real worker: a
@@ -102,6 +117,7 @@ func TestRematerialize_FullLifecycle(t *testing.T) {
 		return len(synced) >= 3
 	}, 10*time.Second, 10*time.Millisecond, "initial sync never completed")
 
+	awaitVersionAnnounced(t, d)
 	require.NoError(t, d.RematerializeSyncable(testCtx(t), "photos-mirror"))
 
 	require.Eventually(t, func() bool {
@@ -152,4 +168,27 @@ func TestRematerialize_RefusesNonConvergingSinks(t *testing.T) {
 
 	// An unknown id is a clean not-found.
 	require.ErrorIs(t, d.RematerializeSyncable(testCtx(t), "nope"), cluster.ErrResourceNotFound)
+}
+
+// TestRematerialize_FeatureGateRefusesUntilAnnounced pins the mixed-version
+// rule: a cluster whose minimum feature level predates the verb refuses it
+// with the retryable typed error, after admission and before anything
+// changes — an older owner resuming the replay would write unstamped rows
+// the completion sweep then deletes.
+func TestRematerialize_FeatureGateRefusesUntilAnnounced(t *testing.T) {
+	sink := &rematFakeSyncable{keyed: true}
+	d, _ := newWalDBRematOpts(t, sink) // no WithVersionAnnounce: cluster min stays 0
+	proposeTypeTOML(t, d, "photos", "photos", "", "")
+	require.NoError(t, d.ProposeSyncable(testCtx(t), &cluster.Configuration{
+		ID: "photos-mirror", MimeType: "text/toml",
+		Data: []byte("[syncable]\nname = \"photos-mirror\"\ntype = \"fake\"\n"),
+	}))
+
+	err := d.RematerializeSyncable(testCtx(t), "photos-mirror")
+	var lvl *cluster.ClusterBelowFeatureLevelError
+	require.ErrorAs(t, err, &lvl)
+	require.Equal(t, uint64(6), lvl.Required)
+	_, began, completed := sink.snapshot()
+	require.Empty(t, began, "nothing began")
+	require.Zero(t, completed)
 }

@@ -117,7 +117,7 @@ func newWalDBMigrationEdit(t *testing.T, sink *migrationEditSink) (*db.DB, *wal.
 	ingestCh := make(chan *db.IngestableWithID, 32)
 	s, err := wal.Open(dir, p, syncCh, ingestCh, wal.WithoutFsync())
 	require.NoError(t, err)
-	d := db.New(uint64(1), db.Peers{1: ""}, s, p, syncCh, ingestCh, db.WithTickInterval(testTickInterval))
+	d := db.New(uint64(1), db.Peers{1: ""}, s, p, syncCh, ingestCh, db.WithTickInterval(testTickInterval), db.WithVersionAnnounce())
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 	return d, s
 }
@@ -195,6 +195,7 @@ func TestMigrationEditThenRematerializeFixesHistory(t *testing.T) {
 	// output. The prescribed action re-materializes: every v1-stamped row
 	// replays through the FIXED chain.
 	require.Equal(t, `{"v":40}`, sink.latest("k4"), "already-synced rows must be untouched by the edit alone")
+	awaitVersionAnnounced(t, d)
 	require.NoError(t, d.RematerializeSyncable(testCtx(t), "mirror"))
 	require.Eventually(t, func() bool {
 		return sink.latest("k1") == `{"v":100}` &&

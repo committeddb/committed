@@ -1323,17 +1323,36 @@ paths:
         replicated, and a resumed replay keeps converging under the same
         epoch.
 
-        Keyed sinks only: a keyless/append sink or a webhook refuses with
-        409 `not_rematerializable` (use `/rebuild` or a blue-green
-        replacement). Leader-pinned. Poll `GET /v1/syncable/{id}/status`:
-        `rematerializing` with `rematerializeTargetHead` shows progress
-        against `checkpointIndex`.
+        Sinks that converge a replay in place only — a keyed `sql` mirror,
+        or a loopback into a snapshot-kind topic: keyless/append, webhook,
+        projection, and Iceberg sinks refuse with 409 `not_rematerializable`
+        (use `/rebuild` or a blue-green replacement). Leader-pinned. The verb needs every
+        member on a binary that knows it (cluster feature level 6): on a
+        mixed-version cluster it answers 503 `cluster_below_feature_level`
+        until the rolling upgrade completes, because an older node taking
+        ownership mid-replay would write rows the completion sweep then
+        deletes. Poll `GET /v1/syncable/{id}/status`: `rematerializing` with
+        `rematerializeTargetHead` shows progress against `checkpointIndex`.
       operationId: rematerializeSyncable
       parameters:
         - $ref: '#/components/parameters/ResourceId'
       responses:
-        '200':
-          description: Re-materialization started; the replay is underway.
+        '202':
+          description: |
+            Re-materialization accepted; the checkpoint is reset, the
+            in-progress record is replicated, and the replay is underway in
+            the worker. The body confirms the trigger and names the status
+            endpoint to poll (also carried as the `Location` header) —
+            repeated triggers are safe.
+          headers:
+            Location:
+              schema:
+                type: string
+              description: The status endpoint to poll for convergence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncableVerbAcceptedResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1341,11 +1360,32 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: This sink cannot converge a replay in place (keyless/append or webhook).
+          description: |
+            `code: not_rematerializable` — this sink cannot converge a replay
+            in place (keyless/append, webhook, projection, Iceberg); the
+            message names the alternatives.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
-          $ref: '#/components/responses/NotLinearizable'
+          description: |
+            Retryable. `code: cluster_below_feature_level` — not every member
+            runs a binary that knows the verb yet; retry once the rolling
+            upgrade completes. `pin_unsatisfiable` — the syncable is pinned to
+            a zone no current member announces. `not_syncable_owner` — the
+            routing view was stale; the next attempt lands on the owner.
+            `worker_wedged` — the local worker did not stop within the drain
+            bound; nothing changed. `request_unconfirmed` — the underlying
+            write could not be confirmed before the request deadline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
   /v1/syncable/{id}/rebuild:
     post:
       tags: [syncable]
@@ -1355,10 +1395,14 @@ paths:
         the same config (and schema). The checkpoint is reset, the table is
         dropped and recreated empty, and the worker replays from index 0 — the
         recovery primitive for a drifted or corrupted projection. Rows the
-        replay does not reproduce are gone. Schema changes are NOT done this way
-        (DELETE then re-POST with the new schema). Re-runnable and idempotent;
-        leader-pinned. Returns 202 once the reset + drop/recreate are done; the
-        replay that refills the table runs afterward (poll
+        replay does not reproduce are gone. Only a table committed created is
+        dropped (the ownership protocol): on a table you created and pointed
+        the syncable at, the verb refuses with 409 `destination_not_owned`
+        before anything changes — drop it yourself and re-POST, or
+        `/rematerialize` a keyed sink in place. Schema changes are NOT done
+        this way (DELETE then re-POST with the new schema). Re-runnable and
+        idempotent; leader-pinned. Returns 202 once the reset + drop/recreate
+        are done; the replay that refills the table runs afterward (poll
         `GET /v1/syncable/{id}/status` for `lag` → 0).
       operationId: rebuildSyncable
       parameters:
@@ -1379,21 +1423,34 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SyncableRebuildResponse'
+                $ref: '#/components/schemas/SyncableVerbAcceptedResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            `code: destination_not_owned` — the destination was not created by
+            committed, so it cannot be dropped for a clean rebuild. Refused
+            before the checkpoint reset; nothing changed. Drop the table
+            yourself and re-POST the config, or `/rematerialize` a keyed sink.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503':
           description: |
             Retryable. Either the underlying write could not be confirmed
-            before the request deadline, or (`code: worker_wedged`) the
-            syncable's local worker is wedged on its destination and did not
-            stop within the drain bound — the rebuild aborted BEFORE the
-            checkpoint reset, so nothing changed. Wait out (or fix) the
-            destination and retry, or re-POST the config to replace the worker.
+            before the request deadline (`request_unconfirmed`), or
+            (`code: worker_wedged`) the syncable's local worker is wedged on
+            its destination and did not stop within the drain bound — the
+            rebuild aborted BEFORE the checkpoint reset, so nothing changed;
+            wait out (or fix) the destination and retry, or re-POST the config
+            to replace the worker. `pin_unsatisfiable` — the syncable is pinned
+            to a zone no current member announces. `not_syncable_owner` — the
+            routing view was stale; the next attempt lands on the owner.
           content:
             application/json:
               schema:
@@ -2851,21 +2908,22 @@ components:
             the worker will dead-letter. Query `GET /v1/syncable/{id}/errors`
             to confirm the `manual` record once it lands.
 
-    SyncableRebuildResponse:
+    SyncableVerbAcceptedResponse:
       type: object
       required: [id, status, poll]
       description: |
-        Acknowledges an accepted rebuild: the destination was reset and the
-        replay is running in the worker. Poll the named status endpoint
-        (lag → 0) to watch it converge.
+        Acknowledges an accepted rebuild or re-materialization: the
+        checkpoint was reset and the replay is running in the worker. Poll
+        the named status endpoint to watch it converge (lag → 0; for a
+        re-materialization, `rematerializing` clearing).
       properties:
         id:
           type: string
-          description: The syncable being rebuilt.
+          description: The syncable being rebuilt or re-materialized.
         status:
           type: string
-          enum: [rebuilding]
-          description: Always `rebuilding` on a 202.
+          enum: [rebuilding, rematerializing]
+          description: Which verb was accepted.
         poll:
           type: string
           description: The status endpoint to poll for convergence.

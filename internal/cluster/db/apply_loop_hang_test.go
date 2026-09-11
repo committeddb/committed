@@ -62,6 +62,10 @@ func (b *blockingDestinationSyncable) Close() error {
 	return nil
 }
 
+func (b *blockingDestinationSyncable) OwnsDestination(context.Context) (bool, error) {
+	return true, nil
+}
+
 func (b *blockingDestinationSyncable) Teardown(bool) (bool, error) {
 	if b.blockTeardown {
 		<-b.block

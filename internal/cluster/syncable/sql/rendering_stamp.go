@@ -5,6 +5,8 @@ import (
 	gosql "database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // SinkRenderingVersion is the version of every rendering the SQL sink family
@@ -113,6 +115,35 @@ func claimIfCreated(ctx context.Context, db *gosql.DB, dialect Dialect, table st
 	return claimOwnership(ctx, db, dialect, table)
 }
 
+// ownsDestination answers Teardownable.OwnsDestination for a table: the note
+// says committed created it, or there is no table yet (Init will create and
+// claim it). A table with no note, or a note saying not owned, is one
+// committed attached to.
+func ownsDestination(ctx context.Context, db *gosql.DB, dialect Dialect, table string) (bool, error) {
+	note, present, err := readNote(ctx, db, dialect, table)
+	if err != nil {
+		return false, err
+	}
+	if present && note.owned {
+		return true, nil
+	}
+	exists, err := dialect.TableExists(ctx, db, table)
+	if err != nil {
+		return false, fmt.Errorf("probe %s: %w", table, err)
+	}
+	return !exists, nil
+}
+
+// OwnsDestination implements cluster.Teardownable.
+func (c *Syncable) OwnsDestination(ctx context.Context) (bool, error) {
+	return ownsDestination(ctx, c.db, c.dialect, c.config.Table)
+}
+
+// OwnsDestination implements cluster.Teardownable.
+func (p *Projection) OwnsDestination(ctx context.Context) (bool, error) {
+	return ownsDestination(ctx, p.db, p.dialect, p.config.Table)
+}
+
 // RenderingVersion implements cluster.RenderingStamped.
 func (c *Syncable) RenderingVersion() uint64 { return SinkRenderingVersion }
 
@@ -140,3 +171,10 @@ func (p *Projection) RenderingStamp(ctx context.Context) (uint64, bool, error) {
 func (p *Projection) StampRendering(ctx context.Context) error {
 	return stampRendering(ctx, p.db, p.dialect, p.config.Table)
 }
+
+var (
+	_ cluster.RenderingStamped = (*Syncable)(nil)
+	_ cluster.RenderingStamped = (*Projection)(nil)
+	_ cluster.Teardownable     = (*Syncable)(nil)
+	_ cluster.Teardownable     = (*Projection)(nil)
+)

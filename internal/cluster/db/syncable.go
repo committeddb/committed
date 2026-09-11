@@ -304,6 +304,27 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 		}
 	}
 
+	// 0. Ownership probe: rebuild promises drop + replay-from-0, and a
+	//    destination committed did not create is never dropped (the ownership
+	//    protocol), so a rebuild there would silently replay over rows it
+	//    cannot remove. Ask the sink before anything changes; the error names
+	//    the remedies. Built-but-never-run, like rematerialize's admission probe.
+	probe, err := db.buildSyncable(id)
+	if err != nil {
+		return cluster.NewConfigError(fmt.Errorf("build syncable for admission: %w", err))
+	}
+	owns := true
+	if td, ok := cluster.SyncableAs[cluster.Teardownable](probe); ok {
+		owns, err = td.OwnsDestination(ctx)
+	}
+	_ = probe.Close()
+	if err != nil {
+		return fmt.Errorf("probe destination ownership: %w", err)
+	}
+	if !owns {
+		return cluster.ErrDestinationNotOwned
+	}
+
 	// 1. Stop the local worker first so it can't bump the checkpoint after the
 	//    reset below. Returns its handle so step 3 can tear the destination down.
 	//    The drain is BOUNDED (workers.drainTimeout, like every sibling handoff) —

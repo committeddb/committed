@@ -48,7 +48,8 @@ var _ cluster.RenderingStamped = (*stampedFakeSyncable)(nil)
 // delete (the SQL family's shape) but cannot converge in place.
 type teardownFakeSyncable struct{ stampedFakeSyncable }
 
-func (f *teardownFakeSyncable) Teardown(bool) (bool, error) { return true, nil }
+func (f *teardownFakeSyncable) Teardown(bool) (bool, error)                   { return true, nil }
+func (f *teardownFakeSyncable) OwnsDestination(context.Context) (bool, error) { return true, nil }
 
 var _ cluster.Teardownable = (*teardownFakeSyncable)(nil)
 
@@ -149,6 +150,7 @@ func TestRenderingStamp_RematerializeRestamps(t *testing.T) {
 	_, stamped, _ := sink.stampState()
 	require.Zero(t, stamped, "a current stamp is left alone")
 
+	awaitVersionAnnounced(t, d)
 	require.NoError(t, d.RematerializeSyncable(testCtx(t), "photos-mirror"))
 	require.Eventually(t, func() bool {
 		_, ok := s.SyncableRematerialization("photos-mirror")

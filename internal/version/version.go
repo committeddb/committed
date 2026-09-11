@@ -65,7 +65,17 @@ var (
 // session resuming a checkpoint written the old way re-snapshots once at a
 // bumped epoch (its closing markers sweep the old spellings on keyed sinks).
 // The checkpoint records its rendering; once canonical it stays canonical.
-const FeatureLevel uint64 = 5
+//
+// Level 6: the re-materialization verb (db.featureLevelRematerialization).
+// The in-progress record itself is ungated (an old node skips it), but the
+// replay it drives stamps every re-emitted row with an epoch and ends with
+// a sweep that deletes rows below it. An older owner taking over mid-replay
+// (a leader-first roll, a one-node rollback) would write rows WITHOUT the
+// stamp and advance the checkpoint, and the resuming new owner's sweep would
+// delete them — silent row loss on a keyed sink. The verb is refused until
+// the cluster minimum reaches 6, so no such owner can exist while a replay
+// is in flight.
+const FeatureLevel uint64 = 6
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

@@ -222,16 +222,23 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		writeRebuildError(w, err)
 		return
 	}
+	writeVerbAccepted(w, id, "rebuilding")
+}
 
-	// 202 with a small ack body: the checkpoint reset and destination
-	// teardown/re-init are done, but the replay that refills the destination
-	// runs in the worker afterward. The body exists because an empty 202 next
-	// to legitimate 405s (wrong verbs on this route) field-read as a routing
-	// failure — an operator spent half an hour disbelieving a success. It
-	// names the poll target so the next step is in the response itself.
-	bs, err := json.Marshal(SyncableRebuildResponse{
+// writeVerbAccepted answers an accepted rebuild or re-materialization: 202
+// with a small ack body — the checkpoint reset (and, for rebuild, the
+// destination teardown/re-init) is done, but the replay that refills the
+// destination runs in the worker afterward. The body exists because an
+// empty 202 next to legitimate 405s (wrong verbs on this route) field-read
+// as a routing failure — an operator spent half an hour disbelieving a
+// success. It names the poll target so the next step is in the response
+// itself; Location carries the same pointer, the idiomatic HTTP spelling of
+// the async-accept pattern, visible to curl -i and REST tooling without
+// parsing the body.
+func writeVerbAccepted(w httpgo.ResponseWriter, id, status string) {
+	bs, err := json.Marshal(SyncableVerbAcceptedResponse{
 		ID:     id,
-		Status: "rebuilding",
+		Status: status,
 		Poll:   "/v1/syncable/" + id + "/status",
 	})
 	if err != nil {
@@ -239,9 +246,6 @@ func (h *HTTP) RebuildSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	// Location is the idiomatic HTTP spelling of the async-accept pattern:
-	// 202 + where to watch. Same pointer as the body's poll field, visible to
-	// curl -i and REST tooling without parsing the body.
 	w.Header().Set("Location", "/v1/syncable/"+id+"/status")
 	w.WriteHeader(httpgo.StatusAccepted)
 	_, _ = w.Write(bs)
@@ -264,15 +268,17 @@ func (h *HTTP) RematerializeSyncable(w httpgo.ResponseWriter, r *httpgo.Request)
 		writeRematerializeError(w, err)
 		return
 	}
-	writeJson(w, []byte(`{"status":"rematerializing"}`))
+	writeVerbAccepted(w, id, "rematerializing")
 }
 
-// SyncableRebuildResponse acknowledges an accepted rebuild: the destination
-// was reset and the replay is running in the worker. Poll the status
-// endpoint (lag → 0) to watch it converge. Re-POSTing rebuild is safe —
-// repeated triggers converge to the same reconciled state (field-observed:
-// a triple-fire ended at exact parity with one clean generation).
-type SyncableRebuildResponse struct {
+// SyncableVerbAcceptedResponse acknowledges an accepted rebuild or
+// re-materialization: the checkpoint was reset and the replay is running in
+// the worker. Poll the status endpoint to watch it converge (lag → 0, and
+// for a re-materialization `rematerializing` clearing). Re-POSTing either
+// verb is safe — repeated triggers converge to the same reconciled state
+// (field-observed: a triple-fire ended at exact parity with one clean
+// generation).
+type SyncableVerbAcceptedResponse struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
 	Poll   string `json:"poll"`
@@ -741,6 +747,11 @@ func writeRebuildError(w httpgo.ResponseWriter, err error) {
 		// retryable condition (wait out the destination, or re-POST the config
 		// to replace the worker), so 503 rather than a generic failure.
 		writeError(w, httpgo.StatusServiceUnavailable, "worker_wedged", redactedMessage(err))
+	case errors.Is(err, cluster.ErrDestinationNotOwned):
+		// 409: the config is fine, but the destination is not committed's to
+		// drop, so a clean rebuild is impossible — the message names the
+		// remedies. Refused before the checkpoint reset; nothing changed.
+		writeError(w, httpgo.StatusConflict, "destination_not_owned", redactedMessage(err))
 	default:
 		writeProposeError(w, err, "syncable", "rebuild syncable")
 	}

@@ -79,7 +79,7 @@ func newWalDBLoopback(t *testing.T, sink *recorderSink) (*db.DB, *wal.Storage) {
 	ingestCh := make(chan *db.IngestableWithID, 32)
 	s, err := wal.Open(dir, p, syncCh, ingestCh, wal.WithoutFsync())
 	require.NoError(t, err)
-	d := db.New(uint64(1), db.Peers{1: ""}, s, p, syncCh, ingestCh, db.WithTickInterval(testTickInterval))
+	d := db.New(uint64(1), db.Peers{1: ""}, s, p, syncCh, ingestCh, db.WithTickInterval(testTickInterval), db.WithVersionAnnounce())
 	// Registered on d AFTER db.New, like cmd/node.go: the loopback needs d as
 	// its Proposer. Same parser map underneath, so wal builds see it too.
 	d.AddSyncableParser("loopback", &loopback.SyncableParser{Proposer: d})
@@ -261,6 +261,7 @@ func TestLoopback_Rematerialize(t *testing.T) {
 		return len(sink.onTopic("canon")) >= 3
 	}, 15*time.Second, 10*time.Millisecond, "initial derivation never completed")
 
+	awaitVersionAnnounced(t, d)
 	require.NoError(t, d.RematerializeSyncable(testCtx(t), "canonizer"))
 
 	// The replay re-derives every row; the record clears on completion.

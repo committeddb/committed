@@ -160,6 +160,16 @@ func newEngineFull(t *testing.T, dbOpts []db.Option, httpOpts []http.Option) *en
 	// http layer's handling of projection configs is testable against a
 	// real admission.
 	p.AddSyncableParser("projection", recParser)
+	// Two more kinds over the same recorder, for the verbs' capability arms:
+	// "remat" converges in place (the rematerialize accepted path), and
+	// "attached" tears down without dropping and says its destination is not
+	// committed's (the rebuild refusal).
+	rematParser := kindSyncableParser{&clusterfakes.FakeSyncableParser{}, "remat"}
+	rematParser.ParseReturns(rematSink{sink}, nil)
+	p.AddSyncableParser("remat", rematParser)
+	attachedParser := kindSyncableParser{&clusterfakes.FakeSyncableParser{}, "attached"}
+	attachedParser.ParseReturns(attachedSink{sink}, nil)
+	p.AddSyncableParser("attached", attachedParser)
 
 	// Database and ingestable plugin seams, same pattern: a "recorder" kind
 	// whose parser admits real configs and hands the engine controllable
@@ -252,6 +262,15 @@ func (e *engine) addType(t *testing.T, id, name string) string {
 func (e *engine) addRecorderSyncable(t *testing.T, id, topic string) {
 	t.Helper()
 	body := fmt.Sprintf("[syncable]\nname = %q\ntype = \"recorder\"\n[recorder]\ntopic = %q\n", id, topic)
+	w := e.doTOML(t, "POST", "/v1/syncable/"+id, body)
+	require.Equal(t, 200, w.Code, w.Body.String())
+}
+
+// addSyncableOfKind POSTs a syncable of one of the fixture's other kinds
+// ("remat", "attached"), whose config section is named after the kind.
+func (e *engine) addSyncableOfKind(t *testing.T, id, kind, topic string) {
+	t.Helper()
+	body := fmt.Sprintf("[syncable]\nname = %q\ntype = %q\n[%s]\ntopic = %q\n", id, kind, kind, topic)
 	w := e.doTOML(t, "POST", "/v1/syncable/"+id, body)
 	require.Equal(t, 200, w.Code, w.Body.String())
 }
@@ -386,3 +405,32 @@ func (p recorderSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []stri
 	}
 	return nil
 }
+
+// kindSyncableParser is recorderSyncableParser for a kind whose config
+// section carries the kind's own name.
+type kindSyncableParser struct {
+	*clusterfakes.FakeSyncableParser
+	kind string
+}
+
+func (p kindSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
+	if t := v.GetString(p.kind + ".topic"); t != "" {
+		return []string{t}
+	}
+	return nil
+}
+
+// rematSink is the recorder with in-place convergence: the rematerialize
+// verb's accepted path.
+type rematSink struct{ *recorderSink }
+
+func (rematSink) CanRematerialize() bool                               { return true }
+func (rematSink) BeginRematerialization(context.Context, uint64) error { return nil }
+func (rematSink) CompleteRematerialization(context.Context) error      { return nil }
+
+// attachedSink is the recorder whose destination committed did not create:
+// a teardown drops nothing, and it says so when asked.
+type attachedSink struct{ *recorderSink }
+
+func (attachedSink) Teardown(bool) (bool, error)                   { return false, nil }
+func (attachedSink) OwnsDestination(context.Context) (bool, error) { return false, nil }

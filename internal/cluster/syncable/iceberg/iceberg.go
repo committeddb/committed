@@ -216,6 +216,16 @@ func (s *Syncable) dropNamespaceIfOwnedAndEmpty(ctx context.Context) error {
 	return nil
 }
 
+// OwnsDestination implements cluster.Teardownable: the table property
+// says committed created it, or there is no table yet.
+func (s *Syncable) OwnsDestination(ctx context.Context) (bool, error) {
+	owned, present, err := s.owned(ctx)
+	if err != nil {
+		return false, err
+	}
+	return !present || owned, nil
+}
+
 var _ cluster.Teardownable = (*Syncable)(nil)
 
 const (

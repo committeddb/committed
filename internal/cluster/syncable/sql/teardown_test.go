@@ -1,6 +1,7 @@
 package sql_test
 
 import (
+	"context"
 	"database/sql/driver"
 	"errors"
 	"testing"
@@ -161,4 +162,37 @@ func TestSyncable_Teardown_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, dropped)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// OwnsDestination is the rebuild verb's admission question: yes for a table
+// committed created (the note says so) and for a table that does not exist
+// yet (Init will create and claim it); no for a table committed attached to,
+// whether it carries a not-owned note or none at all.
+func TestSyncable_OwnsDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rows    *sqlmock.Rows
+		absent  bool // the mock answers "no such table"
+		wantOwn bool
+	}{
+		{"owned note", noteRows(true), false, true},
+		{"not-owned note, table exists", noteRows(false), false, false},
+		{"no note, table exists", sqlmock.NewRows([]string{"rendering_version", "owned"}), false, false},
+		{"no note, no table", sqlmock.NewRows([]string{"rendering_version", "owned"}), true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dialect, mock, err := testdialects.NewSQLMockDialect()
+			require.NoError(t, err)
+			dialect.CreatesTables = tc.absent
+			db, err := sql.NewDB(dialect, "")
+			require.NoError(t, err)
+			config := teardownConfig()
+			mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs(config.Table).WillReturnRows(tc.rows)
+
+			owns, err := sql.New(db, config).OwnsDestination(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, tc.wantOwn, owns)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }

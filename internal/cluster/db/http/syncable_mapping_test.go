@@ -39,6 +39,7 @@ func TestWriteRebuildError_Mapping(t *testing.T) {
 		{fmt.Errorf("%w: zone z-1 unserved", cluster.ErrZonePinUnsatisfiable), 503, "pin_unsatisfiable"},
 		{fmt.Errorf("%w: moved", cluster.ErrNotSyncableOwner), 503, "not_syncable_owner"},
 		{fmt.Errorf("%w: rebuild aborted", cluster.ErrWorkerWedged), 503, "worker_wedged"},
+		{cluster.ErrDestinationNotOwned, 409, "destination_not_owned"},
 		{io.ErrUnexpectedEOF, 500, "internal_error"},
 	} {
 		t.Run(tc.wantCode, func(t *testing.T) {
@@ -62,6 +63,7 @@ func TestWriteRematerializeError_Mapping(t *testing.T) {
 		{fmt.Errorf("%w: zone z-1 unserved", cluster.ErrZonePinUnsatisfiable), 503, "pin_unsatisfiable"},
 		{fmt.Errorf("%w: moved", cluster.ErrNotSyncableOwner), 503, "not_syncable_owner"},
 		{fmt.Errorf("%w: drain timed out", cluster.ErrWorkerWedged), 503, "worker_wedged"},
+		{&cluster.ClusterBelowFeatureLevelError{Feature: "rematerialization", Required: 6, ClusterMin: 5}, 503, "cluster_below_feature_level"},
 		{io.ErrUnexpectedEOF, 500, "internal_error"},
 	} {
 		t.Run(tc.wantCode, func(t *testing.T) {
