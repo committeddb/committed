@@ -18,6 +18,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.uber.org/zap"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/http"
 	"github.com/committeddb/committed/internal/cluster/db/httptransport"
@@ -423,19 +424,7 @@ image can be templated per-node by an orchestrator:
 		// above). These three need *d (the ingestable parser) or are simply
 		// fine to register here alongside it.
 		d.AddIngestableParser("sql", ingestableParser(d, d, d))
-		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
-		// The projection parser. The "sql-projection" spelling was removed in
-		// 0.8.0; db/parser's removal ledger names the rename at POST.
-		projectionParser := &syncsql.ProjectionSyncableParser{
-			Metrics: m,
-			// Stage stores (internal-stage state) live beside the node's
-			// data: derived, node-local, rebuildable from the log.
-			StoreDir: filepath.Join(dataDir, "projections"),
-		}
-		d.AddSyncableParser("projection", projectionParser)
-		d.AddSyncableParser("http", &synchttp.SyncableParser{})
-		d.AddSyncableParser("loopback", &loopback.SyncableParser{Proposer: d})
-		d.AddSyncableParser("iceberg", &synciceberg.SyncableParser{})
+		registerSyncableKinds(d, d, m, dataDir)
 		// Inject the entity-schema compilers so ProposeType rejects a broken
 		// schema at POST /type and Propose's validation tripwire can check
 		// announce-typed payloads (the compilers live in the http layer, which
@@ -627,4 +616,31 @@ func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReade
 
 func init() {
 	rootCmd.AddCommand(nodeCmd)
+}
+
+// syncableRegistry is the one method registerSyncableKinds needs from the
+// engine, so a test can hand it a recorder.
+type syncableRegistry interface {
+	AddSyncableParser(name string, p cluster.SyncableParser)
+}
+
+// syncableKinds is every syncable kind a node serves, in registration order.
+// Pinned by TestRegisterSyncableKinds: a kind added under
+// internal/cluster/syncable must be added here, or no config of it admits.
+var syncableKinds = []string{"sql", "projection", "http", "loopback", "iceberg"}
+
+// registerSyncableKinds wires the syncable kinds onto the engine. The
+// "sql-projection" spelling was removed in 0.8.0; db/parser's removal ledger
+// names the rename at POST.
+func registerSyncableKinds(reg syncableRegistry, proposer loopback.Proposer, m *metrics.Metrics, dataDir string) {
+	reg.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
+	reg.AddSyncableParser("projection", &syncsql.ProjectionSyncableParser{
+		Metrics: m,
+		// Stage stores (internal-stage state) live beside the node's data:
+		// derived, node-local, rebuildable from the log.
+		StoreDir: filepath.Join(dataDir, "projections"),
+	})
+	reg.AddSyncableParser("http", &synchttp.SyncableParser{})
+	reg.AddSyncableParser("loopback", &loopback.SyncableParser{Proposer: proposer})
+	reg.AddSyncableParser("iceberg", &synciceberg.SyncableParser{})
 }

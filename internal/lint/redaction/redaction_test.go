@@ -80,7 +80,7 @@ func TestFixtures(t *testing.T) {
 func TestNoUnredactedTextReachesASurface(t *testing.T) {
 	root := moduleRoot(t)
 	cfg := &packages.Config{Mode: redaction.LoadMode, Dir: root}
-	pkgs, err := packages.Load(cfg, "./internal/...")
+	pkgs, err := packages.Load(cfg, "./internal/...", "./cmd/...")
 	require.NoError(t, err)
 	require.False(t, packages.PrintErrors(pkgs) > 0, "module packages must load cleanly")
 	require.NotEmpty(t, pkgs)

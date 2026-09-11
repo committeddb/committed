@@ -76,11 +76,13 @@ docker/release:
 test:
 	go test -short ./... -cover
 	go test -C third_party/forked/tidwall-wal ./...
+	go test -C third_party/forked/go-mysql ./replication/
 
 test/ci:
 	go build -ldflags="$(LDFLAGS)"
 	go test -race ./... -cover
 	go test -C third_party/forked/tidwall-wal -race ./...
+	go test -C third_party/forked/go-mysql -race ./replication/
 
 test-all:
 	go build -ldflags="$(LDFLAGS)"

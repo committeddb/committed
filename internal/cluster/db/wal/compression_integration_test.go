@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/committeddb/committed/internal/cluster/backup"
 )
 
 // The event-log compression integration: segments compress in the background
@@ -164,4 +167,45 @@ func TestEventLogCompression_CorruptCompressedSegmentIsLoud(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, LogCorrupt, d.Status)
 	require.Contains(t, d.Detail, "zstd frame checksum")
+}
+
+// TestEventLogCompression_BackupRestoreRoundTrip: a backup taken over a
+// compressed log carries the .zst segments as they are, and the restored
+// node opens the mixed log and reads every entry back — the door between
+// compression and disaster recovery.
+func TestEventLogCompression_BackupRestoreRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
+	require.NoError(t, err)
+	const n = 200
+	seedEventLog(t, s, 1, n)
+	eventsDir := filepath.Join(dir, "events")
+	require.Eventually(t, func() bool { return countZst(t, eventsDir) >= 2 },
+		60*time.Second, 50*time.Millisecond, "the sealer never compressed sealed segments")
+	require.NoError(t, s.Close())
+	compressed := countZst(t, eventsDir)
+
+	scaffoldNode(t, dir) // the raft logs and metadata backup.Create requires
+	var archive bytes.Buffer
+	_, err = backup.Create(&archive, dir, 1, time.Now())
+	require.NoError(t, err)
+
+	target := filepath.Join(t.TempDir(), "restored")
+	_, err = backup.Restore(bytes.NewReader(archive.Bytes()), target, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, compressed, countZst(t, filepath.Join(target, "events")), "compressed segments travel as they are")
+
+	d, err := DiagnoseLog(filepath.Join(target, "events"))
+	require.NoError(t, err)
+	require.Equal(t, LogClean, d.Status, d.Detail)
+	require.Equal(t, n, d.Records)
+
+	s2, err := Open(target, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(time.Hour))
+	require.NoError(t, err)
+	defer func() { _ = s2.Close() }()
+	for i := 1; i <= n; i++ {
+		entry, rerr := s2.readEventAt(uint64(i))
+		require.NoError(t, rerr, "event %d", i)
+		require.Contains(t, string(entry), fmt.Sprintf(`{"entity_id":%d,`, i))
+	}
 }
