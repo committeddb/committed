@@ -9,7 +9,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-// SinkRenderingVersion is the version of every rendering the SQL sink family
+// RenderingVersion is the version of every rendering the SQL sink family
 // writes into a destination: projected column values, the aggregate and
 // forEach sidecars, the keyless applied log. It is the destination's twin of
 // the stage store's format version (stages/store_format_reference_test.go):
@@ -18,20 +18,20 @@ import (
 // destination stamped with another version parks until it is converged
 // again — rematerialize for a keyed sink, delete + re-POST otherwise — so
 // rows rendered under two rules never share a table. The docker reference
-// (sink_rendering_reference_test.go) fails when the bytes change under the
+// (destination_reference_test.go) fails when the bytes change under the
 // current number.
-const SinkRenderingVersion uint64 = 1
+const RenderingVersion uint64 = 1
 
-// SinkMetaTable is the per-database helper table holding committed's note
+// DestinationsTable is the per-database helper table holding committed's note
 // on each destination table: (table_name, rendering_version, owned,
 // materialized_at). It lives beside the rows it describes so it moves,
 // drops, and restores with them. rendering_version says which version wrote
 // the rows; owned says whether committed created the table — and so whether
 // a delete drops it (the protocol: delete what we created, leave what we
 // didn't; keepData hands a created table over by clearing owned).
-const SinkMetaTable = "committed__sink_meta"
+const DestinationsTable = "committed__destinations"
 
-// destinationNote is one row of SinkMetaTable.
+// destinationNote is one row of DestinationsTable.
 type destinationNote struct {
 	version uint64
 	owned   bool
@@ -40,12 +40,12 @@ type destinationNote struct {
 // readNote reads table's note, creating the meta table on first contact.
 // present is false for a table committed has never noted.
 func readNote(ctx context.Context, db *gosql.DB, dialect Dialect, table string) (note destinationNote, present bool, err error) {
-	if err := dialect.EnsureSinkMeta(ctx, db); err != nil {
+	if err := dialect.EnsureDestinations(ctx, db); err != nil {
 		return destinationNote{}, false, err
 	}
 	var version int64
 	var owned bool
-	err = db.QueryRowContext(ctx, dialect.SinkMetaSelectSQL(), table).Scan(&version, &owned)
+	err = db.QueryRowContext(ctx, dialect.DestinationSelectSQL(), table).Scan(&version, &owned)
 	switch {
 	case errors.Is(err, gosql.ErrNoRows):
 		return destinationNote{}, false, nil
@@ -57,14 +57,14 @@ func readNote(ctx context.Context, db *gosql.DB, dialect Dialect, table string) 
 	return destinationNote{version: uint64(version), owned: owned}, true, nil
 }
 
-// stampRendering records SinkRenderingVersion as table's rendering,
+// stampRendering records RenderingVersion as table's rendering,
 // leaving ownership as it is (absent rows are inserted not owned: a table
 // committed did not create).
 func stampRendering(ctx context.Context, db *gosql.DB, dialect Dialect, table string) error {
-	if err := dialect.EnsureSinkMeta(ctx, db); err != nil {
+	if err := dialect.EnsureDestinations(ctx, db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, dialect.SinkMetaStampSQL(), table, int64(SinkRenderingVersion)); err != nil { //nolint:gosec // G115: a small constant
+	if _, err := db.ExecContext(ctx, dialect.DestinationStampSQL(), table, int64(RenderingVersion)); err != nil { //nolint:gosec // G115: a small constant
 		return fmt.Errorf("stamp rendering for %s: %w", table, err)
 	}
 	return nil
@@ -73,10 +73,10 @@ func stampRendering(ctx context.Context, db *gosql.DB, dialect Dialect, table st
 // claimOwnership records that committed created table: owned, rendered by
 // this binary.
 func claimOwnership(ctx context.Context, db *gosql.DB, dialect Dialect, table string) error {
-	if err := dialect.EnsureSinkMeta(ctx, db); err != nil {
+	if err := dialect.EnsureDestinations(ctx, db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, dialect.SinkMetaClaimSQL(), table, int64(SinkRenderingVersion)); err != nil { //nolint:gosec // G115: a small constant
+	if _, err := db.ExecContext(ctx, dialect.DestinationClaimSQL(), table, int64(RenderingVersion)); err != nil { //nolint:gosec // G115: a small constant
 		return fmt.Errorf("claim ownership of %s: %w", table, err)
 	}
 	return nil
@@ -85,10 +85,10 @@ func claimOwnership(ctx context.Context, db *gosql.DB, dialect Dialect, table st
 // disown hands table over: committed keeps its note but no longer owns the
 // table, so no later delete drops it.
 func disown(ctx context.Context, db *gosql.DB, dialect Dialect, table string) error {
-	if err := dialect.EnsureSinkMeta(ctx, db); err != nil {
+	if err := dialect.EnsureDestinations(ctx, db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, dialect.SinkMetaDisownSQL(), table); err != nil {
+	if _, err := db.ExecContext(ctx, dialect.DestinationDisownSQL(), table); err != nil {
 		return fmt.Errorf("disown %s: %w", table, err)
 	}
 	return nil
@@ -96,10 +96,10 @@ func disown(ctx context.Context, db *gosql.DB, dialect Dialect, table string) er
 
 // deleteNote removes table's note: the table is gone, so is what described it.
 func deleteNote(ctx context.Context, db *gosql.DB, dialect Dialect, table string) error {
-	if err := dialect.EnsureSinkMeta(ctx, db); err != nil {
+	if err := dialect.EnsureDestinations(ctx, db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, dialect.SinkMetaDeleteSQL(), table); err != nil {
+	if _, err := db.ExecContext(ctx, dialect.DestinationDeleteSQL(), table); err != nil {
 		return fmt.Errorf("delete destination note for %s: %w", table, err)
 	}
 	return nil
@@ -145,7 +145,7 @@ func (p *Projection) OwnsDestination(ctx context.Context) (bool, error) {
 }
 
 // RenderingVersion implements cluster.RenderingStamped.
-func (c *Syncable) RenderingVersion() uint64 { return SinkRenderingVersion }
+func (c *Syncable) RenderingVersion() uint64 { return RenderingVersion }
 
 // RenderingStamp implements cluster.RenderingStamped.
 func (c *Syncable) RenderingStamp(ctx context.Context) (uint64, bool, error) {
@@ -159,7 +159,7 @@ func (c *Syncable) StampRendering(ctx context.Context) error {
 }
 
 // RenderingVersion implements cluster.RenderingStamped.
-func (p *Projection) RenderingVersion() uint64 { return SinkRenderingVersion }
+func (p *Projection) RenderingVersion() uint64 { return RenderingVersion }
 
 // RenderingStamp implements cluster.RenderingStamped.
 func (p *Projection) RenderingStamp(ctx context.Context) (uint64, bool, error) {

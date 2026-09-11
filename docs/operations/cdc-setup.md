@@ -41,7 +41,7 @@ checkpoint and de-duplicates any re-delivered changes by source transaction
 and sequence. You do not get duplicate stream changes in the topic across a
 restart.
 
-A change-stream transaction lands in the topic as **one atomic unit**: sinks
+A change-stream transaction lands in the topic as **one atomic unit**: syncables
 apply all of its rows in a single destination transaction, so consumers never
 observe a partial source transaction — with one bounded exception. A source
 transaction too large to fit a single committed proposal (larger than the
@@ -107,7 +107,7 @@ checkpoint rides the final row of each read window — so a restart mid-window
 re-emits that window and rows the crash had already committed appear in the
 log again. That is the same semantics as a reconciling refresh (which
 re-observes every row): keyed upserts, last write wins, consumers converge
-identically. A keyless/append sink has no key to converge on, so it appends each
+identically. A keyless syncable has no key to converge on, so it appends each
 re-observation as another row — see [History tables vs. read
 models](../read-models.md#history-tables-vs-read-models).
 
@@ -167,12 +167,12 @@ rows downstream: rebuilding an ingestable, the Postgres lost-slot recovery
 is **upsert-only** — it enumerates the rows that *exist* in the source, so it has
 no way to emit a delete for a row removed while it wasn't watching. committed
 reconciles those deletions with a **generation watermark** instead of a diff — on
-sinks that can apply it. **Keyed** SQL sinks (and HTTP receivers that honor
-`op:"refresh"`) reconcile automatically; **keyless/append and projection sinks
-cannot sweep and are NOT reconciled** — see [Sinks that don't
-reconcile](#sinks-that-dont-reconcile) below.
+destinations that can apply it. **Keyed** SQL syncables (and HTTP receivers that honor
+`op:"refresh"`) reconcile automatically; **keyless and projection syncables
+cannot sweep and are NOT reconciled** — see [Syncables that don't
+reconcile](#syncables-that-dont-reconcile) below.
 
-Each keyed SQL sink carries one committed-managed column, `committed_generation`.
+Each keyed SQL syncable carries one committed-managed column, `committed_generation`.
 Every ingest snapshot runs at a generation `G` (a per-topic number that increases
 by one on each full refresh), stamps every row it emits with `G`, and closes with
 a one-entity **refresh-boundary marker** carrying `G`. The syncable applies the
@@ -180,11 +180,11 @@ stream in commit order: each upsert writes the row *and* its generation; the
 marker runs
 
 ```
-DELETE FROM <sink> WHERE committed_generation >= 1 AND committed_generation < G
+DELETE FROM <table> WHERE committed_generation >= 1 AND committed_generation < G
 ```
 
 This is deletion-by-omission: a full refresh re-stamps every surviving row at `G`,
-so anything the sink is still holding *below* `G` was not re-emitted — it no longer
+so anything the destination is still holding *below* `G` was not re-emitted — it no longer
 exists in the source — and the sweep removes it. (The `>= 1` floor spares
 generation-0 rows: direct `POST /v1/proposal` writes committed does not own.)
 
@@ -194,35 +194,35 @@ while nothing is watching; then the topic is refreshed again at generation 2:
 
 ```
 gen-1 refresh:  upsert 1,2,3 @g1 ; marker g1 → sweep <1 (no-op)
-                sink: 1→g1, 2→g1, 3→g1
+                destination: 1→g1, 2→g1, 3→g1
 (row 2 deleted at the source; nothing observes it)
 gen-2 refresh:  upsert 1,3   @g2 ; marker g2 → sweep <2
-                sink: 1→g2, 3→g2         (row 2, still g1, is swept)
+                destination: 1→g2, 3→g2         (row 2, still g1, is swept)
 ```
 
 Two consequences worth internalizing:
 
-- **The delete is a sink-side `DELETE`, never a log entry.** The commit log holds
-  no delete for row 2 — it only ever recorded upserts. Row 2 leaves the sink
+- **The delete is a destination-side `DELETE`, never a log entry.** The commit log holds
+  no delete for row 2 — it only ever recorded upserts. Row 2 leaves the destination
   because the marker's sweep removes what the refresh did not re-stamp.
 - **No duplication despite re-emitting every row.** The log is append-only, so the
-  re-snapshot appends a second copy of the surviving rows — but the sink is keyed,
+  re-snapshot appends a second copy of the surviving rows — but the destination is keyed,
   so re-upserting rows 1 and 3 overwrites them in place (`g1 → g2`), not adds them.
 
 > **Removing a table from a multi-table ingestable is rejected** (409,
 > `ingestable_table_removal_requires_recreate`). A refresh re-stamps only the
 > currently-configured tables, so an in-place removal would arm this sweep to
-> silently delete the removed table's rows from keyed sinks at the *next*
+> silently delete the removed table's rows from keyed syncables at the *next*
 > refresh event — possibly months after the config edit — while a syncable
-> replay from the log would resurrect them. To drop a table **and** its sink
+> replay from the log would resurrect them. To drop a table **and** its destination
 > rows, delete and recreate the ingestable (the recreate's snapshot + marker
 > sweeps them as the explicit, immediate semantics of that operation); to keep
 > the rows, keep the table listed. Adding a table remains allowed.
 
 The watermark only holds if each refresh's `G` is **strictly above every
-generation already on the sink**. committed keeps a delete-surviving, per-topic
+generation already on the destination**. committed keeps a delete-surviving, per-topic
 generation high-water mark for exactly this, so a delete-and-recreate on the same
-topic resumes *above* the rows the sink still holds instead of restarting at 1 and
+topic resumes *above* the rows the destination still holds instead of restarting at 1 and
 sweeping nothing. It is also why a topic may have only one ingestable ([above](#one-writer-per-topic)):
 two producers would stamp generations independently and sweep each other's rows.
 
@@ -231,9 +231,9 @@ generation < G`). For an **HTTP** syncable the same reconciliation is delivered
 to your endpoint as an `op:"refresh"` carrying `G`, and the receiver runs the
 sweep — see [writing a webhook receiver](../webhook-receiver.md).
 
-#### Sinks that don't reconcile
+#### Syncables that don't reconcile
 
-A refresh boundary is a **no-op** for two sink shapes, because a generation sweep
+A refresh boundary is a **no-op** for two syncable shapes, because a generation sweep
 has nothing to act on:
 
 - **Keyless/append (history) tables** have no current-row identity — they record
@@ -243,26 +243,26 @@ has nothing to act on:
   downtime-beyond-retention limitation, not a bug).
 - **Projections** fan one source entity out to many/aggregated rows, so a
   topic-level sweep doesn't map onto their shape. After a gap, rows the source
-  deleted **remain in the projection**, and — unlike a keyed sink — **a rebuild
+  deleted **remain in the projection**, and — unlike a keyed syncable — **a rebuild
   does NOT fix it** (the delete was never in the log, and the marker no-ops on
   replay too). Until projection reconciliation is implemented, recovery is
   **manual** (correct the stale rows, or re-derive the projection from a keyed
-  sink that did reconcile).
+  destination that did reconcile).
 
 Both cases log a `WARN` when a re-snapshot boundary reaches them (generation > 1).
 For a **Postgres** source this log is the *only* signal — `reSnapshotRequired`
 stays `false` on Postgres because the dialect auto-re-snapshots, which reconciles
-*keyed* sinks but leaves these two shapes silently affected. Watch for that WARN
+*keyed* syncables but leaves these two shapes silently affected. Watch for that WARN
 if you fan a Postgres topic into a projection or history table.
 
 > **Compliance (RTBF/GDPR).** A source-side *erasure* — a subject deleted at the
 > source for right-to-be-forgotten — lost in the gap is exactly what a keyed
-> sink's sweep removes. On keyless/projection sinks it is **retained**: the
+> destination's sweep removes. On keyless and projection syncables it is **retained**: the
 > subject's PII lingers with no delete. committed's own RTBF path (a delete
-> proposal + event-log scrub) still erases these sinks when the erasure goes
+> proposal + event-log scrub) still erases these destinations when the erasure goes
 > *through* committed; the exposure is specifically a source-side erasure
 > committed never captured. Treat a re-snapshot `WARN` on a PII-bearing
-> keyless/projection sink as a **manual-erasure** action item, not just stale data.
+> keyless or projection syncable as a **manual-erasure** action item, not just stale data.
 
 ### What to watch
 
@@ -309,10 +309,10 @@ GET /v1/ingestable/{id}/status
   fresh snapshot. Always `false` for Postgres — not because a slot can't lose WAL
   (a reaped or dropped slot does), but because the dialect recovers in-band: it
   re-snapshots from the new slot's consistent point and sweeps the rows deleted
-  in the lost window off **keyed** sinks, so for them the gap is reconciled rather
+  in the lost window off **keyed** destinations, so for them the gap is reconciled rather
   than surfaced. Keyless/append and projection consumers of a Postgres topic are
-  neither reconciled nor flagged here — only the sink-side `WARN` signals them
-  (see [Sinks that don't reconcile](#sinks-that-dont-reconcile)).
+  neither reconciled nor flagged here — only the destination-side `WARN` signals them
+  (see [Syncables that don't reconcile](#syncables-that-dont-reconcile)).
 
 The quickstart polls this endpoint to know when the initial snapshot has landed
 (`"caughtUp": true`).
@@ -356,13 +356,13 @@ A few edge cases:
 
 committed replicates `INSERT`, `UPDATE`, and `DELETE`, but **not `TRUNCATE`** — on
 either engine. It has no "clear-all" primitive yet, so a `TRUNCATE` on a watched
-table empties the source but leaves the sink's rows in place — the sink
+table empties the source but leaves the destination's rows in place — the destination
 **diverges** from the source until you reconcile it. committed does not swallow
 this silently: each dropped truncate is logged at `Warn`, naming the affected
 `schema.table`, so you can alert on it:
 
 ```
-TRUNCATE on a watched table is not propagated to the sink; the sink now
+TRUNCATE on a watched table is not propagated to the destination; the destination now
 diverges from the source and must be re-snapshotted to reconcile   tables=[public.movie]
 ```
 
@@ -374,10 +374,10 @@ message above (the `tables` field is the affected `schema.table`).
 To reconcile after a truncate, **re-snapshot** the ingestable (rebuild it from
 zero — see [rebuild.md](rebuild.md)). To avoid the divergence entirely, prefer
 `DELETE FROM <table>` over `TRUNCATE` on watched tables: each row delete
-replicates as a keyed tombstone and clears the sink row-by-row.
+replicates as a keyed tombstone and clears the destination row-by-row.
 
 Full truncate propagation is planned (a clear-all signal applied downstream as
-`DELETE FROM <sink>`); until then this caveat stands.
+`DELETE FROM <table>`); until then this caveat stands.
 
 ---
 
@@ -438,7 +438,7 @@ On its first streaming connection committed runs, idempotently:
 
 - `CREATE PUBLICATION <publication> FOR TABLE <tables>` — only the watched tables
   are in the publication, so the ingest never sees writes to other tables
-  (including a downstream projection's own sink table).
+  (including a downstream projection's own destination table).
 - the logical replication **slot** (`pgoutput`).
 
 You don't create either by hand.
@@ -481,13 +481,13 @@ column is rejected at POST.
 Best applied **when the ingestable is created**: adding the hint to an
 existing ingestable changes that column's payload shape for NEW events only
 (string → object), so a projection folding the topic sees both shapes
-across history. Keyed sinks converge regardless (last write wins); to
+across history. Keyed destinations converge regardless (last write wins); to
 reshape history too, pair the change with a re-snapshot (delete + recreate
 the ingestable, or a slot recreate on Postgres).
 
 > **Why ingest configs carry `connectionString` inline** (while syncables
 > reference a shared `[database]` config by `sql.db`): a `[database]` config is
-> a shared, long-lived **sink** pool that many syncables reuse — one place to
+> a shared, long-lived **destination** pool that many syncables reuse — one place to
 > rotate credentials for a destination. An ingest **source** is different: the
 > worker owns its connections (the replication-protocol stream plus short-lived
 > SQL sessions), opens them itself, and tears them down with the worker — there
@@ -691,7 +691,7 @@ whole database — see
 [Multiple topics from one ingestable](#multiple-topics-from-one-ingestable-all-sql-engines).
 
 **TLS.** A MySQL connection takes the same libpq-style TLS parameters as
-PostgreSQL, so a MySQL source (or sink) is secured the same way. Use the
+PostgreSQL, so a MySQL source (or destination) is secured the same way. Use the
 `mysqls://` scheme (shorthand for full verification) or an explicit `?sslmode=`:
 
 - `sslmode=disable` — no TLS (the default for `mysql://`)
@@ -716,7 +716,7 @@ entry (`["widget"]`) resolves to the connection's database. The connection user
 needs the usual read + `REPLICATION` grants on the qualified schema.
 
 A complete worked MySQL setup — source DDL, the grant, an ingestable, and a
-syncable projecting back into a MySQL sink table — is exercised end-to-end by the
+syncable projecting back into a MySQL destination table — is exercised end-to-end by the
 `e2e/cdc` MySQL tests (`e2e/cdc/harness/mysql.go`, `e2e/cdc/mysql_test.go`); the
 DDL and TOML there are copy-pasteable.
 
@@ -924,8 +924,8 @@ a mixed-version cluster never spells one key two ways. Once the cluster is
 fully upgraded, each SQL Server ingestable **re-snapshots once** the next
 time its worker starts (a restart or an ownership change): every row
 re-emits at a bumped refresh epoch with canonical keys, and the closing
-refresh-boundary marker sweeps the uppercase rows from keyed sinks. Keyless
-(append) sinks keep both spellings until rebuilt. The worker logs
+refresh-boundary marker sweeps the uppercase rows from keyed syncables. Keyless
+(append) destinations keep both spellings until rebuilt. The worker logs
 `uniqueidentifier rendering changed to canonical lowercase` when it does
 this.
 

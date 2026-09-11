@@ -187,8 +187,8 @@ After the last node:
 > to the canonical lowercase `uniqueidentifier` spelling (feature level 5,
 > see [cdc-setup.md](cdc-setup.md#uniqueidentifier-rendering)) keeps that
 > spelling in its checkpoint; an older binary would resume it rendering
-> uppercase again and spell new rows differently from the rows on the sink —
-> treat the re-key as a one-way transition and rebuild the sink if you must
+> uppercase again and spell new rows differently from the rows on the destination —
+> treat the re-key as a one-way transition and rebuild the destination if you must
 > roll back past it. Finally, do not roll a node back while a
 > re-materialization is in progress (`rematerializing` on the syncable's
 > status): the verb only starts once every member is 0.8.0 (feature level
@@ -237,7 +237,7 @@ same quorum rule applies in reverse.
   `Protobuf`); any other was accepted before and validated nothing.
 - **0.8.0 leaves a note in each SQL destination** saying which version of
   committed wrote its rows: one row per projected table in a small
-  `committed__sink_meta` table in the destination database (see
+  `committed__destinations` table in the destination database (see
   [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
   Nothing stops on this upgrade: existing tables get the note the first
   time 0.8.0 touches them. The note also records whether committed created

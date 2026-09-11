@@ -55,25 +55,25 @@ type Dialect interface {
 	// in the destination — asked before CREATE TABLE IF NOT EXISTS, which
 	// cannot say whether it created, so ownership is recorded truthfully.
 	TableExists(ctx context.Context, db *gosql.DB, table string) (bool, error)
-	// EnsureSinkMeta creates the per-database destination-note table
-	// (SinkMetaTable) if it is absent, with every column. Idempotent.
-	EnsureSinkMeta(ctx context.Context, db *gosql.DB) error
-	// SinkMetaSelectSQL selects (rendering_version, owned) by table_name
+	// EnsureDestinations creates the per-database destination-note table
+	// (DestinationsTable) if it is absent, with every column. Idempotent.
+	EnsureDestinations(ctx context.Context, db *gosql.DB) error
+	// DestinationSelectSQL selects (rendering_version, owned) by table_name
 	// (one placeholder).
-	SinkMetaSelectSQL() string
-	// SinkMetaStampSQL inserts (table_name, rendering_version, owned=false)
+	DestinationSelectSQL() string
+	// DestinationStampSQL inserts (table_name, rendering_version, owned=false)
 	// or, on conflict, updates rendering_version ONLY — ownership is never
 	// touched by a stamp. Placeholders: table_name, rendering_version.
-	SinkMetaStampSQL() string
-	// SinkMetaClaimSQL inserts (table_name, rendering_version, owned=true)
+	DestinationStampSQL() string
+	// DestinationClaimSQL inserts (table_name, rendering_version, owned=true)
 	// or, on conflict, sets both: committed just created the table.
 	// Placeholders: table_name, rendering_version.
-	SinkMetaClaimSQL() string
-	// SinkMetaDisownSQL sets owned=false for table_name (one placeholder):
+	DestinationClaimSQL() string
+	// DestinationDisownSQL sets owned=false for table_name (one placeholder):
 	// the operator kept the table; committed will not drop it again.
-	SinkMetaDisownSQL() string
-	// SinkMetaDeleteSQL deletes the row for table_name (one placeholder).
-	SinkMetaDeleteSQL() string
+	DestinationDisownSQL() string
+	// DestinationDeleteSQL deletes the row for table_name (one placeholder).
+	DestinationDeleteSQL() string
 	// CreateEnrichedUpsertSQL is CreateSQL for a projection rule with spine
 	// lookup enrichments: enriched columns' VALUES entries are scalar
 	// subqueries against the lookup dimension table — `(SELECT
@@ -282,7 +282,7 @@ func validateMappings(mappings []Mapping) error {
 		// at Init — so reject it at config time with an actionable message.
 		if strings.EqualFold(strings.TrimSpace(m.Column), GenerationColumn) {
 			return fmt.Errorf(
-				"mapping column %q is reserved: committed manages a %q column on keyed sinks for reconciling refreshes; rename this mapping",
+				"mapping column %q is reserved: committed manages a %q column on keyed tables for reconciling refreshes; rename this mapping",
 				m.Column, GenerationColumn)
 		}
 		if m.JsonPath != wholePayloadPath {

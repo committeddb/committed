@@ -771,7 +771,7 @@ paths:
         from the node's AWS credential chain / catalog token),
         `iceberg.namespace`, `iceberg.table`, optional `iceberg.warehouse`
         and `[iceberg.props]` FileIO properties (s3.endpoint …). See
-        docs/operations/iceberg-sink.md.
+        docs/operations/iceberg-syncable.md.
 
         `loopback` derives a topic INSIDE the cluster: it consumes
         `loopback.topic`, applies `[[loopback.mappings]]` (`jsonPath` →
@@ -790,7 +790,7 @@ paths:
 
         `syncable.zone` (optional) pins the syncable to a node in that zone
         (nodes announce theirs via `COMMITTED_ZONE`), so sync egress to a
-        same-zone sink never pays a redundant cross-zone crossing. STRICT
+        same-zone destination never pays a redundant cross-zone crossing. STRICT
         pin: if no current member announces the zone, the syncable stalls
         loudly (status `pinUnsatisfiable`) and never silently falls back to
         the leader; it catches up completely when a node in the zone
@@ -1087,7 +1087,7 @@ paths:
       summary: Mark a dead-lettered proposal resolved out-of-band
       description: |
         The third dead-letter verb, for the superseded case: a later event
-        already corrected the sink row (e.g. the source was fixed and CDC
+        already corrected the destination row (e.g. the source was fixed and CDC
         delivered the correction), so REPLAY would regress the row — and
         leaving the record inflates `deadLetters` forever, making the honest
         completeness check (`caughtUp && deadLetters == 0 && workerState ==
@@ -1305,9 +1305,9 @@ paths:
   /v1/syncable/{id}/rematerialize:
     post:
       tags: [syncable]
-      summary: Re-materialize a syncable's keyed sink in place, non-destructively
+      summary: Re-materialize a syncable's keyed destination in place, non-destructively
       description: |
-        The non-destructive sibling of `/rebuild`: the sink keeps serving
+        The non-destructive sibling of `/rebuild`: the destination keeps serving
         reads while the worker replays the topic from index 0 through the
         CURRENT projection + interpretation. Keyed upserts converge rows in
         place; every re-emitted row is stamped with the replay's epoch (a
@@ -1323,9 +1323,9 @@ paths:
         replicated, and a resumed replay keeps converging under the same
         epoch.
 
-        Sinks that converge a replay in place only — a keyed `sql` mirror,
+        Syncables that converge a replay in place only — a keyed `sql` mirror,
         or a loopback into a snapshot-kind topic: keyless/append, webhook,
-        projection, and Iceberg sinks refuse with 409 `not_rematerializable`
+        projection, and Iceberg syncables refuse with 409 `not_rematerializable`
         (use `/rebuild` or a blue-green replacement). Leader-pinned. The verb needs every
         member on a binary that knows it (cluster feature level 6): on a
         mixed-version cluster it answers 503 `cluster_below_feature_level`
@@ -1361,7 +1361,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: |
-            `code: not_rematerializable` — this sink cannot converge a replay
+            `code: not_rematerializable` — this syncable cannot converge a replay
             in place (keyless/append, webhook, projection, Iceberg); the
             message names the alternatives.
           content:
@@ -1399,7 +1399,7 @@ paths:
         dropped (the ownership protocol): on a table you created and pointed
         the syncable at, the verb refuses with 409 `destination_not_owned`
         before anything changes — drop it yourself and re-POST, or
-        `/rematerialize` a keyed sink in place. Schema changes are NOT done
+        `/rematerialize` a keyed syncable in place. Schema changes are NOT done
         this way (DELETE then re-POST with the new schema). Re-runnable and
         idempotent; leader-pinned. Returns 202 once the reset + drop/recreate
         are done; the replay that refills the table runs afterward (poll
@@ -1435,7 +1435,7 @@ paths:
             `code: destination_not_owned` — the destination was not created by
             committed, so it cannot be dropped for a clean rebuild. Refused
             before the checkpoint reset; nothing changed. Drop the table
-            yourself and re-POST the config, or `/rematerialize` a keyed sink.
+            yourself and re-POST the config, or `/rematerialize` a keyed syncable.
           content:
             application/json:
               schema:
@@ -2768,7 +2768,7 @@ components:
             Accompanies the migration-edit advisory: the always-current
             syncables consuming the edited type's topic. Each must be
             re-materialized (`POST /v1/syncable/{id}/rematerialize` — keyed
-            sinks converge in place) or rebuilt for the migration fix to
+            destinations converge in place) or rebuilt for the migration fix to
             reach rows already synced through the previous transform.
             As-stored consumers deliver written bytes and are unaffected.
           items:
@@ -3009,7 +3009,7 @@ components:
           description: |
             How many proposals this syncable has skipped (dead-lettered),
             permanently or by an operator's manual skip, and NOT yet
-            acknowledged. Always present. A sink can be caught up AND have
+            acknowledged. Always present. A syncable can be caught up AND have
             skipped rows, so the honest completeness check is `caughtUp &&
             deadLetters == 0 && workerState == "running"`. List the records
             via GET /syncable/{id}/errors; a successful

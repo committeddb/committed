@@ -30,7 +30,7 @@ Committed is specifically NOT a databse designed for querying.
 - **Actual** — a committed fact: the Proposal that consensus ordered and
   wrote to the log at a fixed Index. You propose Proposals, you *sync*
   Actuals — a Syncable is handed Actuals (in Index order), never Proposals.
-- **Database** — connection config for an external SQL sink that syncables
+- **Database** — connection config for an external SQL syncable that syncables
   reference (MySQL or PostgreSQL; ingestables carry their own connection
   string inline).
 - **Ingestable** — pulls data into the log from an external source.
@@ -45,7 +45,7 @@ Committed is specifically NOT a databse designed for querying.
   [docs/read-models.md](docs/read-models.md)). Destinations today:
   SQL (MySQL/PostgreSQL), HTTP, Apache Iceberg on S3 (`iceberg` — a
   current-state warehouse landing zone for Athena/Spectrum/S3 Tables;
-  see [docs/operations/iceberg-sink.md](docs/operations/iceberg-sink.md))
+  see [docs/operations/iceberg-syncable.md](docs/operations/iceberg-syncable.md))
   — and the cluster itself (`loopback`),
   which derives a new topic from a source topic so one transform serves
   N dumb consumers ([docs/read-models.md](docs/read-models.md)
@@ -276,7 +276,7 @@ shape, and the structured violations (paths and types only — never sample
 values), plus the source position when it arrived via CDC. Events are keyed
 `typeID:version:fingerprint` and delivery is at-least-once: one event per
 distinct shape (replicated dedupe, surviving restarts and failover), with the
-rare concurrent-detection duplicate converging in keyed sinks. The tripwire
+rare concurrent-detection duplicate converging in keyed syncables. The tripwire
 runs on every write path — CDC ingest (snapshot and streaming) and direct
 proposals — and it never pauses or fails a write; for a schema to catch
 *added* fields, declare `additionalProperties: false`.
@@ -322,12 +322,12 @@ A restatement also marks dependent syncables **stale**
 it landed were derived under the superseded reading. Staleness is loud and
 queryable, never auto-healed — re-derivation is yours to trigger:
 `POST /v1/syncable/{id}/rematerialize` replays the topic from index 0 through
-the current projection + interpretation while the keyed sink keeps serving
+the current projection + interpretation while the keyed syncable keeps serving
 (rows converge in place; a completion sweep removes rows the replay no longer
-produces), or blue-green a replacement for sink shapes that can't converge
+produces), or blue-green a replacement for syncable shapes that can't converge
 in place. `GET /v1/restatement` lists the registry.
 
-Configure a database to write into (sink):
+Configure a database to write into (destination):
 
 ```sh
 curl -X POST -H 'Content-Type: text/toml' \
@@ -573,8 +573,8 @@ checkpointMaxAge  = "1s"     # ...or once 1s elapses since the first pending one
 
 **Duplicate bound:** a crash re-delivers **at most `checkpointEvery`**
 already-synced proposals. The default of `1` re-delivers at most one — keep it
-at `1` for **non-idempotent** sinks (an HTTP webhook, an event stream: every
-duplicate is externally visible). Raise it only for **idempotent** sinks (the
+at `1` for **non-idempotent** destinations (an HTTP webhook, an event stream: every
+duplicate is externally visible). Raise it only for **idempotent** destinations (the
 `sql` / `projection` dialects upsert, so a replay is a harmless no-op),
 where it trades that bounded duplicate exposure for substantially fewer raft
 round-trips on a fast destination. For a `BatchSyncable` (the SQL dialects)

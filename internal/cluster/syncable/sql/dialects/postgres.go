@@ -373,41 +373,41 @@ func (d *PostgreSQLDialect) TableExists(ctx context.Context, db *gosql.DB, table
 	return exists, nil
 }
 
-// EnsureSinkMeta implements Dialect: the per-database destination-note table.
-func (d *PostgreSQLDialect) EnsureSinkMeta(ctx context.Context, db *gosql.DB) error {
+// EnsureDestinations implements Dialect: the per-database destination-note table.
+func (d *PostgreSQLDialect) EnsureDestinations(ctx context.Context, db *gosql.DB) error {
 	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (table_name TEXT PRIMARY KEY, rendering_version BIGINT NOT NULL, owned BOOLEAN NOT NULL DEFAULT false, materialized_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-		pgIdent.Table(sql.SinkMetaTable))
+		pgIdent.Table(sql.DestinationsTable))
 	if _, err := db.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("ensure sink meta [%s]: %w", stmt, err)
 	}
 	return nil
 }
 
-// SinkMetaSelectSQL implements Dialect.
-func (d *PostgreSQLDialect) SinkMetaSelectSQL() string {
-	return fmt.Sprintf("SELECT rendering_version, owned FROM %s WHERE table_name = $1", pgIdent.Table(sql.SinkMetaTable))
+// DestinationSelectSQL implements Dialect.
+func (d *PostgreSQLDialect) DestinationSelectSQL() string {
+	return fmt.Sprintf("SELECT rendering_version, owned FROM %s WHERE table_name = $1", pgIdent.Table(sql.DestinationsTable))
 }
 
-// SinkMetaStampSQL implements Dialect: a stamp never touches ownership.
-func (d *PostgreSQLDialect) SinkMetaStampSQL() string {
+// DestinationStampSQL implements Dialect: a stamp never touches ownership.
+func (d *PostgreSQLDialect) DestinationStampSQL() string {
 	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, owned, materialized_at) VALUES ($1, $2, false, now()) ON CONFLICT (table_name) DO UPDATE SET rendering_version = EXCLUDED.rendering_version, materialized_at = now()",
-		pgIdent.Table(sql.SinkMetaTable))
+		pgIdent.Table(sql.DestinationsTable))
 }
 
-// SinkMetaClaimSQL implements Dialect: committed just created the table.
-func (d *PostgreSQLDialect) SinkMetaClaimSQL() string {
+// DestinationClaimSQL implements Dialect: committed just created the table.
+func (d *PostgreSQLDialect) DestinationClaimSQL() string {
 	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, owned, materialized_at) VALUES ($1, $2, true, now()) ON CONFLICT (table_name) DO UPDATE SET rendering_version = EXCLUDED.rendering_version, owned = true, materialized_at = now()",
-		pgIdent.Table(sql.SinkMetaTable))
+		pgIdent.Table(sql.DestinationsTable))
 }
 
-// SinkMetaDisownSQL implements Dialect.
-func (d *PostgreSQLDialect) SinkMetaDisownSQL() string {
-	return fmt.Sprintf("UPDATE %s SET owned = false WHERE table_name = $1", pgIdent.Table(sql.SinkMetaTable))
+// DestinationDisownSQL implements Dialect.
+func (d *PostgreSQLDialect) DestinationDisownSQL() string {
+	return fmt.Sprintf("UPDATE %s SET owned = false WHERE table_name = $1", pgIdent.Table(sql.DestinationsTable))
 }
 
-// SinkMetaDeleteSQL implements Dialect.
-func (d *PostgreSQLDialect) SinkMetaDeleteSQL() string {
-	return fmt.Sprintf("DELETE FROM %s WHERE table_name = $1", pgIdent.Table(sql.SinkMetaTable))
+// DestinationDeleteSQL implements Dialect.
+func (d *PostgreSQLDialect) DestinationDeleteSQL() string {
+	return fmt.Sprintf("DELETE FROM %s WHERE table_name = $1", pgIdent.Table(sql.DestinationsTable))
 }
 
 // CreateRematerializationSweepSQL implements Dialect: delete rows this

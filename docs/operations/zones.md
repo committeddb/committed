@@ -2,10 +2,10 @@
 
 A cluster spanning zones (availability zones, racks, sites) pays cross-zone
 traffic for raft replication once per follower — that is the durability
-product, and it is unavoidable. But **sync egress** from the leader to a sink
+product, and it is unavoidable. But **sync egress** from the leader to a destination
 in another zone pays a second, redundant crossing: the bytes already live on
-the node sitting next to that sink, in its own event log. With a read-model
-database per zone, leader-based sync pays cross-zone for most sinks on every
+the node sitting next to that destination, in its own event log. With a read-model
+database per zone, leader-based sync pays cross-zone for most destinations on every
 entity, forever.
 
 Zone-pinned syncables drop that to zero:
@@ -13,7 +13,7 @@ Zone-pinned syncables drop that to zero:
 1. Give each node a zone identity: `COMMITTED_ZONE=us-east-1c` (env-only,
    like all node config). The node announces it into the cluster at startup.
    Vendor-neutral — a zone can be an AZ, a rack, or a site.
-2. Pin a syncable to its sink's zone:
+2. Pin a syncable to its destination's zone:
 
    ```toml
    [syncable]
@@ -36,7 +36,7 @@ removed), the syncable **stalls** — visibly (`pinUnsatisfiable: true` on
 `GET /v1/syncable/{id}/status`, `ownerNode: 0`) — and no other node takes
 over. This is deliberate: a silent leader fallback would quietly reintroduce
 the cross-zone cost the pin exists to avoid, and hide the topology problem.
-The event log is permanent, so a stalled sink always catches up completely
+The event log is permanent, so a stalled syncable always catches up completely
 when a node in the zone returns: **lag, never loss**. Alert on
 `pinUnsatisfiable` like you alert on a stuck syncable.
 
@@ -48,7 +48,7 @@ when a node in the zone returns: **lag, never loss**. Alert on
   configs are refused with 503 `cluster_below_feature_level` until every
   member is upgraded, and every node resolves leader-owns until then. This
   is what guarantees a pin can never produce two concurrent writers to one
-  sink mid-upgrade.
+  destination mid-upgrade.
 - The `rebuild` and `rematerialize` verbs work on pinned syncables and are
   ROUTED to the serving node automatically (one bounded hop — set
   `COMMITTED_API_URL` on every node, as for follower proxying generally):
@@ -58,7 +58,7 @@ when a node in the zone returns: **lag, never loss**. Alert on
 
 ## What it saves, and what it doesn't
 
-- **Saved**: the sync-egress crossing for every same-zone sink — typically
+- **Saved**: the sync-egress crossing for every same-zone destination — typically
   the dominant recurring volume (every entity, to every read model,
   forever).
 - **Still paid**: raft replication to each follower (the durability

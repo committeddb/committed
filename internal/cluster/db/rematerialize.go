@@ -140,7 +140,7 @@ func (db *DB) beginRematerializationIfRequested(ctx context.Context, id string, 
 		// Admission prevents this; a config re-POST to a non-keyed shape
 		// mid-remat could still reach it. Clear the record loudly: the sweep
 		// contract can't be honored, and a plain replay is what runs.
-		db.logger.Error("re-materialization record present but the sink cannot converge in place; clearing the record (the replay still runs, without a sweep)",
+		db.logger.Error("re-materialization record present but the destination cannot converge in place; clearing the record (the replay still runs, without a sweep)",
 			zap.String("id", id))
 		db.proposeDeleteRematerialization(ctx, id)
 		return rematState{}
@@ -187,7 +187,7 @@ func (db *DB) completeRematerializationIfDone(ctx context.Context, id string, s 
 	}
 	db.proposeDeleteRematerialization(ctx, id)
 	st.active = false
-	db.logger.Info("re-materialization complete: sink converged and swept", zap.String("id", id))
+	db.logger.Info("re-materialization complete: destination converged and swept", zap.String("id", id))
 }
 
 func (db *DB) proposeDeleteRematerialization(ctx context.Context, id string) {

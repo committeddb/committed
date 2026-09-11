@@ -369,7 +369,7 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 		// visible, replayable false positive — see IsCompositeEncoded).
 		if len(c.config.DeleteKeyColumns()) == 1 && cluster.IsCompositeEncoded(string(e.Key)) {
 			return cluster.Permanent(fmt.Errorf(
-				"[sql.apply] delete tombstone carries a composite entity key; this sink keys by the single column %q and cannot address the row (topic %q) — the producer keys this topic by several columns; match the producer with a composite primaryKey, or drop primaryKey for an append-only history table",
+				"[sql.apply] delete tombstone carries a composite entity key; this syncable keys by the single column %q and cannot address the row (topic %q) — the producer keys this topic by several columns; match the producer with a composite primaryKey, or drop primaryKey for an append-only history table",
 				c.config.DeleteKeyColumns()[0], c.config.Topic))
 		}
 		// Decode the entity Key into per-column values (bare value for a
@@ -518,7 +518,7 @@ func (c *Syncable) applyRefreshBoundary(ctx context.Context, tx *sql.Tx, e *clus
 		// signal it here. The initial snapshot (generation 1) has no pre-existing
 		// state to reconcile, so stay quiet.
 		if e.Generation > 1 {
-			zap.L().Warn("refresh boundary on a keyless/append (history) sink is a no-op: a re-snapshot recovered a source gap, but a delete in that window (an RTBF/GDPR erasure among them) was never captured, so the subject's earlier rows remain in this history with no delete. A rebuild reconstructs the captured events; it cannot recover the uncaptured delete. Erase any source-side-forgotten subject manually.",
+			zap.L().Warn("refresh boundary on a keyless/append (history) table is a no-op: a re-snapshot recovered a source gap, but a delete in that window (an RTBF/GDPR erasure among them) was never captured, so the subject's earlier rows remain in this history with no delete. A rebuild reconstructs the captured events; it cannot recover the uncaptured delete. Erase any source-side-forgotten subject manually.",
 				zap.String("topic", e.Type.ID), zap.Uint64("generation", e.Generation))
 		}
 		return nil // keyless/append: nothing to sweep

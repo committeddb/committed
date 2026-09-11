@@ -331,7 +331,7 @@ func readAll(t *testing.T, rc interface{ Read([]byte) (int, error) }) string {
 // The rendering stamp is a table property: absent on a fresh table, written
 // by StampRendering as a metadata-only commit, read back by any sink that
 // loads the table, and untouched by data commits.
-func TestIcebergSinkRenderingStamp(t *testing.T) {
+func TestIcebergRenderingStamp(t *testing.T) {
 	st := startIcebergStack(t)
 	s := st.sink(t, "photos_stamp", 2)
 	ctx := context.Background()

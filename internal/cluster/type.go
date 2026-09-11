@@ -318,7 +318,7 @@ func MigrationEditAdvisory(before, after *Type) string {
 		"applies only to Actuals synced from now on; already-synced rows keep the " +
 		"previous migration's output on every always-current consumer of this " +
 		"type's topic (migrationEditDependents names them). Re-materialize each " +
-		"(POST /v1/syncable/{id}/rematerialize — keyed sinks converge in place) or " +
+		"(POST /v1/syncable/{id}/rematerialize — keyed syncables converge in place) or " +
 		"rebuild blue-green — see docs/read-models.md, \"Changing the rules after a " +
 		"projection is live\"."
 }

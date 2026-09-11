@@ -25,9 +25,9 @@ func TestRenderingStamp_ReadWriteDelete(t *testing.T) {
 	sink := sql.New(db, &sql.Config{Topic: "t", Table: "events", PrimaryKey: []string{"id"}})
 	ctx := context.Background()
 
-	selectSQL := (&dialects.MySQLDialect{}).SinkMetaSelectSQL()
-	stampSQL := (&dialects.MySQLDialect{}).SinkMetaStampSQL()
-	deleteSQL := (&dialects.MySQLDialect{}).SinkMetaDeleteSQL()
+	selectSQL := (&dialects.MySQLDialect{}).DestinationSelectSQL()
+	stampSQL := (&dialects.MySQLDialect{}).DestinationStampSQL()
+	deleteSQL := (&dialects.MySQLDialect{}).DestinationDeleteSQL()
 
 	// Never stamped: present=false, no error.
 	mock.ExpectQuery(selectSQL).WithArgs("events").WillReturnRows(sqlmock.NewRows([]string{"rendering_version", "owned"}))
@@ -36,9 +36,9 @@ func TestRenderingStamp_ReadWriteDelete(t *testing.T) {
 	require.False(t, present)
 
 	// Stamp: the current version, keyed by the table name as configured.
-	mock.ExpectExec(stampSQL).WithArgs("events", int64(sql.SinkRenderingVersion)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(stampSQL).WithArgs("events", int64(sql.RenderingVersion)).WillReturnResult(driver.ResultNoRows)
 	require.NoError(t, sink.StampRendering(ctx))
-	require.Equal(t, sql.SinkRenderingVersion, sink.RenderingVersion())
+	require.Equal(t, sql.RenderingVersion, sink.RenderingVersion())
 
 	// Stamped: the recorded version comes back verbatim.
 	mock.ExpectQuery(selectSQL).WithArgs("events").WillReturnRows(sqlmock.NewRows([]string{"rendering_version", "owned"}).AddRow(int64(7), true))
@@ -60,20 +60,20 @@ func TestRenderingStamp_ReadWriteDelete(t *testing.T) {
 
 // The production dialects' note statements are pinned verbatim: they are
 // DDL and DML committed runs in the customer's database, and the reference
-// destination dumps (sink_rendering_reference_test.go) depend on their shape.
+// destination dumps (destination_reference_test.go) depend on their shape.
 // A stamp inserts not-owned and never updates ownership; a claim sets it.
 func TestRenderingStamp_DialectStatements(t *testing.T) {
 	pg := &dialects.PostgreSQLDialect{}
-	require.Equal(t, `SELECT rendering_version, owned FROM "committed__sink_meta" WHERE table_name = $1`, pg.SinkMetaSelectSQL())
-	require.Equal(t, `INSERT INTO "committed__sink_meta" (table_name, rendering_version, owned, materialized_at) VALUES ($1, $2, false, now()) ON CONFLICT (table_name) DO UPDATE SET rendering_version = EXCLUDED.rendering_version, materialized_at = now()`, pg.SinkMetaStampSQL())
-	require.Equal(t, `INSERT INTO "committed__sink_meta" (table_name, rendering_version, owned, materialized_at) VALUES ($1, $2, true, now()) ON CONFLICT (table_name) DO UPDATE SET rendering_version = EXCLUDED.rendering_version, owned = true, materialized_at = now()`, pg.SinkMetaClaimSQL())
-	require.Equal(t, `UPDATE "committed__sink_meta" SET owned = false WHERE table_name = $1`, pg.SinkMetaDisownSQL())
-	require.Equal(t, `DELETE FROM "committed__sink_meta" WHERE table_name = $1`, pg.SinkMetaDeleteSQL())
+	require.Equal(t, `SELECT rendering_version, owned FROM "committed__destinations" WHERE table_name = $1`, pg.DestinationSelectSQL())
+	require.Equal(t, `INSERT INTO "committed__destinations" (table_name, rendering_version, owned, materialized_at) VALUES ($1, $2, false, now()) ON CONFLICT (table_name) DO UPDATE SET rendering_version = EXCLUDED.rendering_version, materialized_at = now()`, pg.DestinationStampSQL())
+	require.Equal(t, `INSERT INTO "committed__destinations" (table_name, rendering_version, owned, materialized_at) VALUES ($1, $2, true, now()) ON CONFLICT (table_name) DO UPDATE SET rendering_version = EXCLUDED.rendering_version, owned = true, materialized_at = now()`, pg.DestinationClaimSQL())
+	require.Equal(t, `UPDATE "committed__destinations" SET owned = false WHERE table_name = $1`, pg.DestinationDisownSQL())
+	require.Equal(t, `DELETE FROM "committed__destinations" WHERE table_name = $1`, pg.DestinationDeleteSQL())
 
 	my := &dialects.MySQLDialect{}
-	require.Equal(t, "SELECT rendering_version, owned FROM `committed__sink_meta` WHERE table_name = ?", my.SinkMetaSelectSQL())
-	require.Equal(t, "INSERT INTO `committed__sink_meta` (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, FALSE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), materialized_at = CURRENT_TIMESTAMP", my.SinkMetaStampSQL())
-	require.Equal(t, "INSERT INTO `committed__sink_meta` (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, TRUE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), owned = TRUE, materialized_at = CURRENT_TIMESTAMP", my.SinkMetaClaimSQL())
-	require.Equal(t, "UPDATE `committed__sink_meta` SET owned = FALSE WHERE table_name = ?", my.SinkMetaDisownSQL())
-	require.Equal(t, "DELETE FROM `committed__sink_meta` WHERE table_name = ?", my.SinkMetaDeleteSQL())
+	require.Equal(t, "SELECT rendering_version, owned FROM `committed__destinations` WHERE table_name = ?", my.DestinationSelectSQL())
+	require.Equal(t, "INSERT INTO `committed__destinations` (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, FALSE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), materialized_at = CURRENT_TIMESTAMP", my.DestinationStampSQL())
+	require.Equal(t, "INSERT INTO `committed__destinations` (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, TRUE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), owned = TRUE, materialized_at = CURRENT_TIMESTAMP", my.DestinationClaimSQL())
+	require.Equal(t, "UPDATE `committed__destinations` SET owned = FALSE WHERE table_name = ?", my.DestinationDisownSQL())
+	require.Equal(t, "DELETE FROM `committed__destinations` WHERE table_name = ?", my.DestinationDeleteSQL())
 }

@@ -83,7 +83,7 @@ table name, a keyless syncable's table must be short enough that
 `<table>__committed_applied` fits the database's 63-char identifier limit;
 committed rejects a longer one at config time.
 
-You will also find a small table called `committed__sink_meta` in the
+You will also find a small table called `committed__destinations` in the
 destination database: one row per projected table, a note saying which
 rendering version of committed wrote its rows and whether committed
 created the table. A worker reads the version before serving, and if a
@@ -131,7 +131,7 @@ carries only the encoded key, and its values decode positionally in the
 producer's column order — a mismatched order mis-addresses rows, and nothing
 can detect it mechanically (topics decouple the two configs on purpose).
 A mismatched column COUNT, by contrast, is caught at delete-apply time and
-dead-letters loudly — a composite tombstone hitting a single-key sink (or
+dead-letters loudly — a composite tombstone hitting a single-key destination (or
 the reverse) would otherwise execute a WHERE that matches nothing and
 silently strand the deleted row. Every key column must also appear in the
 mappings; the parser rejects a config where it doesn't.
@@ -264,7 +264,7 @@ error handling, deletes, and schema evolution:
   under the same name, for a table committed created. On a table you
   created it refuses (409 `destination_not_owned`) rather than replay over
   rows it cannot drop: drop the table yourself and re-POST, or rematerialize
-  a keyed sink. The log is permanent, so replay is cheap.
+  a keyed syncable. The log is permanent, so replay is cheap.
 
 ### Computed columns (`expr`)
 
@@ -444,7 +444,7 @@ NULL when no children qualify.
 
 Some read models are a *pipeline*: filter, then aggregate, then aggregate
 again. `[[projection.stages]]` blocks declare internal stages — private
-keyed refolds held in a node-local stage store, never topics, never sink
+keyed refolds held in a node-local stage store, never topics, never destination
 writes (only the table is outward-facing) — and a table source consumes a
 stage with `from = "<stage name>"`:
 
@@ -492,7 +492,7 @@ set = [ { column = "total", from = "$.total" },
   retracts entirely, cascading. `collect` is `array_agg` with determinism SQL doesn't
   promise: values fold into an ALWAYS-SORTED array (numbers
   numerically, then strings, then bools), `distinct = true` dedupes,
-  and the array lands in the sink as JSON. Any fold arm takes a
+  and the array lands in the destination as JSON. Any fold arm takes a
   per-emit `where` — SQL's `FILTER (WHERE …)`: `{ field = "reviewed",
   count = true, where = [ { path = "$.billed", equals = "true" } ] }`
   folds only matching inputs for THAT field, while row membership stays
@@ -890,7 +890,7 @@ The rules that keep the chain safe:
   the source — including an RTBF delete — forwards as a tombstone with the
   same key, so erasure chases the derivation chain. Generations and
   refresh-boundary markers forward verbatim too, so an ingest full-refresh of
-  the source reconciles all the way through to the derived topic's sinks.
+  the source reconciles all the way through to the derived topic's destinations.
 - **The derivation graph is a DAG with one producer per derived topic** —
   checked at POST and re-checked deterministically at apply (a config that
   races past admission is persisted but loudly degraded, never run). A cycle
@@ -899,7 +899,7 @@ The rules that keep the chain safe:
 - **Producer handover must not regress the epoch space.** A loopback targeting
   a topic whose committed refresh epochs exceed its source's is refused at
   POST: forwarded sweeps could never reconcile the previous producer's
-  higher-stamped rows, which would linger stale on downstream keyed sinks.
+  higher-stamped rows, which would linger stale on downstream keyed syncables.
   Derive into a fresh topic instead — the old topic's log carries its history
   permanently. A source at or *above* the target's highwater is fine (its
   first refresh reconciles the handover), and replacing any producer with an
@@ -1011,7 +1011,7 @@ Restatements are the highest-blast-radius config in committed: they are
 **append-only** (a wrong one cannot be edited, only corrected by another —
 later in the log wins), and admitting one instantly marks every consumer of
 the topic `interpretationStale` — rows materialized before it keep the
-superseded reading until you re-materialize each sink. So the workflow is
+superseded reading until you re-materialize each syncable. So the workflow is
 **rehearse, then author**:
 
 1. `POST /v1/restatement/dryrun` with the exact body you intend to admit. Nothing
@@ -1048,7 +1048,7 @@ A projection is a **disposable view of an immutable log** — its fold rules, an
 the type migration that feeds it, are *derivation logic*, not data. When you
 change that logic, committed applies the new logic to Actuals it processes *from
 that point on*; it does **not** retroactively re-render rows already written to
-the sink. Correcting history is a deliberate rebuild, and running it is your
+the destination. Correcting history is a deliberate rebuild, and running it is your
 responsibility.
 
 **Re-materializing a plain keyed `sql` mirror — in place.** For a plain
@@ -1058,7 +1058,7 @@ current mappings + type migrations + restatements, keyed upserts overwrite rows 
 place while the table keeps serving reads, and a completion sweep removes
 rows the replay never re-emitted. Restart-resumable, and it refreshes the
 syncable's `interpretationPin` (clearing `interpretationStale`). Projections
-and keyless sinks refuse the verb — for those, use the patterns below. The
+and keyless syncables refuse the verb — for those, use the patterns below. The
 verb also needs every member of the cluster on 0.8.0 or later: on a
 mixed-version cluster it answers 503 `cluster_below_feature_level` until the
 rolling upgrade completes, because an older node taking ownership
@@ -1101,19 +1101,19 @@ knowingly, because nothing rebuilds them on your behalf.
 A syncable's `checkpointEvery` (TOML, `[syncable]` section) is its **checkpoint
 cadence**: how many synced records may accumulate before the resume checkpoint
 is durably persisted. It is also the crash re-delivery bound — a restart
-re-delivers at most that many already-synced records, which keyed sinks absorb
-idempotently. It does **not** control sink transaction size: batches are capped
+re-delivers at most that many already-synced records, which keyed syncables absorb
+idempotently. It does **not** control destination transaction size: batches are capped
 internally (a few hundred rows) regardless of cadence.
 
-The cadence matters most during **replays** (initial sink builds, rebuilds):
-every checkpoint persist is a consensus round trip, and many sinks replaying
+The cadence matters most during **replays** (initial destination builds, rebuilds):
+every checkpoint persist is a consensus round trip, and many syncables replaying
 with a tight cadence can bottleneck on checkpoint traffic rather than data.
 The default (2500) keeps replays fast out of the box; raising it further
 (e.g. 5000) buys a little more replay throughput at a proportionally larger
 re-delivery window. Caught-up syncables persist on catch-up regardless of
 cadence, so steady-state checkpoint freshness does not depend on this value.
 
-## Destination limits: when a row cannot fit the sink
+## Destination limits: when a row cannot fit the destination
 
 Every SQL engine has physical limits on its tables, and a projection can hit
 them two ways — at **table-creation time** (loud, immediate, nothing synced
@@ -1125,7 +1125,7 @@ Survey your widest tables against these before creating mirrors:
   individual rows that exceed it at apply time ("row is too big"). And a
   text value with an **embedded U+0000** is rejected at apply time
   (SQLSTATE 22021) even though MySQL and SQL Server store it — a row that
-  flowed through every other engine dead-letters only at a PG sink. The
+  flowed through every other engine dead-letters only at a Postgres destination. The
   dead-letter message names the offending payload field(s), so triage is
   read-the-record, not hand-hunting the byte across every string column;
   the remedy is fixing the value at the source (CDC delivers the
@@ -1143,7 +1143,7 @@ this row's own value, where every other row would apply. It wedges the
 worker (sticks-and-waits, resumes on fix) whenever the error could be
 schema- or config-shaped. MySQL reports an over-long value as a per-column
 data error, which proves entry-specificity → the row is dead-lettered and
-the sink keeps flowing. PostgreSQL reports its row-size wall as a program
+the destination keeps flowing. PostgreSQL reports its row-size wall as a program
 limit, which doesn't → the worker wedges visibly on it. Same principle,
 different engine error vocabularies.
 
@@ -1157,7 +1157,7 @@ List the skipped proposals with `GET /syncable/{id}/errors`; after fixing
 the destination (e.g. `ALTER ... LONGTEXT`), re-drive each with
 `POST /syncable/{id}/replay/{index}`, which applies the row and clears its
 record. If instead the fix happened **at the source** and a later CDC event
-already corrected the sink row, replaying the stale proposal would regress
+already corrected the destination row, replaying the stale proposal would regress
 it — acknowledge the record instead
 (`POST /syncable/{id}/deadletter/{index}/acknowledge`; see the triage flow
 in [operations/stuck-syncables.md](operations/stuck-syncables.md)). A

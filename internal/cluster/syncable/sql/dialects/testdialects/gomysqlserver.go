@@ -55,28 +55,28 @@ func (d *GoMySQLServerDialect) TableExists(ctx context.Context, db *gosql.DB, ta
 	return (&dialects.MySQLDialect{}).TableExists(ctx, db, table)
 }
 
-func (d *GoMySQLServerDialect) EnsureSinkMeta(ctx context.Context, db *gosql.DB) error {
-	return (&dialects.MySQLDialect{}).EnsureSinkMeta(ctx, db)
+func (d *GoMySQLServerDialect) EnsureDestinations(ctx context.Context, db *gosql.DB) error {
+	return (&dialects.MySQLDialect{}).EnsureDestinations(ctx, db)
 }
 
-func (d *GoMySQLServerDialect) SinkMetaSelectSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaSelectSQL()
+func (d *GoMySQLServerDialect) DestinationSelectSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationSelectSQL()
 }
 
-func (d *GoMySQLServerDialect) SinkMetaStampSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaStampSQL()
+func (d *GoMySQLServerDialect) DestinationStampSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationStampSQL()
 }
 
-func (d *GoMySQLServerDialect) SinkMetaClaimSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaClaimSQL()
+func (d *GoMySQLServerDialect) DestinationClaimSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationClaimSQL()
 }
 
-func (d *GoMySQLServerDialect) SinkMetaDisownSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaDisownSQL()
+func (d *GoMySQLServerDialect) DestinationDisownSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationDisownSQL()
 }
 
-func (d *GoMySQLServerDialect) SinkMetaDeleteSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaDeleteSQL()
+func (d *GoMySQLServerDialect) DestinationDeleteSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationDeleteSQL()
 }
 
 func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {

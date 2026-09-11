@@ -69,7 +69,7 @@ func NewDeleteSyncableRematerializationEntity(id string) *Entity {
 // replay in place: a keyless/append sink would duplicate every row, and a
 // webhook has no addressable rows to sweep. The rebuild verb (drop + replay)
 // or a blue-green replacement remain available.
-var ErrNotRematerializable = errors.New("this syncable's sink cannot re-materialize in place: only keyed sinks converge a replay (keyless/append sinks would duplicate rows; webhooks have no rows to sweep) — use POST /syncable/{id}/rebuild or a blue-green replacement instead")
+var ErrNotRematerializable = errors.New("this syncable cannot re-materialize in place: only a keyed destination converges a replay (a keyless/append table would duplicate rows; a webhook has no rows to sweep) — use POST /syncable/{id}/rebuild or a blue-green replacement instead")
 
 // Rematerializable is the optional Syncable extension for keyed sinks that
 // can converge a non-destructive replay. Wrappers (interpretation, migration)

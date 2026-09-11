@@ -89,7 +89,7 @@ func TestRenderingStamp_MismatchParksNamingRematerialize(t *testing.T) {
 	parked := startStampedSyncable(t, sink, sink)
 	require.Eventually(t, func() bool { _, ok := parked(); return ok }, 10*time.Second, 10*time.Millisecond, "the worker never parked")
 	msg, _ := parked()
-	require.Contains(t, msg, "rendered under sink rendering version 1")
+	require.Contains(t, msg, "rendered under rendering version 1")
 	require.Contains(t, msg, "this binary renders version 2")
 	require.Contains(t, msg, "POST /v1/syncable/photos-mirror/rematerialize")
 	_, stamped, synced := sink.stampState()

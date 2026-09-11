@@ -155,17 +155,17 @@ count is non-zero, triage each record (list them via
   succeeds and clears the record.
 - **Acknowledge** (`POST /v1/syncable/{id}/deadletter/{index}/acknowledge`)
   — the record is **superseded**: the source was fixed and a later event
-  already corrected the sink row, so replaying the stale proposal would
+  already corrected the destination row, so replaying the stale proposal would
   REGRESS it, while leaving the record reads permanently red. Acknowledge
   attests "resolved out-of-band": the record moves from `deadLetters` to
   `acknowledgedDeadLetters` (completeness goes green) and stays listable
   with `acknowledged: true` as the audit trail. The worked example is an
-  embedded-NUL row against a Postgres sink: the upsert dead-letters
+  embedded-NUL row against a Postgres destination: the upsert dead-letters
   (Postgres TEXT can't store U+0000), you fix the value at the source, CDC
-  delivers the correction as a normal update — the sink row is now right,
+  delivers the correction as a normal update — the destination row is now right,
   the dead letter is history, acknowledge it.
 - **Leave it** — the row still needs a decision. An unacknowledged record
-  is the honest signal that data is missing from the sink.
+  is the honest signal that data is missing from the destination.
 
 A successful replay deletes the record entirely, acknowledged or not. See
 "Destination limits" in [read-models.md](../read-models.md) for when each
@@ -283,7 +283,7 @@ Replay re-runs the syncable's `Sync` once for that proposal against a fresh
 build of its current config, and on success removes the dead letter. It is
 node-agnostic (config, the proposal, and the dead-letter store are all
 replicated) and safe to retry — `Sync` is idempotent, so replaying a
-proposal that already applied is a no-op at the sink. A `502` means the
+proposal that already applied is a no-op at the destination. A `502` means the
 downstream *still* won't take it: read the `details`, fix the cause, and
 replay again.
 

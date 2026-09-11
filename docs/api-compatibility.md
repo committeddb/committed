@@ -180,7 +180,7 @@ that projection, and readers never see it.
 
 **SQL destinations** (the projected rows and the helper tables beside
 them) carry a **rendering version**, written as a note into your
-database: the table `committed__sink_meta`, one row per projected table,
+database: the table `committed__destinations`, one row per projected table,
 saying "these rows were written by rendering version N" and whether
 committed created the table. The note lives next to the rows it
 describes, so it moves, drops, and restores with them — restore the
@@ -202,9 +202,9 @@ Every time a worker starts serving a syncable it reads the note first:
 
 **Iceberg tables** carry the same note as table properties
 (`committed.rendering-version`, and `committed.owned` on the tables and
-namespaces the sink created), beside the checkpoint the sink already
+namespaces the syncable created), beside the checkpoint the syncable already
 keeps in the table's snapshot summary, with its own version number: the
-two sink families render nothing in common. An Iceberg sink cannot
+two syncable families render nothing in common. An Iceberg syncable cannot
 converge in place, so a mismatch there names delete and re-POST: a table
 committed created is dropped and recreated; one you created, recreate
 yourself first.
@@ -307,7 +307,7 @@ Extending the envelope with a **new variant** is a fixed recipe:
    `e2e/upgrade/testdata/` (see its README).
 4. Give it a `cluster.EntityVariant` constant and handle it in every consumer
    switch. Consumers apply an entity by switching on `Entity.Variant()`
-   (sinks; the wal apply dispatch admits only row/delete to internal
+   (syncables; the wal apply dispatch admits only row/delete to internal
    handlers; the migration chain migrates only rows) — a variant a consumer
    does not handle lands in its `default` case and dead-letters/errors
    explicitly.

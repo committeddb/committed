@@ -1,4 +1,4 @@
-# Iceberg sink: a current-state table on S3
+# Iceberg syncable: a current-state table on S3
 
 The `iceberg` syncable lands a topic in an Apache Iceberg table — the
 warehouse/analytics landing zone. Anything that reads Iceberg through a REST
@@ -9,7 +9,7 @@ The table is a **current-state materialization, not a fact log**: one row per
 live entity, maintained by copy-on-write merge. A keyed upsert replaces the
 row, a source DELETE removes it (right-to-be-forgotten flows through), and an
 ingest refresh boundary sweeps rows whose generation predates the refresh —
-the same reconciliation contract as the SQL sinks.
+the same reconciliation contract as the SQL syncables.
 
 ## Configuration
 
@@ -83,7 +83,7 @@ upstream with a `loopback` derived topic and land that instead).
   your schedule with your engine's tools (or S3 Tables' automatic
   maintenance). committed writes tight, key-sorted files but never expires
   snapshots it has committed.
-- **Reshaping is blue-green**: the sink refuses the re-materialization verb
+- **Reshaping is blue-green**: the destination refuses the re-materialization verb
   (`POST /v1/syncable/{id}/rematerialize` → 409). To rebuild or reshape,
   create a second syncable into a new table and swap readers (or
   RenameTable) when it converges — the same pattern as projections.
@@ -91,7 +91,7 @@ upstream with a `loopback` derived topic and land that instead).
   table. Two writers would interleave their checkpoint markers and each
   would treat the other's rows as its own to merge over.
 - **Deleting the syncable drops what committed created.** The same rule
-  as the SQL sinks: a namespace or table the sink created carries a
+  as the SQL syncables: a namespace or table the syncable created carries a
   `committed.owned` property, and `DELETE /v1/syncable/{id}` purges that
   table (catalog entry and data files), then the namespace once nothing
   else lives in it. A table you created in the catalog first and pointed

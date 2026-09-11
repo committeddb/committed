@@ -269,7 +269,7 @@ var ErrWorkerWedged = errors.New("syncable worker did not stop in time (wedged o
 // committed did not create (the ownership protocol: delete what we created,
 // leave what we did not). The remedies are the operator's: drop the
 // destination by hand and re-POST, or converge a keyed sink in place.
-var ErrDestinationNotOwned = errors.New("the destination was not created by committed, so it cannot be dropped for a clean rebuild: drop it yourself and re-POST the config, or POST /syncable/{id}/rematerialize to converge a keyed sink in place")
+var ErrDestinationNotOwned = errors.New("the destination was not created by committed, so it cannot be dropped for a clean rebuild: drop it yourself and re-POST the config, or POST /syncable/{id}/rematerialize to converge a keyed syncable in place")
 
 type Teardownable interface {
 	// Teardown removes the destination state committed OWNS — the tables it

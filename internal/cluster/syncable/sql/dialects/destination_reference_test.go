@@ -27,21 +27,21 @@ import (
 // beside yours. None of that is in the config. If a release changed one of
 // those details without saying so, rows written before the upgrade and rows
 // written after would sit in one table rendered two ways, and nothing would
-// notice. So every destination carries a note (committed__sink_meta) saying
+// notice. So every destination carries a note (committed__destinations) saying
 // which rendering version wrote its rows, and this test pins what that
 // version means: it folds every sink in the fixture through the production
 // Sync path into a real database, dumps every table committed created plus
 // the notes, and compares the dump against a reference chosen by the version
 // read back from the database. A rendering change fails under the current
-// number; bumping sql.SinkRenderingVersion demands a new reference generated on
+// number; bumping sql.RenderingVersion demands a new reference generated on
 // purpose:
 //
-//	UPDATE_SINK_REFERENCE=1 go test -tags docker ./internal/cluster/syncable/sql/dialects -run TestSinkRenderingReference
+//	UPDATE_DESTINATION_REFERENCE=1 go test -tags docker ./internal/cluster/syncable/sql/dialects -run TestDestinationReference
 //
 // and committed with the bump. The bump is what makes a worker refuse to
 // write into rows rendered by the older version (db/rendering_stamp.go).
-func TestSinkRenderingReference_Postgres(t *testing.T) {
-	runSinkReference(t, "postgres", &dialects.PostgreSQLDialect{}, pgConnString, "JSONB", "DOUBLE PRECISION", destinationCatalog{
+func TestDestinationReference_Postgres(t *testing.T) {
+	runDestinationReference(t, "postgres", &dialects.PostgreSQLDialect{}, pgConnString, "JSONB", "DOUBLE PRECISION", destinationCatalog{
 		tables:  "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name LIKE $1 ORDER BY table_name",
 		columns: "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 ORDER BY ordinal_position",
 		orderBy: func(col, dataType string) string {
@@ -50,13 +50,13 @@ func TestSinkRenderingReference_Postgres(t *testing.T) {
 			}
 			return col
 		},
-		meta:  "SELECT table_name, rendering_version, owned FROM " + sqlident.Postgres.Table(sql.SinkMetaTable) + " WHERE table_name LIKE $1 ORDER BY table_name",
+		meta:  "SELECT table_name, rendering_version, owned FROM " + sqlident.Postgres.Table(sql.DestinationsTable) + " WHERE table_name LIKE $1 ORDER BY table_name",
 		quote: sqlident.Postgres.Table,
 	})
 }
 
-func TestSinkRenderingReference_MySQL(t *testing.T) {
-	runSinkReference(t, "mysql", &dialects.MySQLDialect{}, mysqlConn(t), "JSON", "DOUBLE", destinationCatalog{
+func TestDestinationReference_MySQL(t *testing.T) {
+	runDestinationReference(t, "mysql", &dialects.MySQLDialect{}, mysqlConn(t), "JSON", "DOUBLE", destinationCatalog{
 		tables:  "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE ? ORDER BY table_name",
 		columns: "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? ORDER BY ordinal_position",
 		orderBy: func(col, dataType string) string {
@@ -65,7 +65,7 @@ func TestSinkRenderingReference_MySQL(t *testing.T) {
 			}
 			return col
 		},
-		meta:  "SELECT table_name, rendering_version, owned FROM " + sqlident.MySQL.Table(sql.SinkMetaTable) + " WHERE table_name LIKE ? ORDER BY table_name",
+		meta:  "SELECT table_name, rendering_version, owned FROM " + sqlident.MySQL.Table(sql.DestinationsTable) + " WHERE table_name LIKE ? ORDER BY table_name",
 		quote: sqlident.MySQL.Table,
 	})
 }
@@ -78,7 +78,7 @@ type destinationCatalog struct {
 	orderBy func(col, dataType string) string
 }
 
-func runSinkReference(t *testing.T, name string, d sql.Dialect, conn, jsonType, floatType string, cat destinationCatalog) {
+func runDestinationReference(t *testing.T, name string, d sql.Dialect, conn, jsonType, floatType string, cat destinationCatalog) {
 	t.Helper()
 	// A short prefix: MySQL caps identifiers at 64 bytes and the helper
 	// tables append suffixes to the projected table's name.
@@ -87,7 +87,7 @@ func runSinkReference(t *testing.T, name string, d sql.Dialect, conn, jsonType, 
 	db, err := sql.NewDB(d, conn)
 	require.NoError(t, err)
 	defer db.Close()
-	fx := sinkReferenceFixture(prefix, jsonType, floatType)
+	fx := destinationReferenceFixture(prefix, jsonType, floatType)
 	ctx := context.Background()
 
 	hist := sql.New(db, fx.hist)
@@ -107,7 +107,7 @@ func runSinkReference(t *testing.T, name string, d sql.Dialect, conn, jsonType, 
 		}
 	}()
 
-	sinkReferenceFeed(t, ctx, hist, keyed, values, single, movies, jobs, items)
+	destinationReferenceFeed(t, ctx, hist, keyed, values, single, movies, jobs, items)
 
 	// The worker stamps on first contact; here the sinks stamp themselves so
 	// the notes are part of the dump.
@@ -119,22 +119,22 @@ func runSinkReference(t *testing.T, name string, d sql.Dialect, conn, jsonType, 
 
 	dump, version := dumpDestination(t, db.DB, cat, prefix)
 	dump = strings.ReplaceAll(dump, prefix, "T")
-	referencePath := filepath.Join("testdata", fmt.Sprintf("sink_rendering_%s_%d.reference", name, version))
-	if os.Getenv("UPDATE_SINK_REFERENCE") == "1" {
+	referencePath := filepath.Join("testdata", fmt.Sprintf("destination_rendering_%s_%d.reference", name, version))
+	if os.Getenv("UPDATE_DESTINATION_REFERENCE") == "1" {
 		require.NoError(t, os.WriteFile(referencePath, []byte(dump), 0o644))
 		t.Logf("wrote %s", referencePath)
 	}
 	want, err := os.ReadFile(referencePath)
-	require.NoError(t, err, "no reference for sink rendering version %d on %s: the version was bumped — generate its reference deliberately (UPDATE_SINK_REFERENCE=1) and commit it with the bump", version, name)
+	require.NoError(t, err, "no reference for sink rendering version %d on %s: the version was bumped — generate its reference deliberately (UPDATE_DESTINATION_REFERENCE=1) and commit it with the bump", version, name)
 	require.Equal(t, string(want), dump,
-		"the %s destination's bytes changed under rendering version %d. Rows already in customers' tables were rendered the old way; bump sql.SinkRenderingVersion (so their workers park until rematerialized) and regenerate the reference for the new number", name, version)
+		"the %s destination's bytes changed under rendering version %d. Rows already in customers' tables were rendered the old way; bump sql.RenderingVersion (so their workers park until rematerialized) and regenerate the reference for the new number", name, version)
 }
 
-// sinkReferenceFeed folds a deterministic event set through every sink: keyless
+// destinationReferenceFeed folds a deterministic event set through every sink: keyless
 // appends with a replayed duplicate, a keyed upsert and delete, the tenant
 // lifecycle, a movie with a cast whose names come from a lookup, and a job
 // with a spine-enriched tenant, fanned items, and a stage-folded total.
-func sinkReferenceFeed(t *testing.T, ctx context.Context, hist, keyed, values *sql.Syncable, single, movies, jobs, items *sql.Projection) {
+func destinationReferenceFeed(t *testing.T, ctx context.Context, hist, keyed, values *sql.Syncable, single, movies, jobs, items *sql.Projection) {
 	t.Helper()
 	var idx uint64
 	fold := func(s interface {
@@ -254,7 +254,7 @@ func dumpDestination(t *testing.T, db *gosql.DB, cat destinationCatalog, prefix 
 		}
 		require.NoError(t, data.Close())
 	}
-	sb.WriteString("== " + sql.SinkMetaTable + " (table_name, rendering_version, owned)\n")
+	sb.WriteString("== " + sql.DestinationsTable + " (table_name, rendering_version, owned)\n")
 	meta, err := db.Query(cat.meta, prefix+"%")
 	require.NoError(t, err)
 	var version uint64

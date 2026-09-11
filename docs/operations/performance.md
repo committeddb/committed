@@ -29,7 +29,7 @@ Two shapes matter more than any single number:
   measuring its own serial round-trips, not the cluster's capacity — add
   concurrency or batch entities into fewer proposals.
 - **Reads are not the bottleneck.** Catch-up drains the log ~500× faster
-  than the write path fills it, so a rebuilt sink converges quickly; sync
+  than the write path fills it, so a rebuilt destination converges quickly; sync
   throughput in practice is bounded by the destination database, not the
   log.
 

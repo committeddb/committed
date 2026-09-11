@@ -51,7 +51,7 @@ func (db *DB) verifyRenderingStamp(ctx context.Context, id string, s cluster.Syn
 	case present && version == want:
 		return renderingOK
 	case present:
-		cause := fmt.Errorf("destination rendered under sink rendering version %d; this binary renders version %d — converge it: %s",
+		cause := fmt.Errorf("destination rendered under rendering version %d; this binary renders version %d — converge it: %s",
 			version, want, renderingRemedy(id, s))
 		db.logger.Error("rendering version mismatch; parked", zap.String("id", id), zap.Error(cause))
 		db.publishSyncableParked(ctx, id, 0, cause)
@@ -87,7 +87,7 @@ func renderingRemedy(id string, s cluster.Syncable) string {
 	if _, ok := cluster.SyncableAs[cluster.Teardownable](s); ok {
 		return "DELETE /v1/syncable/" + id + " (drops the table if committed created it; otherwise drop it yourself), then re-POST the config"
 	}
-	return "this sink cannot drop its destination: recreate the table by hand, then DELETE /v1/syncable/" + id + " and re-POST the config"
+	return "this syncable cannot drop its destination: recreate the table by hand, then DELETE /v1/syncable/" + id + " and re-POST the config"
 }
 
 // stampAfterRematerialization records the current rendering version once a

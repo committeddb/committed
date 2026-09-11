@@ -27,7 +27,7 @@ type sinkFixture struct {
 	tableNames          []string
 }
 
-func sinkReferenceFixture(prefix, jsonType, floatType string) sinkFixture {
+func destinationReferenceFixture(prefix, jsonType, floatType string) sinkFixture {
 	hist := &sql.Config{
 		Topic: "audit", Table: prefix + "_hist",
 		Mappings: []sql.Mapping{
@@ -49,7 +49,7 @@ func sinkReferenceFixture(prefix, jsonType, floatType string) sinkFixture {
 	}
 	// The value matrix: one column per type family, fed one row per JSON
 	// kind (sinkValueRows), so value rendering — not just config words — is
-	// pinned. TestSinkReferenceValueMatrixCoversEveryKind holds it complete.
+	// pinned. TestDestinationReferenceValueMatrixCoversEveryKind holds it complete.
 	values := &sql.Config{
 		Topic: "values", Table: prefix + "_values", PrimaryKey: []string{"id"},
 		Mappings: []sql.Mapping{
@@ -204,13 +204,13 @@ func sinkDelete(index uint64, topic, key string) *cluster.Actual {
 	return &cluster.Actual{Index: index, Entities: []*cluster.Entity{cluster.NewDeleteEntity(tp, []byte(key))}}
 }
 
-// TestSinkReferenceFixtureCoversTheVocabulary: every config-tagged field of the
+// TestDestinationReferenceFixtureCoversTheVocabulary: every config-tagged field of the
 // SQL sink vocabulary is set somewhere in the fixture, or this fails naming
 // it. Excluded: the database handle and id (resolved by the parser, not a
 // rendering), the checkpoint policy (cadence, not a rendering), and the
 // stage vocabulary (pinned by the stage store's own reference).
-func TestSinkReferenceFixtureCoversTheVocabulary(t *testing.T) {
-	fx := sinkReferenceFixture("t", "JSON", "DOUBLE")
+func TestDestinationReferenceFixtureCoversTheVocabulary(t *testing.T) {
+	fx := destinationReferenceFixture("t", "JSON", "DOUBLE")
 	seen := map[string]bool{}
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
@@ -283,12 +283,12 @@ func sinkValueRows() []map[string]any {
 	}
 }
 
-// TestSinkReferenceValueMatrixCoversEveryKind: the JSON column receives an
+// TestDestinationReferenceValueMatrixCoversEveryKind: the JSON column receives an
 // object, an array, and null (the kinds a JSON column takes — scalars land in
 // typed columns), and every other column receives at least two distinct
 // kinds (a typed value and null, or a number and its string spelling), so a
 // rendering path cannot go unexercised because the feed happened to skip it.
-func TestSinkReferenceValueMatrixCoversEveryKind(t *testing.T) {
+func TestDestinationReferenceValueMatrixCoversEveryKind(t *testing.T) {
 	kind := func(v any) string {
 		switch v.(type) {
 		case nil:

@@ -419,7 +419,7 @@ func (db *DB) rebuildTeardownDestinationLocal(id string, handle *workerHandle) {
 		db.logger.Error("rebuild: destination teardown failed; replay will write over the existing destination (rebuild not clean)",
 			zap.String("id", id), zap.Error(err))
 	} else if !dropped {
-		db.logger.Warn("rebuild: destination kept — committed did not create it; replay writes over it (rows it never re-emits remain; rematerialize a keyed sink to sweep them, or drop the table yourself and re-POST)",
+		db.logger.Warn("rebuild: destination kept — committed did not create it; replay writes over it (rows it never re-emits remain; rematerialize a keyed syncable to sweep them, or drop the table yourself and re-POST)",
 			zap.String("id", id))
 	}
 }

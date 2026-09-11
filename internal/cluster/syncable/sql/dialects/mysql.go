@@ -374,41 +374,41 @@ func (d *MySQLDialect) TableExists(ctx context.Context, db *gosql.DB, table stri
 	return n > 0, nil
 }
 
-// EnsureSinkMeta implements Dialect: the per-database destination-note table.
-func (d *MySQLDialect) EnsureSinkMeta(ctx context.Context, db *gosql.DB) error {
+// EnsureDestinations implements Dialect: the per-database destination-note table.
+func (d *MySQLDialect) EnsureDestinations(ctx context.Context, db *gosql.DB) error {
 	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (table_name VARCHAR(255) PRIMARY KEY, rendering_version BIGINT NOT NULL, owned BOOLEAN NOT NULL DEFAULT FALSE, materialized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
-		mysqlIdent.Table(sql.SinkMetaTable))
+		mysqlIdent.Table(sql.DestinationsTable))
 	if _, err := db.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("ensure sink meta [%s]: %w", stmt, err)
 	}
 	return nil
 }
 
-// SinkMetaSelectSQL implements Dialect.
-func (d *MySQLDialect) SinkMetaSelectSQL() string {
-	return fmt.Sprintf("SELECT rendering_version, owned FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.SinkMetaTable))
+// DestinationSelectSQL implements Dialect.
+func (d *MySQLDialect) DestinationSelectSQL() string {
+	return fmt.Sprintf("SELECT rendering_version, owned FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.DestinationsTable))
 }
 
-// SinkMetaStampSQL implements Dialect: a stamp never touches ownership.
-func (d *MySQLDialect) SinkMetaStampSQL() string {
+// DestinationStampSQL implements Dialect: a stamp never touches ownership.
+func (d *MySQLDialect) DestinationStampSQL() string {
 	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, FALSE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), materialized_at = CURRENT_TIMESTAMP",
-		mysqlIdent.Table(sql.SinkMetaTable))
+		mysqlIdent.Table(sql.DestinationsTable))
 }
 
-// SinkMetaClaimSQL implements Dialect: committed just created the table.
-func (d *MySQLDialect) SinkMetaClaimSQL() string {
+// DestinationClaimSQL implements Dialect: committed just created the table.
+func (d *MySQLDialect) DestinationClaimSQL() string {
 	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, TRUE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), owned = TRUE, materialized_at = CURRENT_TIMESTAMP",
-		mysqlIdent.Table(sql.SinkMetaTable))
+		mysqlIdent.Table(sql.DestinationsTable))
 }
 
-// SinkMetaDisownSQL implements Dialect.
-func (d *MySQLDialect) SinkMetaDisownSQL() string {
-	return fmt.Sprintf("UPDATE %s SET owned = FALSE WHERE table_name = ?", mysqlIdent.Table(sql.SinkMetaTable))
+// DestinationDisownSQL implements Dialect.
+func (d *MySQLDialect) DestinationDisownSQL() string {
+	return fmt.Sprintf("UPDATE %s SET owned = FALSE WHERE table_name = ?", mysqlIdent.Table(sql.DestinationsTable))
 }
 
-// SinkMetaDeleteSQL implements Dialect.
-func (d *MySQLDialect) SinkMetaDeleteSQL() string {
-	return fmt.Sprintf("DELETE FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.SinkMetaTable))
+// DestinationDeleteSQL implements Dialect.
+func (d *MySQLDialect) DestinationDeleteSQL() string {
+	return fmt.Sprintf("DELETE FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.DestinationsTable))
 }
 
 // CreateRematerializationSweepSQL implements Dialect: delete rows this

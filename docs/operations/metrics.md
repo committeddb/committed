@@ -72,12 +72,12 @@ Labels are shown in `{braces}`.
 | `committed.first.index` | Oldest raft index still retained in the raft log. |
 | `committed.last.index` | Newest raft index in the raft log. |
 
-### Sync (syncable → external sink)
+### Sync (syncable → external destination)
 
 | Metric | What it tells you |
 |---|---|
 | `committed.sync.lag` | Per-`{syncable_id}` gap between the log head and what the syncable has delivered. |
-| `committed.sync.duration` | Time to apply one Actual to a sink (histogram). |
+| `committed.sync.duration` | Time to apply one Actual to a destination (histogram). |
 | `committed.sync.errors` | Sync errors, by `{syncable_id}`. |
 | `committed.sync.stuck` | 1 when a `{syncable_id}` worker has been blocked past the stuck threshold. **Alert on this.** |
 | `committed.sync.breaker_trips` | A syncable's consecutive-permanent-error breaker tripped (dead-lettering en masse). |

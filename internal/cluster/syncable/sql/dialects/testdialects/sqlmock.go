@@ -182,28 +182,28 @@ func (d *SQLMockDialect) TableExists(_ context.Context, _ *gosql.DB, _ string) (
 	return !d.CreatesTables, nil
 }
 
-// The destination-note statements mirror MySQL's; EnsureSinkMeta is a no-op
+// The destination-note statements mirror MySQL's; EnsureDestinations is a no-op
 // like EnsureRematerializationColumn (the mock pins statement sequences).
-func (d *SQLMockDialect) EnsureSinkMeta(_ context.Context, _ *gosql.DB) error { return nil }
+func (d *SQLMockDialect) EnsureDestinations(_ context.Context, _ *gosql.DB) error { return nil }
 
-func (d *SQLMockDialect) SinkMetaSelectSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaSelectSQL()
+func (d *SQLMockDialect) DestinationSelectSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationSelectSQL()
 }
 
-func (d *SQLMockDialect) SinkMetaStampSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaStampSQL()
+func (d *SQLMockDialect) DestinationStampSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationStampSQL()
 }
 
-func (d *SQLMockDialect) SinkMetaClaimSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaClaimSQL()
+func (d *SQLMockDialect) DestinationClaimSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationClaimSQL()
 }
 
-func (d *SQLMockDialect) SinkMetaDisownSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaDisownSQL()
+func (d *SQLMockDialect) DestinationDisownSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationDisownSQL()
 }
 
-func (d *SQLMockDialect) SinkMetaDeleteSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaDeleteSQL()
+func (d *SQLMockDialect) DestinationDeleteSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationDeleteSQL()
 }
 
 func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {

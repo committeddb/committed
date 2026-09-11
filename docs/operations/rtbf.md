@@ -11,7 +11,7 @@ Erasure is three stages, the first yours and the rest committed's:
 1. **You issue logical deletes** — one per `(type, key)` the subject owns.
 2. **The scrub physically removes the subject's data** from every node's
    permanent event log (the automatic scheduler, or your expedited request),
-   while syncables propagate downstream `DELETE`s to the sinks they maintain.
+   while syncables propagate downstream `DELETE`s to the destinations they maintain.
 3. **Delete-key erasure removes the last identifier**: the retained delete
    tombstone's key — kept raw only while some syncable still needs it to
    erase its downstream row — is rewritten to a fixed PII-free sentinel once
@@ -33,7 +33,7 @@ EOF
 A delete carries no payload and covers the key's whole history: one delete
 per `(type, key)` is enough regardless of how many events the subject has.
 Every syncable consuming the topic translates it downstream in log order — a
-SQL sink executes `DELETE ... WHERE key = ...`, a webhook receiver gets
+SQL syncable executes `DELETE ... WHERE key = ...`, a webhook receiver gets
 `op: "delete"` — so the read models you maintain through committed converge
 on their own. After all deletes are committed, note any node's
 `appliedIndex` (`GET /v1/node/status`): that index is your erasure watermark
@@ -93,12 +93,12 @@ shrinking means a consumer is holding the gate (next section).
 - **A rebuilding or freshly created syncable** pins its node's rewrite swap
   while it replays from index 0 (the log line says `scrub swap waiting on
   in-flight from-0 log reads`). The rewrite resumes when the replay catches
-  up; a replay stalled on its sink delays that one node's scrub.
-- **Deleting a syncable does not erase its sink.** A deleted syncable's
+  up; a replay stalled on its destination delays that one node's scrub.
+- **Deleting a syncable does not erase its destination.** A deleted syncable's
   downstream rows are yours: if it never processed the delete, run the
   downstream `DELETE` yourself. Deletion also removes the syncable from the
   erasure gate — committed will not hold every subject's erasure hostage to
-  a sink nobody manages anymore.
+  a destination nobody manages anymore.
 
 ## Adjacent copies and retention you own
 

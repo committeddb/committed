@@ -67,7 +67,7 @@ const propertyCheckpoint = "committed.checkpoint-index"
 // it moves, drops, and restores with the table. The worker reads it before
 // serving and parks on a mismatch (db/rendering_stamp.go); this sink cannot
 // converge in place, so the remedy is a fresh table (delete drops one
-// committed created; the operator recreates one it did not). sql.SinkRenderingVersion
+// committed created; the operator recreates one it did not). sql.RenderingVersion
 // is the SQL family's twin, versioned separately: the two render nothing in
 // common.
 const RenderingVersion uint64 = 1

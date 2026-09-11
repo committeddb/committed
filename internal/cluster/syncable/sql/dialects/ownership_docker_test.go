@@ -51,17 +51,17 @@ func runOwnership(t *testing.T, d sql.Dialect, conn, existsSQL string) {
 	}
 	note := func() (owned, present bool) {
 		var v int64
-		err := db.DB.QueryRowContext(ctx, d.SinkMetaSelectSQL(), table).Scan(&v, &owned)
+		err := db.DB.QueryRowContext(ctx, d.DestinationSelectSQL(), table).Scan(&v, &owned)
 		if err == gosql.ErrNoRows {
 			return false, false
 		}
 		require.NoError(t, err)
-		require.Equal(t, int64(sql.SinkRenderingVersion), v)
+		require.Equal(t, int64(sql.RenderingVersion), v)
 		return owned, true
 	}
 	t.Cleanup(func() {
 		_, _ = db.DB.ExecContext(ctx, d.DropDDL(config))
-		_, _ = db.DB.ExecContext(ctx, d.SinkMetaDeleteSQL(), table)
+		_, _ = db.DB.ExecContext(ctx, d.DestinationDeleteSQL(), table)
 	})
 
 	// Created by committed: claimed at Init, dropped (note and all) on delete.

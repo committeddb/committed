@@ -28,7 +28,8 @@ internal/cluster/  Core domain
 - **Topics**: Where data is appended
 - **Proposals** (`cluster.Proposal`): A write *request* — the entities offered to the log, pre-consensus, with no Index yet. You propose Proposals.
 - **Actuals** (`cluster.Actual`): A committed fact — the Proposal consensus ordered and wrote at a fixed `Index`. Readers yield Actuals in Index order and Syncables consume them; a Syncable never sees a Proposal. The consensus boundary turns a Proposal into an Actual.
-- **Syncables**: Configs for syncing committed Actuals to external systems (SQL, HTTP webhook)
+- **Syncables**: Configs for syncing committed Actuals to external systems (SQL, HTTP webhook, Iceberg, loopback)
+- **Destination**: The external table or system a syncable writes to. Customer-facing text (docs, API text, status and log messages) uses exactly these two words — "syncable" for the config and its worker, "destination" for what it writes to — never "sink", which collided with both.
 - **Ingestables**: Configs for ingesting data from external sources
 - **Types**: Schemas/metadata for topic data
 - **Databases**: External database connection configurations (TOML format)

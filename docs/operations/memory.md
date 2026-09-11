@@ -35,8 +35,8 @@ disk-parse speed.
   `64` (~1.3GB worst case) is cheap insurance; size up freely with your RAM.
 - Steady-state streaming (all syncables caught up) concentrates reads in the
   newest segments and needs almost none of this — the cache earns its memory
-  during **replays**: initial sink builds, projection rebuilds, and rebuilt
-  nodes catching sinks back up.
+  during **replays**: initial destination builds, projection rebuilds, and rebuilt
+  nodes catching destinations back up.
 
 The raft entry log is not tunable and needs no tuning: its reader is the
 single sequential consensus loop, which cannot thrash.

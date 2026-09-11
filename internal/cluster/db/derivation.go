@@ -64,7 +64,7 @@ func CheckDerivation(accepted []DerivationEdge, candidate DerivationEdge) error 
 	for _, t := range candidate.Targets {
 		if by, taken := producers[t]; taken {
 			return fmt.Errorf(
-				"topic %q already has a producer (%s %q): a topic has exactly one epoch-stamping producer, because two would interleave their refresh-epoch spaces and one producer's reconciling sweep could erase the other's rows on every keyed sink downstream; use a separate topic or delete the other config first", t, by.Kind, by.ID)
+				"topic %q already has a producer (%s %q): a topic has exactly one epoch-stamping producer, because two would interleave their refresh-epoch spaces and one producer's reconciling sweep could erase the other's rows on every keyed syncable downstream; use a separate topic or delete the other config first", t, by.Kind, by.ID)
 		}
 	}
 
@@ -163,7 +163,7 @@ func ReplayWithCandidate(stored []DerivationEdge, candidate DerivationEdge) erro
 // nil. The loopback forwards its source's generations and refresh
 // boundaries VERBATIM, so a source whose epoch highwater lags a target's
 // committed highwater could never sweep the rows a previous producer
-// stamped higher — stale rows would linger on every downstream keyed sink
+// stamped higher — stale rows would linger on every downstream keyed syncable
 // (and epoch monotonicity is also what lets a FUTURE consumer's full replay
 // converge: the first in-log boundary above the old era's highwater sweeps
 // it). A source at or above the target is safe — its first refresh
@@ -183,7 +183,7 @@ func DerivedTopicEpochRegression(sources, targets []string, epochOf func(topic s
 	for _, t := range targets {
 		if thw := epochOf(t); thw > srcHw {
 			return fmt.Errorf(
-				"derived topic %q carries committed refresh epochs up to %d, above source topic %q's %d: the loopback forwards the source's epochs verbatim, so its reconciling sweeps could never reach rows a previous producer stamped at higher epochs — they would linger stale on every downstream keyed sink. Derive into a fresh topic instead; the old topic's log carries its history permanently, so it cannot be safely re-targeted from a lower-epoch source",
+				"derived topic %q carries committed refresh epochs up to %d, above source topic %q's %d: the loopback forwards the source's epochs verbatim, so its reconciling sweeps could never reach rows a previous producer stamped at higher epochs — they would linger stale on every downstream keyed syncable. Derive into a fresh topic instead; the old topic's log carries its history permanently, so it cannot be safely re-targeted from a lower-epoch source",
 				t, thw, strings.Join(sources, ", "), srcHw)
 		}
 	}

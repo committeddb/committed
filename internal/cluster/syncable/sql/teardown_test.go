@@ -23,7 +23,7 @@ func teardownConfig() *sql.Config {
 
 // noteRows is the destination note as the mock returns it.
 func noteRows(owned bool) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"rendering_version", "owned"}).AddRow(int64(sql.SinkRenderingVersion), owned)
+	return sqlmock.NewRows([]string{"rendering_version", "owned"}).AddRow(int64(sql.RenderingVersion), owned)
 }
 
 // Teardown of a table committed created: read the note (owned), run the
@@ -40,9 +40,9 @@ func TestSyncable_Teardown(t *testing.T) {
 	config := teardownConfig()
 	syncable := sql.New(db, config)
 
-	mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs(config.Table).WillReturnRows(noteRows(true))
+	mock.ExpectQuery(dialect.DestinationSelectSQL()).WithArgs(config.Table).WillReturnRows(noteRows(true))
 	mock.ExpectExec(dialect.DropDDL(config)).WillReturnResult(driver.ResultNoRows)
-	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs(config.Table).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.DestinationDeleteSQL()).WithArgs(config.Table).WillReturnResult(driver.ResultNoRows)
 
 	dropped, err := syncable.Teardown(false)
 	require.NoError(t, err)
@@ -68,7 +68,7 @@ func TestSyncable_Teardown_AttachedTableStays(t *testing.T) {
 			require.NoError(t, err)
 
 			config := teardownConfig()
-			mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs(config.Table).WillReturnRows(tc.rows)
+			mock.ExpectQuery(dialect.DestinationSelectSQL()).WithArgs(config.Table).WillReturnRows(tc.rows)
 
 			dropped, err := sql.New(db, config).Teardown(false)
 			require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestSyncable_Teardown_KeepDisowns(t *testing.T) {
 	require.NoError(t, err)
 
 	config := teardownConfig()
-	mock.ExpectExec(dialect.SinkMetaDisownSQL()).WithArgs(config.Table).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.DestinationDisownSQL()).WithArgs(config.Table).WillReturnResult(driver.ResultNoRows)
 
 	dropped, err := sql.New(db, config).Teardown(true)
 	require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestSyncable_Init_ClaimsTheTableItCreated(t *testing.T) {
 	config := teardownConfig()
 	config.Mappings[0].JsonPath = "$.id" // Init compiles the mapping; teardown alone does not
 	mock.ExpectExec(dialect.CreateDDL(config)).WillReturnResult(driver.ResultNoRows)
-	mock.ExpectExec(dialect.SinkMetaClaimSQL()).WithArgs(config.Table, int64(sql.SinkRenderingVersion)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectExec(dialect.DestinationClaimSQL()).WithArgs(config.Table, int64(sql.RenderingVersion)).WillReturnResult(driver.ResultNoRows)
 	mock.ExpectPrepare(dialect.CreateGenerationUpsertSQL(config))
 	mock.ExpectPrepare(dialect.CreateDeleteSQL(config))
 	mock.ExpectPrepare(dialect.CreateGenerationSweepSQL(config))
@@ -129,7 +129,7 @@ func TestSyncable_Teardown_WrapsError(t *testing.T) {
 	config := teardownConfig()
 	syncable := sql.New(db, config)
 
-	mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs(config.Table).WillReturnRows(noteRows(true))
+	mock.ExpectQuery(dialect.DestinationSelectSQL()).WithArgs(config.Table).WillReturnRows(noteRows(true))
 	mock.ExpectExec(dialect.DropDDL(config)).WillReturnError(errors.New("permission denied"))
 
 	dropped, err := syncable.Teardown(false)
@@ -150,10 +150,10 @@ func TestSyncable_Teardown_Idempotent(t *testing.T) {
 	config := teardownConfig()
 	syncable := sql.New(db, config)
 
-	mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs(config.Table).WillReturnRows(noteRows(true))
+	mock.ExpectQuery(dialect.DestinationSelectSQL()).WithArgs(config.Table).WillReturnRows(noteRows(true))
 	mock.ExpectExec(dialect.DropDDL(config)).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs(config.Table).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs(config.Table).WillReturnRows(sqlmock.NewRows([]string{"rendering_version", "owned"}))
+	mock.ExpectExec(dialect.DestinationDeleteSQL()).WithArgs(config.Table).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(dialect.DestinationSelectSQL()).WithArgs(config.Table).WillReturnRows(sqlmock.NewRows([]string{"rendering_version", "owned"}))
 
 	dropped, err := syncable.Teardown(false)
 	require.NoError(t, err)
@@ -187,7 +187,7 @@ func TestSyncable_OwnsDestination(t *testing.T) {
 			db, err := sql.NewDB(dialect, "")
 			require.NoError(t, err)
 			config := teardownConfig()
-			mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs(config.Table).WillReturnRows(tc.rows)
+			mock.ExpectQuery(dialect.DestinationSelectSQL()).WithArgs(config.Table).WillReturnRows(tc.rows)
 
 			owns, err := sql.New(db, config).OwnsDestination(context.Background())
 			require.NoError(t, err)
