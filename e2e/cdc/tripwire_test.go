@@ -54,7 +54,7 @@ func TestValidationTripwireAnnouncesToSQLSink(t *testing.T) {
 name = "region"
 schemaType = "JSONSchema"
 schema = '%s'
-validate = 2
+validate = "announce"
 schemaChangeTopic = "schema-changes"
 
 [migration]

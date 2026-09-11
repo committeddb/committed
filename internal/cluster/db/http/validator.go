@@ -58,9 +58,10 @@ type SchemaValidator struct {
 	schemas sync.Map // schemaCacheKey -> entityValidator
 }
 
-// ValidateTypeSchema returns nil for a valid schema, a non-validating type, or an
-// unknown SchemaType (compileValidator fails open with (nil, nil)); it returns the
-// compile error only when a known SchemaType's schema will not compile.
+// ValidateTypeSchema returns nil for a valid schema or a non-validating type,
+// and the compile error otherwise — including a validating type naming a
+// schema language this binary cannot compile, which admitted would validate
+// nothing and say so nowhere (compileValidator).
 func (v *SchemaValidator) ValidateTypeSchema(t *cluster.Type) error {
 	_, err := compileValidator(t)
 	return err
@@ -68,10 +69,10 @@ func (v *SchemaValidator) ValidateTypeSchema(t *cluster.Type) error {
 
 // ValidateEntityData implements cluster.EntitySchemaValidator for the
 // validation tripwire: it reports a payload's schema violations structurally
-// instead of gating. (nil, nil) = conformant, non-validating type, or unknown
-// SchemaType (fail-open, matching ValidateTypeSchema); non-nil divergence =
-// well-formed payload violating the schema; error = schema or input
-// structurally unusable.
+// instead of gating. (nil, nil) = conformant or non-validating type; non-nil
+// divergence = well-formed payload violating the schema; error = schema or
+// input structurally unusable, including a language this binary cannot
+// compile (the tripwire logs that and commits without announcing).
 func (v *SchemaValidator) ValidateEntityData(t *cluster.Type, data []byte) (*cluster.SchemaDivergence, error) {
 	key := schemaCacheKey{id: t.ID, version: t.Version}
 	var ev entityValidator
@@ -138,13 +139,17 @@ func flattenValidationError(e *jsonschema.ValidationError, d *cluster.SchemaDive
 	}
 }
 
-// compileValidator builds an entityValidator for the given type, or
-// returns (nil, nil) if this type shouldn't be validated. Both validating
-// strategies compile — ValidateSchema to gate, ValidateAnnounce for the
-// tripwire (callers scope gating to ValidateSchema themselves). Unknown
-// SchemaType values fall through to (nil, nil) — we fail-open for now per
-// proposal-validation.md's "do not fail-closed for unknown schema types"
-// guidance, which becomes the place to revisit once Thrift/Avro land.
+// compileValidator builds an entityValidator for the given type, or returns
+// (nil, nil) for a non-validating type. Both validating strategies compile —
+// ValidateSchema to gate, ValidateAnnounce for the tripwire (callers scope
+// gating to ValidateSchema themselves). A validating type whose schema
+// language this binary cannot compile is an ERROR, at admission and on the
+// proposal path alike: admitted, it would validate nothing and say so
+// nowhere. Admission has required a language since v0.3-beta (below the
+// data-dir floor), so no stored type lacks one; and a language added in a
+// later release must be feature-gated at admission (version.FeatureLevel)
+// so a rolling upgrade never presents an older node with one — never fail
+// open here to paper over that.
 func compileValidator(t *cluster.Type) (entityValidator, error) {
 	if t.Validate != cluster.ValidateSchema && t.Validate != cluster.ValidateAnnounce {
 		return nil, nil
@@ -154,8 +159,10 @@ func compileValidator(t *cluster.Type) (entityValidator, error) {
 		return compileJSONSchemaValidator(t)
 	case "Protobuf":
 		return compileProtobufValidator(t)
+	case "":
+		return nil, fmt.Errorf("type %q validates but names no schema language (JSONSchema or Protobuf)", t.ID)
 	default:
-		return nil, nil
+		return nil, fmt.Errorf("schemaType = %q is not a schema language this binary can validate (JSONSchema, Protobuf): a validating type it cannot check would admit every payload silently", t.SchemaType)
 	}
 }
 

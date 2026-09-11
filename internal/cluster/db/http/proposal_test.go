@@ -125,10 +125,10 @@ func TestAddProposal_TypeNotFound(t *testing.T) {
 const personSchema = `{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"integer"}},"required":["name"]}`
 
 // TestAddProposal_SchemaValidation_Valid: a conforming payload under a
-// strict (validate = 1) type flows through to the sink.
+// strict (validate = "schema") type flows through to the sink.
 func TestAddProposal_SchemaValidation_Valid(t *testing.T) {
 	e := newEngine(t)
-	e.addTypeWithSchema(t, "person", "person", personSchema, 1)
+	e.addTypeWithSchema(t, "person", "person", personSchema, "schema")
 	e.addRecorderSyncable(t, "rec-1", "person")
 
 	w := e.doJSON(t, "POST", "/v1/proposal",
@@ -141,7 +141,7 @@ func TestAddProposal_SchemaValidation_Valid(t *testing.T) {
 // field under a strict type is a 400 with structured details.
 func TestAddProposal_SchemaValidation_Invalid(t *testing.T) {
 	e := newEngine(t)
-	e.addTypeWithSchema(t, "person", "person", personSchema, 1)
+	e.addTypeWithSchema(t, "person", "person", personSchema, "schema")
 
 	w := e.doJSON(t, "POST", "/v1/proposal",
 		`{"entities": [{"typeId": "person", "key": "k1", "data": {"age": 30}}]}`)
@@ -153,7 +153,7 @@ func TestAddProposal_SchemaValidation_Invalid(t *testing.T) {
 // the same gate.
 func TestAddProposal_SchemaValidation_WrongType(t *testing.T) {
 	e := newEngine(t)
-	e.addTypeWithSchema(t, "person", "person", personSchema, 1)
+	e.addTypeWithSchema(t, "person", "person", personSchema, "schema")
 
 	w := e.doJSON(t, "POST", "/v1/proposal",
 		`{"entities": [{"typeId": "person", "key": "k1", "data": {"name": "Alice", "age": "not a number"}}]}`)
@@ -161,10 +161,10 @@ func TestAddProposal_SchemaValidation_WrongType(t *testing.T) {
 }
 
 // TestAddProposal_SchemaValidation_NoValidation: a type carrying a schema
-// with validate = 0 gates nothing.
+// with validate = "none" gates nothing.
 func TestAddProposal_SchemaValidation_NoValidation(t *testing.T) {
 	e := newEngine(t)
-	e.addTypeWithSchema(t, "loose", "loose", `{"type":"object","required":["name"]}`, 0)
+	e.addTypeWithSchema(t, "loose", "loose", `{"type":"object","required":["name"]}`, "none")
 	e.addRecorderSyncable(t, "rec-1", "loose")
 
 	w := e.doJSON(t, "POST", "/v1/proposal",
@@ -177,7 +177,7 @@ func TestAddProposal_SchemaValidation_NoValidation(t *testing.T) {
 // so even a strict type must accept a bare tombstone.
 func TestAddProposal_Delete_SkipsSchemaValidation(t *testing.T) {
 	e := newEngine(t)
-	e.addTypeWithSchema(t, "person", "person", personSchema, 1)
+	e.addTypeWithSchema(t, "person", "person", personSchema, "schema")
 	e.addRecorderSyncable(t, "rec-1", "person")
 
 	w := e.doJSON(t, "POST", "/v1/proposal",
@@ -190,18 +190,18 @@ func TestAddProposal_Delete_SkipsSchemaValidation(t *testing.T) {
 
 // TestAddProposal_AnnounceCommitsDivergentPayload pins the signal-not-reject
 // rule on the direct-proposal path: a divergent payload under an
-// announce-typed (validate = 2) topic COMMITS — the tripwire announces the
+// announce-typed (validate = "announce") topic COMMITS — the tripwire announces the
 // divergence instead of gating — while the same payload under a strict type
 // stays a 400.
 func TestAddProposal_AnnounceCommitsDivergentPayload(t *testing.T) {
 	schema := `{"type":"object","properties":{"caption":{"type":"string"}},"additionalProperties":false}`
 	divergent := `{"entities": [{"typeId": "cap", "key": "k1", "data": {"caption": 7}}]}`
 
-	// Announce: divergence flows through to the sink. validate = 2 requires
+	// Announce: divergence flows through to the sink. validate = "announce" requires
 	// schemaChangeTopic — the type that receives ContractExtension events.
 	e := newEngine(t)
 	e.addType(t, "capEvents", "capEvents")
-	e.addTypeWithSchemaType(t, "cap", "cap", "JSONSchema", schema, 2, "schemaChangeTopic = \"capEvents\"\n")
+	e.addTypeWithSchemaType(t, "cap", "cap", "JSONSchema", schema, "announce", "schemaChangeTopic = \"capEvents\"\n")
 	e.addRecorderSyncable(t, "rec-1", "cap")
 	w := e.doJSON(t, "POST", "/v1/proposal", divergent)
 	mustStatus(t, w, 200)
@@ -209,7 +209,7 @@ func TestAddProposal_AnnounceCommitsDivergentPayload(t *testing.T) {
 
 	// Strict: the same divergence is still rejected at the gate.
 	e2 := newEngine(t)
-	e2.addTypeWithSchema(t, "cap", "cap", schema, 1)
+	e2.addTypeWithSchema(t, "cap", "cap", schema, "schema")
 	w = e2.doJSON(t, "POST", "/v1/proposal", divergent)
 	requireEnvelope(t, w, 400, "schema_validation_failed")
 }
@@ -231,7 +231,7 @@ message Person {
 // are pinned in proposal_schema_test.go.
 func TestAddProposal_ProtobufValidation(t *testing.T) {
 	e := newEngine(t)
-	e.addTypeWithSchemaType(t, "person", "Person", "Protobuf", protoSourcePerson, 1, "")
+	e.addTypeWithSchemaType(t, "person", "Person", "Protobuf", protoSourcePerson, "schema", "")
 	e.addRecorderSyncable(t, "rec-1", "person")
 
 	for i := 1; i <= 3; i++ {
@@ -262,7 +262,7 @@ message Person {
 }
 `
 	e := newEngine(t)
-	e.addTypeWithSchemaType(t, "person", "Person", "Protobuf", src, 1, "")
+	e.addTypeWithSchemaType(t, "person", "Person", "Protobuf", src, "schema", "")
 	e.addRecorderSyncable(t, "rec-1", "person")
 
 	w := e.doJSON(t, "POST", "/v1/proposal",
@@ -279,7 +279,7 @@ func TestAddProposal_AttachesResolvedTypeVersion(t *testing.T) {
 	e := newEngine(t)
 	e.addType(t, "photos", "photos")
 	// A version bump must declare its migration; none is the identity.
-	e.addTypeWithSchemaType(t, "photos", "photos", "JSONSchema", `{"type":"object"}`, 0, "[migration]\nnone = true\n") // version 2
+	e.addTypeWithSchemaType(t, "photos", "photos", "JSONSchema", `{"type":"object"}`, "none", "[migration]\nnone = true\n") // version 2
 	e.addRecorderSyncable(t, "rec-1", "photos")
 
 	w := e.doJSON(t, "POST", "/v1/proposal",
@@ -297,7 +297,7 @@ func TestAddProposal_AttachesResolvedTypeVersion(t *testing.T) {
 func TestAddProposal_SchemaValidation_CacheInvalidatesOnVersionBump(t *testing.T) {
 	e := newEngine(t)
 	e.addTypeWithSchema(t, "person", "person",
-		`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`, 1)
+		`{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`, "schema")
 
 	// Passes against schema v1 (warming the cache).
 	w := e.doJSON(t, "POST", "/v1/proposal",
@@ -307,7 +307,7 @@ func TestAddProposal_SchemaValidation_CacheInvalidatesOnVersionBump(t *testing.T
 	// The schema evolves: now email is required instead of name. (A version
 	// bump must declare its migration; none is the identity.)
 	e.addTypeWithSchemaType(t, "person", "person", "JSONSchema",
-		`{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}}`, 1, "[migration]\nnone = true\n")
+		`{"type":"object","required":["email"],"properties":{"email":{"type":"string"}}}`, "schema", "[migration]\nnone = true\n")
 
 	// The same payload must now fail — proof the bumped version missed the
 	// cache and compiled the new schema.
@@ -323,18 +323,18 @@ func TestAddProposal_BadJSON(t *testing.T) {
 	requireEnvelope(t, w, 400, "invalid_json")
 }
 
-// TestAddProposal_SchemaValidation_UnknownSchemaType: an unrecognized
-// SchemaType fails OPEN (the proposal commits unvalidated) per
-// proposal-validation.md's "do not fail-closed for unknown schema types"
-// guidance — admitted for real, since admission checks only that a
-// validating type names SOME schema language.
-func TestAddProposal_SchemaValidation_UnknownSchemaType(t *testing.T) {
+// TestAddType_UnknownSchemaTypeRefused: a validating type naming a schema
+// language this binary cannot compile is refused at POST — admitted, it
+// would validate nothing and say so nowhere. Without validation the language
+// is inert metadata and passes. (The proposal path's fail-open for such a
+// type, admitted by an upgraded peer, is pinned at the unit level.)
+func TestAddType_UnknownSchemaTypeRefused(t *testing.T) {
 	e := newEngine(t)
-	e.addTypeWithSchemaType(t, "thing", "Thing", "Thrift", "not a real schema", 1, "")
-	e.addRecorderSyncable(t, "rec-1", "thing")
+	body := "[type]\nname = \"Thing\"\nschemaType = \"Thrift\"\nschema = 'not a real schema'\nvalidate = \"schema\"\n"
+	w := e.doTOML(t, "POST", "/v1/type/thing", body)
+	mustStatus(t, w, 400)
+	require.Contains(t, w.Body.String(), "JSONSchema, Protobuf")
 
-	w := e.doJSON(t, "POST", "/v1/proposal",
-		`{"entities": [{"typeId": "thing", "key": "k1", "data": {"anything": true}}]}`)
+	w = e.doTOML(t, "POST", "/v1/type/thing", "[type]\nname = \"Thing\"\nschemaType = \"Thrift\"\nschema = 'x'\n")
 	mustStatus(t, w, 200)
-	awaitRow(t, e, "k1", `{"anything": true}`)
 }

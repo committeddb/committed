@@ -194,7 +194,7 @@ func TestParseType(t *testing.T) {
 
 	t.Run("with JSONSchema", func(t *testing.T) {
 		schema := `{"type":"object","required":["name"]}`
-		toml := fmt.Sprintf("[type]\nname = \"Person\"\nschemaType = \"JSONSchema\"\nvalidate = 1\nschema = '%s'", schema)
+		toml := fmt.Sprintf("[type]\nname = \"Person\"\nschemaType = \"JSONSchema\"\nvalidate = \"schema\"\nschema = '%s'", schema)
 
 		cfg := &cluster.Configuration{
 			ID:       "t2",
@@ -211,7 +211,7 @@ func TestParseType(t *testing.T) {
 	})
 
 	t.Run("validate enabled but no schemaType", func(t *testing.T) {
-		toml := "[type]\nname = \"Bad\"\nvalidate = 1\nschema = '{\"type\":\"object\"}'"
+		toml := "[type]\nname = \"Bad\"\nvalidate = \"schema\"\nschema = '{\"type\":\"object\"}'"
 
 		cfg := &cluster.Configuration{
 			ID:       "t3",
@@ -225,7 +225,7 @@ func TestParseType(t *testing.T) {
 	})
 
 	t.Run("validate enabled but no schema", func(t *testing.T) {
-		toml := "[type]\nname = \"Bad\"\nschemaType = \"JSONSchema\"\nvalidate = 1"
+		toml := "[type]\nname = \"Bad\"\nschemaType = \"JSONSchema\"\nvalidate = \"schema\""
 
 		cfg := &cluster.Configuration{
 			ID:       "t4",
@@ -256,7 +256,7 @@ func TestParseType(t *testing.T) {
 
 	t.Run("with Protobuf", func(t *testing.T) {
 		proto := "syntax = \\\"proto3\\\"; message Person { string name = 1; }"
-		toml := fmt.Sprintf("[type]\nname = \"Person\"\nschemaType = \"Protobuf\"\nvalidate = 1\nschema = \"%s\"", proto)
+		toml := fmt.Sprintf("[type]\nname = \"Person\"\nschemaType = \"Protobuf\"\nvalidate = \"schema\"\nschema = \"%s\"", proto)
 
 		cfg := &cluster.Configuration{
 			ID:       "t6",

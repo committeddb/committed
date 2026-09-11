@@ -28,7 +28,7 @@ func proposeAnnounceFixtures(t *testing.T, d *db.DB, s *wal.Storage) *cluster.Ty
 	}))
 	require.NoError(t, d.ProposeType(testCtx(t), &cluster.Configuration{
 		ID: "photo-meta", MimeType: "text/toml",
-		Data: []byte(fmt.Sprintf("[type]\nname = \"PhotoMeta\"\nschemaType = \"JSONSchema\"\nschema = '%s'\nvalidate = 2\nschemaChangeTopic = \"schema-changes\"", tripwireSchema)),
+		Data: []byte(fmt.Sprintf("[type]\nname = \"PhotoMeta\"\nschemaType = \"JSONSchema\"\nschema = '%s'\nvalidate = \"announce\"\nschemaChangeTopic = \"schema-changes\"", tripwireSchema)),
 	}))
 	tp, err := s.ResolveType(cluster.LatestTypeRef("photo-meta"))
 	require.NoError(t, err)
@@ -225,7 +225,7 @@ func TestProposeType_AnnounceAdmission(t *testing.T) {
 
 	// announce without a destination → refused.
 	err := d.ProposeType(testCtx(t), &cluster.Configuration{
-		ID: "t-a", MimeType: "text/toml", Data: []byte(base + "\nvalidate = 2"),
+		ID: "t-a", MimeType: "text/toml", Data: []byte(base + "\nvalidate = \"announce\""),
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "schemaChangeTopic")
@@ -235,18 +235,18 @@ func TestProposeType_AnnounceAdmission(t *testing.T) {
 		ID: "t-b", MimeType: "text/toml", Data: []byte(base + "\nschemaChangeTopic = \"somewhere\""),
 	})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "only valid with validate = 2")
+	require.Contains(t, err.Error(), `only valid with validate = "announce"`)
 
 	// self-reference → refused.
 	err = d.ProposeType(testCtx(t), &cluster.Configuration{
-		ID: "t-c", MimeType: "text/toml", Data: []byte(base + "\nvalidate = 2\nschemaChangeTopic = \"t-c\""),
+		ID: "t-c", MimeType: "text/toml", Data: []byte(base + "\nvalidate = \"announce\"\nschemaChangeTopic = \"t-c\""),
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot be the type itself")
 
 	// a destination that does not exist yet → refused (declare it first).
 	err = d.ProposeType(testCtx(t), &cluster.Configuration{
-		ID: "t-d", MimeType: "text/toml", Data: []byte(base + "\nvalidate = 2\nschemaChangeTopic = \"missing\""),
+		ID: "t-d", MimeType: "text/toml", Data: []byte(base + "\nvalidate = \"announce\"\nschemaChangeTopic = \"missing\""),
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not name an existing type")
@@ -257,19 +257,27 @@ func TestProposeType_AnnounceAdmission(t *testing.T) {
 	}))
 	require.NoError(t, d.ProposeType(testCtx(t), &cluster.Configuration{
 		ID: "events-announcing", MimeType: "text/toml",
-		Data: []byte(base + "\nvalidate = 2\nschemaChangeTopic = \"events-plain\""),
+		Data: []byte(base + "\nvalidate = \"announce\"\nschemaChangeTopic = \"events-plain\""),
 	}))
 	err = d.ProposeType(testCtx(t), &cluster.Configuration{
 		ID: "t-e", MimeType: "text/toml",
-		Data: []byte(base + "\nvalidate = 2\nschemaChangeTopic = \"events-announcing\""),
+		Data: []byte(base + "\nvalidate = \"announce\"\nschemaChangeTopic = \"events-announcing\""),
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "itself announce-typed")
 
-	// an unknown strategy integer → refused.
+	// an unknown strategy word → refused naming the three.
 	err = d.ProposeType(testCtx(t), &cluster.Configuration{
-		ID: "t-f", MimeType: "text/toml", Data: []byte(base + "\nvalidate = 9"),
+		ID: "t-f", MimeType: "text/toml", Data: []byte(base + "\nvalidate = \"gate\""),
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not a known validation strategy")
+
+	// the 0.7.x integer spelling → refused naming the word it became.
+	err = d.ProposeType(testCtx(t), &cluster.Configuration{
+		ID: "t-g", MimeType: "text/toml", Data: []byte(base + "\nvalidate = 2"),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "0.7.x integer spelling")
+	require.Contains(t, err.Error(), `"announce" (was 2)`)
 }

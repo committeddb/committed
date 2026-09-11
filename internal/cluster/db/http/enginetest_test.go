@@ -203,6 +203,9 @@ func newEngineFull(t *testing.T, dbOpts []db.Option, httpOpts []http.Option) *en
 	}, dbOpts...)
 	d := db.New(1, peers, s, p, syncCh, ingestCh, opts...)
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
+	// The admission schema compiler, injected as the node wires it (a broken
+	// or uncompilable schema is a 400 at POST /type, not a later surprise).
+	d.SetTypeSchemaValidator(&http.SchemaValidator{})
 
 	// Wait out the single-node election on BOTH leadership views: the
 	// leader-pinned routes (rebuild, delete) consult Leader()/ID() — raft's
@@ -357,20 +360,20 @@ func (e *engine) syncableIDs(t *testing.T) []string {
 }
 
 // addTypeWithSchema POSTs a type with a JSON schema and a validation
-// strategy (0 = none, 1 = gate on schema, 2 = announce divergence).
-func (e *engine) addTypeWithSchema(t *testing.T, id, name, schema string, validate int) {
+// strategy ("none", "schema" = gate, "announce" = the tripwire).
+func (e *engine) addTypeWithSchema(t *testing.T, id, name, schema string, validate string) {
 	t.Helper()
 	e.addTypeWithSchemaType(t, id, name, "JSONSchema", schema, validate, "")
 }
 
 // addTypeWithSchemaType is addTypeWithSchema with the schema language and
-// any extra TOML lines (e.g. schemaChangeTopic, required by validate = 2)
+// any extra TOML lines (e.g. schemaChangeTopic, required by "announce")
 // spelled out.
-func (e *engine) addTypeWithSchemaType(t *testing.T, id, name, schemaType, schema string, validate int, extraTOML string) {
+func (e *engine) addTypeWithSchemaType(t *testing.T, id, name, schemaType, schema string, validate string, extraTOML string) {
 	t.Helper()
 	// TOML multi-line literal quoting so a .proto source with newlines
 	// survives; no schema in these tests carries a ''' sequence.
-	body := fmt.Sprintf("[type]\nname = %q\nschemaType = %q\nschema = '''%s'''\nvalidate = %d\n%s", name, schemaType, schema, validate, extraTOML)
+	body := fmt.Sprintf("[type]\nname = %q\nschemaType = %q\nschema = '''%s'''\nvalidate = %q\n%s", name, schemaType, schema, validate, extraTOML)
 	w := e.doTOML(t, "POST", "/v1/type/"+id, body)
 	require.Equal(t, 200, w.Code, w.Body.String())
 }

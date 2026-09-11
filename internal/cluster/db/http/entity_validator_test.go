@@ -39,13 +39,14 @@ func TestValidateEntityData(t *testing.T) {
 	require.Contains(t, keywords, "type", "the type mismatch must surface: %v", div.Causes)
 	require.Equal(t, "/caption", keywords["type"], "the mismatch names its instance path")
 
-	// A non-validating type and an unknown SchemaType both report nothing
-	// (fail-open, symmetric with ValidateTypeSchema).
+	// A non-validating type reports nothing; a language this binary cannot
+	// compile is an error, not a silent pass (the tripwire logs it and
+	// commits without announcing — symmetric with ValidateTypeSchema).
 	div, err = sv.ValidateEntityData(&cluster.Type{ID: "plain"}, []byte(`{}`))
 	require.NoError(t, err)
 	require.Nil(t, div)
 	div, err = sv.ValidateEntityData(&cluster.Type{ID: "thrift", Validate: cluster.ValidateAnnounce, SchemaType: "Thrift", Schema: []byte("x")}, []byte(`{}`))
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.Nil(t, div)
 
 	// Malformed payload JSON is a divergence-shaped report from the

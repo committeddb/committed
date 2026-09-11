@@ -24,7 +24,7 @@ func TestParseTypeToleratesCaseVariantKeys(t *testing.T) {
 Name       = "Person"
 SchemaType = "JSONSchema"
 Schema     = '{"type":"object","required":["camelCaseField"]}'
-Validate   = 1
+Validate   = "schema"
 EntityKind = "event"
 
 [Migration]
@@ -44,14 +44,14 @@ Transform = '. + {camelCase: "Value"}'
 }
 
 // JSON-mimetype type configs decode like their TOML twin, including
-// the int-typed validate flag and IsSet-dependent optionality.
+// the validate word and IsSet-dependent optionality.
 func TestParseTypeJSONMimeType(t *testing.T) {
 	jsonConfig := `{
   "type": {
     "name": "Person",
     "schemaType": "JSONSchema",
     "schema": "{\"type\":\"object\"}",
-    "validate": 1
+    "validate": "schema"
   }
 }`
 	c := &cluster.Configuration{ID: "person", MimeType: "application/json", Data: []byte(jsonConfig)}
@@ -59,7 +59,7 @@ func TestParseTypeJSONMimeType(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, "Person", name)
-	require.Equal(t, cluster.ValidateSchema, tipe.Validate, "validate arrives as a JSON number and must coerce to int")
+	require.Equal(t, cluster.ValidateSchema, tipe.Validate, "the validate word reads the same from JSON")
 	require.Equal(t, `{"type":"object"}`, string(tipe.Schema))
 }
 

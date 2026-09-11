@@ -211,7 +211,7 @@ state and served on `GET /v1/ingestable/{id}/status`:
   evidence;
 - a **draft JSON Schema** mirroring the observed structure
   (`additionalProperties: false` at every level), ready to review and POST as
-  a type — with `validate = 2` it becomes the tripwire's contract. Inference
+  a type — with `validate = "announce"` it becomes the tripwire's contract. Inference
   is bootstrap-only: the draft is never auto-blessed, and the runtime never
   infers — after blessing, the tripwire reconciles reality against the
   declared contract.
@@ -240,10 +240,10 @@ range with restatements.
 A type with a schema chooses what happens when a payload doesn't match it,
 via `validate`:
 
-- `0` — none (the default). Payloads are never checked.
-- `1` — **gate**. A direct proposal whose payload violates the schema is
-  rejected with 400. Right for topics whose producers you control.
-- `2` — **announce** (the tripwire). The payload **still commits** — a
+- `"none"` (the default). Payloads are never checked.
+- `"schema"` — the **gate**. A direct proposal whose payload violates the
+  schema is rejected with 400. Right for topics whose producers you control.
+- `"announce"` — the **tripwire**. The payload **still commits** — a
   non-conformant CDC row is a true fact about the source, and refusing to
   record it would make the log less true — and the first occurrence of each
   *distinct divergent shape* emits a **ContractExtension** event to the topic
@@ -263,7 +263,7 @@ entityKind = "standalone"
 name = "PhotoMeta"
 schemaType = "JSONSchema"
 schema = '{"type":"object","properties":{"caption":{"type":"string"}},"additionalProperties":false}'
-validate = 2
+validate = "announce"
 schemaChangeTopic = "schema-changes"
 ```
 

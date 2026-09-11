@@ -223,6 +223,13 @@ same quorum rule applies in reverse.
   re-POST it renamed and it resumes from its checkpoint. Re-POST **after**
   upgrading, not before: 0.7.x does not know the new spellings and would
   silently fall back to the default slot and publication names.
+- **`validate` is a word.** A type's validation strategy is spelled
+  `"none"`, `"schema"`, or `"announce"` instead of `0`, `1`, `2`; the
+  integer is refused at POST naming the word it became. Stored types are
+  unaffected (the strategy is stored as data, never re-parsed), so only
+  the documents you POST need the new spelling. A validating type must
+  also name a schema language the binary can check (`JSONSchema` or
+  `Protobuf`); any other was accepted before and validated nothing.
 - **0.8.0 leaves a note in each SQL destination** saying which version of
   committed wrote its rows: one row per projected table in a small
   `committed__sink_meta` table in the destination database (see

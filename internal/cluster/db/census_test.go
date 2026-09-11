@@ -219,7 +219,7 @@ func TestCensus_DraftBlessTripwire(t *testing.T) {
 name = "photo-meta"
 schemaType = "JSONSchema"
 schema = '''%s'''
-validate = 2
+validate = "announce"
 schemaChangeTopic = "schema-changes"
 
 [migration]

@@ -42,6 +42,9 @@ type TypeResolver interface {
 	ResolveType(ref TypeRef) (*Type, error)
 }
 
+// ValidationStrategy is what a type with a schema does when a payload does
+// not match it. Stored as the number; spelled in config as the word
+// (validate = "none" | "schema" | "announce", see ParseValidationStrategy).
 type ValidationStrategy int
 
 const (
@@ -53,6 +56,42 @@ const (
 	// emits a ContractExtension event to the Type's SchemaChangeTopic.
 	ValidateAnnounce ValidationStrategy = 2
 )
+
+// The config spellings, one per strategy.
+const (
+	ValidateWordNone     = "none"
+	ValidateWordSchema   = "schema"
+	ValidateWordAnnounce = "announce"
+)
+
+// String is the config spelling.
+func (s ValidationStrategy) String() string {
+	switch s {
+	case ValidateSchema:
+		return ValidateWordSchema
+	case ValidateAnnounce:
+		return ValidateWordAnnounce
+	default:
+		return ValidateWordNone
+	}
+}
+
+// ParseValidationStrategy reads the config spelling ("" = none, like the
+// other enums' absent value). The 0.7.x integers are refused naming the
+// word each became; any other spelling is refused naming the three.
+func ParseValidationStrategy(s string) (ValidationStrategy, error) {
+	switch s {
+	case "", ValidateWordNone:
+		return NoValidation, nil
+	case ValidateWordSchema:
+		return ValidateSchema, nil
+	case ValidateWordAnnounce:
+		return ValidateAnnounce, nil
+	case "0", "1", "2":
+		return NoValidation, fmt.Errorf("validate = %s was the 0.7.x integer spelling, removed in 0.8.0: write %q (was 0), %q (was 1), or %q (was 2)", s, ValidateWordNone, ValidateWordSchema, ValidateWordAnnounce)
+	}
+	return NoValidation, fmt.Errorf("validate = %q is not a known validation strategy: %q, %q (gate: a proposal whose payload violates the schema is rejected), or %q (tripwire: it commits, and the first of each divergent shape is announced)", s, ValidateWordNone, ValidateWordSchema, ValidateWordAnnounce)
+}
 
 // EntityKind declares what the entities written under a type are,
 // ordered by how much interpretation a consumer needs to apply one. It
@@ -245,10 +284,12 @@ func (e *StrandedSyncablesError) Error() string {
 // the http layer, which db must not import — the same dependency inversion as the
 // SyncableParser / IngestableParser / DatabaseParser seams.
 type TypeSchemaValidator interface {
-	// ValidateTypeSchema returns nil for a valid schema, a non-validating type,
-	// or an UNKNOWN SchemaType (fail-open, so a schema type a newer producer
-	// understands is not rejected here); it returns an error only when a KNOWN
-	// SchemaType's schema will not compile.
+	// ValidateTypeSchema returns nil for a valid schema or a non-validating
+	// type; it errors when a validating type names a schema language this
+	// binary cannot compile (admitting it would validate nothing, silently)
+	// or when a known language's schema will not compile. A language added
+	// in a later release is feature-gated at admission, like every other
+	// cross-version change, so an older node is never handed one.
 	ValidateTypeSchema(t *Type) error
 }
 

@@ -48,10 +48,11 @@ func TestCompiledValidator_LegacyBrokenSchemasError(t *testing.T) {
 	}
 }
 
-// TestCompiledValidator_LegacyIncompleteConfigFailsOpen: a validating type
-// with no schema language at all skips validation (nil validator, no error)
-// — the fail-open half of the legacy contract.
-func TestCompiledValidator_LegacyIncompleteConfigFailsOpen(t *testing.T) {
+// TestCompiledValidator_NoLanguageFailsClosed: a validating type with no
+// schema language cannot be checked, and a gate that cannot check must not
+// wave payloads through. Admission has required a language since v0.3-beta
+// (below the data-dir floor), so this is a backstop, never a stored shape.
+func TestCompiledValidator_NoLanguageFailsClosed(t *testing.T) {
 	typ := &cluster.Type{
 		ID: "legacy", Name: "Legacy", Version: 1,
 		Schema:   []byte(`{"type":"object"}`),
@@ -59,8 +60,9 @@ func TestCompiledValidator_LegacyIncompleteConfigFailsOpen(t *testing.T) {
 	}
 	h := &HTTP{}
 	v, err := h.compiledValidator(typ)
-	require.NoError(t, err)
-	require.Nil(t, v, "no schema language means no gate — fail open, not closed")
+	require.Error(t, err)
+	require.Nil(t, v)
+	require.Contains(t, err.Error(), "names no schema language")
 }
 
 // TestCompiledValidator_CachesByVersion: the same (typeID, version) resolves

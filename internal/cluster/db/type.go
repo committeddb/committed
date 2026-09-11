@@ -87,8 +87,9 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 	// ConfigError (400) at POST /type, not an accepted-then-permanent-500 on every
 	// proposal to the type — symmetric with the jq migration compiled in ParseType.
 	// Nil-safe (some tests inject no validator); the schema is self-contained, so
-	// this admission check need not re-run on apply. Fail-open for unknown
-	// SchemaTypeS is preserved by the validator (returns nil).
+	// this admission check need not re-run on apply. A validating type naming a
+	// schema language the binary cannot compile is refused here too — admitted,
+	// it would validate nothing and say so nowhere.
 	if b := db.schemaValidator.Load(); b != nil {
 		if err := b.v.ValidateTypeSchema(t); err != nil {
 			return cluster.NewConfigError(err)
@@ -308,14 +309,9 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		schema = []byte(v.GetString("type.schema"))
 	}
 
-	var validate cluster.ValidationStrategy
-	if v.IsSet("type.validate") {
-		validate = cluster.ValidationStrategy(v.GetInt("type.validate"))
-	}
-	switch validate {
-	case cluster.NoValidation, cluster.ValidateSchema, cluster.ValidateAnnounce:
-	default:
-		return "", nil, fmt.Errorf("validate = %d is not a known validation strategy (0 = none, 1 = gate on schema, 2 = announce divergence)", validate)
+	validate, err := cluster.ParseValidationStrategy(v.GetString("type.validate"))
+	if err != nil {
+		return "", nil, err
 	}
 
 	// Both validating strategies need a schema to check against; announce
@@ -338,10 +334,10 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 	// ProposeType, which has storage.
 	schemaChangeTopic := v.GetString("type.schemaChangeTopic")
 	if validate == cluster.ValidateAnnounce && schemaChangeTopic == "" {
-		return "", nil, fmt.Errorf("validate = 2 (announce) requires schemaChangeTopic: the Type ID that receives ContractExtension events")
+		return "", nil, fmt.Errorf("validate = \"announce\" requires schemaChangeTopic: the Type ID that receives ContractExtension events")
 	}
 	if validate != cluster.ValidateAnnounce && schemaChangeTopic != "" {
-		return "", nil, fmt.Errorf("schemaChangeTopic is only valid with validate = 2 (announce)")
+		return "", nil, fmt.Errorf("schemaChangeTopic is only valid with validate = \"announce\"")
 	}
 	if schemaChangeTopic == c.ID {
 		return "", nil, fmt.Errorf("schemaChangeTopic cannot be the type itself")
