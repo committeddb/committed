@@ -4,6 +4,7 @@ package iceberg_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -15,6 +16,9 @@ import (
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/table"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/iceberg"
@@ -170,10 +174,15 @@ func startIcebergStack(t *testing.T) *icebergStack {
 
 func (st *icebergStack) sink(t *testing.T, tableName string, flushRows int) *iceberg.Syncable {
 	t.Helper()
+	return st.sinkIn(t, "committed", tableName, flushRows)
+}
+
+func (st *icebergStack) sinkIn(t *testing.T, namespace, tableName string, flushRows int) *iceberg.Syncable {
+	t.Helper()
 	toml := fmt.Sprintf(`[iceberg]
 topic = "photos"
 catalog = %q
-namespace = "committed"
+namespace = %q
 table = %q
 flushRows = %d
 flushInterval = "1h"
@@ -181,7 +190,7 @@ flushInterval = "1h"
 "s3.endpoint" = %q
 "s3.region" = "us-east-1"
 "s3.force-virtual-addressing" = "false"
-`, st.catalogURI, tableName, flushRows, st.s3Endpoint)
+`, st.catalogURI, namespace, tableName, flushRows, st.s3Endpoint)
 	v, err := cluster.ParseConfigBytes("text/toml", []byte(toml))
 	require.NoError(t, err)
 	s, err := (&iceberg.SyncableParser{}).Parse(v, nil)
@@ -326,12 +335,13 @@ func TestIcebergSinkRenderingStamp(t *testing.T) {
 	st := startIcebergStack(t)
 	s := st.sink(t, "photos_stamp", 2)
 	ctx := context.Background()
-	_, present, err := s.RenderingStamp(ctx)
-	require.NoError(t, err)
-	require.False(t, present, "a fresh table carries no stamp")
-
-	require.NoError(t, s.StampRendering(ctx))
 	v, present, err := s.RenderingStamp(ctx)
+	require.NoError(t, err)
+	require.True(t, present, "a table the sink creates is stamped with the create")
+	require.Equal(t, iceberg.RenderingVersion, v)
+
+	require.NoError(t, s.StampRendering(ctx), "re-stamping is a no-op commit")
+	v, present, err = s.RenderingStamp(ctx)
 	require.NoError(t, err)
 	require.True(t, present)
 	require.Equal(t, iceberg.RenderingVersion, v)
@@ -344,4 +354,84 @@ func TestIcebergSinkRenderingStamp(t *testing.T) {
 	require.True(t, present, "the stamp belongs to the table, not to the sink instance")
 	require.Equal(t, iceberg.RenderingVersion, v)
 	require.Equal(t, map[string]string{"k1": `{"v":1}`, "k2": `{"v":2}`}, s2.ReadRowsForTest(t), "a data commit leaves the stamp and the rows intact")
+}
+
+// The ownership protocol against a real catalog: the namespace and table the
+// sink creates carry committed.owned and go on delete (the namespace only
+// once nothing else lives in it); a table the operator created first is
+// never marked and never dropped; keepData flips a created table to
+// not-owned so a later delete leaves it too.
+func TestIcebergSinkOwnership(t *testing.T) {
+	st := startIcebergStack(t)
+	ctx := context.Background()
+
+	// Created by the sink: namespace and table both claimed, both dropped.
+	created := st.sinkIn(t, "owned_ns", "photos_owned", 2)
+	cat := created.CatalogForTest()
+	// Load-and-check-not-found rather than the HEAD probes: existence
+	// probes are unevenly supported across REST catalog servers.
+	tableExists := func(id table.Identifier) bool {
+		_, err := cat.LoadTable(ctx, id)
+		if errors.Is(err, catalog.ErrNoSuchTable) {
+			return false
+		}
+		require.NoError(t, err)
+		return true
+	}
+	namespaceExists := func(ns table.Identifier) bool {
+		_, err := cat.LoadNamespaceProperties(ctx, ns)
+		if errors.Is(err, catalog.ErrNoSuchNamespace) {
+			return false
+		}
+		require.NoError(t, err)
+		return true
+	}
+	require.Equal(t, "true", created.PropertiesForTest(t)["committed.owned"])
+	nsProps, err := cat.LoadNamespaceProperties(ctx, table.Identifier{"owned_ns"})
+	require.NoError(t, err)
+	require.Equal(t, "true", nsProps["committed.owned"])
+	require.False(t, syncOne(t, created, 10, upsert("k1", `{"v":1}`, 1)))
+	require.True(t, syncOne(t, created, 11, upsert("k2", `{"v":2}`, 1)), "a flush, so the purge has data files to remove")
+	dropped, err := created.Teardown(false)
+	require.NoError(t, err)
+	require.True(t, dropped)
+	require.False(t, tableExists(table.Identifier{"owned_ns", "photos_owned"}), "an owned table is dropped")
+	require.False(t, namespaceExists(table.Identifier{"owned_ns"}), "an owned, now-empty namespace goes with its last table")
+	dropped, err = created.Teardown(false)
+	require.NoError(t, err)
+	require.False(t, dropped, "a second teardown finds nothing and is a no-op")
+
+	// Attached: the operator made the namespace and table; the sink claims
+	// neither and drops neither.
+	attachedNS := table.Identifier{"theirs_ns"}
+	attachedID := table.Identifier{"theirs_ns", "photos_theirs"}
+	require.NoError(t, cat.CreateNamespace(ctx, attachedNS, nil))
+	_, err = cat.CreateTable(ctx, attachedID, iceberg.EnvelopeSchemaForTest())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, attachedID); _ = cat.DropNamespace(ctx, attachedNS) })
+	attached := st.sinkIn(t, "theirs_ns", "photos_theirs", 2)
+	_, hasOwned := attached.PropertiesForTest(t)["committed.owned"]
+	require.False(t, hasOwned, "attaching claims nothing")
+	_, present, err := attached.RenderingStamp(ctx)
+	require.NoError(t, err)
+	require.False(t, present, "an attached table is stamped by the worker at first contact, not by the create")
+	dropped, err = attached.Teardown(false)
+	require.NoError(t, err)
+	require.False(t, dropped)
+	require.True(t, tableExists(attachedID), "a table committed did not create stays")
+
+	// Handover: created, then keepData — not-owned from then on, so a plain
+	// delete leaves it; the namespace stays because the table is still in it.
+	handedID := table.Identifier{"handed_ns", "photos_handed"}
+	handed := st.sinkIn(t, "handed_ns", "photos_handed", 2)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, handedID); _ = cat.DropNamespace(ctx, table.Identifier{"handed_ns"}) })
+	dropped, err = handed.Teardown(true)
+	require.NoError(t, err)
+	require.False(t, dropped)
+	require.Equal(t, "false", handed.PropertiesForTest(t)["committed.owned"], "keepData relinquishes ownership")
+	dropped, err = handed.Teardown(false)
+	require.NoError(t, err)
+	require.False(t, dropped)
+	require.True(t, tableExists(handedID), "a handed-over table is not dropped by a later delete")
+	require.True(t, namespaceExists(table.Identifier{"handed_ns"}), "the namespace still holds the handed-over table")
 }

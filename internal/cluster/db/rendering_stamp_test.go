@@ -107,7 +107,7 @@ func TestRenderingStamp_MismatchNamesDeleteForNonConvergingSinks(t *testing.T) {
 }
 
 // A sink that neither converges in place nor drops its destination on
-// delete (Iceberg keeps its table) names the by-hand step, or the re-POST
+// delete (no Teardownable at all) names the by-hand step, or the re-POST
 // would meet the same stamp.
 func TestRenderingStamp_MismatchNamesRecreateForSinksThatKeepTheirTable(t *testing.T) {
 	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: false}, renders: 2, stamp: 1}

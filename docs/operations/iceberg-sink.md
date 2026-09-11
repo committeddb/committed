@@ -90,14 +90,19 @@ upstream with a `loopback` derived topic and land that instead).
 - **One producer per table**: point exactly one syncable at a given catalog
   table. Two writers would interleave their checkpoint markers and each
   would treat the other's rows as its own to merge over.
-- **Deleting the syncable keeps the table.** Unlike the SQL sinks, an
-  Iceberg table is not dropped when its syncable is deleted; drop it in the
-  catalog yourself if you want it gone. The table carries a
-  `committed.rendering-version` property saying which version of committed
-  wrote its rows (see
+- **Deleting the syncable drops what committed created.** The same rule
+  as the SQL sinks: a namespace or table the sink created carries a
+  `committed.owned` property, and `DELETE /v1/syncable/{id}` purges that
+  table (catalog entry and data files), then the namespace once nothing
+  else lives in it. A table you created in the catalog first and pointed
+  the syncable at carries no such property and stays. `?keepData=true` on
+  the DELETE hands a created table over: nothing is removed, and the
+  property flips to `false`, so a later DELETE leaves it too. The table
+  also carries `committed.rendering-version`, saying which version of
+  committed wrote its rows (see
   [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings));
   if a later committed renders rows differently, the syncable stops rather
-  than mixing renderings. Because the table survives a delete, the fix is
-  the rebuild pattern above — a second syncable into a new table, swap
-  readers when it converges — or recreate this table yourself, then delete
-  and re-POST the syncable.
+  than mixing renderings. The fix is the rebuild pattern above — a second
+  syncable into a new table, swap readers when it converges — or delete
+  and re-POST the syncable (a table committed created is dropped and
+  recreated; one you created, recreate yourself first).

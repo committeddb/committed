@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	iceberggo "github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,6 +38,21 @@ func (s *Syncable) SnapshotCountForTest(t *testing.T) int {
 	require.NoError(t, s.tbl.Refresh(context.Background()))
 	return len(s.tbl.Metadata().Snapshots())
 }
+
+// CatalogForTest exposes the sink's catalog so a test can create or inspect
+// tables beside the sink (the ownership test's "attached" arm).
+func (s *Syncable) CatalogForTest() *rest.Catalog { return s.catalog }
+
+// PropertiesForTest returns the table's current properties.
+func (s *Syncable) PropertiesForTest(t *testing.T) iceberggo.Properties {
+	t.Helper()
+	require.NoError(t, s.tbl.Refresh(context.Background()))
+	return s.tbl.Properties()
+}
+
+// EnvelopeSchemaForTest is the sink's table schema, for a test that creates
+// the table itself.
+func EnvelopeSchemaForTest() *iceberggo.Schema { return envelopeSchema() }
 
 // MetadataLocationForTest exposes the table's current metadata JSON location
 // for independent readers (the duckdb oracle).

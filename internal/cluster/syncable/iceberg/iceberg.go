@@ -66,12 +66,25 @@ const propertyCheckpoint = "committed.checkpoint-index"
 // snapshot-summary property; the rendering is a property of the table), so
 // it moves, drops, and restores with the table. The worker reads it before
 // serving and parks on a mismatch (db/rendering_stamp.go); this sink cannot
-// converge in place, so the remedy is a fresh table. sql.SinkRenderingVersion
+// converge in place, so the remedy is a fresh table (delete drops one
+// committed created; the operator recreates one it did not). sql.SinkRenderingVersion
 // is the SQL family's twin, versioned separately: the two render nothing in
 // common.
 const RenderingVersion uint64 = 1
 
 const propertyRenderingVersion = "committed.rendering-version"
+
+// propertyOwned marks a table or namespace committed CREATED (set with the
+// create, never afterwards) — the ownership protocol: delete drops what
+// committed created and leaves what it attached to; keepData hands a
+// created table over by setting this to "false". A table without the
+// property is one committed did not create.
+const propertyOwned = "committed.owned"
+
+// teardownTimeout bounds a Teardown's catalog calls (the destination that
+// wedged the worker is the one being torn down). The engine bounds the
+// whole call too, but the ctx is what cancels the HTTP round trips.
+const teardownTimeout = 10 * time.Second
 
 // RenderingVersion implements cluster.RenderingStamped.
 func (s *Syncable) RenderingVersion() uint64 { return RenderingVersion }
@@ -109,6 +122,101 @@ func (s *Syncable) StampRendering(ctx context.Context) error {
 }
 
 var _ cluster.RenderingStamped = (*Syncable)(nil)
+
+// Teardown implements cluster.Teardownable. Drop mode purges the table
+// (catalog entry and data files) if committed created it, then the
+// namespace if committed created that and nothing else lives in it; a
+// table committed attached to is left alone. Keep mode hands a created
+// table over: its property flips to not-owned and nothing is removed.
+func (s *Syncable) Teardown(keep bool) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+	defer cancel()
+	owned, present, err := s.owned(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !present {
+		return false, nil // already gone: a second teardown is a no-op
+	}
+	if keep {
+		if !owned {
+			return false, nil
+		}
+		return false, s.disown(ctx)
+	}
+	if !owned {
+		return false, nil
+	}
+	if err := s.catalog.PurgeTable(ctx, s.identifier()); err != nil {
+		return false, fmt.Errorf("[iceberg] drop table: %w", err)
+	}
+	return true, s.dropNamespaceIfOwnedAndEmpty(ctx)
+}
+
+// owned reads the table's ownership from the current metadata; present is
+// false when the table no longer exists.
+func (s *Syncable) owned(ctx context.Context) (owned, present bool, err error) {
+	if err := s.tbl.Refresh(ctx); err != nil {
+		if errors.Is(err, catalog.ErrNoSuchTable) {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("[iceberg] refresh table: %w", err)
+	}
+	return s.tbl.Properties()[propertyOwned] == "true", true, nil
+}
+
+// disown is the keepData handover: a metadata-only commit marking the
+// table as not committed's, so no later delete drops it.
+func (s *Syncable) disown(ctx context.Context) error {
+	tx := s.tbl.NewTransaction()
+	if err := tx.SetProperties(iceberggo.Properties{propertyOwned: "false"}); err != nil {
+		return fmt.Errorf("[iceberg] disown table: %w", err)
+	}
+	newTbl, err := tx.Commit(ctx)
+	if err != nil {
+		return fmt.Errorf("[iceberg] commit disown: %w", err)
+	}
+	s.tbl = newTbl
+	return nil
+}
+
+// dropNamespaceIfOwnedAndEmpty drops the namespace committed created once
+// its last table is gone. The catalog does not distinguish "not empty"
+// from other drop failures, so emptiness (tables and child namespaces) is
+// checked first; anything the operator put there keeps the namespace.
+func (s *Syncable) dropNamespaceIfOwnedAndEmpty(ctx context.Context) error {
+	ns := table.Identifier{s.config.Namespace}
+	props, err := s.catalog.LoadNamespaceProperties(ctx, ns)
+	if err != nil {
+		return fmt.Errorf("[iceberg] load namespace properties: %w", err)
+	}
+	if props[propertyOwned] != "true" {
+		return nil
+	}
+	// One unpaginated page: the question is "anything here?", and the
+	// page-size parameter is the one thing REST catalog servers disagree on
+	// (tabulario's rejects it outright).
+	ctx = s.catalog.SetPageSize(ctx, 0)
+	for _, err := range s.catalog.ListTables(ctx, ns) {
+		if err != nil {
+			return fmt.Errorf("[iceberg] list tables: %w", err)
+		}
+		return nil // something else lives here
+	}
+	children, err := s.catalog.ListNamespaces(ctx, ns)
+	if err != nil {
+		return fmt.Errorf("[iceberg] list namespaces: %w", err)
+	}
+	if len(children) > 0 {
+		return nil
+	}
+	if err := s.catalog.DropNamespace(ctx, ns); err != nil {
+		return fmt.Errorf("[iceberg] drop namespace: %w", err)
+	}
+	return nil
+}
+
+var _ cluster.Teardownable = (*Syncable)(nil)
 
 const (
 	defaultFlushRows     = 10000
@@ -210,8 +318,10 @@ func (s *Syncable) ensureTable(ctx context.Context) error {
 	// Create-and-tolerate-exists rather than check-then-create: existence
 	// probes (HEAD) are unevenly supported across REST catalog servers, and
 	// create races resolve the same way regardless.
+	// What committed creates it marks as its own (propertyOwned) in the same
+	// call, so a namespace or table that already existed is never claimed.
 	ns := table.Identifier{s.config.Namespace}
-	if err := s.catalog.CreateNamespace(ctx, ns, nil); err != nil &&
+	if err := s.catalog.CreateNamespace(ctx, ns, iceberggo.Properties{propertyOwned: "true"}); err != nil &&
 		!errors.Is(err, catalog.ErrNamespaceAlreadyExists) {
 		return fmt.Errorf("[iceberg] create namespace: %w", err)
 	}
@@ -224,7 +334,10 @@ func (s *Syncable) ensureTable(ctx context.Context) error {
 	if !errors.Is(err, catalog.ErrNoSuchTable) {
 		return fmt.Errorf("[iceberg] load table: %w", err)
 	}
-	tbl, err = s.catalog.CreateTable(ctx, s.identifier(), envelopeSchema())
+	tbl, err = s.catalog.CreateTable(ctx, s.identifier(), envelopeSchema(), catalog.WithProperties(iceberggo.Properties{
+		propertyOwned:            "true",
+		propertyRenderingVersion: strconv.FormatUint(RenderingVersion, 10), // created by this binary: rendered by it
+	}))
 	if err != nil {
 		if errors.Is(err, catalog.ErrTableAlreadyExists) {
 			// Lost a create race: load what the winner made.

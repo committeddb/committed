@@ -191,13 +191,14 @@ Every time a worker starts serving a syncable it reads the note first:
   rewritten in place. This is deliberate rather than automatic because it
   touches a table your readers are using.
 
-**Iceberg tables** carry the same note as a table property
-(`committed.rendering-version`), beside the checkpoint the sink already
+**Iceberg tables** carry the same note as table properties
+(`committed.rendering-version`, and `committed.owned` on the tables and
+namespaces the sink created), beside the checkpoint the sink already
 keeps in the table's snapshot summary, with its own version number: the
 two sink families render nothing in common. An Iceberg sink cannot
-converge in place and keeps its table when its syncable is deleted, so a
-mismatch there names the by-hand step: recreate the table, then delete
-and re-POST.
+converge in place, so a mismatch there names delete and re-POST: a table
+committed created is dropped and recreated; one you created, recreate
+yourself first.
 
 0.8.0 introduces the note. Existing tables have none, so 0.8.0 writes
 "version 1" the first time it touches each one, recorded as a table
