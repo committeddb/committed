@@ -428,8 +428,8 @@ func (db *DB) deleteSync(id string, keepData bool) {
 	// and independent of the owner-only destination teardown below.
 	db.closeDrainedSyncable(handle, id)
 
-	if keepData || !db.isNode(id) {
-		return // operator opted to keep the data, or this node isn't the owner
+	if !db.isNode(id) {
+		return // this node isn't the owner
 	}
 
 	// Resolved through the Unwrap chain: an always-current syncable's
@@ -444,7 +444,12 @@ func (db *DB) deleteSync(id string, keepData bool) {
 	// and the destination that wedged the worker above is the same one Teardown
 	// is about to talk to — an unbounded DROP there would park the listener and
 	// stall the raft apply loop on its next config send.
-	if err, completed := runBounded(db.workers.drainTimeout, teardownable.Teardown); !completed {
+	// keepData hands the destination over (ownership relinquished, nothing
+	// removed); otherwise the sink drops what committed owns and leaves an
+	// attached destination in place.
+	var dropped bool
+	teardown := func() (err error) { dropped, err = teardownable.Teardown(keepData); return err }
+	if err, completed := runBounded(db.workers.drainTimeout, teardown); !completed {
 		db.logger.Error("syncable deleted but destination teardown did not return in time (unreachable destination?); abandoning it (orphaned destination state; remove it manually)",
 			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
 	} else if err != nil {
@@ -452,6 +457,10 @@ func (db *DB) deleteSync(id string, keepData bool) {
 		// move on — the worst case is orphaned destination state.
 		db.logger.Error("syncable deleted but destination teardown failed (orphaned destination state; remove it manually)",
 			zap.String("id", id), zap.Error(err))
+	} else if keepData {
+		db.logger.Info("syncable deleted; destination handed over (kept, no longer committed-owned)", zap.String("id", id))
+	} else if !dropped {
+		db.logger.Info("syncable deleted; destination kept — committed did not create it (drop it yourself if it should go)", zap.String("id", id))
 	}
 }
 

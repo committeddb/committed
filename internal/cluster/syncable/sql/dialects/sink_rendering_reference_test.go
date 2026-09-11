@@ -50,7 +50,7 @@ func TestSinkRenderingReference_Postgres(t *testing.T) {
 			}
 			return col
 		},
-		meta:  "SELECT table_name, rendering_version FROM " + sqlident.Postgres.Table(sql.SinkMetaTable) + " WHERE table_name LIKE $1 ORDER BY table_name",
+		meta:  "SELECT table_name, rendering_version, owned FROM " + sqlident.Postgres.Table(sql.SinkMetaTable) + " WHERE table_name LIKE $1 ORDER BY table_name",
 		quote: sqlident.Postgres.Table,
 	})
 }
@@ -65,7 +65,7 @@ func TestSinkRenderingReference_MySQL(t *testing.T) {
 			}
 			return col
 		},
-		meta:  "SELECT table_name, rendering_version FROM " + sqlident.MySQL.Table(sql.SinkMetaTable) + " WHERE table_name LIKE ? ORDER BY table_name",
+		meta:  "SELECT table_name, rendering_version, owned FROM " + sqlident.MySQL.Table(sql.SinkMetaTable) + " WHERE table_name LIKE ? ORDER BY table_name",
 		quote: sqlident.MySQL.Table,
 	})
 }
@@ -102,8 +102,8 @@ func runSinkReference(t *testing.T, name string, d sql.Dialect, conn, jsonType, 
 		require.NoError(t, s.Init())
 	}
 	defer func() {
-		for _, s := range []interface{ Teardown() error }{hist, keyed, values, single, movies, jobs, items} {
-			_ = s.Teardown()
+		for _, s := range []cluster.Teardownable{hist, keyed, values, single, movies, jobs, items} {
+			_, _ = s.Teardown(false)
 		}
 	}()
 
@@ -254,16 +254,17 @@ func dumpDestination(t *testing.T, db *gosql.DB, cat destinationCatalog, prefix 
 		}
 		require.NoError(t, data.Close())
 	}
-	sb.WriteString("== " + sql.SinkMetaTable + " (table_name, rendering_version)\n")
+	sb.WriteString("== " + sql.SinkMetaTable + " (table_name, rendering_version, owned)\n")
 	meta, err := db.Query(cat.meta, prefix+"%")
 	require.NoError(t, err)
 	var version uint64
 	for meta.Next() {
 		var table string
 		var v int64
-		require.NoError(t, meta.Scan(&table, &v))
+		var owned bool
+		require.NoError(t, meta.Scan(&table, &v, &owned))
 		version = uint64(v)
-		fmt.Fprintf(&sb, "%s\t%d\n", table, v)
+		fmt.Fprintf(&sb, "%s\t%d\t%t\n", table, v, owned)
 	}
 	require.NoError(t, meta.Close())
 	require.NotZero(t, version, "the destination carries no rendering note")

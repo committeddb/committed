@@ -856,13 +856,17 @@ paths:
       summary: Delete a syncable
       description: |
         Removes a syncable: its configuration and its checkpoint index are
-        deleted atomically (one committed Actual), the worker is stopped, and —
-        unless `keepData=true` — the owner tears down the syncable's destination
-        on a best-effort basis (for a SQL syncable, dropping its table). The
-        logical deletion is the authoritative act and completes before this
-        returns; the teardown settles shortly after on the leader and, if it
-        fails, only orphans destination state (the delete still succeeds). After
-        deletion a later same-id POST starts fresh from index 0. Leader-pinned.
+        deleted atomically (one committed Actual), the worker is stopped, and
+        the owner tears down what committed owns at the destination on a
+        best-effort basis: for a SQL syncable its helper tables always, and its
+        table only if committed created it (a table you created and pointed
+        the syncable at stays). With `keepData=true` the destination is handed
+        over instead: nothing is removed, and committed stops counting the
+        table as its own, so a later delete leaves it too. The logical
+        deletion is the authoritative act and completes before this returns;
+        the teardown settles shortly after on the leader and, if it fails, only
+        orphans destination state (the delete still succeeds). After deletion a
+        later same-id POST starts fresh from index 0. Leader-pinned.
       operationId: deleteSyncable
       parameters:
         - $ref: '#/components/parameters/ResourceId'
@@ -870,10 +874,12 @@ paths:
           in: query
           required: false
           description: |
-            When true, the syncable's destination state is preserved (the
+            When true, the syncable's destination is handed over rather than
+            torn down: nothing is removed, and committed no longer counts the
+            table as one it created, so a later delete leaves it too (the
             logical delete still proceeds). Use when another consumer reads a
             SQL syncable's table, or the node has DML-only grants. Defaults to
-            false (tear the destination down).
+            false (drop what committed created).
           schema:
             type: boolean
             default: false

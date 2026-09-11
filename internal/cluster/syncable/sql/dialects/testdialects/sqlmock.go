@@ -20,6 +20,10 @@ import (
 
 type SQLMockDialect struct {
 	db *gosql.DB
+	// CreatesTables makes TableExists answer "absent", so an Init under the
+	// mock creates and claims the table (the ownership protocol's create
+	// arm). Off by default: Init attaches and claims nothing.
+	CreatesTables bool
 }
 
 func NewSQLMockDialect() (*SQLMockDialect, sqlmock.Sqlmock, error) {
@@ -170,7 +174,15 @@ func (d *SQLMockDialect) CreateRematerializationSweepSQL(config *sql.Config) str
 	return (&dialects.MySQLDialect{}).CreateRematerializationSweepSQL(config)
 }
 
-// The rendering-stamp statements mirror MySQL's; EnsureSinkMeta is a no-op
+// TableExists answers without a query, like the other probes the mock
+// short-circuits (the mock pins statement sequences): the table "existed"
+// unless the test sets CreatesTables, so a plain Init attaches and claims
+// nothing, and a test of the ownership protocol opts into the claim.
+func (d *SQLMockDialect) TableExists(_ context.Context, _ *gosql.DB, _ string) (bool, error) {
+	return !d.CreatesTables, nil
+}
+
+// The destination-note statements mirror MySQL's; EnsureSinkMeta is a no-op
 // like EnsureRematerializationColumn (the mock pins statement sequences).
 func (d *SQLMockDialect) EnsureSinkMeta(_ context.Context, _ *gosql.DB) error { return nil }
 
@@ -178,8 +190,16 @@ func (d *SQLMockDialect) SinkMetaSelectSQL() string {
 	return (&dialects.MySQLDialect{}).SinkMetaSelectSQL()
 }
 
-func (d *SQLMockDialect) SinkMetaUpsertSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaUpsertSQL()
+func (d *SQLMockDialect) SinkMetaStampSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaStampSQL()
+}
+
+func (d *SQLMockDialect) SinkMetaClaimSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaClaimSQL()
+}
+
+func (d *SQLMockDialect) SinkMetaDisownSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaDisownSQL()
 }
 
 func (d *SQLMockDialect) SinkMetaDeleteSQL() string {

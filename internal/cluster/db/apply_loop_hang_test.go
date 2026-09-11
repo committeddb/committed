@@ -62,11 +62,11 @@ func (b *blockingDestinationSyncable) Close() error {
 	return nil
 }
 
-func (b *blockingDestinationSyncable) Teardown() error {
+func (b *blockingDestinationSyncable) Teardown(bool) (bool, error) {
 	if b.blockTeardown {
 		<-b.block
 	}
-	return nil
+	return true, nil
 }
 
 // waitForLeadership blocks until the single-node db believes it is leader —

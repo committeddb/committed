@@ -48,7 +48,7 @@ var _ cluster.RenderingStamped = (*stampedFakeSyncable)(nil)
 // delete (the SQL family's shape) but cannot converge in place.
 type teardownFakeSyncable struct{ stampedFakeSyncable }
 
-func (f *teardownFakeSyncable) Teardown() error { return nil }
+func (f *teardownFakeSyncable) Teardown(bool) (bool, error) { return true, nil }
 
 var _ cluster.Teardownable = (*teardownFakeSyncable)(nil)
 
@@ -103,7 +103,7 @@ func TestRenderingStamp_MismatchNamesDeleteForNonConvergingSinks(t *testing.T) {
 	parked := startStampedSyncable(t, &sink.stampedFakeSyncable, sink)
 	require.Eventually(t, func() bool { _, ok := parked(); return ok }, 10*time.Second, 10*time.Millisecond)
 	msg, _ := parked()
-	require.Contains(t, msg, "DELETE /v1/syncable/photos-mirror (drops the table), then re-POST the config")
+	require.Contains(t, msg, "DELETE /v1/syncable/photos-mirror (drops the table if committed created it; otherwise drop it yourself), then re-POST the config")
 }
 
 // A sink that neither converges in place nor drops its destination on

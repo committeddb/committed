@@ -215,7 +215,12 @@ same quorum rule applies in reverse.
   `committed__sink_meta` table in the destination database (see
   [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
   Nothing stops on this upgrade: existing tables get the note the first
-  time 0.8.0 touches them. The note matters when a later release changes
+  time 0.8.0 touches them. The note also records whether committed created
+  the table, and a table that exists before the upgrade is recorded as one
+  it did not: from then on `DELETE /v1/syncable/{id}` leaves that table in
+  place (before 0.8.0 it dropped it) — drop it yourself when you mean to.
+  Tables 0.8.0 creates are committed's and drop on DELETE as before. The
+  note's version matters when a later release changes
   how rows are written: a syncable whose table was written by the older
   binary stops on the new one, with its status naming the fix
   (rematerialize, or delete and re-POST), rather than mixing the two. While

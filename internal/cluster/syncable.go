@@ -266,7 +266,14 @@ var ErrWorkerWedged = errors.New("syncable worker did not stop in time (wedged o
 // never run on a replaying or non-owner node. Syncables that own no external
 // state do not implement it.
 type Teardownable interface {
-	Teardown() error
+	// Teardown removes the destination state committed OWNS — the tables it
+	// created (recorded next to them at creation), always its helper tables
+	// and node-local stores — and reports whether the destination itself
+	// was dropped. A destination committed attached to rather than created
+	// is left in place (dropped=false, err=nil). keep hands the destination
+	// over instead: ownership is relinquished (committed will not drop it on
+	// a later delete either), nothing is removed, and dropped is false.
+	Teardown(keep bool) (dropped bool, err error)
 }
 
 // SyncableUnwrapper is implemented by decorating wrappers (the

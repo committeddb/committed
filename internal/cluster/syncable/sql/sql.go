@@ -70,7 +70,7 @@ func (c *Syncable) CheckpointPolicy() cluster.CheckpointPolicy {
 // unreachable destination.
 const teardownTimeout = 10 * time.Second
 
-func (c *Syncable) Teardown() error {
+func (c *Syncable) Teardown(keep bool) (bool, error) {
 	// Self-bounded (teardownTimeout): teardown targets a destination that may be
 	// the very reason the worker was torn down — a hung DROP must not run
 	// unbounded. Mirrors the ingest twin (TeardownSource). The db-layer caller
@@ -79,21 +79,32 @@ func (c *Syncable) Teardown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
 	defer cancel()
 
-	dropString := c.dialect.DropDDL(c.config)
-	if _, err := c.db.ExecContext(ctx, dropString); err != nil {
-		return fmt.Errorf("teardown [%s]: %w", dropString, err)
+	if keep {
+		return false, disown(ctx, c.db, c.dialect, c.config.Table)
 	}
-	// Drop the keyless syncable's dedup sidecar too — DropDDL on its name. A
-	// keyed syncable has none, so this is skipped.
+	// The keyless syncable's dedup sidecar is always committed's: drop it
+	// whoever owns the table. A keyed syncable has none.
 	if !c.config.Keyed() {
 		sidecarDrop := c.dialect.DropDDL(&Config{Table: AppliedSidecarName(c.config.Table)})
 		if _, err := c.db.ExecContext(ctx, sidecarDrop); err != nil {
-			return fmt.Errorf("teardown applied-sidecar [%s]: %w", sidecarDrop, err)
+			return false, fmt.Errorf("teardown applied-sidecar [%s]: %w", sidecarDrop, err)
 		}
 	}
-	// The rendering stamp describes the rows just dropped; a recreated table
-	// must not inherit it.
-	return deleteRenderingStamp(ctx, c.db, c.dialect, c.config.Table)
+	// The table itself is committed's to drop only if committed created it.
+	note, present, err := readNote(ctx, c.db, c.dialect, c.config.Table)
+	if err != nil {
+		return false, err
+	}
+	if !present || !note.owned {
+		return false, nil // attached (or noted before ownership existed): the table stays, and so does its note
+	}
+	dropString := c.dialect.DropDDL(c.config)
+	if _, err := c.db.ExecContext(ctx, dropString); err != nil {
+		return false, fmt.Errorf("teardown [%s]: %w", dropString, err)
+	}
+	// The note described the rows just dropped; a recreated table must not
+	// inherit it.
+	return true, deleteNote(ctx, c.db, c.dialect, c.config.Table)
 }
 
 func (c *Syncable) Init() error {
@@ -123,10 +134,19 @@ func (c *Syncable) Init() error {
 	ctx, cancel := context.WithTimeout(context.Background(), InitTimeout)
 	defer cancel()
 
-	ddlString := c.dialect.CreateDDL(c.config)
-	_, err := c.db.ExecContext(ctx, ddlString)
+	// Ownership: probe before the create (IF NOT EXISTS cannot say whether it
+	// created), claim the table only if it was absent — what committed made,
+	// it may later drop; what it attached to, it must not.
+	existed, err := c.dialect.TableExists(ctx, c.db, c.config.Table)
 	if err != nil {
+		return fmt.Errorf("probe %s: %w", c.config.Table, err)
+	}
+	ddlString := c.dialect.CreateDDL(c.config)
+	if _, err := c.db.ExecContext(ctx, ddlString); err != nil {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
+	}
+	if err := claimIfCreated(ctx, c.db, c.dialect, c.config.Table, existed); err != nil {
+		return err
 	}
 
 	keyed := c.config.Keyed()

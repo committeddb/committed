@@ -172,10 +172,13 @@ that projection, and readers never see it.
 **SQL destinations** (the projected rows and the helper tables beside
 them) carry a **rendering version**, written as a note into your
 database: the table `committed__sink_meta`, one row per projected table,
-saying "these rows were written by rendering version N". The note lives
-next to the rows it describes, so it moves, drops, and restores with them
-— restore the database from a backup and the note from that backup comes
-along, still correct.
+saying "these rows were written by rendering version N" and whether
+committed created the table. The note lives next to the rows it
+describes, so it moves, drops, and restores with them — restore the
+database from a backup and the note from that backup comes along, still
+correct. The created-by-committed half is what a `DELETE` consults: it
+drops the table committed created and leaves the one it attached to (see
+[read-models.md](read-models.md#history-tables-vs-read-models)).
 
 Every time a worker starts serving a syncable it reads the note first:
 
@@ -197,9 +200,13 @@ mismatch there names the by-hand step: recreate the table, then delete
 and re-POST.
 
 0.8.0 introduces the note. Existing tables have none, so 0.8.0 writes
-"version 1" the first time it touches each one; nothing stops on this
-upgrade. The note matters the first time a later release changes how rows
-are written — that release bumps the number, and tests hold it to that.
+"version 1" the first time it touches each one, recorded as a table
+committed did not create; nothing stops on this upgrade, and a `DELETE`
+leaves such a table in place from then on (drop it yourself when you
+mean to). A table 0.8.0 creates is recorded as committed's from the
+start. The version matters the first time a later release changes how
+rows are written — that release bumps the number, and tests hold it to
+that.
 
 ### Cluster feature level (semantic compatibility gate)
 

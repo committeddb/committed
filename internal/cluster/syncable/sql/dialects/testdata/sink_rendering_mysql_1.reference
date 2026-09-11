@@ -32,11 +32,11 @@
 "r4"	"x"	0	"0.0000"	0	1	"{\"n\": 7.5, \"s\": \"str\", \"t\": true}"	0
 "r5"	"y"	NULL	"1.0000"	1	0	"[\"str\", 7.5, true, null]"	0
 "r6"	"z"	2	"2.5000"	NULL	1	"{}"	0
-== committed__sink_meta (table_name, rendering_version)
-T_hist	1
-T_items	1
-T_jobs	1
-T_keyed	1
-T_movies	1
-T_single	1
-T_values	1
+== committed__sink_meta (table_name, rendering_version, owned)
+T_hist	1	true
+T_items	1	true
+T_jobs	1	true
+T_keyed	1	true
+T_movies	1	true
+T_single	1	true
+T_values	1	true

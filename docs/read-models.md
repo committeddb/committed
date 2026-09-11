@@ -82,11 +82,22 @@ committed rejects a longer one at config time.
 
 You will also find a small table called `committed__sink_meta` in the
 destination database: one row per projected table, a note saying which
-rendering version of committed wrote its rows. A worker reads it before
-serving, and if a newer committed writes rows differently than the note
-says, the syncable stops and tells you how to bring the table forward
-instead of mixing two renderings in one table (see
+rendering version of committed wrote its rows and whether committed
+created the table. A worker reads the version before serving, and if a
+newer committed writes rows differently than the note says, the syncable
+stops and tells you how to bring the table forward instead of mixing two
+renderings in one table (see
 [api-compatibility.md](api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+
+Whether committed created the table decides what a `DELETE` does. The
+rule is the one committed applies everywhere it touches your systems: it
+removes what it created and leaves what it did not. A table committed
+created (there was none when the syncable was first POSTed) is dropped
+with the syncable. A table you created first and pointed a syncable at
+stays, rows and all. The helper tables are always committed's and always
+go. `?keepData=true` on the DELETE hands a table committed created over
+to you: nothing is removed, and committed stops counting the table as
+its own, so a later DELETE leaves it too.
 
 The sidecar keys on the event's *raft index*, so it makes re-applying the **same
 committed event** a no-op — but each *distinct* event is still its own row. A
@@ -240,10 +251,12 @@ error handling, deletes, and schema evolution:
   `details`) rather than silently no-op'd. To
   add or change a column, replace the syncable in place:
   `DELETE /v1/syncable/{id}` (removes the config + checkpoint atomically
-  and drops the table), then re-POST the new config — the fresh table
-  replays from index 0. `?keepData=true` on the DELETE preserves the
-  destination (e.g. another consumer reads the table). To re-materialize a drifted or
-  corrupted projection *without* a schema change,
+  and drops the table if committed created it — a table you created
+  stays, so drop it yourself first), then re-POST the new config — the
+  fresh table replays from index 0. `?keepData=true` on the DELETE hands
+  the table over instead (e.g. another consumer reads it): nothing is
+  dropped, and committed no longer counts the table as its own. To
+  re-materialize a drifted or corrupted projection *without* a schema change,
   `POST /v1/syncable/{id}/rebuild` does the drop + replay-from-0 in place
   under the same name. The log is permanent, so replay is cheap.
 

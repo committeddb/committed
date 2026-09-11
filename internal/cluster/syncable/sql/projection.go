@@ -275,12 +275,15 @@ func projectionIdentity(c *ProjectionConfig) SyncableIdentity {
 // reconstructable from the persisted config alone (it needs only the table
 // name + DB handle), which is what the delete/rebuild paths rely on. It never
 // touches prepared statements or the connection pool; call Close for those.
-func (p *Projection) Teardown() error {
+func (p *Projection) Teardown(keep bool) (bool, error) {
 	// Self-bounded — see Syncable.Teardown for the rationale.
 	ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
 	defer cancel()
 
 	p.config.applyDefaults()
+	if keep {
+		return false, disown(ctx, p.db, p.dialect, p.config.Table)
+	}
 	// Drop every table the projection keeps (the same list Init's phase one
 	// creates — a left-behind sidecar would make a rebuilt projection inherit
 	// stale state and mis-reconcile from its first event), then the
@@ -290,7 +293,7 @@ func (p *Projection) Teardown() error {
 	for _, kt := range p.keptTables() {
 		drop := p.dialect.DropDDL(&Config{Table: kt.name})
 		if _, err := p.db.ExecContext(ctx, drop); err != nil {
-			return fmt.Errorf("teardown [%s]: %w", drop, err)
+			return false, fmt.Errorf("teardown [%s]: %w", drop, err)
 		}
 	}
 	// The stage store is part of the destination state a teardown erases:
@@ -304,18 +307,27 @@ func (p *Projection) Teardown() error {
 		}
 		if p.storeDir != "" {
 			if err := os.Remove(stagestore.FilePath(p.storeDir, p.name)); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("teardown stage store: %w", err)
+				return false, fmt.Errorf("teardown stage store: %w", err)
 			}
 		}
 	}
 
+	// The main table is committed's to drop only if committed created it;
+	// its helper tables and stage store above are always committed's.
+	note, present, err := readNote(ctx, p.db, p.dialect, p.config.Table)
+	if err != nil {
+		return false, err
+	}
+	if !present || !note.owned {
+		return false, nil // attached: the table stays, and so does its note
+	}
 	dropString := p.dialect.DropDDL(p.config.ddlConfig())
 	if _, err := p.db.ExecContext(ctx, dropString); err != nil {
-		return fmt.Errorf("teardown [%s]: %w", dropString, err)
+		return false, fmt.Errorf("teardown [%s]: %w", dropString, err)
 	}
-	// The rendering stamp describes the rows just dropped; a recreated table
-	// must not inherit it.
-	return deleteRenderingStamp(ctx, p.db, p.dialect, p.config.Table)
+	// The note described the rows just dropped; a recreated table must not
+	// inherit it.
+	return true, deleteNote(ctx, p.db, p.dialect, p.config.Table)
 }
 
 func (p *Projection) Init() error {
@@ -352,9 +364,18 @@ func (p *Projection) Init() error {
 	p.initCtx = ctx
 
 	ddlConfig := p.config.ddlConfig()
+	// Ownership: probe before the create (IF NOT EXISTS cannot say whether it
+	// created), claim the table only if it was absent — see Syncable.Init.
+	existed, err := p.dialect.TableExists(ctx, p.db, p.config.Table)
+	if err != nil {
+		return fmt.Errorf("probe %s: %w", p.config.Table, err)
+	}
 	ddlString := p.dialect.CreateDDL(ddlConfig)
 	if _, err := p.db.ExecContext(ctx, ddlString); err != nil {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
+	}
+	if err := claimIfCreated(ctx, p.db, p.dialect, p.config.Table, existed); err != nil {
+		return err
 	}
 
 	// Phase one: every table this projection keeps — the lookup dimensions,

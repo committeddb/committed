@@ -51,15 +51,27 @@ type Dialect interface {
 	// sweep of a re-materialization.
 	CreateRematerializationSweepSQL(config *Config) string
 
-	// EnsureSinkMeta creates the per-database rendering-stamp table
-	// (SinkMetaTable) if it is absent. Idempotent.
+	// TableExists reports whether table (optionally schema-qualified) exists
+	// in the destination — asked before CREATE TABLE IF NOT EXISTS, which
+	// cannot say whether it created, so ownership is recorded truthfully.
+	TableExists(ctx context.Context, db *gosql.DB, table string) (bool, error)
+	// EnsureSinkMeta creates the per-database destination-note table
+	// (SinkMetaTable) if it is absent, with every column. Idempotent.
 	EnsureSinkMeta(ctx context.Context, db *gosql.DB) error
-	// SinkMetaSelectSQL selects rendering_version by table_name (one
-	// placeholder).
+	// SinkMetaSelectSQL selects (rendering_version, owned) by table_name
+	// (one placeholder).
 	SinkMetaSelectSQL() string
-	// SinkMetaUpsertSQL inserts or replaces (table_name, rendering_version),
-	// placeholders in that order.
-	SinkMetaUpsertSQL() string
+	// SinkMetaStampSQL inserts (table_name, rendering_version, owned=false)
+	// or, on conflict, updates rendering_version ONLY — ownership is never
+	// touched by a stamp. Placeholders: table_name, rendering_version.
+	SinkMetaStampSQL() string
+	// SinkMetaClaimSQL inserts (table_name, rendering_version, owned=true)
+	// or, on conflict, sets both: committed just created the table.
+	// Placeholders: table_name, rendering_version.
+	SinkMetaClaimSQL() string
+	// SinkMetaDisownSQL sets owned=false for table_name (one placeholder):
+	// the operator kept the table; committed will not drop it again.
+	SinkMetaDisownSQL() string
 	// SinkMetaDeleteSQL deletes the row for table_name (one placeholder).
 	SinkMetaDeleteSQL() string
 	// CreateEnrichedUpsertSQL is CreateSQL for a projection rule with spine

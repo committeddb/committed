@@ -353,11 +353,30 @@ func (d *MySQLDialect) EnsureRematerializationColumn(ctx context.Context, db *go
 	return nil
 }
 
-// CreateRematerializationSweepSQL implements Dialect: delete rows this
-// replay never re-emitted (stamp below the epoch).
-// EnsureSinkMeta implements Dialect: the per-database rendering-stamp table.
+// TableExists implements Dialect via information_schema (the same probe
+// EnsureRematerializationColumn uses; a qualified name splits into schema
+// and table, an unqualified one is looked up in the connection's database).
+func (d *MySQLDialect) TableExists(ctx context.Context, db *gosql.DB, table string) (bool, error) {
+	var n int
+	var err error
+	if dot := strings.IndexByte(table, '.'); dot >= 0 {
+		err = db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+			table[:dot], table[dot+1:]).Scan(&n)
+	} else {
+		err = db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+			table).Scan(&n)
+	}
+	if err != nil {
+		return false, fmt.Errorf("check table exists: %w", err)
+	}
+	return n > 0, nil
+}
+
+// EnsureSinkMeta implements Dialect: the per-database destination-note table.
 func (d *MySQLDialect) EnsureSinkMeta(ctx context.Context, db *gosql.DB) error {
-	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (table_name VARCHAR(255) PRIMARY KEY, rendering_version BIGINT NOT NULL, materialized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (table_name VARCHAR(255) PRIMARY KEY, rendering_version BIGINT NOT NULL, owned BOOLEAN NOT NULL DEFAULT FALSE, materialized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
 		mysqlIdent.Table(sql.SinkMetaTable))
 	if _, err := db.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("ensure sink meta [%s]: %w", stmt, err)
@@ -367,13 +386,24 @@ func (d *MySQLDialect) EnsureSinkMeta(ctx context.Context, db *gosql.DB) error {
 
 // SinkMetaSelectSQL implements Dialect.
 func (d *MySQLDialect) SinkMetaSelectSQL() string {
-	return fmt.Sprintf("SELECT rendering_version FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.SinkMetaTable))
+	return fmt.Sprintf("SELECT rendering_version, owned FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.SinkMetaTable))
 }
 
-// SinkMetaUpsertSQL implements Dialect.
-func (d *MySQLDialect) SinkMetaUpsertSQL() string {
-	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, materialized_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), materialized_at = CURRENT_TIMESTAMP",
+// SinkMetaStampSQL implements Dialect: a stamp never touches ownership.
+func (d *MySQLDialect) SinkMetaStampSQL() string {
+	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, FALSE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), materialized_at = CURRENT_TIMESTAMP",
 		mysqlIdent.Table(sql.SinkMetaTable))
+}
+
+// SinkMetaClaimSQL implements Dialect: committed just created the table.
+func (d *MySQLDialect) SinkMetaClaimSQL() string {
+	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, TRUE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), owned = TRUE, materialized_at = CURRENT_TIMESTAMP",
+		mysqlIdent.Table(sql.SinkMetaTable))
+}
+
+// SinkMetaDisownSQL implements Dialect.
+func (d *MySQLDialect) SinkMetaDisownSQL() string {
+	return fmt.Sprintf("UPDATE %s SET owned = FALSE WHERE table_name = ?", mysqlIdent.Table(sql.SinkMetaTable))
 }
 
 // SinkMetaDeleteSQL implements Dialect.
@@ -381,6 +411,8 @@ func (d *MySQLDialect) SinkMetaDeleteSQL() string {
 	return fmt.Sprintf("DELETE FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.SinkMetaTable))
 }
 
+// CreateRematerializationSweepSQL implements Dialect: delete rows this
+// replay never re-emitted (stamp below the epoch).
 func (d *MySQLDialect) CreateRematerializationSweepSQL(config *sql.Config) string {
 	return fmt.Sprintf("DELETE FROM %s WHERE %s < ?",
 		mysqlIdent.Table(config.Table), sql.RematerializationColumn)

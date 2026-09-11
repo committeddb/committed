@@ -20,7 +20,7 @@ type teardownFake struct {
 	torn atomic.Bool
 }
 
-func (t *teardownFake) Teardown() error { t.torn.Store(true); return nil }
+func (t *teardownFake) Teardown(bool) (bool, error) { t.torn.Store(true); return true, nil }
 
 // An always-current syncable's DELETE must tear down its destination. The
 // field incident: twelve mode="always-current" projections were deleted

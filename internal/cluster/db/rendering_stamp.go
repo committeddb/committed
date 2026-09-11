@@ -84,7 +84,7 @@ func renderingRemedy(id string, s cluster.Syncable) string {
 		return "POST /v1/syncable/" + id + "/rematerialize"
 	}
 	if _, ok := cluster.SyncableAs[cluster.Teardownable](s); ok {
-		return "DELETE /v1/syncable/" + id + " (drops the table), then re-POST the config"
+		return "DELETE /v1/syncable/" + id + " (drops the table if committed created it; otherwise drop it yourself), then re-POST the config"
 	}
 	return "this sink cannot drop its destination: recreate the table by hand, then DELETE /v1/syncable/" + id + " and re-POST the config"
 }

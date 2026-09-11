@@ -51,6 +51,10 @@ func (d *GoMySQLServerDialect) CreateRematerializationSweepSQL(config *sql.Confi
 	return (&dialects.MySQLDialect{}).CreateRematerializationSweepSQL(config)
 }
 
+func (d *GoMySQLServerDialect) TableExists(ctx context.Context, db *gosql.DB, table string) (bool, error) {
+	return (&dialects.MySQLDialect{}).TableExists(ctx, db, table)
+}
+
 func (d *GoMySQLServerDialect) EnsureSinkMeta(ctx context.Context, db *gosql.DB) error {
 	return (&dialects.MySQLDialect{}).EnsureSinkMeta(ctx, db)
 }
@@ -59,8 +63,16 @@ func (d *GoMySQLServerDialect) SinkMetaSelectSQL() string {
 	return (&dialects.MySQLDialect{}).SinkMetaSelectSQL()
 }
 
-func (d *GoMySQLServerDialect) SinkMetaUpsertSQL() string {
-	return (&dialects.MySQLDialect{}).SinkMetaUpsertSQL()
+func (d *GoMySQLServerDialect) SinkMetaStampSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaStampSQL()
+}
+
+func (d *GoMySQLServerDialect) SinkMetaClaimSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaClaimSQL()
+}
+
+func (d *GoMySQLServerDialect) SinkMetaDisownSQL() string {
+	return (&dialects.MySQLDialect{}).SinkMetaDisownSQL()
 }
 
 func (d *GoMySQLServerDialect) SinkMetaDeleteSQL() string {

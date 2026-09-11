@@ -869,10 +869,13 @@ func TestProjectionTeardownResetsStageStore(t *testing.T) {
 
 	p := boot()
 
-	// Teardown: sink drops AND the stage store file goes with them.
+	// Teardown: the stage store file goes, the (owned) table drops, the note
+	// with it.
+	mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs(ddlConfig.Table).WillReturnRows(noteRows(true))
 	mock.ExpectExec(dialect.DropDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
 	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs(ddlConfig.Table).WillReturnResult(driver.ResultNoRows)
-	require.NoError(t, p.Teardown())
+	_, err = p.Teardown(false)
+	require.NoError(t, err)
 	_, statErr := os.Stat(stagestore.FilePath(storeDir, "job_totals"))
 	require.True(t, os.IsNotExist(statErr), "teardown must remove the stage store")
 	require.NoError(t, p.Close())
@@ -1049,10 +1052,13 @@ func TestProjectionTeardownDropsScalarsOnlySidecar(t *testing.T) {
 	projection := sql.NewProjection(db, config, nil, "jobs")
 	require.NoError(t, projection.Init())
 
-	// Teardown: the sidecar under its real name, the table, the stamp.
+	// Teardown: the sidecar under its real name (always committed's), then
+	// the owned table and its note.
 	mock.ExpectExec(dialect.DropDDL(&sql.Config{Table: "jobs__visit_count"})).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectQuery(dialect.SinkMetaSelectSQL()).WithArgs("jobs").WillReturnRows(noteRows(true))
 	mock.ExpectExec(dialect.DropDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
 	mock.ExpectExec(dialect.SinkMetaDeleteSQL()).WithArgs("jobs").WillReturnResult(driver.ResultNoRows)
-	require.NoError(t, projection.Teardown())
+	_, err = projection.Teardown(false)
+	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

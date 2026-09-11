@@ -28,11 +28,11 @@ func (f *reconcileFakeSyncable) Sync(context.Context, *cluster.Actual) (cluster.
 	return false, nil
 }
 func (f *reconcileFakeSyncable) Close() error { return nil }
-func (f *reconcileFakeSyncable) Teardown() error {
+func (f *reconcileFakeSyncable) Teardown(bool) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.teardowns++
-	return nil
+	return true, nil
 }
 
 func (f *reconcileFakeSyncable) teardownCount() int {
