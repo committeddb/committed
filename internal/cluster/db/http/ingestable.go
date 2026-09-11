@@ -83,7 +83,7 @@ type TableSnapshotProgress struct {
 	Topic    string `json:"topic"`
 	Complete bool   `json:"complete"`
 	// ChunksTotal/ChunksDone report a chunked parallel snapshot's progress
-	// (snapshot_readers > 1 with a splittable PK). Omitted for a
+	// (snapshotReaders > 1 with a splittable PK). Omitted for a
 	// single-stream table.
 	ChunksTotal int `json:"chunksTotal,omitempty"`
 	ChunksDone  int `json:"chunksDone,omitempty"`

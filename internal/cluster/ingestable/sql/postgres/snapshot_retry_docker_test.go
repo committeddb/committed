@@ -60,9 +60,9 @@ func TestPostgresSnapshotResumesAfterTransientError(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		// batch_size 2 over 5 rows = 3 batches, so the injected failure at
+		// batchSize 2 over 5 rows = 3 batches, so the injected failure at
 		// batch 2 lands mid-enumeration with rows on both sides of it.
-		Options: map[string]string{"slot_name": "slot_snapretry1", "publication": "pub_snapretry1", "batch_size": "2"},
+		Options: sql.Options{SlotName: "slot_snapretry1", Publication: "pub_snapretry1", BatchSize: 2},
 	}
 
 	var fired atomic.Bool
@@ -128,7 +128,7 @@ func TestPostgresSlotRecreateRefreshResumesAfterTransientError(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": "slot_snapretry2", "publication": "pub_snapretry2"},
+		Options:          sql.Options{SlotName: "slot_snapretry2", Publication: "pub_snapretry2"},
 	}
 
 	// Phase 1: ingest, stream 'before', capture the commit position that will
@@ -222,7 +222,7 @@ func TestPostgresAddedTableBackfillResumesAfterTransientError(t *testing.T) {
 			PrimaryKey:       []string{"pk"},
 			ConnectionString: connString,
 			Tables:           tables,
-			Options:          map[string]string{"slot_name": "slot_snapretry3", "publication": "pub_snapretry3"},
+			Options:          sql.Options{SlotName: "slot_snapretry3", Publication: "pub_snapretry3"},
 		}
 	}
 
@@ -356,9 +356,9 @@ func TestPostgresAddedTableBackfillResumesAcrossRestart(t *testing.T) {
 			PrimaryKey:       []string{"pk"},
 			ConnectionString: connString,
 			Tables:           tables,
-			// batch_size 1 so the backfill checkpoints after every row — the
+			// batchSize 1 so the backfill checkpoints after every row — the
 			// "crash" below needs a persisted MID-backfill position.
-			Options: map[string]string{"slot_name": "slot_snapretry4", "publication": "pub_snapretry4", "batch_size": "1"},
+			Options: sql.Options{SlotName: "slot_snapretry4", Publication: "pub_snapretry4", BatchSize: 1},
 		}
 	}
 

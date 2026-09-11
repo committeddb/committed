@@ -139,7 +139,7 @@ func postSQLServerIngestable(t *testing.T, url string) {
 	fmt.Fprintf(&b, "connectionString = %q\n", url)
 	fmt.Fprintf(&b, "primaryKey = %q\n", mssqlPK)
 	fmt.Fprintf(&b, "tables = [%q]\n\n", mssqlSource)
-	fmt.Fprintf(&b, "[sql.options]\npoll_interval = \"500ms\"\n\n")
+	fmt.Fprintf(&b, "[sql.options]\npollInterval = \"500ms\"\n\n")
 	fmt.Fprintf(&b, "[[sql.mappings]]\njsonName = %q\ncolumn = %q\n\n", mssqlPK, mssqlPK)
 	fmt.Fprintf(&b, "[[sql.mappings]]\njsonName = \"name\"\ncolumn = \"name\"\n\n")
 	postConfig(t, "/v1/ingestable/"+mssqlTopic, b.String())

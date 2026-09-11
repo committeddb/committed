@@ -28,7 +28,7 @@ func multiTopicConfig(slot, pub string) *sql.Config {
 	return &sql.Config{
 		ConnectionString: connString,
 		Tables:           []string{"mt_orders", "mt_customers"},
-		Options:          map[string]string{"slot_name": slot, "publication": pub},
+		Options:          sql.Options{SlotName: slot, Publication: pub},
 		Topics: []sql.TopicSpec{
 			{
 				Type:       mtOrdersType,

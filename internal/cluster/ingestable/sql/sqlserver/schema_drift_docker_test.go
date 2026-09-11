@@ -39,7 +39,7 @@ func TestSQLServerPrimaryKeyDrift_ParksInsteadOfCollapsing(t *testing.T) {
 		PrimaryKey:       []string{"id"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_pkdrift"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	// Run 1: snapshot the seed, reach streaming, capture the checkpoint.
@@ -105,7 +105,7 @@ func TestSQLServerMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
 		PrimaryKey:       []string{"id"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_mapdrift"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	ctx1, cancel1 := context.WithCancel(context.Background())

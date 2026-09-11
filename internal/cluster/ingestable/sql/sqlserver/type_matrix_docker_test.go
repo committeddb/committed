@@ -57,7 +57,7 @@ func TestSQLServerTypeMatrixParity(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_types"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

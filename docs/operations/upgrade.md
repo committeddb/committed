@@ -214,6 +214,15 @@ same quorum rule applies in reverse.
   admissible under this binary"); re-POST it without the key. The setting
   never took effect before, so nothing about its behavior changes except
   that you now learn about it.
+- **0.8.0 renames the ingest options.** `[sql.options]` keys are now spelled
+  like every other key (`slotName`, `pollInterval`, `batchSize`,
+  `snapshotReaders`; `publication` is unchanged), numbers are numbers rather
+  than quoted strings, and the older `[sql.postgres]` / `[sql.mysql]` /
+  `[sql.sqlserver]` tables are gone. A *stored* ingestable config under the
+  old spelling parks on the upgraded binary with the rename in its status;
+  re-POST it renamed and it resumes from its checkpoint. Re-POST **after**
+  upgrading, not before: 0.7.x does not know the new spellings and would
+  silently fall back to the default slot and publication names.
 - **0.8.0 leaves a note in each SQL destination** saying which version of
   committed wrote its rows: one row per projected table in a small
   `committed__sink_meta` table in the destination database (see

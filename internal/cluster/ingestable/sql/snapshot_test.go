@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -89,7 +90,7 @@ func TestHandOffSnapshotWindow_CheckpointStride(t *testing.T) {
 
 // TestHandOffSnapshotWindow_ShortWindow: a window at or below the stride
 // degenerates to exactly the pre-stride behavior — one checkpoint, on the final
-// row (byte-compat for small windows, e.g. docker suites with batch_size=10).
+// row (byte-compat for small windows, e.g. docker suites with batchSize=10).
 func TestHandOffSnapshotWindow_ShortWindow(t *testing.T) {
 	old := SnapshotCheckpointStride
 	SnapshotCheckpointStride = 10
@@ -223,31 +224,15 @@ func TestAddedTables(t *testing.T) {
 	}
 }
 
-func TestParseBatchSize(t *testing.T) {
+// The typed options default at the accessor so a hand-built Config (no
+// parser) behaves like a parsed one; invalid values never get this far —
+// parseOptions refuses them at admission.
+func TestOptionsDefaults(t *testing.T) {
 	const def = 10000
-	tests := []struct {
-		name string
-		opts map[string]string
-		want int
-	}{
-		{"nil_options", nil, def},
-		{"missing_key", map[string]string{"other": "v"}, def},
-		{"valid", map[string]string{"batch_size": "500"}, 500},
-		{"invalid_non_numeric", map[string]string{"batch_size": "xyz"}, def},
-		{"zero_falls_back", map[string]string{"batch_size": "0"}, def},
-		{"negative_falls_back", map[string]string{"batch_size": "-42"}, def},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, ParseBatchSize(tt.opts, def))
-		})
-	}
-}
-
-func TestParseSnapshotReaders(t *testing.T) {
-	require.Equal(t, 1, ParseSnapshotReaders(nil), "missing option = single stream")
-	require.Equal(t, 1, ParseSnapshotReaders(map[string]string{"snapshot_readers": "bogus"}))
-	require.Equal(t, 1, ParseSnapshotReaders(map[string]string{"snapshot_readers": "0"}))
-	require.Equal(t, 4, ParseSnapshotReaders(map[string]string{"snapshot_readers": "4"}))
-	require.Equal(t, MaxSnapshotReaders, ParseSnapshotReaders(map[string]string{"snapshot_readers": "1000"}), "clamped to the source-protecting cap")
+	require.Equal(t, def, Options{}.BatchSizeOr(def), "unset = the dialect's default")
+	require.Equal(t, 500, Options{BatchSize: 500}.BatchSizeOr(def))
+	require.Equal(t, 1, Options{}.Readers(), "unset = single stream")
+	require.Equal(t, 4, Options{SnapshotReaders: 4}.Readers())
+	require.Equal(t, 3*time.Second, Options{}.PollIntervalOr(3*time.Second))
+	require.Equal(t, 500*time.Millisecond, Options{PollInterval: 500 * time.Millisecond}.PollIntervalOr(3*time.Second))
 }

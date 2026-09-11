@@ -170,7 +170,7 @@ func TestSQLServerChangeTrackingEndToEnd(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_e2e"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -265,7 +265,7 @@ func TestSQLServerEnablementOwnership(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_owned", "ct_preexisting"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

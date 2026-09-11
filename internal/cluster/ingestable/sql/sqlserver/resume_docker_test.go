@@ -38,7 +38,7 @@ func TestSQLServerResumeFromStreamingCheckpoint(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_resume"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	// Run 1: snapshot the one row, reach streaming, capture the checkpoint.
@@ -118,9 +118,9 @@ func TestSQLServerCompositePKAndUniqueidentifier(t *testing.T) {
 		PrimaryKey:       []string{"a", "b"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_comp"},
-		// batch_size 2 forces the composite keyset's expanded-OR resume WHERE
+		// batchSize 2 forces the composite keyset's expanded-OR resume WHERE
 		// across batches (3 rows → two batches).
-		Options: map[string]string{"poll_interval": "300ms", "batch_size": "2"},
+		Options: sql.Options{PollInterval: 300 * time.Millisecond, BatchSize: 2},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

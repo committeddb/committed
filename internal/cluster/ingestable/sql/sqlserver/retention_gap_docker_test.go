@@ -41,7 +41,7 @@ func TestSQLServerRetentionGapResnapshots(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_gap"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	// Run 1: snapshot the seed, reach streaming, capture the checkpoint.

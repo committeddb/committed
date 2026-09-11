@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"strconv"
 	"sync"
 
 	"go.uber.org/zap"
@@ -39,7 +38,7 @@ type SnapshotReader interface {
 	ReadBatch(ctx context.Context, table string, spec *TopicSpec, lastPK string, haveLastPK bool, batchSize int) (entities []*cluster.Entity, lastKey string, n int, err error)
 }
 
-// ChunkPlanner is the optional adapter capability behind snapshot_readers > 1:
+// ChunkPlanner is the optional adapter capability behind snapshotReaders > 1:
 // splitting a table into primary-key ranges read by a pool of parallel
 // readers. PlanChunks returns nil (no error) when the table cannot be split
 // (composite key, no split strategy, too few rows) — the table then takes
@@ -118,8 +117,8 @@ func RunSnapshot(ctx context.Context, run SnapshotRun) error {
 		}
 		// Chunked-parallel dispatch: a table with a persisted chunk plan
 		// ALWAYS resumes chunked (the frozen-plan contract — even if
-		// snapshot_readers has since changed, including to 1). A fresh table
-		// goes parallel only when the operator opted in (snapshot_readers > 1),
+		// snapshotReaders has since changed, including to 1). A fresh table
+		// goes parallel only when the operator opted in (snapshotReaders > 1),
 		// the adapter can plan, AND the planner found a split strategy;
 		// everything else takes the single-stream path unchanged. A table
 		// mid-flight on the SINGLE stream (last_pk_by_table) similarly keeps
@@ -534,32 +533,7 @@ func AddedTables(configured, snapshotted []string) []string {
 	return added
 }
 
-// ParseBatchSize reads "batch_size" from Config.Options, falling back to the
-// dialect's default for a missing, non-numeric, zero, or negative value.
-func ParseBatchSize(options map[string]string, def int) int {
-	if v, ok := options["batch_size"]; ok {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return def
-}
-
 // MaxSnapshotReaders caps the per-table reader pool. The ceiling protects
 // the SOURCE (each reader holds a connection and streams a range scan), not
 // committed.
 const MaxSnapshotReaders = 16
-
-// ParseSnapshotReaders reads "snapshot_readers" from Config.Options: 1 (the
-// single stream) when missing or invalid, clamped to MaxSnapshotReaders.
-func ParseSnapshotReaders(options map[string]string) int {
-	v, ok := options["snapshot_readers"]
-	if !ok {
-		return 1
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 {
-		return 1
-	}
-	return min(n, MaxSnapshotReaders)
-}

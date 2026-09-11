@@ -6,6 +6,8 @@ import (
 
 	mssql "github.com/microsoft/go-mssqldb"
 	"github.com/stretchr/testify/require"
+
+	sql "github.com/committeddb/committed/internal/cluster/ingestable/sql"
 )
 
 // The SourceSeq encoding must be strictly monotonic across (version, sub)
@@ -67,11 +69,11 @@ func TestStringifyKeyValue(t *testing.T) {
 	require.Equal(t, "<nil>", stringifyKeyValue(nil))
 }
 
+// The poll cadence defaults at the accessor; a non-positive value never
+// reaches here (parseOptions refuses it at admission).
 func TestPollInterval(t *testing.T) {
-	require.Equal(t, defaultPollInterval, pollInterval(nil))
-	require.Equal(t, 10*time.Second, pollInterval(map[string]string{"poll_interval": "10s"}))
-	require.Equal(t, defaultPollInterval, pollInterval(map[string]string{"poll_interval": "-1s"}),
-		"a non-positive cadence falls back rather than busy-looping")
+	require.Equal(t, defaultPollInterval, sql.Options{}.PollIntervalOr(defaultPollInterval))
+	require.Equal(t, 10*time.Second, sql.Options{PollInterval: 10 * time.Second}.PollIntervalOr(defaultPollInterval))
 }
 
 func TestRenderUniqueidentifier(t *testing.T) {

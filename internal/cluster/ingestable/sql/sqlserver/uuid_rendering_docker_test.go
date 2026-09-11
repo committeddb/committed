@@ -58,7 +58,7 @@ func TestSQLServerUniqueidentifierRenderingUpgrade(t *testing.T) {
 		PrimaryKey:       []string{"id"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_uuid"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 	payload := func(e *cluster.Entity) map[string]any {
 		var m map[string]any

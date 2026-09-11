@@ -30,7 +30,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
 )
 
-// rowCount for chunking tests; sized to comfortably exceed batch_size=10.
+// rowCount for chunking tests; sized to comfortably exceed batchSize=10.
 const chunkTestRowCount = 25
 
 var connString string
@@ -259,9 +259,9 @@ func TestPostgresDialect(t *testing.T) {
 			cfg := *tt.config
 			cfg.ConnectionString = connString
 			cfg.Tables = []string{tt.table}
-			cfg.Options = map[string]string{
-				"slot_name":   slotName,
-				"publication": pubName,
+			cfg.Options = sql.Options{
+				SlotName:    slotName,
+				Publication: pubName,
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -370,7 +370,7 @@ func TestPostgresPKChangingUpdateTombstonesOldKey(t *testing.T) {
 	dialect := &postgres.PostgreSQLDialect{}
 	config.ConnectionString = connString
 	config.Tables = []string{table}
-	config.Options = map[string]string{"slot_name": slotName, "publication": pubName}
+	config.Options = sql.Options{SlotName: slotName, Publication: pubName}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -447,7 +447,7 @@ func TestPostgresTruncateNotSilentlyDropped(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": "slot_trunc", "publication": "pub_trunc"},
+		Options:          sql.Options{SlotName: "slot_trunc", Publication: "pub_trunc"},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -513,7 +513,7 @@ func TestPostgresTypedPayload(t *testing.T) {
 			{JsonName: "b", SQLColumn: "b"},
 			{JsonName: "j", SQLColumn: "j"},
 		},
-		Options: map[string]string{"slot_name": "slot_typed", "publication": "pub_typed"},
+		Options: sql.Options{SlotName: "slot_typed", Publication: "pub_typed"},
 	}
 
 	db := createDB(t)
@@ -619,7 +619,7 @@ func TestPostgresPrimaryKeyDrift_ParksInsteadOfCollapsing(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		Options: map[string]string{"slot_name": "slot_pkdrift", "publication": "pub_pkdrift"},
+		Options: sql.Options{SlotName: "slot_pkdrift", Publication: "pub_pkdrift"},
 	}
 
 	db := createDB(t)
@@ -690,7 +690,7 @@ func TestPostgresMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 			{JsonName: "extra", SQLColumn: "extra"},
 		},
-		Options: map[string]string{"slot_name": "slot_mapdrift", "publication": "pub_mapdrift"},
+		Options: sql.Options{SlotName: "slot_mapdrift", Publication: "pub_mapdrift"},
 	}
 
 	db := createDB(t)
@@ -790,7 +790,7 @@ func TestPostgresSnapshotStreamByteIdentity(t *testing.T) {
 			{JsonName: "by", SQLColumn: "by"},
 			{JsonName: "num", SQLColumn: "num"},
 		},
-		Options: map[string]string{"slot_name": "slot_byteident", "publication": "pub_byteident"},
+		Options: sql.Options{SlotName: "slot_byteident", Publication: "pub_byteident"},
 	}
 
 	db := createDB(t)
@@ -898,7 +898,7 @@ func TestPostgresSnapshotStreamDomainByteIdentity(t *testing.T) {
 			{JsonName: "amt", SQLColumn: "amt"},
 			{JsonName: "flag", SQLColumn: "flag"},
 		},
-		Options: map[string]string{"slot_name": "slot_domainident", "publication": "pub_domainident"},
+		Options: sql.Options{SlotName: "slot_domainident", Publication: "pub_domainident"},
 	}
 
 	db := createDB(t)
@@ -1007,7 +1007,7 @@ func TestPostgresTeardownSourceDropsSlot(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": "slot_teardown", "publication": "pub_teardown"},
+		Options:          sql.Options{SlotName: "slot_teardown", Publication: "pub_teardown"},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1080,7 +1080,7 @@ func TestPostgresTeardownSourceDropsActiveSlot(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": slot, "publication": pub},
+		Options:          sql.Options{SlotName: slot, Publication: pub},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1153,7 +1153,7 @@ func TestPostgresMixedCaseColumn(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "createdAt", SQLColumn: "CreatedAt"}, // quoted CamelCase source column
 		},
-		Options: map[string]string{"slot_name": "slot_mixedcase", "publication": "pub_mixedcase"},
+		Options: sql.Options{SlotName: "slot_mixedcase", Publication: "pub_mixedcase"},
 	}
 
 	db := createDB(t)
@@ -1290,7 +1290,7 @@ func TestPostgresUnchangedToastReselect(t *testing.T) {
 			{JsonName: "n", SQLColumn: "n"},
 			{JsonName: "big", SQLColumn: "big"},
 		},
-		Options: map[string]string{"slot_name": "slot_toast", "publication": "pub_toast"},
+		Options: sql.Options{SlotName: "slot_toast", Publication: "pub_toast"},
 	}
 
 	db := createDB(t)
@@ -1381,9 +1381,9 @@ func TestPostgresPositionResume(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_resume",
-			"publication": "pub_resume",
+		Options: sql.Options{
+			SlotName:    "slot_resume",
+			Publication: "pub_resume",
 		},
 	}
 
@@ -1490,9 +1490,9 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_txgroup",
-			"publication": "pub_txgroup",
+		Options: sql.Options{
+			SlotName:    "slot_txgroup",
+			Publication: "pub_txgroup",
 		},
 	}
 
@@ -1606,9 +1606,9 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_snap",
-			"publication": "pub_snap",
+		Options: sql.Options{
+			SlotName:    "slot_snap",
+			Publication: "pub_snap",
 		},
 	}
 
@@ -1676,7 +1676,7 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 }
 
 // TestPostgresSnapshotChunking verifies keyset-paginated snapshots
-// deliver all rows across multiple proposals when batch_size is smaller
+// deliver all rows across multiple proposals when batchSize is smaller
 // than the row count.
 func TestPostgresSnapshotChunking(t *testing.T) {
 	// Capture logs to assert the snapshot never logs the primary-key value
@@ -1713,10 +1713,10 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_chunk",
-			"publication": "pub_chunk",
-			"batch_size":  "10",
+		Options: sql.Options{
+			SlotName:    "slot_chunk",
+			Publication: "pub_chunk",
+			BatchSize:   10,
 		},
 	}
 
@@ -1740,7 +1740,7 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 		case p := <-proposalChan:
 			snapshotProposals++
 			require.LessOrEqual(t, len(p.Entities), 10,
-				"each snapshot proposal must not exceed batch_size")
+				"each snapshot proposal must not exceed batchSize")
 			for _, e := range p.Entities {
 				seen[string(e.Key)] = true
 			}
@@ -1751,7 +1751,7 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 	}
 
 	require.GreaterOrEqual(t, snapshotProposals, 3,
-		"25 rows at batch_size=10 should produce ≥3 proposals")
+		"25 rows at batchSize=10 should produce ≥3 proposals")
 
 	for i := 0; i < chunkTestRowCount; i++ {
 		require.Truef(t, seen[fmt.Sprintf("%03d", i)], "missing row %03d", i)
@@ -1773,7 +1773,7 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 // column they collided and all but the last were dropped. With the composite key
 // every row gets a distinct entity key, and keyset pagination uses row-value
 // comparison so a batch boundary inside a shared tconst doesn't skip its
-// siblings — batch_size=2 forces exactly that boundary.
+// siblings — batchSize=2 forces exactly that boundary.
 func TestPostgresSnapshotCompositePrimaryKey(t *testing.T) {
 	table := "pg_composite_pk"
 
@@ -1809,10 +1809,10 @@ func TestPostgresSnapshotCompositePrimaryKey(t *testing.T) {
 		PrimaryKey:       []string{"tconst", "ordering"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_composite",
-			"publication": "pub_composite",
-			"batch_size":  "2", // forces a batch boundary inside tt1's principals
+		Options: sql.Options{
+			SlotName:    "slot_composite",
+			Publication: "pub_composite",
+			BatchSize:   2, // forces a batch boundary inside tt1's principals
 		},
 	}
 
@@ -1894,7 +1894,7 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": "slot_recreate", "publication": "pub_recreate"},
+		Options:          sql.Options{SlotName: "slot_recreate", Publication: "pub_recreate"},
 	}
 
 	// Phase 1: ingest, stream 'before', capture the commit position that will

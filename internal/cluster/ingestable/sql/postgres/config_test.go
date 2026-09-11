@@ -27,9 +27,9 @@ func TestBuildPgConfig(t *testing.T) {
 			config: &sql.Config{
 				ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable",
 				Tables:           []string{"public.orders", "public.items"},
-				Options: map[string]string{
-					"slot_name":   "my_slot",
-					"publication": "my_pub",
+				Options: sql.Options{
+					SlotName:    "my_slot",
+					Publication: "my_pub",
 				},
 			},
 			wantSlot:    "my_slot",
@@ -44,7 +44,7 @@ func TestBuildPgConfig(t *testing.T) {
 			config: &sql.Config{
 				ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable",
 				Tables:           []string{"mytable"},
-				Options:          map[string]string{},
+				Options:          sql.Options{},
 			},
 			wantSlot:   "committed_slot",
 			wantPub:    "committed_pub",
@@ -74,7 +74,7 @@ func TestBuildPgConfig(t *testing.T) {
 			config: &sql.Config{
 				ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable&replication=database",
 				Tables:           []string{"t"},
-				Options:          map[string]string{},
+				Options:          sql.Options{},
 			},
 			wantSlot:    "committed_slot",
 			wantPub:     "committed_pub",

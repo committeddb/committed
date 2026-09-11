@@ -43,7 +43,7 @@ type MySQLDialect struct{}
 
 const (
 	// defaultSnapshotBatchSize is the number of rows read per snapshot
-	// batch when Config.Options has no "batch_size" override. The
+	// batch when Config.Options has no batchSize override. The
 	// snapshot uses keyset pagination (SELECT ... WHERE pk > :last_pk
 	// LIMIT :batch_size) with a short transaction per batch, so this
 	// also bounds how long each MVCC read-view is held.
@@ -55,6 +55,12 @@ const (
 // FULL/NOBLOB carry the whole (non-blob) before-image; only MINIMAL trims to the
 // row's identifying key, so only then must the table's PRIMARY KEY cover
 // primaryKey.
+// OptionKeys implements sql.Dialect: the snapshot batch size and the
+// parallel reader count (MySQL has no slot or publication to name).
+func (m *MySQLDialect) OptionKeys() []string {
+	return []string{sql.OptionBatchSize, sql.OptionSnapshotReaders}
+}
+
 func (m *MySQLDialect) Preflight(config *sql.Config) error {
 	// Normalize to the per-topic model up front, single-threaded: a dialect entered
 	// directly (a hand-built config, bypassing the sql.Ingestable wrapper) carries
@@ -2113,8 +2119,8 @@ func snapshot(
 		Tables:    config.Tables,
 		Progress:  sql.NewSnapshotProgress(resumeProgress),
 		Epoch:     epoch,
-		BatchSize: sql.ParseBatchSize(config.Options, defaultSnapshotBatchSize),
-		Readers:   sql.ParseSnapshotReaders(config.Options),
+		BatchSize: config.Options.BatchSizeOr(defaultSnapshotBatchSize),
+		Readers:   config.Options.Readers(),
 		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
 			return encodeProgress(pos, gtid, p, epoch)
 		},
@@ -2127,7 +2133,7 @@ func snapshot(
 }
 
 // mysqlSnapshotReader is the dialect's snapshot adapter: the keyset batch
-// SQL (readBatch) and, for snapshot_readers > 1, the chunk planner
+// SQL (readBatch) and, for snapshotReaders > 1, the chunk planner
 // (planTableChunks) plus the range-bounded chunk reads.
 type mysqlSnapshotReader struct{ db *gosql.DB }
 

@@ -35,8 +35,8 @@ Tables           = ["public.Orders", "public.customers"]
 JsonName = "pk"
 Column   = "pk"
 
-[SQL.Postgres]
-Slot_Name   = "my_slot"
+[SQL.Options]
+SlotName   = "my_slot"
 Publication = "my_pub"
 `
 	v := readConfig(t, "toml", bytes.NewReader([]byte(variant)))
@@ -55,10 +55,8 @@ Publication = "my_pub"
 	require.Equal(t, []string{"public.Orders", "public.customers"}, config.Tables,
 		"table names are user data — case preserved")
 	require.Equal(t, []sql.Mapping{{JsonName: "pk", SQLColumn: "pk"}}, config.Mappings)
-	require.Equal(t, map[string]string{
-		"slot_name":   "my_slot",
-		"publication": "my_pub",
-	}, config.Options, "dialect option keys match case-insensitively (lowercased)")
+	require.Equal(t, sql.Options{SlotName: "my_slot", Publication: "my_pub"}, config.Options,
+		"option keys match case-insensitively")
 }
 
 // The [sql] vocabulary is closed: a typo'd key is rejected naming the key and
@@ -84,8 +82,10 @@ mapAllColumn     = true
 	require.Contains(t, err.Error(), `did you mean "mapAllColumns"?`)
 }
 
-// [sql.options] is the documented, dialect-neutral option table; the older
-// [sql.<dialect>] spelling still reads, and an option set in both is refused.
+// [sql.options] is committed's own table: the pre-0.8.0 [sql.<dialect>]
+// spelling and the snake_case keys park with the rename (a stored config
+// under either resumes from its checkpoint once re-POSTed), and a key the
+// configured dialect does not read is refused rather than ignored.
 func TestIngestableParseConfigReadsSQLOptions(t *testing.T) {
 	base := `
 [sql]
@@ -105,12 +105,30 @@ mapAllColumns    = true
 		config, _, err := p.ParseConfig(v)
 		return config, err
 	}
-	config, err := parse(base + "[sql.options]\nslot_name = \"neutral\"\n[sql.postgres]\npublication = \"dialect\"\n")
+	config, err := parse(base + "[sql.options]\nslotName = \"neutral\"\npublication = \"p\"\nbatchSize = 250\n")
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{"slot_name": "neutral", "publication": "dialect"}, config.Options,
-		"both tables read into one option set")
+	require.Equal(t, sql.Options{SlotName: "neutral", Publication: "p", BatchSize: 250}, config.Options)
 
-	_, err = parse(base + "[sql.options]\nslot_name = \"a\"\n[sql.postgres]\nslot_name = \"b\"\n")
+	_, err = parse(base + "[sql.postgres]\nslot_name = \"old\"\n")
+	require.Error(t, err)
+	require.Equal(t, "sql.postgres", cluster.NewConfigError(err).Field)
+	require.Contains(t, err.Error(), "removed in 0.8.0")
+	require.Contains(t, err.Error(), "slot_name → slotName")
+
+	_, err = parse(base + "[sql.options]\nslot_name = \"old\"\n")
 	require.Error(t, err)
 	require.Equal(t, "sql.options.slot_name", cluster.NewConfigError(err).Field)
+	require.Contains(t, err.Error(), `spell it "slotName"`)
+
+	_, err = parse(base + "[sql.options]\nsnapshotReaders = 4\n")
+	require.Error(t, err)
+	require.Equal(t, "sql.options.snapshotReaders", cluster.NewConfigError(err).Field)
+	require.Contains(t, err.Error(), "not read by the postgres dialect")
+
+	_, err = parse(base + "[sql.options]\nbatchSize = 0\n")
+	require.Error(t, err)
+	require.Equal(t, "sql.options.batchSize", cluster.NewConfigError(err).Field)
+
+	_, err = parse(base + "[sql.options]\nbatchSize = \"10\"\n")
+	require.Error(t, err, "a quoted number is a string, not the integer the key takes")
 }

@@ -199,11 +199,11 @@ func (d *SQLServerDialect) ingestOnce(ctx context.Context, s *session) error {
 	// the poll resumes FROM is the first datum a re-delivery question needs.
 	zap.L().Info("change tracking poll started",
 		zap.Uint64("resumeVersion", s.version),
-		zap.Duration("pollInterval", pollInterval(config.Options)),
+		zap.Duration("pollInterval", config.Options.PollIntervalOr(defaultPollInterval)),
 		zap.Bool("canonicalUUID", s.canonicalUUID()))
 
 	// --- the poll loop ---
-	interval := pollInterval(config.Options)
+	interval := config.Options.PollIntervalOr(defaultPollInterval)
 	s.drift = &schemaDriftGuard{}
 	for {
 		if err := ctx.Err(); err != nil {

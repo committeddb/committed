@@ -82,9 +82,10 @@ kind reads (`[ingestable]`, `[syncable]`, `[database]`, `[type]`,
 its parser reads; a key outside that set — a typo, a misplaced field, or a
 probe for a feature that does not exist — is rejected at POST with a 400
 naming the key (and the nearest known one), and a misspelled section is
-rejected the same way. Free-form tables (`[sql.options]`, `[iceberg.props]`,
-`[http.headers]`) take any key: their contents are the source's or sink's
-vocabulary, not committed's. Matching stays case-insensitive.
+rejected the same way. Free-form tables (`[iceberg.props]`, `[http.headers]`)
+take any key: their contents are the catalog's or the receiver's
+vocabulary, not committed's. `[sql.options]` is committed's own and is
+closed like everything else, per dialect. Matching stays case-insensitive.
 
 The alternative — accepting and ignoring — manufactured belief in settings
 that never took effect. Adding a key is an ordinary additive change; a config

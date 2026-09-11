@@ -125,16 +125,10 @@ func (r tableRef) qualified() string {
 // interpolated).
 func (r tableRef) objectID() string { return r.schema + "." + r.name }
 
-// pollInterval reads the poll cadence option, defaulting sanely. Invalid
-// values were rejected at parse time by validateOptions-style checks; here a
-// bad value just falls back to the default.
-func pollInterval(options map[string]string) time.Duration {
-	if v := options["poll_interval"]; v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
-	return defaultPollInterval
+// OptionKeys implements sql.Dialect: the Change Tracking poll cadence and
+// the snapshot batch size.
+func (d *SQLServerDialect) OptionKeys() []string {
+	return []string{sql.OptionPollInterval, sql.OptionBatchSize}
 }
 
 // Preflight validates the source can be ingested safely — read-only, because

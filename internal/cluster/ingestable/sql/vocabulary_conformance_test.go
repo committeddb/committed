@@ -29,9 +29,9 @@ jsonColumns      = ["doc"]
 jsonName = "pk"
 column   = "pk"
 [sql.options]
-slot_name = "s"
-[sql.postgres]
+slotName    = "s"
 publication = "p"
+batchSize   = 500
 `
 	topics := `
 [sql]
@@ -59,7 +59,7 @@ mapAllColumns = true
 			_ = p.TopicsFromConfig(v)
 		}
 	})
-	undeclared, unread := cluster.VocabularyDiff(sql.SQLSectionKeys("postgres"), read["sql"])
+	undeclared, unread := cluster.VocabularyDiff(sql.SQLSectionKeys(), read["sql"])
 	require.Empty(t, undeclared, "[sql]: keys read but not declared — they would be rejected at POST")
 	require.Empty(t, unread, "[sql]: keys declared but never read — a typo there would be silently inert again")
 }

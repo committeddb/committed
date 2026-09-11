@@ -51,8 +51,8 @@ connectionString = %q
 primaryKey = "id"
 tables = ["public.photos"]
 
-[sql.postgres]
-slot_name = "slot_census"
+[sql.options]
+slotName = "slot_census"
 publication = "pub_census"
 
 [[sql.mappings]]

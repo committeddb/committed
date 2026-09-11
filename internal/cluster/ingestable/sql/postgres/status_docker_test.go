@@ -41,9 +41,9 @@ func TestPostgresStatusStreamingLag(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_status",
-			"publication": "pub_status",
+		Options: sql.Options{
+			SlotName:    "slot_status",
+			Publication: "pub_status",
 		},
 	}
 

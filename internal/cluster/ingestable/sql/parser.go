@@ -138,14 +138,18 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 	if !ok {
 		return nil, nil, cluster.UnknownDialectError(dialectName, dialectNames(p.Dialects))
 	}
-	// The [sql] vocabulary. `options` is the dialect-neutral option table the
-	// docs show; `[sql.<dialect>]` is its older spelling — both are free-form
-	// (dialect option names, validated by the dialect) and read wholesale.
-	if err := v.RejectUnknownKeys("sql", sqlSectionKeys(dialectName)...); err != nil {
+	// The [sql] vocabulary. `options` is committed's own option table, typed
+	// and closed per dialect (parseOptions); its pre-0.8.0 [sql.<dialect>]
+	// spelling is refused with the rename before the generic check would
+	// call it a typo.
+	if err := rejectRemovedOptionTables(v); err != nil {
+		return nil, nil, err
+	}
+	if err := v.RejectUnknownKeys("sql", sqlSectionKeys()...); err != nil {
 		return nil, nil, err
 	}
 	connectionString := v.GetString("sql.connectionString")
-	options, err := mergeOptions(v.GetStringMapString("sql.options"), v.GetStringMapString("sql."+dialectName), dialectName)
+	options, err := parseOptions(v, dialectName, dialect)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -163,7 +167,7 @@ func (p *IngestableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, Dialec
 // parseFlatConfig parses the flat single-topic form into a one-element Topics. It is
 // the original config shape; the singular Config fields and Topics[0] carry the same
 // values.
-func (p *IngestableParser) parseFlatConfig(v *cluster.ParsedConfig, dialect Dialect, connectionString string, options map[string]string) (*Config, Dialect, error) {
+func (p *IngestableParser) parseFlatConfig(v *cluster.ParsedConfig, dialect Dialect, connectionString string, options Options) (*Config, Dialect, error) {
 	topic := v.GetString("sql.topic")
 	// primaryKey accepts a scalar (primaryKey = "pk") or a list
 	// (primaryKey = ["tconst", "ordering"]) for composite keys; GetStringSlice
@@ -265,33 +269,13 @@ func (p *IngestableParser) parseFlatConfig(v *cluster.ParsedConfig, dialect Dial
 // jsonColumns saga was a field added to the struct but not this list,
 // and a config in the mixed spelling silently hinted nothing for weeks.
 // sqlSectionKeys is the ingest [sql] vocabulary: what ParseConfig, its two
-// forms, and TopicsFromConfig read, plus the two free-form option tables.
+// forms, and TopicsFromConfig read, plus the typed [sql.options] table.
 // Pinned to those reads by the vocabulary conformance test.
-func sqlSectionKeys(dialectName string) []string {
+func sqlSectionKeys() []string {
 	return []string{
 		"dialect", "connectionString", "topic", "tables", "primaryKey", "mappings",
-		"mapAllColumns", "excludeColumns", "jsonColumns", "topics", "options", dialectName,
+		"mapAllColumns", "excludeColumns", "jsonColumns", "topics", "options",
 	}
-}
-
-// mergeOptions unions [sql.options] with the older [sql.<dialect>] table.
-// One option named in both is ambiguous — refused rather than silently
-// resolved one way.
-func mergeOptions(neutral, dialect map[string]string, dialectName string) (map[string]string, error) {
-	out := make(map[string]string, len(neutral)+len(dialect))
-	for k, val := range dialect {
-		out[k] = val
-	}
-	for k, val := range neutral {
-		if _, dup := out[k]; dup {
-			return nil, cluster.NotAdmissible(&cluster.FieldError{
-				Field: "sql.options." + k,
-				Issue: fmt.Sprintf("also set under [sql.%s]; set each option in one place", dialectName),
-			})
-		}
-		out[k] = val
-	}
-	return out, nil
 }
 
 var flatPerTopicFields = []string{
@@ -315,7 +299,7 @@ type topicSpecTOML struct {
 // topic, and a topic id claimed by more than one entry. The singular Config fields
 // mirror Topics[0] for the few remaining flat-compat readers (topicID/topicName, the
 // park-log fields, chunkTag hashes ALL specs).
-func (p *IngestableParser) parseTopicsConfig(v *cluster.ParsedConfig, dialect Dialect, connectionString string, options map[string]string) (*Config, Dialect, error) {
+func (p *IngestableParser) parseTopicsConfig(v *cluster.ParsedConfig, dialect Dialect, connectionString string, options Options) (*Config, Dialect, error) {
 	// Mutual exclusivity: the [[sql.topics]] form owns the per-topic fields; a stray
 	// flat-level one is ambiguous (which shape wins?), so reject it loudly rather
 	// than silently ignore it. dialect / connectionString / sql.<dialect> options

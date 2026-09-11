@@ -49,7 +49,7 @@ func TestPostgresPublicationReconciledOnAddedTable(t *testing.T) {
 			PrimaryKey:       []string{"pk"},
 			ConnectionString: connString,
 			Tables:           tables,
-			Options:          map[string]string{"slot_name": "slot_recon", "publication": "pub_recon"},
+			Options:          sql.Options{SlotName: "slot_recon", Publication: "pub_recon"},
 		}
 	}
 

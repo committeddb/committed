@@ -41,7 +41,7 @@ func postIngestable(t *testing.T, table, pgConnStr, slotName, pubName string) {
 	// (postgres.go:389) so "public.region" correctly becomes the
 	// schema.table reference "public"."region".
 	fmt.Fprintf(&b, "tables = [\"public.%s\"]\n\n", table)
-	fmt.Fprintf(&b, "[sql.postgres]\nslot_name = %q\npublication = %q\n\n", slotName, pubName)
+	fmt.Fprintf(&b, "[sql.options]\nslotName = %q\npublication = %q\n\n", slotName, pubName)
 	for _, col := range dataset.Columns(table) {
 		fmt.Fprintf(&b, "[[sql.mappings]]\njsonName = %q\ncolumn = %q\n\n", col, col)
 	}
@@ -60,7 +60,7 @@ func postMultiTopicIngestable(t *testing.T, id string, tables []string, pgConnSt
 	fmt.Fprintf(&b, "[ingestable]\nname = %q\ntype = \"sql\"\n\n", id)
 	fmt.Fprintf(&b, "[sql]\ndialect = \"postgres\"\n")
 	fmt.Fprintf(&b, "connectionString = %q\n\n", pgConnStr)
-	fmt.Fprintf(&b, "[sql.postgres]\nslot_name = %q\npublication = %q\n", slotName, pubName)
+	fmt.Fprintf(&b, "[sql.options]\nslotName = %q\npublication = %q\n", slotName, pubName)
 	for _, table := range tables {
 		// Scalar keys first, then the nested [[sql.topics.mappings]] blocks: once a
 		// sub-table array is opened, later bare keys would attach to it, not the topic.

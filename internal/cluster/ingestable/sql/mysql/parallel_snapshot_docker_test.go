@@ -61,10 +61,7 @@ func psConfig(table string, readers int) *sql.Config {
 		Tables:           []string{table},
 		PrimaryKey:       []string{"id"},
 		Mappings:         []sql.Mapping{{JsonName: "id", SQLColumn: "id"}, {JsonName: "v", SQLColumn: "v"}},
-		Options: map[string]string{
-			"snapshot_readers": fmt.Sprintf("%d", readers),
-			"batch_size":       "200",
-		},
+		Options:          sql.Options{SnapshotReaders: readers, BatchSize: 200},
 	}
 }
 
@@ -297,7 +294,7 @@ func TestMysqlParallelSnapshotSpeedup(t *testing.T) {
 
 	run := func(readers int) (time.Duration, int) {
 		cfg := psConfig(table, readers)
-		cfg.Options["batch_size"] = "1000"
+		cfg.Options.BatchSize = 1000
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		pr := make(chan *cluster.Proposal, 1024)

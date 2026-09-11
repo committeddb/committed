@@ -21,7 +21,7 @@ import (
 // NaN arrives as the string "NaN" and the row emits normally (that branch is
 // defensive today; the fix made it advance the scan instead of silently
 // truncating the table if it ever fires). Second: the whole 5-row table
-// arrives at batch_size 1 — if a future decode change ever made NaN (or
+// arrives at batchSize 1 — if a future decode change ever made NaN (or
 // anything else) start failing marshal, THIS assertion is what turns the old
 // silent truncation into a loud test failure: rows after the failing row
 // would stop arriving.
@@ -47,9 +47,9 @@ func TestPostgresSnapshotNaNScansCompletely(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		// batch_size 1 makes the NaN row a whole batch by itself — the exact
+		// batchSize 1 makes the NaN row a whole batch by itself — the exact
 		// shape that used to read as "table exhausted".
-		Options: map[string]string{"slot_name": "slot_skipscan", "publication": "pub_skipscan", "batch_size": "1"},
+		Options: sql.Options{SlotName: "slot_skipscan", Publication: "pub_skipscan", BatchSize: 1},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

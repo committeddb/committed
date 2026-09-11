@@ -46,7 +46,7 @@ func (d *SQLServerDialect) snapshot(ctx context.Context, s *session, progress *d
 		Tables:    config.Tables,
 		Progress:  progress,
 		Epoch:     epoch,
-		BatchSize: sql.ParseBatchSize(config.Options, defaultSnapshotBatchSize),
+		BatchSize: config.Options.BatchSizeOr(defaultSnapshotBatchSize),
 		Readers:   1,
 		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
 			return encodePosition(version, p, epoch, snapshotted, rendering)

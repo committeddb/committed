@@ -1121,7 +1121,7 @@ func TestMysqlPKChangingUpdateTombstonesOldKey(t *testing.T) {
 func TestMysqlSnapshotConcurrentMutationConverges(t *testing.T) {
 	table := "converge_table"
 
-	// Seed enough rows (small batch_size → many batches) that the snapshot spans a
+	// Seed enough rows (small batchSize → many batches) that the snapshot spans a
 	// window wide enough for the concurrent mutations to interleave with it.
 	const seedRows = 300
 	db := createDB(t)
@@ -1141,7 +1141,7 @@ func TestMysqlSnapshotConcurrentMutationConverges(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
-		Options:          map[string]string{"batch_size": "10"},
+		Options:          sql.Options{BatchSize: 10},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1917,9 +1917,9 @@ func TestMysqlSnapshotStampsGenerationAndMarker(t *testing.T) {
 }
 
 // TestMysqlSnapshotChunking verifies that a snapshot of a table with
-// more rows than the configured batch_size delivers all rows across
+// more rows than the configured batchSize delivers all rows across
 // multiple proposals. With keyset pagination and tx-per-batch, a 25-row
-// table at batch_size=10 should yield ≥3 proposals.
+// table at batchSize=10 should yield ≥3 proposals.
 func TestMysqlSnapshotChunking(t *testing.T) {
 	// Capture logs to assert the snapshot never logs the primary-key value
 	// (snapshot-primarykey-logged-info-pii): natural keys are often source PII and
@@ -1953,7 +1953,7 @@ func TestMysqlSnapshotChunking(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
-		Options:          map[string]string{"batch_size": "10"},
+		Options:          sql.Options{BatchSize: 10},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1975,10 +1975,10 @@ func TestMysqlSnapshotChunking(t *testing.T) {
 		select {
 		case p := <-proposalChan:
 			snapshotProposals++
-			// With batch_size=10 and 25 rows, each proposal except
+			// With batchSize=10 and 25 rows, each proposal except
 			// possibly the last must contain exactly 10 entities.
 			require.LessOrEqual(t, len(p.Entities), 10,
-				"each snapshot proposal must not exceed batch_size")
+				"each snapshot proposal must not exceed batchSize")
 			for _, e := range p.Entities {
 				seen[string(e.Key)] = true
 			}
@@ -1989,7 +1989,7 @@ func TestMysqlSnapshotChunking(t *testing.T) {
 	}
 
 	require.GreaterOrEqual(t, snapshotProposals, 3,
-		"25 rows at batch_size=10 should produce ≥3 proposals")
+		"25 rows at batchSize=10 should produce ≥3 proposals")
 
 	for i := 0; i < rowCount; i++ {
 		require.True(t, seen[fmt.Sprintf("%03d", i)], "missing row %03d", i)
@@ -2213,7 +2213,7 @@ func TestMysqlSnapshotResume(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
-		Options:          map[string]string{"batch_size": "3"},
+		Options:          sql.Options{BatchSize: 3},
 	}
 
 	ctx1, cancel1 := context.WithCancel(context.Background())
@@ -2329,7 +2329,7 @@ drain:
 // regression: a table with a composite PK whose rows share a leading column.
 // Every row must land with a distinct key, and keyset pagination (row-value
 // comparison) must not skip a shared-key sibling across a batch boundary
-// (batch_size=2 forces that boundary inside tt1's rows).
+// (batchSize=2 forces that boundary inside tt1's rows).
 func TestMysqlSnapshotCompositePrimaryKey(t *testing.T) {
 	table := "composite_pk"
 
@@ -2358,7 +2358,7 @@ func TestMysqlSnapshotCompositePrimaryKey(t *testing.T) {
 		PrimaryKey:       []string{"tconst", "ordering"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
-		Options:          map[string]string{"batch_size": "2"},
+		Options:          sql.Options{BatchSize: 2},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

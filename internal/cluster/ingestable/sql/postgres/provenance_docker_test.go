@@ -47,7 +47,7 @@ func TestPostgresCaptureProvenance(t *testing.T) {
 	config := &sql.Config{
 		ConnectionString: connString,
 		Tables:           []string{"prov_orders", "prov_customers"},
-		Options:          map[string]string{"slot_name": slot, "publication": pub},
+		Options:          sql.Options{SlotName: slot, Publication: pub},
 		Topics: []sql.TopicSpec{
 			{
 				Type:       provOrdersType,

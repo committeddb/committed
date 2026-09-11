@@ -35,7 +35,7 @@ func TestPostgresUUIDRendersCanonicalLowercase(t *testing.T) {
 			{JsonName: "id", SQLColumn: "id"},
 			{JsonName: "ref", SQLColumn: "ref"},
 		},
-		Options: map[string]string{"slot_name": slot, "publication": pub},
+		Options: sql.Options{SlotName: slot, Publication: pub},
 	}
 
 	db := createDB(t)

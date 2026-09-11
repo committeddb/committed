@@ -459,8 +459,8 @@ tables           = ["ingress.movie"]   # schema-qualified
 mapAllColumns    = true                # mirror every column 1:1
 # jsonColumns  = ["event_data"]        # string columns that HOLD JSON — see below
 
-[sql.postgres]
-slot_name   = "committed_movie_slot"   # optional; default "committed_slot"
+[sql.options]
+slotName   = "committed_movie_slot"   # optional; default "committed_slot"
 publication = "committed_movie_pub"    # optional; default "committed_pub"
 ```
 
@@ -496,7 +496,7 @@ the ingestable, or a slot recreate on Postgres).
 > connection-string password** (HTTP 400) so it is never stored in the replicated
 > log or a snapshot. See [secrets.md](secrets.md).
 
-Give each ingestable its own `slot_name` and `publication` so they don't collide.
+Give each ingestable its own `slotName` and `publication` so they don't collide.
 A runnable, end-to-end Postgres example lives in
 [`examples/movies/`](../../examples/movies/) (`source.sql`, `ingest-*.toml`,
 `compose.yml`).
@@ -682,8 +682,8 @@ column   = "name"
 
 Note the connection string uses the `mysql://user:${VAR}@host:port/db` URL form
 (the password is a `${VAR}` reference — an inline password is rejected), and
-there is no `[sql.mysql]` subsection — MySQL has nothing analogous to a slot or
-publication to name. (`mapAllColumns = true` works here too, in place of the
+there is no slot or publication to name — MySQL has nothing analogous
+(`[sql.options]` on MySQL takes only `batchSize` and `snapshotReaders`). (`mapAllColumns = true` works here too, in place of the
 explicit `[[sql.mappings]]` blocks.)
 
 To feed **several topics** from this one ingestable — one binlog reader for a
@@ -732,15 +732,15 @@ For very large tables, the snapshot can additionally read each table with
 
 ```toml
 [sql.options]
-batch_size       = "10000"   # rows per keyset batch (default 10000)
-snapshot_readers = "4"       # parallel PK-range readers per table (default 1)
+batchSize       = 10000   # rows per keyset batch (default 10000)
+snapshotReaders = 4       # parallel PK-range readers per table (default 1)
 ```
 
-(`[sql.options]` is the dialect-neutral home for options; the older
-`[sql.mysql]` / `[sql.postgres]` / `[sql.sqlserver]` table reads the same
-way. Set each option in one place.)
+(`[sql.options]` is committed's own vocabulary: the keys are typed, the
+set is closed, and a key the configured dialect does not read is refused
+rather than accepted and ignored.)
 
-- `snapshot_readers` defaults to **1** (the single stream) on purpose: the
+- `snapshotReaders` defaults to **1** (the single stream) on purpose: the
   snapshot target is usually a production replica, and every reader holds a
   connection running a range scan. Raise it deliberately, watching the
   source's load. Values are capped at 16.
@@ -751,7 +751,7 @@ way. Set each option in one place.)
   safely reproduce. Small tables also stay single-stream (splitting them
   gains nothing).
 - The chunk plan is **frozen in the checkpoint**: a restart resumes the same
-  ranges from their cursors even if `snapshot_readers` changed. Per-table
+  ranges from their cursors even if `snapshotReaders` changed. Per-table
   progress shows as `chunksTotal` / `chunksDone` on
   `GET /v1/ingestable/{id}/status`.
 - Ordering: rows from different ranges of one table interleave in the log
@@ -892,18 +892,17 @@ tables = ["orders"]           # bare names scope to dbo; "sales.orders" keeps it
 primaryKey = "id"
 
 [sql.options]
-poll_interval = "3s"          # CT poll cadence (default 3s) — read models trail by ~this
-batch_size = "1000"           # snapshot keyset batch
+pollInterval = "3s"          # CT poll cadence (default 3s) — read models trail by ~this
+batchSize = 1000           # snapshot keyset batch
 ```
 
-(`[sql.sqlserver]` is accepted as an older spelling of `[sql.options]`.)
 
 ### Lag, retention, and the poll cadence
 
 - `lag` reports **transactions** (`lagUnit: "transactions"`): the source's
   current CT version minus the consumed version — the version increments per
   committed transaction.
-- Latency is the **poll cadence**: changes arrive within ~`poll_interval` of
+- Latency is the **poll cadence**: changes arrive within ~`pollInterval` of
   committing at the source, comparable to the sync workers' own cadence.
 - **Retention** (`CHANGE_RETENTION`, default 2 days when committed enables
   CT) is the binlog-expiry analog: if the cleanup purges changes past the
@@ -962,8 +961,8 @@ type = "sql"
 dialect          = "postgres"
 connectionString = "postgres://committed:${PG_PASSWORD}@db:5432/shop?sslmode=disable"
 
-[sql.postgres]
-slot_name   = "committed_shop_slot"
+[sql.options]
+slotName   = "committed_shop_slot"
 publication = "committed_shop_pub"
 
 [[sql.topics]]
@@ -986,7 +985,7 @@ column   = "cust_id"
 ```
 
 For a MySQL source, only the top-level engine bits change — `dialect = "mysql"`,
-a `mysql://` connection string, and no `[sql.mysql]` subsection (nothing
+a `mysql://` connection string, and no slot or publication options (nothing
 analogous to a slot or publication to name); the `[[sql.topics]]` entries are
 identical.
 

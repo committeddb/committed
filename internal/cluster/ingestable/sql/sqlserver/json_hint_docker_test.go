@@ -45,7 +45,7 @@ func TestSQLServerJSONColumnHint(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"json_hint"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,7 +126,7 @@ mapAllColumns    = true
 jsonColumns      = ["EventData"]
 
 [sql.options]
-poll_interval    = "300ms"
+pollInterval    = "300ms"
 `, ingestURL)
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
 	require.NoError(t, err)

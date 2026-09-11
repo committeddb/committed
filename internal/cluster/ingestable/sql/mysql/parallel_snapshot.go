@@ -36,7 +36,7 @@ import (
 // Default reader count is 1 (the single-stream path, byte-for-byte the
 // pre-0.8.0 behavior): the snapshot target is usually someone's production
 // replica, so parallelism is an explicit operator opt-in via the ingestable's
-// options: snapshot_readers = "4".
+// options: snapshotReaders = 4.
 
 // batchPredicate builds the keyset-pagination clause shared by the batch row
 // read and the phase-2 JSON type query: FROM … [WHERE …] ORDER BY pk LIMIT n.

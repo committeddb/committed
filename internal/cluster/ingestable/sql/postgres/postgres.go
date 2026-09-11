@@ -70,7 +70,7 @@ const (
 	standbyTimeout = 10 * time.Second
 
 	// defaultSnapshotBatchSize is the default number of rows per snapshot
-	// batch when Config.Options has no "batch_size" override. See the
+	// batch when Config.Options has no batchSize override. See the
 	// corresponding constant in the MySQL dialect for rationale.
 	defaultSnapshotBatchSize = 10000
 
@@ -95,7 +95,7 @@ type pgConfig struct {
 }
 
 // buildPgConfig constructs a pgConfig from the sql.Config. It reads
-// slot_name and publication from Config.Options, and tables from
+// slotName and publication from Config.Options, and tables from
 // Config.Tables. The connection string should be a plain Postgres URL
 // with no application-level params.
 func buildPgConfig(config *sql.Config) (*pgConfig, error) {
@@ -129,13 +129,8 @@ func buildPgConfig(config *sql.Config) (*pgConfig, error) {
 		tables: config.Tables,
 	}
 
-	options := config.Options
-	if options == nil {
-		options = map[string]string{}
-	}
-
-	cfg.slotName = options["slot_name"]
-	cfg.publication = options["publication"]
+	cfg.slotName = config.Options.SlotName
+	cfg.publication = config.Options.Publication
 
 	// Build the SQL connection string (no replication param).
 	q.Del("replication")
@@ -212,6 +207,12 @@ func (d *PostgreSQLDialect) Preflight(config *sql.Config) error {
 		}
 	}
 	return nil
+}
+
+// OptionKeys implements sql.Dialect: the slot and publication names, and the
+// snapshot batch size.
+func (d *PostgreSQLDialect) OptionKeys() []string {
+	return []string{sql.OptionSlotName, sql.OptionPublication, sql.OptionBatchSize}
 }
 
 // TeardownSource drops the replication slot and publication this ingestable
@@ -488,7 +489,7 @@ func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos 
 		lag, ok, lagErr := d.replicationLag(ctx, config)
 		if lagErr != nil {
 			zap.L().Debug("[postgres.status] replication lag query failed",
-				zap.String("slot", config.Options["slot_name"]), zap.Error(lagErr))
+				zap.String("slot", config.Options.SlotName), zap.Error(lagErr))
 		} else if ok {
 			status.Lag = &lag
 			status.LagUnit = cluster.LagUnitBytes
@@ -1554,7 +1555,7 @@ func (d *PostgreSQLDialect) snapshot(
 		Tables:    tables,
 		Progress:  progress,
 		Epoch:     epoch,
-		BatchSize: sql.ParseBatchSize(config.Options, defaultSnapshotBatchSize),
+		BatchSize: config.Options.BatchSizeOr(defaultSnapshotBatchSize),
 		Readers:   1,
 		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
 			return encodePosition(lsn, p, epoch)

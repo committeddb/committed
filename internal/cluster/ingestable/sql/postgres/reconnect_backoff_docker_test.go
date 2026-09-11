@@ -34,7 +34,7 @@ func TestPostgresReconnectBackoffResetsAfterHealthySession(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		Options: map[string]string{"slot_name": slot, "publication": pub},
+		Options: sql.Options{SlotName: slot, Publication: pub},
 	}
 
 	db := createDB(t)

@@ -22,7 +22,7 @@ import (
 // to capture — but that immunity is an accident of the current select lists:
 // one future byte-parity edit that aliases a cast back to a column's own name
 // (exactly how the Postgres bug was born) would reintroduce silent partial
-// snapshots with a green status. Integer pks 0..24 at batch_size 10 are the
+// snapshots with a green status. Integer pks 0..24 at batchSize 10 are the
 // discriminating shape: any text-ordered walk with a numeric cursor loses
 // keys 2..9 forever. The pre-existing chunking test cannot catch this — its
 // VARCHAR keys are zero-padded to uniform width, where text order and value
@@ -51,7 +51,7 @@ func TestMysqlSnapshotIntegerPKKeysetOrder(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{table},
-		Options:          map[string]string{"batch_size": "10"},
+		Options:          sql.Options{BatchSize: 10},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
