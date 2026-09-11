@@ -83,10 +83,13 @@ upstream with a `loopback` derived topic and land that instead).
   your schedule with your engine's tools (or S3 Tables' automatic
   maintenance). committed writes tight, key-sorted files but never expires
   snapshots it has committed.
-- **Reshaping is blue-green**: the destination refuses the re-materialization verb
-  (`POST /v1/syncable/{id}/rematerialize` → 409). To rebuild or reshape,
-  create a second syncable into a new table and swap readers (or
-  RenameTable) when it converges — the same pattern as projections.
+- **Reshaping is blue-green**: the syncable refuses the re-materialization
+  verb (`POST /v1/syncable/{id}/rematerialize` → 409). To reshape, create a
+  second syncable into a new table and swap readers (or RenameTable) when it
+  converges — the same pattern as projections. `POST /v1/syncable/{id}/rebuild`
+  exists too: it drops a table committed created and replays from index 0,
+  so readers see an empty table until the replay catches up — right for
+  recovering a corrupted table, not for reshaping under live readers.
 - **One producer per table**: point exactly one syncable at a given catalog
   table. Two writers would interleave their checkpoint markers and each
   would treat the other's rows as its own to merge over.

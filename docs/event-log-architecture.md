@@ -1259,9 +1259,10 @@ see § "Metadata GC (system tombstones)".
 These need future tickets to resolve. Listed here so future readers can
 see what was deliberately deferred vs. accidentally forgotten.
 
-- **Read fan-out coordination**: how to prevent multiple nodes from
-  double-syncing the same syncable. Deferred until the foundation is
-  in place.
+- **Read fan-out coordination** — resolved: a syncable's owner is a pure
+  function of replicated state (the leader, or the lowest member announcing
+  its pinned zone), and the HTTP layer routes owner-local verbs to it. See
+  [zones.md](operations/zones.md).
 - **Custom permanent log format**: when to write our own format with
   sparse indexing, segment GC, etc. Will be driven by performance metrics
   from production.

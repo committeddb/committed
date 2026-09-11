@@ -26,8 +26,13 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
 
 ## Operations
 
-- [CDC setup](operations/cdc-setup.md) — point ingest at your own Postgres or
-  MySQL: the source-side settings, what committed creates, and common failures.
+- [CDC setup](operations/cdc-setup.md) — point ingest at your own Postgres,
+  MySQL, or SQL Server: the source-side settings, what committed creates, and
+  common failures.
+- [Zone-pinned syncables](operations/zones.md) — keep sync egress inside a
+  zone, and what a strict pin does when its node is down.
+- [Iceberg syncable](operations/iceberg-syncable.md) — a current-state
+  Iceberg table on S3 as a destination: config, catalogs, and maintenance.
 - [Cluster membership](operations/membership.md) — add, remove, and grow nodes
   safely, and read cluster state.
 - [Performance envelope](operations/performance.md) — the write/apply/catch-up
@@ -61,3 +66,5 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   tune the drain deadline.
 - [HTTP limits](operations/http-limits.md) — the proposal-size cap and HTTP
   server timeouts.
+- [Memory](operations/memory.md) — what drives a node's memory, and how to
+  size and bound it.

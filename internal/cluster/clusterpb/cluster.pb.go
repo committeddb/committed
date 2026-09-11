@@ -910,11 +910,10 @@ type LogSyncableIndex struct {
 	// to: the raft index of the last interpretation-registry record (see
 	// LogRestatement) folded into the readings this syncable's outputs were
 	// derived under. Same pair ⇒ same output — the replay-determinism
-	// statement the 0.8.x three-layer track hangs on. 0 means "no registry
-	// records folded", which is the only value until the restatement registry
-	// lands later in the 0.8.x series (the field ships early so the
-	// checkpoint format never migrates mid-series). Wire add-only:
-	// pre-feature checkpoints unmarshal as 0 and a 0 stamps no bytes.
+	// statement the three-layer design hangs on. 0 means "no registry
+	// records folded" (a pre-0.8.0 checkpoint, or a topic no restatement
+	// touches). Wire add-only: pre-feature checkpoints unmarshal as 0 and a
+	// 0 stamps no bytes.
 	InterpretationIndex uint64 `protobuf:"varint,3,opt,name=interpretationIndex,proto3" json:"interpretationIndex,omitempty"`
 }
 
@@ -1191,10 +1190,9 @@ func (x *LogSyncableRematerialization) GetTargetHead() uint64 {
 // the restatement fold, where later-in-log wins (a wrong restatement is corrected by
 // another restatement, never edited).
 //
-// RESERVED SHAPE (0.8.x format groundwork): this release defines the record
-// and its type identity so the on-disk shape never migrates mid-series —
-// nothing emits or applies it yet; the registry semantics (fold, read-path
-// resolution, admission validation) land later in the 0.8.x series. The type
+// The restatement registry record: emitted by POST /v1/restatement/{id}
+// (gated on feature level 2), folded into the replicated registry, and
+// resolved on the read path (internal/cluster/interpretation). The type
 // UUID (cluster.RestatementTypeID) is minted in the system-type namespace as
 // GATED (must-understand): a node that cannot fold restatements must not skip
 // them, or its syncables would emit stale readings — and emission will

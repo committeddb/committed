@@ -178,9 +178,17 @@ After the last node:
 ## Rolling back
 
 > **Rolling back below 0.8.0?** Event-log segments compress at rest from
-> 0.8.0 on, and older binaries cannot read compressed segments. Stop each
-> node and run `committed wal decompress --data <datadir>` before starting
-> the older binary. Rollbacks within 0.8.x need nothing. Also note: 0.8.0's
+> 0.8.0 on, and an older binary does not recognize a compressed segment:
+> it does not fail, it **silently opens a partial log** whose history
+> appears to begin at the first uncompressed segment (the oldest segments
+> compress first, so that is most of it). Stop each node and run
+> `committed wal decompress --data <datadir>` before starting the older
+> binary; the runbook is the only guard, since the old binary cannot be
+> taught to refuse. Rollbacks within 0.8.x need nothing. A node rolled back
+> below 0.8.0 also **fatal-exits** on applying a committed restatement
+> (feature level 2) — once one is on the log, rolling back means a rebuild
+> from a peer — and any 0.8.0-only syncable kind (Iceberg, loopback, a
+> zone-pinned config) parks on it as not admissible. Also note: 0.8.0's
 > RTBF delete-key erasure (feature level 4) pauses on an older binary —
 > already-erased tombstones stay erased, but new erasures resume only when
 > you upgrade again. And a SQL Server ingestable that has already re-keyed
@@ -194,6 +202,12 @@ After the last node:
 > status): the verb only starts once every member is 0.8.0 (feature level
 > 6), and an older owner resuming the replay would write rows the completion
 > sweep then deletes — let it finish, or run the verb again after upgrading.
+> And an ingestable that has opted into per-transaction dedup
+> (`txnScopedDedup`) writes its dedup record in a shape an older binary
+> reads as "nothing seen": an older owner may re-ingest rows already in the
+> log, which on a keyless (append) destination are permanent duplicate
+> rows. Roll leader-last, and do not roll back an owner of such an
+> ingestable.
 
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:
@@ -235,6 +249,13 @@ same quorum rule applies in reverse.
   the documents you POST need the new spelling. A validating type must
   also name a schema language the binary can check (`JSONSchema` or
   `Protobuf`); any other was accepted before and validated nothing.
+- **Iceberg deletes now drop what committed created.** Before 0.8.0 every
+  Iceberg table survived its syncable's deletion; from 0.8.0 the namespace
+  and table the syncable created carry a `committed.owned` property and go
+  with it (`?keepData=true` hands them over). A table you created stays.
+- **`normalize` on an aggregate source now takes effect.** It was accepted
+  and ignored; if you declared it, rematerialize that syncable after
+  upgrading so the rows folded under the two spellings converge.
 - **0.8.0 leaves a note in each SQL destination** saying which version of
   committed wrote its rows: one row per projected table in a small
   `committed__destinations` table in the destination database (see

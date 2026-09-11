@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Committed API
-  version: 0.7.3
+  version: 0.8.0
   description: |
     HTTP API for Committed — a distributed commit log database.
 
@@ -1194,8 +1194,14 @@ paths:
         - name: probeKey
           in: query
           required: false
-          schema: { type: string }
-          description: Stored-form key to probe (canonical digits, normalized case).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+          description: |
+            Stored-form key to probe (canonical digits, normalized case) —
+            repeated once per keyPath position for a composite key.
         - name: readPosition
           in: query
           required: false
@@ -1213,6 +1219,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SyncableStatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -2456,11 +2464,13 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     MembershipUnconfirmed:
       description: |
-        The membership change was submitted to raft but could not be
-        confirmed to have taken effect before the request deadline —
-        typically this node cannot currently reach a quorum. The change may
-        still take effect once a quorum is reachable; re-query membership or
-        retry the request (it is idempotent).
+        Retryable. `code: membership_unconfirmed` — the change was submitted
+        to raft but could not be confirmed to have taken effect before the
+        request deadline, typically because this node cannot currently reach
+        a quorum; it may still take effect once a quorum is reachable, so
+        re-query membership or retry (it is idempotent).
+        `code: membership_unsettled` — a previous membership change has not
+        yet settled on every member; retry shortly.
       content:
         application/json:
           schema:
@@ -2947,14 +2957,17 @@ components:
             `since`, and `message` fields are present when stuck or parked.
         workerState:
           type: string
-          enum: [running, parked, degraded]
+          enum: [running, re-deriving, parked, degraded]
           description: |
             The worker's lifecycle state: `running` (healthy, or transiently stuck
-            retrying — see `stuck`), `parked` (the circuit breaker tripped on a
-            systematic config fault and the worker STOPPED — fix the config and
-            re-POST it, or delete the syncable), or `degraded` (the config is
-            persisted but failed to BUILD on the answering node — e.g. a missing
-            `${VAR}` — so no worker was started; `message` carries the build
+            retrying — see `stuck`), `re-deriving` (the answering node's worker is
+            rebuilding this projection's stage state from the log before serving;
+            `stageRecovery` shows progress), `parked` (the circuit breaker tripped
+            on a systematic config fault, the config is not admissible under this
+            binary, or the destination's rendering version mismatches — the worker
+            STOPPED; `message` names the cause and the remedy), or `degraded` (the
+            config is persisted but failed to BUILD on the answering node — e.g. a
+            missing `${VAR}` — so no worker was started; `message` carries the build
             error; fix the environment or config and re-POST). `running`/`parked`
             are replicated, so any node reports them; `degraded` reflects the
             answering node's own build state. The build runs shortly after the
@@ -3111,6 +3124,58 @@ components:
             here as `false` with `ownerNode` naming the dead node: watch
             `lag`, and `active` on `GET /v1/membership`. Omitted for
             unpinned syncables.
+        stages:
+          type: object
+          description: |
+            With `?stages=true`, on the owning node, for a projection with
+            stages: per-stage counters keyed by stage name. Absent on a
+            non-owner or a stage-free syncable, never an error.
+          additionalProperties:
+            type: object
+            properties:
+              keys:
+                type: integer
+                description: Distinct keys the stage currently holds.
+              inputs:
+                type: integer
+                format: int64
+                description: Inputs folded since the worker started.
+              fanned:
+                type: integer
+                format: int64
+                description: Elements a forEach stage's fan produced (omitted for plain stages).
+              unkeyedDeletes:
+                type: integer
+                format: int64
+                description: |
+                  Delete-shaped inputs whose key could not resolve — lost
+                  retractions, the key each meant to kill stays live. Omitted while zero.
+              joins:
+                type: array
+                description: Per-join hit/miss counters (omitted for stages without joins).
+                items:
+                  type: object
+                  additionalProperties: true
+        stageRecovery:
+          type: object
+          description: |
+            Present while `workerState` is `re-deriving`: how far the stage
+            state has been rebuilt from the log.
+          properties:
+            folded:
+              type: integer
+              format: int64
+              description: Log index folded so far.
+            target:
+              type: integer
+              format: int64
+              description: Log index at which the rebuild is complete.
+        stageKeyExists:
+          type: boolean
+          description: |
+            With `?probeStage=<name>&probeKey=<part>...`, on the owning node:
+            whether that key is currently held in that stage. Absent on a
+            non-owner or without the probe parameters.
         derivedFrom:
           type: string
           description: |

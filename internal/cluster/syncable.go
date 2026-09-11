@@ -640,10 +640,9 @@ type SyncableIndex struct {
 	// (data index, interpretation index) a derived checkpoint is pinned to:
 	// the raft index of the last interpretation-registry record (restatement)
 	// folded into the readings this syncable's outputs were derived under.
-	// Same pair ⇒ same output. 0 means "no registry records folded" — the
-	// only value until the restatement registry lands later in the 0.8.x series;
-	// the field ships early so the checkpoint format never migrates
-	// mid-series. Pre-feature checkpoints unmarshal as 0.
+	// Same pair ⇒ same output. 0 means "no registry records folded" (a
+	// pre-0.8.0 checkpoint, or a topic no restatement touches). Pre-feature
+	// checkpoints unmarshal as 0.
 	InterpretationIndex uint64
 }
 

@@ -6,21 +6,25 @@ Committed is a distributed commit log database built on etcd Raft consensus. It 
 
 ## Tech Stack
 
-- **Backend**: Go 1.26.2 (Raft consensus, Chi HTTP router, Protobuf serialization, Zap logging)
+- **Backend**: Go 1.26 (Raft consensus, Chi HTTP router, Protobuf serialization, Zap logging) — the exact toolchain is in go.mod
 - **Storage**: Write-ahead log (tidwall/wal), BoltDB
 - **Databases**: MySQL (go-sql-driver), PostgreSQL (pgx), SQL Server (go-mssqldb)
 
 ## Project Structure
 
 ```
-cmd/               CLI commands (Cobra) - node, member, backup/restore, wal repair, healthcheck
-internal/cluster/  Core domain
-  db/              Raft consensus, WAL storage, sync/ingest processing
-  http/            REST API handlers (Chi router)
-  syncable/sql/    SQL sync implementations
-  ingestable/sql/  SQL ingest implementations
-  clusterpb/       Protobuf definitions
-  clusterfakes/    Generated test fakes (counterfeiter)
+cmd/                 CLI commands (Cobra) - node, member, backup/restore, wal repair/decompress, healthcheck
+internal/cluster/    Core domain: the vocabulary and the plugin contracts
+  db/                Raft consensus, WAL storage, sync/ingest processing (db/wal/ the log layer)
+  db/http/           REST API handlers (Chi router) — the engine's transport subpackage
+  db/parser/         Config document parsing and the removed-spelling ledger
+  syncable/          sql/ (mirrors + projections; dialects/ per engine), iceberg/, loopback/, http/
+  syncable/stages/   Projection stage runtime; stagestore/ its node-local store
+  ingestable/sql/    SQL ingest: mysql/, postgres/, sqlserver/
+  interpretation/, migration/  The read-path wrappers (restatements, type migrations)
+  clusterpb/         Protobuf definitions
+  clusterfakes/      Generated test fakes (counterfeiter)
+internal/lint/redaction/  The taint analyzer run by go test
 ```
 
 ## Key Concepts
@@ -39,8 +43,10 @@ internal/cluster/  Core domain
 ```bash
 go build                    # Build the binary
 make test                   # Run short tests with coverage
-make test/ci                # Full test suite (build + test)
-make test/e2e               # End-to-end tests (sequential: -p=1)
+make test/ci                # Build + the race job (no build tags)
+make test/integration       # `integration`-tagged tests (docker || integration files)
+make test/cdc               # CDC end-to-end (docker, -p=1); also test/upgrade, test/backup, test/multinode, test/adversarial
+make lint                   # golangci-lint (+ lint/gosec for the security config)
 make crosscompile           # Build for darwin/linux/windows amd64
 ```
 
@@ -52,14 +58,13 @@ Use goreman (`go get github.com/mattn/goreman`) with the Procfile to start a 3-n
 goreman start               # Starts nodes on ports 12380, 22380, 32380
 ```
 
-Single node: `./committed --id 1 --cluster http://127.0.0.1:12379 --port 12380`
+Node config is environment-only (`COMMITTED_*` variables, no flags): see the Procfile for a working single-node set.
 
 ## Testing
 
 - Go tests use the standard `testing` package with `counterfeiter/v6` for generating interface fakes
 - Fakes are in `clusterfakes/` and `db/dbfakes/` directories
-- Run `make test` for quick iteration; `make test/ci` for full suite
-- Package-specific test targets: `make test/topic`, `make test/cluster`, `make test/sync`
+- Run `make test` for quick iteration; `make test/ci` for the race job. Docker-backed tests need the `docker` or `integration` build tag (see the Makefile targets above).
 
 ## Configuration Format
 
@@ -69,11 +74,11 @@ Databases, syncables, and ingestables use TOML configuration. See README.md for 
 
 All served via Chi router in `internal/cluster/db/http/`:
 
-- `GET/POST /database/{id}` - Database configurations
+- `POST /database/{id}` - Database configurations (list via `GET /database`; history via `/versions`)
 - `POST /proposal` - Append proposals (write-only; the log is not queried over HTTP — sync it out and query there)
-- `GET/POST /syncable/{id}` - Syncable configurations
+- `POST /syncable/{id}` - Syncable configurations (list via `GET /syncable`; `DELETE`, `/status`, `/rebuild`, `/rematerialize`)
 - `POST /syncable/dryrun` - Rehearse a syncable config against a log sample (diagnostic report; nothing admitted)
-- `GET/POST /ingestable/{id}` - Ingestable configurations
+- `POST /ingestable/{id}` - Ingestable configurations (list via `GET /ingestable`; `DELETE`, `/status`)
 - `POST /type/{id}` - Type configurations (read back via `GET /type` and the version endpoints)
 
 ## Code Generation

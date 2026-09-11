@@ -50,12 +50,26 @@ is not retrying, it has stopped.
   parked anywhere?" without polling each resource. Unlike `/node/status`, it
   reads the same from any node, so it's safe behind a load balancer.
 
-**Fixing.** A park means the *config* is wrong, so the remedy is to fix it, not
-to skip a proposal: correct the syncable config and **re-POST it**
-(`POST /v1/syncable/{id}`). A new config version clears the parked record and
-starts a fresh worker; deleting the syncable also clears it. A bare restart or
-leadership change does **not** clear a park — it stays visibly parked until you
-act.
+**Fixing.** The park's `message` names its cause, and there are three:
+
+- **A systematic fault** (the circuit breaker above): the *config* is wrong,
+  so the remedy is to fix it, not to skip a proposal — correct the syncable
+  config and **re-POST it** (`POST /v1/syncable/{id}`).
+- **Not admissible under this binary**: the stored config uses a spelling
+  this release removed or a key it does not know (an upgrade parks such
+  configs rather than guessing). The message names the rename; re-POST the
+  config renamed, and it resumes where it left off.
+- **A rendering-version mismatch**: the destination's rows were written by
+  a different version of committed than this binary renders (the note in
+  the destination says which). Re-POSTing the same config does **not**
+  clear this one; the message names the verb that does — `rematerialize`
+  for a keyed syncable, or `DELETE` and re-POST for one that cannot
+  converge in place. See
+  [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings).
+
+A new config version clears the parked record and starts a fresh worker;
+deleting the syncable also clears it. A bare restart or leadership change
+does **not** clear a park — it stays visibly parked until you act.
 
 ## Degraded: the config never built
 
@@ -113,8 +127,7 @@ the one running the worker, and it survives a leader change.
   and the worker logs `transient sync error, will retry` on each attempt.
 
 The stuck threshold debounces the signal so a normal blip that recovers in a
-few seconds never flags. It is currently fixed at **30 seconds** (tunable in
-a future release).
+few seconds never flags. It is fixed at **30 seconds**.
 
 ## Telling how far behind a syncable is (lag)
 

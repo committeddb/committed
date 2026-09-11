@@ -376,8 +376,8 @@ zero — see [rebuild.md](rebuild.md)). To avoid the divergence entirely, prefer
 `DELETE FROM <table>` over `TRUNCATE` on watched tables: each row delete
 replicates as a keyed tombstone and clears the destination row-by-row.
 
-Full truncate propagation is planned (a clear-all signal applied downstream as
-`DELETE FROM <table>`); until then this caveat stands.
+There is no truncate propagation: committed has no clear-all primitive, and
+a re-snapshot is the reconciliation.
 
 ---
 

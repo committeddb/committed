@@ -263,7 +263,9 @@ message on the permanent event log (`internal/cluster/clusterpb`):
 `LogProposal`, `LogEntity`, `LogType`, `LogConfiguration`,
 `LogSyncableIndex`, `LogIngestablePosition`, `LogSyncableDeadLetter`,
 `LogSyncableStuck`, `LogSyncableSkipRequest`, `LogTypeMigrationDeadLetter`,
-`LogScrub`, `LogNodeAPIURL`, `LogNodeVersion`. The rule is **add-only**:
+`LogScrub`, `LogNodeAPIURL`, `LogNodeVersion`, `LogNodeZone`, `LogIngestableStuck`,
+`LogIngestableCensus`, `LogContractFingerprint`, `LogRestatement`,
+`LogSyncableRematerialization`. The rule is **add-only**:
 
 - A new field gets a new, never-before-used tag number. Old binaries
   ignore unknown fields (proto3); new binaries treat an absent field as
@@ -363,22 +365,28 @@ Entries on disk are wrapped in a self-describing frame
 [magic 0xC0 'C' 'L'][version 0x01][crc32c, 4 bytes BE][payload…]
 ```
 
-The leading magic byte is a discriminator: pre-checksum (legacy) entries
-begin with the raw protobuf/gob bytes (`0x08`/`0x24`), so a current
-binary reads **both** legacy and framed entries without a persisted
-format flag. A frame whose CRC32C doesn't match fails the read with
-`ErrCorruptEntry` (a torn or bit-rotted entry is surfaced, never applied).
+Framing shipped in v0.5-beta and every write path frames, so every log a
+supported data dir can hold (floor: 0.7.3-beta) is fully framed. From
+0.8.0 the "trust on first read" passthrough for unframed bytes is gone:
+absent or torn magic is corruption and fails the read with
+`ErrCorruptEntry`, as does a frame whose CRC32C doesn't match (a torn or
+bit-rotted entry is surfaced, never applied). The old scheme's limitation —
+corruption landing in the magic bytes silently downgraded an entry to
+"legacy" and skipped verification — is closed with it.
 A future frame-version bump (`0x02`) would be introduced the same way —
 new binaries read old versions; the bump itself is a one-way transition.
 
 ### BoltDB metadata buckets
 
 Replicated metadata lives in named BoltDB buckets: `types`, `databases`,
-`ingestables`, `ingestablePositions`, `ingestSourceSeq`, `topicRefreshEpoch`,
-`eventTombstones`, `memberAPIURLs`, `memberPeerURLs`, `memberVersions`,
-`syncables`, `syncableIndexes`, `syncableDeadLetters`, `syncableStuck`,
-`syncableSkipRequests`, `typeMigrationDeadLetters`, `appliedIndex`,
-`pendingScrub`. Adding a bucket is additive (a new binary
+`ingestables`, `ingestablePositions`, `ingestableStuck`, `ingestableCensuses`,
+`ingestSourceSeq`, `topicRefreshEpoch`, `eventTombstones`, `memberAPIURLs`,
+`memberPeerURLs`, `memberVersions`, `memberZones`, `syncables`,
+`syncableIndexes`, `syncableCreateIndexes`, `syncableDeadLetters`,
+`syncableStuck`, `syncableSkipRequests`, `syncableRematerializations`,
+`typeMigrationDeadLetters`, `typeMigrationEdits`, `contractFingerprints`,
+`restatements`, `scrubHistory`, `unhashedDeletes`, `pendingScrub`,
+`appliedIndex`, `confState`, `versions`. Adding a bucket is additive (a new binary
 creates it on open; an old binary ignores it). **Renaming or removing** a
 bucket, or changing the encoding of the values within one, requires an
 explicit migration step at open time and is a release-noted change.
@@ -426,6 +434,22 @@ the old binary cannot read:
   Rolling back means a rebuild; and the forward upgrade must be **full-stop**,
   not rolling, for the same reason (see
   [upgrade.md](operations/upgrade.md)).
+- **Rolling back below 0.8.0 with compressed event-log segments on disk.**
+  0.8.0 compresses sealed segments at rest. A pre-0.8.0 binary does not
+  recognize them and — worse than a refusal — silently opens a partial log
+  beginning at the first uncompressed segment. Run `committed wal
+  decompress` on the stopped node first ([upgrade.md](operations/upgrade.md#rolling-back));
+  nothing in the old binary can be made to guard this.
+- **Rolling back past the first committed restatement (0.8.0).** The
+  restatement record is a gated system type: a pre-0.8.0 binary
+  fatal-exits applying it. Emission waits for every member to reach feature
+  level 2, so this door only opens once you have used the feature.
+- **Rolling back an owner mid-re-materialization (0.8.0)**, or below the
+  per-transaction ingest dedup regime (`txnScopedDedup`): neither loses
+  data on its own, but the first lets an older owner write rows the closing
+  sweep then deletes, and the second lets an older owner re-ingest rows
+  that a keyless destination keeps twice. Both are described in
+  [upgrade.md](operations/upgrade.md#rolling-back).
 - **A raft transport `protocolVersion` bump.** The peer transport
   currently accepts only an exact protocol-version match, so a bump is a
   flag-day: it partitions a half-upgraded cluster until every node is on

@@ -29,12 +29,13 @@ route the text through the choke point rather than working around a finding.
 - **db/**: Raft consensus, WAL storage, sync/ingest processing. `db.go` anchors `db.DB`, the engine. `raft.go` handles Raft node lifecycle. `sync.go` handles syncable processing. `ingest.go` handles ingestable processing.
 - **db/wal/**: Write-ahead log storage layer (tidwall/wal wrapper)
 - **db/http/**: REST API handlers (Chi router) — the engine's transport subpackage; `http.go` assembles the router and the route table, `versions.go` handles config version history endpoints. Lives under `db/` so handlers hold the engine directly (no aggregated service interface).
-- **syncable/sql/**: SQL sync implementations — `mysql/` and `postgres/` subdirectories
-- **ingestable/sql/**: SQL ingest implementations — `mysql/` and `postgres/` subdirectories
+- **syncable/sql/**: the SQL syncable family — keyed/keyless mirrors and projections; `dialects/` holds the MySQL and PostgreSQL dialects and the docker reference tests. **syncable/stages/** is the projection stage runtime and **syncable/stagestore/** its node-local store; **syncable/iceberg/**, **syncable/loopback/**, **syncable/http/** are the other kinds.
+- **ingestable/sql/**: SQL ingest — `mysql/`, `postgres/`, `sqlserver/` dialects; `options.go` is the typed `[sql.options]` vocabulary
+- **interpretation/**, **migration/**: the read-path wrappers (restatement registry, type migrations); **config/**, **backup/**, **sqlident/**, **fsutil/**, **metrics/**: support packages
 - **clusterpb/**: Protobuf definitions (generated — do not edit, regenerate with `go generate ./...`)
 - **clusterfakes/**, **db/dbfakes/**, **ingestable/sql/sqlfakes/**: Generated counterfeiter fakes (do not edit, regenerate with `go generate ./...`)
 
 ## Other files in this package
 
 - `config_error.go`: ConfigError type for configuration validation
-- `type.go`, `proposal.go`, `actual.go`, `time_point.go`, `version_info.go`: Domain types (`proposal.go` = the write request; `actual.go` = the committed fact a Syncable consumes)
+- `type.go`, `proposal.go`, `actual.go`, `version.go`: Domain types (`proposal.go` = the write request; `actual.go` = the committed fact a Syncable consumes)

@@ -74,10 +74,10 @@ under `/home/nonroot/data`:
 ```sh
 docker run --rm -p 8080:8080 -p 9022:9022 \
   -v committed-data:/home/nonroot/data \
-  committeddb/committed:0.7.3-beta
+  committeddb/committed:0.8.0
 ```
 
-`docker run committeddb/committed:0.7.3-beta --version` prints the build
+`docker run committeddb/committed:0.8.0 --version` prints the build
 identity; `:latest` tracks the most recent release. See
 [Configuration](#configuration) for the env vars and `docker-compose.yml`
 for a local single-node setup.

@@ -235,7 +235,7 @@ configuration change adding the new node's ID.
 #    targeting any existing node — as a learner first, promoted once
 #    caught up (the safe pattern; see membership.md for the full flow):
 committed member add --id 4 --url http://n4:9022 --learner --target http://n1:8080
-#    ...wait for matchIndex to close on commitIndex (member list), then:
+#    ...wait for matchIndex to close on commitIndex (GET /v1/membership), then:
 committed member promote --id 4 --target http://n1:8080
 ```
 
