@@ -4,16 +4,17 @@ This runbook covers `committed backup` and `committed restore` — the offline
 primitive for archiving a node's state to a portable tarball and reconstituting
 it into a fresh data directory.
 
-It complements [rebuild.md](rebuild.md). Rebuild recovers a *single* dead node
-by rsyncing from a *healthy peer* — it needs a surviving peer and only ever
-restores in place. Backup/restore covers what rebuild can't:
+It complements [rebuild.md](rebuild.md). A node that fell behind, or a fresh
+node replacing a dead one, takes the cluster's history from a *healthy peer*
+by itself — that needs a surviving peer. Backup/restore covers what a peer
+can't:
 
 - **Point-in-time archival** — keep a snapshot of the cluster's state.
 - **A known-good export before a risky change** — a type migration, a metadata
   scrub, a bulk delete — so you can roll back the *data*, not just the binary.
 - **Off-box disaster recovery** — ship the tarball to object storage.
 - **Total-loss recovery** — rebuild a cluster where *every* node lost its local
-  state at once (no healthy peer to rsync from). On ephemeral/instance-store
+  state at once (no healthy peer to fetch from). On ephemeral/instance-store
   disks this is a routine risk — a fleet recycle or AZ event can take out a
   quorum of disks together, which raft replication alone cannot survive.
 
@@ -138,8 +139,9 @@ this one is an ETL job, not a restore.
 > first contact the restored node fatals with a raft invariant panic
 > (`tocommit(...) out of range [lastIndex(...)]`). This is raft protecting the
 > cluster from a member whose log went backwards, not a recoverable hiccup.
-> Recovering one member of a live cluster is the **rebuild** flow — rsync
-> current state from a healthy peer ([rebuild.md](rebuild.md)) — not a restore.
+> Recovering one member of a live cluster is the **rebuild** flow — a fresh
+> node that fetches current state from a healthy peer ([rebuild.md](rebuild.md))
+> — not a restore.
 
 ### Version compatibility
 

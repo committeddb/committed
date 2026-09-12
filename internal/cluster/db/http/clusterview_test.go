@@ -9,6 +9,7 @@ import "context"
 type viewStub struct {
 	id, leader, applied uint64
 	stalled             bool
+	catchingUp          bool
 	linearizeErr        error
 	linearizeCalls      int
 	memberAPIURLCalls   int
@@ -19,6 +20,7 @@ func (v *viewStub) ID() uint64           { return v.id }
 func (v *viewStub) Leader() uint64       { return v.leader }
 func (v *viewStub) AppliedIndex() uint64 { return v.applied }
 func (v *viewStub) ApplyStalled() bool   { return v.stalled }
+func (v *viewStub) CatchingUp() bool     { return v.catchingUp }
 func (v *viewStub) LinearizableRead(context.Context) error {
 	v.linearizeCalls++
 	return v.linearizeErr

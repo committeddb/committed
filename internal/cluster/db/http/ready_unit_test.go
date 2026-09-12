@@ -20,6 +20,7 @@ func TestReady_Unit(t *testing.T) {
 		leader         uint64
 		applied        uint64
 		applyStalled   bool
+		catchingUp     bool
 		expectedStatus int
 		expectedBody   ReadyResponse
 	}{
@@ -56,11 +57,23 @@ func TestReady_Unit(t *testing.T) {
 			expectedStatus: 503,
 			expectedBody:   ReadyResponse{Status: "not ready"},
 		},
+		{
+			// A node filling its event log from a peer before a snapshot
+			// installs (a fresh learner, a member back from a long
+			// outage) is not serving current state: out of rotation
+			// until the catch-up completes.
+			name:           "catching up",
+			leader:         1,
+			applied:        7,
+			catchingUp:     true,
+			expectedStatus: 503,
+			expectedBody:   ReadyResponse{Status: "not ready"},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &HTTP{view: &viewStub{leader: tc.leader, applied: tc.applied, stalled: tc.applyStalled}}
+			h := &HTTP{view: &viewStub{leader: tc.leader, applied: tc.applied, stalled: tc.applyStalled, catchingUp: tc.catchingUp}}
 
 			req := httptest.NewRequest("GET", "http://localhost/ready", nil)
 			w := httptest.NewRecorder()

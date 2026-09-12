@@ -45,15 +45,13 @@ func stage(t *testing.T, sealed []EventSegment) []string {
 	return out
 }
 
-func fetchTail(t *testing.T, peer *Storage, lay EventLayout) [][]byte {
+// fetchTail encodes the peer's tail records as a fetch would carry them.
+func fetchTail(t *testing.T, peer *Storage, lay EventLayout) []byte {
 	t.Helper()
-	var raws [][]byte
-	for seq := lay.TailFirstSeq; seq <= lay.LastSeq; seq++ {
-		raw, err := peer.ReadEventRaw(seq)
-		require.NoError(t, err)
-		raws = append(raws, raw)
-	}
-	return raws
+	data, last, err := peer.encodeRecords(lay.TailFirstSeq, lay.LastSeq, 1<<30)
+	require.NoError(t, err)
+	require.Equal(t, lay.LastSeq, last)
+	return data
 }
 
 func verifyEvents(t *testing.T, s *Storage, n int) {
@@ -95,7 +93,7 @@ func TestEventFetch_EmptyReceiverAdoptsSegmentsAndTail(t *testing.T) {
 	recvDir := t.TempDir()
 	recv := openFetchPeer(t, recvDir, time.Hour)
 	require.NoError(t, recv.AdoptEventSegments(stage(t, lay.Sealed)))
-	require.NoError(t, recv.AppendFetchedEvents(fetchTail(t, peer, lay)))
+	require.NoError(t, recv.AppendFetchedRecords(fetchTail(t, peer, lay)))
 	verifyEvents(t, recv, n)
 
 	seq, err := recv.EventSeqForIndex(150)
@@ -106,7 +104,7 @@ func TestEventFetch_EmptyReceiverAdoptsSegmentsAndTail(t *testing.T) {
 	require.Equal(t, uint64(n), idx)
 
 	// Overlap is harmless: re-appending the tail changes nothing.
-	require.NoError(t, recv.AppendFetchedEvents(fetchTail(t, peer, lay)))
+	require.NoError(t, recv.AppendFetchedRecords(fetchTail(t, peer, lay)))
 	verifyEvents(t, recv, n)
 
 	require.NoError(t, recv.Close())
@@ -134,7 +132,7 @@ func TestEventFetch_StaleReceiverAlignedAndMisaligned(t *testing.T) {
 	aligned := openFetchPeer(t, t.TempDir(), time.Hour)
 	seedEventLog(t, aligned, 1, boundary)
 	require.NoError(t, aligned.AdoptEventSegments(stage(t, lay.Sealed[j:])))
-	require.NoError(t, aligned.AppendFetchedEvents(fetchTail(t, peer, lay)))
+	require.NoError(t, aligned.AppendFetchedRecords(fetchTail(t, peer, lay)))
 	verifyEvents(t, aligned, n)
 
 	stale := openFetchPeer(t, t.TempDir(), time.Hour)
@@ -153,7 +151,7 @@ func TestEventFetch_StaleReceiverAlignedAndMisaligned(t *testing.T) {
 	t.Cleanup(func() { _ = partial.Close() })
 	seedEventLog(t, partial, 1, boundary)
 	require.NoError(t, partial.AdoptEventSegments(stage(t, lay.Sealed[j:])))
-	require.NoError(t, partial.AppendFetchedEvents(fetchTail(t, peer, lay)))
+	require.NoError(t, partial.AppendFetchedRecords(fetchTail(t, peer, lay)))
 	verifyEvents(t, partial, n)
 }
 

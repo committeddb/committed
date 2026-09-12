@@ -395,6 +395,11 @@ type Storage struct {
 	// highest Scrub upper-bound this node has finished rewriting to). Loaded in
 	// Open, advanced by the worker; read by the automatic-scrub scheduler.
 	lastScrubbedBound atomic.Uint64
+	// swappedBound is the bound of the rewrite most recently swapped in —
+	// set at the swap, before the completion mark that advances
+	// lastScrubbedBound — so EventLogGeneration describes the bytes on disk
+	// through the swap-to-mark window too. Zero until a swap this process.
+	swappedBound atomic.Uint64
 	// metadataBacklog counts system-tombstonable (internal-snapshot) entities
 	// applied since the last completed scrub — a cheap, in-memory proxy for
 	// "superseded metadata is waiting to be GC'd." HasScrubBacklog consults it so

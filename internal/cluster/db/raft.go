@@ -101,6 +101,9 @@ type Raft struct {
 
 	transport      Transport
 	transportStopC chan struct{} // signals http transport to shutdown
+	// catchUp is the progress of a catch-up in flight (see catchup.go), read
+	// by the status surface.
+	catchUp        catchUpProgress
 	transportDoneC chan struct{} // signals http transport shutdown complete
 
 	// transportWrapper is captured from the options in newRaftWithOptions
@@ -337,7 +340,11 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		panic("db: no transport factory configured — wire one with WithTransportFactory")
 	}
 	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger}
-	t := n.transportFactory(id, ps, n.logger, r, n.tlsInfo, n.apiToken)
+	// The transport serves peers' catch-up fetches from this node's event
+	// log when the storage has one (wal.Storage); the in-memory doubles do
+	// not, and serve nothing.
+	events, _ := n.storage.(EventServer)
+	t := n.transportFactory(id, ps, n.logger, r, events, n.tlsInfo, n.apiToken)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
 		// wrapper returns a Transport that conforms to the same interface,
@@ -680,6 +687,22 @@ func (n *Raft) serveChannels() {
 			// channel (raft_test's direct-constructed Raft) doesn't deadlock
 			// the return path. Production callers (db.DB) drain ErrorC so
 			// the send always lands immediately.
+			// A snapshot past this node's event log cannot be saved (the
+			// event log would be left with a permanent gap): fill the log
+			// from a peer first — the automatic catch-up, catchup.go — and
+			// only then save and install. The loop stalls here for the
+			// duration; the node is not-ready meanwhile. A false return is
+			// a storage without an event log (the fail-fast path below says
+			// so) or the node closing.
+			if !raft.IsEmptySnap(rd.Snapshot) {
+				if needIndex, needGen, needed := n.snapshotNeedsCatchUp(rd.Snapshot); needed && !n.catchUpEventLog(rd.Snapshot, needIndex, needGen) {
+					select {
+					case <-n.closeC:
+						return
+					default:
+					}
+				}
+			}
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {
 				n.logger.Error("storage save", zap.Error(err))
@@ -813,14 +836,11 @@ func (n *Raft) serveChannels() {
 
 			// Storage invariant: P_local == R_local. See
 			// docs/event-log-architecture.md § "The central invariant"
-			// (Face 1 — the storage highwatermark).
-			// On violation the cluster has compacted past this node's
-			// recoverable window (almost always via an InstallSnapshot
-			// that advanced the raft side without backfilling the event
-			// log) and this node cannot safely keep serving reads or
-			// voting — it must exit and be rebuilt. v1 is fail-fast per
-			// the doc; v2 will enter a streaming catch-up mode in
-			// place of the Fatal.
+			// (Face 1 — the storage highwatermark). A snapshot that would
+			// advance the raft side past the event log is caught up from
+			// a peer before it is saved (above), so a violation here is a
+			// storage that cannot catch up or a bug — and this node cannot
+			// safely keep serving reads or voting on a log with a gap.
 			n.checkStorageInvariant()
 
 			// If configured, trim the raft log up to a safe point so we
@@ -1083,12 +1103,12 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 // Under normal operation ApplyCommittedBatch appends the Ready's events
 // and persists appliedIndex within one iteration, so the two are equal
 // again by the time this check runs (transiently p > r inside the batch —
-// see below). The only
-// way they diverge is an InstallSnapshot that advanced appliedIndex
-// past the permanent event log highwatermark — i.e., the cluster's
-// raft log has been compacted past a gap this node can't fill. v1
-// handles this by fatal-exiting with a pointer to the rebuild
-// runbook; see docs/operations/rebuild.md.
+// see below). The only way they could diverge is an InstallSnapshot that
+// advanced appliedIndex past the permanent event log highwatermark — and
+// the Ready loop fills the event log from a peer before it saves such a
+// snapshot (catchup.go), so a violation means the storage could not catch
+// up. The node fatal-exits with a pointer to the rebuild runbook; see
+// docs/operations/rebuild.md.
 func (n *Raft) checkStorageInvariant() {
 	p := n.storage.EventIndex()
 	r := n.storage.AppliedIndex()
@@ -1104,7 +1124,8 @@ func (n *Raft) checkStorageInvariant() {
 	}
 	n.logger.Fatal(
 		"storage invariant violation: permanent event log is behind raft applied index. "+
-			"The cluster has compacted past this node's recovery point. "+
+			"The cluster compacted past this node's recovery point and the automatic catch-up from a peer "+
+			"did not fill the event log first (this storage cannot catch up, or it was interrupted). "+
 			"Run the rebuild procedure at docs/operations/rebuild.md.",
 		zap.Uint64("eventIndex", p),
 		zap.Uint64("appliedIndex", r),

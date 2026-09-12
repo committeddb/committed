@@ -111,6 +111,13 @@ type HttpTransport struct {
 	// transport — today's default.
 	tlsInfo *transport.TLSInfo
 	client  *http.Client
+	// fetchClient is the catch-up client's HTTP client: the same trust as
+	// client, with a response-header bound long enough for a serving peer
+	// to take its layout freeze first (see events.go).
+	fetchClient *http.Client
+	// events is this node's event log, served to peers' catch-up fetches
+	// (events.go); nil when the storage has none (the in-memory doubles).
+	events db.EventServer
 	// token, when non-empty (COMMITTED_API_TOKEN set), is required as a bearer on
 	// the receive handler and sent on every POST — reusing the API-token posture
 	// so a sender without the shared secret can't inject raft messages.
@@ -139,19 +146,20 @@ type peer struct {
 // this concrete transport into db (used by cmd in production and by tests), so
 // db itself never imports this package.
 func Factory() db.TransportFactory {
-	return func(id uint64, peers []raft.Peer, logger *zap.Logger, r db.TransportRaft, tlsInfo *transport.TLSInfo, token string) db.Transport {
-		return New(id, peers, logger, r, tlsInfo, token)
+	return func(id uint64, peers []raft.Peer, logger *zap.Logger, r db.TransportRaft, events db.EventServer, tlsInfo *transport.TLSInfo, token string) db.Transport {
+		return New(id, peers, logger, r, events, tlsInfo, token)
 	}
 }
 
 // New constructs an HttpTransport. The peer registry and dial client are ready
 // immediately so callers can Send/Stop right after New; the listener and the
-// seed peers are wired in Start (mirroring the prior lifecycle). tlsInfo controls
-// mTLS for peer transport — nil means plaintext. token is the cluster bearer
-// token sent on peer requests — empty means unauthenticated. Both are injected
-// by the composition root (cmd/node.go via db's TransportFactory) rather than
-// read from the environment here.
-func New(id uint64, ps []raft.Peer, l *zap.Logger, r db.TransportRaft, tlsInfo *transport.TLSInfo, token string) *HttpTransport {
+// seed peers are wired in Start (mirroring the prior lifecycle). events is the
+// event log this node serves peers' catch-up fetches from (nil serves none).
+// tlsInfo controls mTLS for peer transport — nil means plaintext. token is the
+// cluster bearer token sent on peer requests — empty means unauthenticated.
+// Both are injected by the composition root (cmd/node.go via db's
+// TransportFactory) rather than read from the environment here.
+func New(id uint64, ps []raft.Peer, l *zap.Logger, r db.TransportRaft, events db.EventServer, tlsInfo *transport.TLSInfo, token string) *HttpTransport {
 	rt, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		log.Fatalf("httptransport: unexpected http.DefaultTransport type %T", http.DefaultTransport)
@@ -175,18 +183,23 @@ func New(id uint64, ps []raft.Peer, l *zap.Logger, r db.TransportRaft, tlsInfo *
 		tr.TLSClientConfig = cfg
 	}
 
+	fetchTr := tr.Clone()
+	fetchTr.ResponseHeaderTimeout = fetchResponseTimeout
+
 	ctx, cancel := context.WithCancel(context.Background())
 	return &HttpTransport{
-		id:      id,
-		seeds:   ps,
-		logger:  l,
-		raft:    r,
-		tlsInfo: tlsInfo,
-		client:  &http.Client{Transport: tr}, // per-request context bounds duration, not Client.Timeout
-		token:   token,
-		baseCtx: ctx,
-		cancel:  cancel,
-		peers:   make(map[uint64]*peer),
+		id:          id,
+		seeds:       ps,
+		logger:      l,
+		raft:        r,
+		tlsInfo:     tlsInfo,
+		client:      &http.Client{Transport: tr}, // per-request context bounds duration, not Client.Timeout
+		fetchClient: &http.Client{Transport: fetchTr},
+		events:      events,
+		token:       token,
+		baseCtx:     ctx,
+		cancel:      cancel,
+		peers:       make(map[uint64]*peer),
 	}
 }
 
@@ -267,6 +280,7 @@ func (t *HttpTransport) Start(stopC <-chan struct{}) error {
 func (t *HttpTransport) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(raftMessagePath, t.handleMessage)
+	mux.HandleFunc(eventsPath, t.handleEvents)
 	return mux
 }
 

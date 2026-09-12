@@ -43,8 +43,8 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   disks fill, the thresholds and metrics, and the incident playbook.
 - [Stuck syncables](operations/stuck-syncables.md) — spot a syncable that's
   wedged or lagging, skip a bad record, and replay it after a fix.
-- [Rebuilding a node](operations/rebuild.md) — recover a node that fell too far
-  behind or lost its disk by copying from a healthy peer.
+- [Rebuilding a node](operations/rebuild.md) — a node that fell behind catches
+  up by itself; replace one whose disk or state cannot be trusted.
 - [Safe mode](operations/safe-mode.md) — boot with workers held to break a
   crashloop: inspect and delete/fix the offending config over the API, then
   restart normally.

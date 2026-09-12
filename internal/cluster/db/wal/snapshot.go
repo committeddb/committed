@@ -152,7 +152,7 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	// so the operator can rebuild from a clean starting point.
 	if snap.Metadata.GetIndex() > s.eventIndex.Load() {
 		return fmt.Errorf(
-			"restore snapshot: snap.Metadata.Index=%d exceeds EventIndex=%d; run rebuild procedure",
+			"restore snapshot: snap.Metadata.Index=%d exceeds EventIndex=%d — the automatic catch-up from a peer did not fill the event log first; see docs/operations/rebuild.md",
 			snap.Metadata.GetIndex(), s.eventIndex.Load(),
 		)
 	}
@@ -387,9 +387,24 @@ func (s *Storage) refreshAfterRestore() {
 	if bound, err := s.loadScrubCompleted(); err != nil {
 		s.logger.Warn("restore: reload scrub bound", zap.Error(err))
 	} else {
-		// Adopt the restored bbolt's completed bound, as Open does. A value below
-		// the current one only re-GCs an already-clean range (idempotent); the
-		// scrub skip/gauge logic stays correct either way.
+		// The completed bound describes THIS node's event-log bytes, and a
+		// snapshot carries another node's: what this log has actually been
+		// rewritten to (its generation) is what "completed" means here.
+		// Above the snapshot's, keeping it spares a rewrite the log already
+		// has; below it would be a log the snapshot's bbolt can no longer
+		// bring forward (the tombstones through the snapshot's bound are
+		// pruned) — the Ready loop's catch-up refuses to install such a
+		// snapshot over such a log (db/catchup.go), so that is a bug here.
+		if mine := s.EventLogGeneration(); bound != mine {
+			if bound > mine {
+				s.logger.Error("restore: this node's event log predates the snapshot's completed scrub; erasures through the snapshot's bound cannot be brought forward on this log — rebuild this node",
+					zap.Uint64("snapshotCompletedBound", bound), zap.Uint64("generation", mine))
+			}
+			bound = mine
+			if err := s.putScrubCompleted(bound); err != nil {
+				s.logger.Warn("restore: persist scrub bound", zap.Error(err))
+			}
+		}
 		s.lastScrubbedBound.Store(bound)
 	}
 	// The swapped-in bbolt may carry a PENDING scrub bound — an RTBF erasure that

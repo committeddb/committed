@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	httpgo "net/http"
+	"time"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -35,6 +36,21 @@ type NodeStatusResponse struct {
 	// delete tombstones whose raw subject key is not yet erased — zero is
 	// the identifier-erasure end condition.
 	Scrub ScrubStatusResponse `json:"scrub"`
+	// CatchingUp is present while this node fills its event log from a
+	// peer before installing a snapshot — a node that joined empty, or
+	// rejoined after the cluster compacted past it. /ready is not-ready for
+	// the duration; when it clears, ordinary replication has taken over.
+	CatchingUp *CatchUpResponse `json:"catchingUp,omitempty"`
+}
+
+// CatchUpResponse is the progress of a catch-up in flight: the raft index
+// this node's event log has reached, the one it needs (the pending
+// snapshot's), when it began, and the peer that last served it.
+type CatchUpResponse struct {
+	Have  uint64    `json:"have"`
+	Need  uint64    `json:"need"`
+	Since time.Time `json:"since"`
+	Peer  uint64    `json:"peer,omitempty"`
 }
 
 // DiskStatusResponse reports this node's disk pressure and the
@@ -105,6 +121,9 @@ func (h *HTTP) NodeStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 			}
 		}(),
 		Disk: diskStatusResponse(h.db.DiskState(), admission),
+	}
+	if cu, active := h.db.CatchUp(); active {
+		resp.CatchingUp = &CatchUpResponse{Have: cu.Have, Need: cu.Need, Since: cu.Since, Peer: cu.Peer}
 	}
 
 	bs, err := json.Marshal(resp)

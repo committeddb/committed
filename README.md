@@ -630,8 +630,8 @@ Operational guides live in [`docs/operations/`](docs/operations/):
   an incident.
 - [Stuck syncables](docs/operations/stuck-syncables.md) — spot a syncable that's
   wedged or falling behind, skip a bad record, and replay it after a fix.
-- [Rebuilding a node](docs/operations/rebuild.md) — recover a node that fell too
-  far behind or lost its disk by copying from a healthy peer.
+- [Rebuilding a node](docs/operations/rebuild.md) — a node that fell behind
+  catches up by itself; replace one whose disk or state cannot be trusted.
 - [Backup and restore](docs/operations/backup.md) — archive a stopped node to a
   portable tarball for disaster recovery and total-loss rebuilds.
 - [Rolling upgrades](docs/operations/upgrade.md) — upgrade the cluster

@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -8,26 +10,37 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/tidwall/wal"
+	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/tidwall/wal"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 )
 
-// The event-log fetch: the primitives a node uses to hand its permanent
-// event log to a peer that is behind (the serving side), and to take one in
-// (the receiving side). A node whose event log is behind the snapshot raft
-// wants to install cannot fill the gap from raft — the entries between were
-// compacted — so it fills it from a peer instead of exiting. Whole sealed
-// segments travel as files (plain or .zst, as on disk); the edges travel as
-// framed records by sequence. Everything here is idempotent by raft index on
-// the receiving side, so a retried or overlapping fetch is harmless.
+// The event-log fetch: how a node hands its permanent event log to a peer
+// that is behind (the serving side, ServeEvents) and how a node takes one in
+// (the receiving side, AppendFetchedRecords and AdoptEventSegments). A node
+// whose event log is behind the snapshot raft wants to install cannot fill
+// the gap from raft — the entries between were compacted — so it fills it
+// from a peer instead of exiting (db/catchup.go). Whole sealed segments
+// travel as files (plain or .zst, as on disk); the edges travel as records
+// in the log's own on-disk encoding, so every byte the receiver writes is
+// the byte the peer holds. The receiving side is idempotent by raft index,
+// so a retried or overlapping fetch is harmless.
 //
-// Serving side: hold FreezeLayout for the whole exchange, then EventLayout,
-// EventSeqForIndex, ReadEventRaw. Receiving side: AdoptEventSegments for
-// whole files, AppendFetchedEvents for records.
+// A log's GENERATION is the scrub bound its bytes reflect (EventLogGeneration).
+// Every replica's rewrite is deterministic, so two logs at one generation
+// are byte-identical over their shared prefix and sequence-aligned; one can
+// extend the other file by file. The receiver never mixes generations —
+// db/catchup.go pins one per fetch and discards its log when a peer's is
+// newer — because a log stitched from two could hold an entity's raw upsert
+// in one part and its hashed delete in the other, which no later scrub
+// could pair up.
 
 // EventSegment is one event-log segment file as a peer would ship it.
 type EventSegment struct {
@@ -52,12 +65,117 @@ type EventLayout struct {
 // records for the boundary, or replaces its log wholesale.
 var ErrSegmentsMisaligned = errors.New("event segments do not align with this node's event log")
 
-// IsCompressedName reports whether a segment file name is a compressed one.
-func IsCompressedName(name string) bool { return wal.IsCompressedSegmentPath(name) }
+// ErrLayoutFrozen refuses a change to the set of event-log files while a
+// layout freeze stands (a peer fetch or live backup is reading them); the
+// caller retries once it lifts.
+var ErrLayoutFrozen = errors.New("event log layout is frozen for a reader; retry")
 
 // ErrLayoutNotFrozen refuses EventLayout outside a FreezeLayout: a listed
 // segment could otherwise vanish (compressed) before it is read.
 var ErrLayoutNotFrozen = errors.New("event layout requires a layout freeze (FreezeLayout) for as long as the listed files are read")
+
+// IsCompressedName reports whether a segment file name is a compressed one.
+func IsCompressedName(name string) bool { return wal.IsCompressedSegmentPath(name) }
+
+// EventFetchDir is the staging directory a catch-up downloads a peer's
+// segment files into before adopting them; Open sweeps it.
+func (s *Storage) EventFetchDir() string { return datadir.FetchDir(s.eventLogDir) }
+
+// EventLogGeneration identifies the content of this node's event log: the
+// scrub bound its bytes reflect — the completed bound, or the bound of a
+// rewrite that has swapped in but not yet marked complete (the content is
+// already the new one).
+func (s *Storage) EventLogGeneration() uint64 {
+	return max(s.lastScrubbedBound.Load(), s.swappedBound.Load())
+}
+
+// SetEventLogGeneration records, durably, the generation of content this
+// node is about to adopt into an empty log from a peer: the completed
+// scrub bound becomes the peer's, so a Scrub command at or below it is a
+// no-op here (its rewrite is already in the bytes), a pending one beyond it
+// re-runs, and a restart mid-fetch resumes at this generation.
+func (s *Storage) SetEventLogGeneration(gen uint64) error {
+	if err := s.putScrubCompleted(gen); err != nil {
+		return err
+	}
+	s.lastScrubbedBound.Store(gen)
+	s.swappedBound.Store(gen)
+	return nil
+}
+
+// SnapshotScrubCompleted reads the completed scrub bound a snapshot's bbolt
+// payload carries: the generation every tombstone through it has been pruned
+// from, and so the least generation a log installing it may be at.
+func (s *Storage) SnapshotScrubCompleted(snap *pb.Snapshot) (uint64, error) {
+	if len(snap.Data) == 0 {
+		return 0, errors.New("snapshot has no payload")
+	}
+	tmp := s.newBoltTmpPath(s.keyValueStorage.Path(), datadir.BoltRestorePrefix)
+	if err := os.WriteFile(tmp, snap.Data, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return 0, err
+	}
+	defer func() { _ = os.Remove(tmp) }()
+	kv, err := bolt.Open(tmp, 0o600, &bolt.Options{ReadOnly: true, Timeout: time.Second})
+	if err != nil {
+		return 0, fmt.Errorf("open snapshot payload: %w", err)
+	}
+	defer func() { _ = kv.Close() }()
+	var bound uint64
+	err = kv.View(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(pendingScrubBucket)
+		if bkt == nil {
+			return nil
+		}
+		if b := bkt.Get(scrubCompletedKey); len(b) == 8 {
+			bound = binary.BigEndian.Uint64(b)
+		}
+		return nil
+	})
+	return bound, err
+}
+
+func (s *Storage) putScrubCompleted(bound uint64) error {
+	return s.update(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(pendingScrubBucket)
+		if bkt == nil {
+			return ErrBucketMissing
+		}
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], bound)
+		return bkt.Put(scrubCompletedKey, buf[:])
+	})
+}
+
+// ResetEventLog discards this node's event log — the content is at an older
+// generation than every peer's and is fetched again whole. Readers re-derive
+// their cursors by raft index, as across a scrub swap. Refused while a layout
+// freeze stands.
+func (s *Storage) ResetEventLog() error {
+	release, ok := s.moveLayout()
+	if !ok {
+		return ErrLayoutFrozen
+	}
+	defer release()
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if err := s.eventLog.Close(); err != nil {
+		return fmt.Errorf("close event log for reset: %w", err)
+	}
+	if err := os.RemoveAll(s.eventLogDir); err != nil {
+		s.reopenEventLogAfterSwapOrFatal("event log reset aborted")
+		return fmt.Errorf("remove event log for reset: %w", err)
+	}
+	if err := os.MkdirAll(s.eventLogDir, 0o700); err != nil {
+		s.logger.Fatal("event log removed for reset but its directory could not be recreated", zap.Error(err))
+	}
+	s.reopenEventLogAfterSwapOrFatal("reopen event log after reset")
+	s.eventIndex.Store(0)
+	s.firstEventIndex.Store(0)
+	s.scrubGen.Add(1)
+	s.logger.Warn("event log reset: this node's content was at an older generation than its peers'; it is fetched again whole")
+	return nil
+}
 
 // EventLayout lists this node's event-log files. Valid only under the
 // FreezeLayout that must be held when it is called.
@@ -153,36 +271,226 @@ func (s *Storage) EventRaftIndexAt(seq uint64) (uint64, error) {
 // LastEventSeq is the sequence of the last event this node holds (0 when none).
 func (s *Storage) LastEventSeq() (uint64, error) { return s.lastEventSeq() }
 
-// AppendFetchedEvents appends framed records fetched from a peer, in order.
-// Each frame is verified; records at or below this node's event index are
-// skipped, so overlap at a fetch boundary is harmless.
-func (s *Storage) AppendFetchedEvents(raws [][]byte) error {
-	entries := make([]*pb.Entry, 0, len(raws))
-	for i, raw := range raws {
-		payload, err := unframe(raw)
+// Serving bounds per ServeEvents call: a fetch is a sequence of bounded
+// exchanges, each under its own layout freeze, so compaction and compression
+// on the serving node only ever wait seconds, and an interrupted fetch
+// resumes from the last part the receiver kept.
+const (
+	serveMaxSegments    = 8
+	serveMaxRecordBytes = 8 << 20
+)
+
+// ServeEvents streams to sink every event with raft index in (after, to]
+// that this node holds, a bounded amount per call, under one layout freeze.
+// Sealed segments whose records all lie in the range go whole, as files;
+// the edges — the segment holding the first wanted record, one extending
+// past the last, and the tail — go as records. Implements db.EventServer.
+func (s *Storage) ServeEvents(ctx context.Context, after, to uint64, sink db.EventSink) (db.EventServeResult, error) {
+	release := s.FreezeLayout()
+	defer release()
+
+	res := db.EventServeResult{Generation: s.EventLogGeneration(), EventIndex: s.eventIndex.Load()}
+	if err := sink.Begin(res.Generation, res.EventIndex); err != nil {
+		return res, err
+	}
+	to = min(to, res.EventIndex)
+	if after >= to {
+		return res, sink.End(res)
+	}
+	lay, err := s.EventLayout()
+	if err != nil {
+		return res, err
+	}
+	startSeq, err := s.EventSeqForIndex(after + 1)
+	if err != nil {
+		return res, err
+	}
+	endSeq, err := s.EventSeqForIndex(to + 1)
+	if err != nil {
+		return res, err
+	}
+	endSeq = min(endSeq-1, lay.LastSeq)
+	if startSeq > endSeq {
+		return res, sink.End(res)
+	}
+
+	served := startSeq - 1
+	segments, recordBytes := 0, 0
+	sendRecords := func(lo, hi uint64) error {
+		data, last, err := s.encodeRecords(lo, hi, serveMaxRecordBytes-recordBytes)
 		if err != nil {
-			return fmt.Errorf("fetched event %d: %w", i, err)
+			return err
+		}
+		if err := sink.Records(data); err != nil {
+			return err
+		}
+		served = last
+		recordBytes += len(data)
+		return nil
+	}
+	budget := func() bool { return segments < serveMaxSegments && recordBytes < serveMaxRecordBytes }
+
+	for i, sg := range lay.Sealed {
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		segEnd := lay.TailFirstSeq - 1
+		if i+1 < len(lay.Sealed) {
+			segEnd = lay.Sealed[i+1].FirstSeq - 1
+		}
+		if segEnd < startSeq {
+			continue
+		}
+		if sg.FirstSeq > endSeq || !budget() {
+			break
+		}
+		if sg.FirstSeq >= startSeq && segEnd <= endSeq {
+			if err := s.sendSegment(sink, sg); err != nil {
+				return res, err
+			}
+			served = segEnd
+			segments++
+			continue
+		}
+		if err := sendRecords(max(sg.FirstSeq, startSeq), min(segEnd, endSeq)); err != nil {
+			return res, err
+		}
+	}
+	if served < endSeq && budget() && served+1 >= lay.TailFirstSeq {
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		if err := sendRecords(served+1, endSeq); err != nil {
+			return res, err
+		}
+	}
+	if served >= startSeq {
+		if res.LastIndex, err = s.EventRaftIndexAt(served); err != nil {
+			return res, err
+		}
+	}
+	res.More = served < endSeq
+	return res, sink.End(res)
+}
+
+func (s *Storage) sendSegment(sink db.EventSink, sg EventSegment) error {
+	f, err := os.Open(sg.Path) //nolint:gosec // G304: a segment file of this node's own event log, listed under a freeze
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	return sink.Segment(filepath.Base(sg.Path), info.Size(), f)
+}
+
+// encodeRecords reads the records at lo..hi and returns them in the log's
+// on-disk encoding, stopping early once maxBytes is reached; last is the
+// sequence of the last record included.
+func (s *Storage) encodeRecords(lo, hi uint64, maxBytes int) (data []byte, last uint64, err error) {
+	var prefix [binary.MaxVarintLen64]byte
+	for seq := lo; seq <= hi; seq++ {
+		raw, err := s.ReadEventRaw(seq)
+		if err != nil {
+			return nil, 0, fmt.Errorf("event log read seq %d to serve: %w", seq, err)
+		}
+		n := binary.PutUvarint(prefix[:], uint64(len(raw)))
+		data = append(data, prefix[:n]...)
+		data = append(data, raw...)
+		last = seq
+		if len(data) >= maxBytes {
+			break
+		}
+	}
+	return data, last, nil
+}
+
+// AppendFetchedRecords appends a run of records fetched from a peer — the
+// log's on-disk encoding, as ServeEvents produced it — verbatim: each
+// frame is verified and the bytes written are the peer's bytes. Records at
+// or below this node's event index are skipped, so overlap at a fetch
+// boundary is harmless.
+func (s *Storage) AppendFetchedRecords(data []byte) error {
+	var raws [][]byte
+	var indexes []uint64
+	var bad error
+	_, incompleteAt := walkSegmentRecords(data, func(ordinal, off, _ int, rec []byte) bool {
+		payload, err := unframe(rec)
+		if err != nil {
+			bad = fmt.Errorf("fetched record %d at offset %d: %w", ordinal, off, err)
+			return false
 		}
 		ent := &pb.Entry{}
 		if err := proto.Unmarshal(payload, ent); err != nil {
-			return fmt.Errorf("fetched event %d: %w", i, err)
+			bad = fmt.Errorf("fetched record %d: %w", ordinal, err)
+			return false
 		}
-		entries = append(entries, ent)
+		raws = append(raws, rec)
+		indexes = append(indexes, ent.GetIndex())
+		return true
+	})
+	if bad != nil {
+		return bad
 	}
-	return s.appendEvents(entries)
+	if incompleteAt >= 0 {
+		return fmt.Errorf("fetched records end inside a record at offset %d", incompleteAt)
+	}
+	return s.appendRawEvents(raws, indexes)
+}
+
+// appendRawEvents is appendEvents for records already framed: the bytes go
+// into the log as they are.
+func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+
+	nextSeq, err := s.eventLog.LastIndex()
+	if err != nil {
+		return fmt.Errorf("event log last index: %w", err)
+	}
+	batch := new(wal.Batch)
+	first, last := uint64(0), uint64(0)
+	wroteSeqOne := nextSeq == 0
+	for i, raw := range raws {
+		if indexes[i] <= s.eventIndex.Load() || (last != 0 && indexes[i] <= last) {
+			continue
+		}
+		nextSeq++
+		batch.Write(nextSeq, raw)
+		if first == 0 {
+			first = indexes[i]
+		}
+		last = indexes[i]
+	}
+	if last == 0 {
+		return nil
+	}
+	if err := s.eventLog.WriteBatch(batch); err != nil {
+		return fmt.Errorf("event log write batch (raft indexes %d-%d): %w", first, last, err)
+	}
+	s.eventLogWriteOps.Add(1)
+	if wroteSeqOne {
+		s.firstEventIndex.Store(first)
+	}
+	s.eventIndex.Store(last)
+	return nil
 }
 
 // AdoptEventSegments takes whole segment files fetched from a peer into this
-// node's event log, in order. Each path is a staged copy whose base name is
-// the segment's own (its first sequence, plus .zst for a compressed one);
-// the name is the only thing the caller asserts, and every file is scanned
-// completely — every record framed and valid, a compressed file decoding —
-// before anything is copied, because it just arrived over a network. The
-// first file must start exactly at this node's next sequence (an empty log
-// adopts from sequence 1) or ErrSegmentsMisaligned and nothing changes. The
-// log is reopened over the adopted files under the event lock; a reopen or
-// boundary read that fails removes them and reopens the log as it was. A
-// compressed last file is fine: the log starts a fresh plain tail past it.
+// node's event log, in order, consuming them. Each path is a staged copy
+// whose base name is the segment's own (its first sequence, plus .zst for a
+// compressed one); the name is the only thing the caller asserts, and every
+// file is scanned completely — every record framed and valid, a compressed
+// file decoding — before anything moves, because it just arrived over a
+// network. The first file must start exactly at this node's next sequence
+// (an empty log adopts from sequence 1) or ErrSegmentsMisaligned and nothing
+// changes. The files are moved into place (a copy when the staging dir is on
+// another filesystem) and the log reopened over them under the event lock;
+// a reopen or boundary read that fails removes them and reopens the log as
+// it was. A compressed last file is fine: the log starts a fresh plain tail
+// past it. Refused while a layout freeze stands.
 func (s *Storage) AdoptEventSegments(paths []string) error {
 	if len(paths) == 0 {
 		return nil
@@ -198,6 +506,11 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 		}
 		files = append(files, EventSegment{Path: p, FirstSeq: seq, Compressed: compressed})
 	}
+	release, ok := s.moveLayout()
+	if !ok {
+		return ErrLayoutFrozen
+	}
+	defer release()
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
 
@@ -227,13 +540,13 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	// sealed segment, whatever its size.
 	if tail.TailLen == 0 {
 		if err := os.Remove(tail.Tail.Path); err != nil && !os.IsNotExist(err) {
-			s.reopenEventLogAfterSwapOrFatal("adoption aborted before copying")
+			s.reopenEventLogAfterSwapOrFatal("adoption aborted before moving files")
 			return fmt.Errorf("remove empty tail: %w", err)
 		}
 	}
-	var copied []string
+	var moved []string
 	rollback := func(cause error) error {
-		for _, p := range copied {
+		for _, p := range moved {
 			_ = os.Remove(p)
 		}
 		s.reopenEventLogAfterSwapOrFatal("adoption rolled back")
@@ -241,10 +554,10 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	}
 	for _, f := range files {
 		dst := filepath.Join(s.eventLogDir, filepath.Base(f.Path))
-		if err := copyFile(f.Path, dst); err != nil {
+		if err := moveFile(f.Path, dst); err != nil {
 			return rollback(fmt.Errorf("adopt %s: %w", filepath.Base(f.Path), err))
 		}
-		copied = append(copied, dst)
+		moved = append(moved, dst)
 	}
 	s.syncDirBestEffort(s.eventLogDir, "event-log adoption")
 	reopened, err := wal.Open(s.eventLogDir, s.eventWalOpts)
@@ -260,7 +573,7 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 			return rollback(fmt.Errorf("adopted %s unreadable at seq %d: %w", filepath.Base(f.Path), f.FirstSeq, err))
 		}
 	}
-	if err := s.refreshEventBoundsLocked(); err != nil {
+	if err := s.deriveEventBoundsLocked(); err != nil {
 		_ = s.eventLog.Close()
 		return rollback(err)
 	}
@@ -269,9 +582,9 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	return nil
 }
 
-// refreshEventBoundsLocked re-reads firstEventIndex/eventIndex from the log
-// after its files changed under the event lock.
-func (s *Storage) refreshEventBoundsLocked() error {
+// deriveEventBoundsLocked sets firstEventIndex/eventIndex from the log as it
+// is, after its files changed under the event lock (an adoption, a reset).
+func (s *Storage) deriveEventBoundsLocked() error {
 	last, err := s.lastEventSeqLocked()
 	if err != nil {
 		return err
@@ -304,6 +617,21 @@ func (s *Storage) refreshEventBoundsLocked() error {
 	}
 	s.firstEventIndex.Store(fe.GetIndex())
 	return nil
+}
+
+// moveFile renames src to dst, or copies and removes it when the two are on
+// different filesystems. dst must not exist.
+func moveFile(src, dst string) error {
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("%s already exists", filepath.Base(dst))
+	}
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	if err := copyFile(src, dst); err != nil {
+		return err
+	}
+	return os.Remove(src)
 }
 
 func copyFile(src, dst string) error {

@@ -2595,6 +2595,37 @@ components:
             pendingDeleteKeyErasures:
               type: integer
               minimum: 0
+        catchingUp:
+          type: object
+          required: [have, need, since]
+          description: |
+            Present while this node fills its permanent event log from a
+            peer before installing a snapshot — a node that joined with an
+            empty data directory, or rejoined after the cluster compacted
+            past it. Catch-up is automatic; `/ready` answers 503 for the
+            duration, and the block disappears once ordinary replication
+            has taken over. Poll it to watch a new learner close on the
+            cluster before promoting it.
+          properties:
+            have:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Raft index this node's event log has reached.
+            need:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Raft index of the snapshot waiting to install; the catch-up is complete when have reaches it.
+            since:
+              type: string
+              format: date-time
+              description: When this catch-up began.
+            peer:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Node ID of the peer that last served events, when one has.
 
     ClusterStatusResponse:
       type: object

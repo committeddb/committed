@@ -185,6 +185,12 @@ After the last node:
 > `committed wal decompress --data <datadir>` before starting the older
 > binary; the runbook is the only guard, since the old binary cannot be
 > taught to refuse. Rollbacks within 0.8.x need nothing. A node rolled back
+> below 0.8.0 also loses the automatic catch-up: a member that falls behind
+> the cluster's compaction window under the older binary fatal-exits
+> instead of fetching what it missed, and a 0.8.0 node catching up can only
+> fetch from a 0.8.0 peer (older peers do not serve the fetch and are
+> skipped) — so keep at least one 0.8.0 voter up while a node catches up,
+> and finish the upgrade before adding nodes. A node rolled back
 > below 0.8.0 also **fatal-exits** on applying a committed restatement
 > (feature level 2) — once one is on the log, rolling back means a rebuild
 > from a peer — and any 0.8.0-only syncable kind (Iceberg, loopback, a

@@ -285,6 +285,15 @@ func (db *DB) ProposeSyncableIndexForTest(ctx context.Context, id string, index 
 
 // LastCompactedIndexForTest lets tests observe the bookkeeping
 // maybeCompact maintains after a successful compaction.
+// CatchUpRunsForTest counts the catch-ups this node has begun — the
+// adversarial scenarios' proof that a stale or empty node took the fetch
+// path rather than plain replication.
+func (n *Raft) CatchUpRunsForTest() int {
+	n.catchUp.mu.Lock()
+	defer n.catchUp.mu.Unlock()
+	return n.catchUp.runs
+}
+
 func (n *Raft) LastCompactedIndexForTest() uint64 {
 	return n.lastCompactedIndex.Load()
 }

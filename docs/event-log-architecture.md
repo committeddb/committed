@@ -69,9 +69,10 @@ This document describes how that separation works.
   process per node.
 - **Read fan-out to followers (eventual).** Once steady-state, syncable
   reads should be servable from any node, not just the leader.
-- **Operationally tractable rebuild.** When a follower falls too far
-  behind to catch up via normal raft replication, an operator can rsync
-  from a healthy peer and restart.
+- **No operator step for a node that falls behind.** When a follower
+  falls too far behind to catch up via normal raft replication, or a new
+  node joins over an empty data directory, it fetches the events it is
+  missing from a peer by itself.
 
 ## Non-goals (v1)
 
@@ -81,8 +82,6 @@ to future work; others may never be needed.
 - **Tiered storage** to object stores (S3 etc). Modern cloud instances offer
   100TB+ of local NVMe per node, so tiered storage is not necessary at this
   design's target scale.
-- **Automated catch-up** of severely-behind followers. v1 is manual rsync
-  triggered by a fatal-exit error message; automation is v2 future work.
 - **Per-topic raft groups.** Cross-type ordering is preserved by having
   one raft group. Sharding is a v3+ decision and only if a single raft
   group hits a write-throughput ceiling.
@@ -265,10 +264,10 @@ committed entry" call.
     └── bbolt.db     # appliedIndex, confState (membership), types, databases, ingestables, syncables, syncableIndex
 ```
 
-`events/` at the top level makes the rebuild story trivial to explain and
-script: "rsync `events/`, `raft/`, `metadata/` from a
-peer." Different I/O profiles per tier mean operators can put `raft/` on a
-smaller fast device if they want; not v1 work but the layout supports it.
+`events/` at the top level is what a peer catch-up ships: whole sealed
+segment files out of it, as they are. Different I/O profiles per tier mean
+operators can put `raft/` on a smaller fast device if they want; not v1
+work but the layout supports it.
 
 ### Indexing
 
@@ -410,14 +409,14 @@ determines its mode automatically from its on-disk state:
 - After every Ready iteration, check `P_local == R_local`.
 - If yes: continue normally. Vote, accept proposals, serve syncable
   reads.
-- If no (i.e., raft just delivered an `InstallSnapshot` that advanced
-  `R_local` past `P_local`): the node is "consensus-ready but
-  reads-blocked." In v1, fatal-exit. In v2, enter the streaming
-  catch-up mechanism.
+- If no (i.e., raft delivered an `InstallSnapshot` that would advance
+  `R_local` past `P_local`): the node fetches the missing events from a
+  peer before it saves the snapshot (the automatic catch-up, below), so
+  `R_local` never overtakes `P_local` on disk.
 
-The detection is automatic and uses only local state. The remediation in
-v1 requires an operator (rsync), but the determination of "am I caught
-up enough to vote" requires no operator input.
+The detection is automatic and uses only local state, and so is the
+remediation; the storage invariant check after apply is the backstop that
+fatal-exits if it ever somehow did.
 
 ---
 
@@ -433,81 +432,68 @@ missing entries to the follower's permanent event log. Done.
 This handles the vast majority of real-world recovery cases (transient
 network blip, brief restart, garbage-collection pause).
 
-### Severe lag — v1 manual rebuild
+### Severe lag — automatic catch-up
 
 A follower has been offline long enough that the leader's raft log no
-longer covers the gap. From the leader's perspective, it would naturally
-try to send `InstallSnapshot`. Our handling:
+longer covers the gap, and the leader sends `InstallSnapshot`. The snapshot
+contains the metadata bbolt content + the metadata `appliedIndex` — no
+events; the events are on local disk on every node and are too big to ship
+through raft — so applying it would advance the follower's `appliedIndex`
+past its permanent event log by a gap of millions of events. The node fills
+the gap itself, before the snapshot is saved:
 
-1. The follower receives the snapshot via `rd.Snapshot` in its Ready
-   loop.
-2. The snapshot contains the metadata bbolt content + the metadata
-   `appliedIndex`. (No events — the events are on local disk on every
-   node and are too big to ship through raft.)
-3. Applying the snapshot would advance the follower's `appliedIndex` to
-   `snap.Metadata.Index`, but its permanent event log is still at the
-   old highwatermark — meaning a gap of millions of events.
-4. The follower **detects this and fatal-exits** with a clear error
-   message:
+1. The Ready loop sees `rd.Snapshot` with an index past the event log's
+   highwatermark (`db/catchup.go`). Nothing is persisted yet: `Save` with
+   such a snapshot is refused by storage, precisely so a crash here leaves
+   the node where it was and the leader re-sends.
+2. The node fetches the events in `(EventIndex, snap.Index]` from a peer
+   over the peer transport (`GET /raft/events` on the raft listener, same
+   cluster-id / protocol / token / mTLS posture as raft messages). Whole
+   sealed segments travel as files — plain or compressed, as on disk — and
+   the partial edges as records in the log's own encoding, so every byte
+   the receiver writes is the peer's byte. One request is one bounded
+   exchange under a **layout freeze** on the serving node (the sealer,
+   raft-log compaction, and the scrub swap all hold off for its duration,
+   so the files it listed stay on disk); the receiver asks again from its
+   new event index until it has what it needs, and an interrupted fetch
+   resumes from the last part it kept.
+3. Once `P_local >= snap.Index`, the snapshot is saved and installed and
+   ordinary replication takes over. The node reports `catchingUp` on
+   `/node/status` and is not-ready meanwhile; its raft loop is stalled
+   while it fetches, which is fine for a learner or a node that was
+   already down.
 
-   ```
-   FATAL: storage invariant violation. Local permanent event log is
-   at index N; raft applied index is M (gap of M-N events). The
-   cluster has compacted past my recovery point. Run the rebuild
-   procedure documented at <link to runbook>.
-   ```
+One rule keeps a fetched log sound under right-to-be-forgotten scrubs: a
+log is one **generation** — the scrub bound its bytes reflect — and a fetch
+never mixes two. Every replica's rewrite is deterministic, so two logs at
+one generation are byte-identical and sequence-aligned, and one can extend
+the other file by file; a log stitched from two generations could hold an
+entity's raw upsert from one and its hashed delete from the other, which no
+later scrub could pair up. So each fetch is pinned to the generation the
+receiver already has; a peer at an older generation is skipped; a peer at
+a newer one — or a snapshot whose bbolt has already pruned the tombstones
+of a scrub the receiver's log predates — makes the receiver discard its
+log and fetch it whole. The generation is the node's completed scrub
+bound, so a pending scrub beyond it re-runs on the fetched log exactly as
+it would on any follower.
 
-5. An operator runs the rebuild script: copy `events/` + `metadata/` +
-   `raft/` from a healthy peer, restart the node.
-
-After restart, the storage invariant (`P_local == R_local`) holds, the
-node joins normally, and raft fills the small gap that accrued during
-the rsync via standard `AppendEntries`.
-
-This is intentionally fail-fast. A node that cannot satisfy the storage
-invariant must not be running, because it could otherwise serve stale
-syncable reads or (if elected leader, however briefly) confuse the
-cluster.
-
-### Severe lag — v2 automated catch-up
-
-Same detection, but instead of fatal-exiting, the node:
-
-1. Refuses to acknowledge the snapshot at the raft level until events
-   catch up.
-2. Initiates an internal "fetch missing event log segments" RPC against
-   a peer.
-3. Receives raw segment files via streaming bulk transfer (not per-entry
-   — far too slow at TB scale).
-4. Once `P_local == R_local` (or close enough that raft replication can
-   finish the job), acknowledges the snapshot and resumes normal
-   participation.
-
-v2 is deferred to a future ticket. The v1 fail-fast behavior is
-forward-compatible: switching from "fatal exit" to "enter catch-up mode"
-is a localized change at the invariant check site.
+The storage invariant check after apply remains as the backstop: a
+violation now means a storage that cannot catch up (the in-memory test
+doubles) or a bug, and still fatal-exits with the rebuild pointer.
 
 ### Brand-new node bootstrap
 
-A newly-provisioned node with an empty data directory cannot in practice
-catch up "the natural way" via raft replication, because the cluster is
-almost certainly past the 10GB / 1hr retention window. So in v1, **the
-bootstrap procedure for a new node is the same as the rebuild procedure**:
+A newly-provisioned node with an empty data directory is the same case
+with `EventIndex == 0`: the leader can only ship a snapshot (the cluster
+is almost certainly past the 10GB / 1hr retention window), and the node
+fetches the whole event log from a peer before installing it. The operator
+flow is add-as-learner, watch `catchingUp`, promote
+(docs/operations/membership.md); nothing is copied by hand.
 
-1. Provision the machine with an empty data directory.
-2. rsync from a healthy peer.
-3. Start the binary. The node will load the rsync'd state, find
-   `P_local == R_local`, and behave like any other node.
-4. From an existing cluster node, propose a conf change adding the new
-   node.
-5. Raft replicates the conf change. Normal AppendEntries fills the small
-   gap accrued between rsync time and conf-change time.
-
-The node does not need any special "I am new" flag. Whether it is a
-member of the raft cluster is determined entirely by whether a conf
-change has been proposed for it. Until then, it sits in "standalone"
-mode receiving heartbeats but not participating in voting (this is
-default raft behavior for an unrecognized peer).
+Whether the node is a member of the raft cluster is determined entirely
+by whether a conf change has been proposed for it. Until then, it sits in
+"standalone" mode receiving heartbeats but not participating in voting
+(this is default raft behavior for an unrecognized peer).
 
 ---
 
@@ -731,8 +717,8 @@ The sub-cases all converge on the right answer:
 
 ### Determinism of the scrub
 
-The rewrite must produce byte-identical files on every node or the rsync
-rebuild story breaks. The survivor set is a pure function of three frozen,
+The rewrite must produce byte-identical files on every node or a peer
+catch-up could not extend one node's log with another's segment files. The survivor set is a pure function of three frozen,
 replicated inputs: the event-log bytes, the tombstone set **filtered to
 delete index `<= B`**, and `B` itself (carried in the committed command).
 
@@ -859,9 +845,10 @@ raft entry, every node must produce identical state transitions and
 identical permanent log writes. This is **load-bearing**, not
 nice-to-have, because:
 
-- **Byte-identical files across nodes enable O(diff) rsync rebuilds.**
-  At terabyte scale, the difference between transferring "everything that
-  changed" and "everything" is the difference between hours and days.
+- **Byte-identical files across nodes make one node's log extend
+  another's.** A peer catch-up ships whole segment files and appends
+  them to the receiver's log; that is only sound because the receiver's
+  own prefix is, byte for byte, what the peer holds.
 - **Hash comparison across nodes is a free correctness check.** A
   divergence indicates a determinism bug — exactly the kind of bug that
   is otherwise nearly impossible to find in distributed systems.
@@ -1107,54 +1094,21 @@ it.)
 
 The operator-facing runbook lives at
 [`docs/operations/rebuild.md`](operations/rebuild.md) — that is the
-canonical reference for anyone actually rebuilding a node, and it
-covers the failure modes ("when to rebuild" / "when not to rebuild"),
-the procedure, and post-restart verification. The summary below is
-design-level only; treat the runbook as the **canonical operator
-reference** when the two drift.
+canonical reference for anyone actually rebuilding a node, and it covers
+the failure modes ("when to rebuild" / "when not to rebuild"), the
+procedure, and verification. Design-level summary:
 
-### Manual rebuild of an existing follower
-
-Triggered when a node fatal-exits with the storage-invariant error.
-
-```bash
-# On the failed node:
-sudo systemctl stop committed
-sudo rm -rf /var/lib/committed/*
-
-# Rsync from a healthy peer. --inplace makes the next rebuild
-# of the same node much faster (only the diff transfers).
-sudo rsync -av --inplace healthy-peer:/var/lib/committed/ /var/lib/committed/
-
-# Restore ownership.
-sudo chown -R committed:committed /var/lib/committed
-
-# Restart.
-sudo systemctl start committed
-```
-
-The node comes up, finds `P_local == R_local`, joins raft, catches up
-the small gap from the rsync time via normal replication, and resumes
-serving reads.
-
-### Adding a new node to the cluster
-
-Same procedure, with one extra step:
-
-1. Provision the new machine with an empty data directory.
-2. rsync from a healthy peer (same command as above).
-3. Start the binary on the new node. The node loads the rsync'd state
-   and waits for cluster membership.
-4. From an existing cluster node, propose a conf change adding the new
-   node ID.
-5. Raft replicates the conf change. The new node receives it and
-   transitions to a voting member.
-6. Normal raft replication fills the gap that accrued between rsync time
-   and conf-change time.
-
-The new node never needs a `--joining` flag or a separate bootstrap
-subcommand. Whether it is a member of the cluster is determined entirely
-by whether a conf change has been propagated for it.
+- **Falling behind is not a rebuild.** A member back from a long outage, or
+  a brand-new node over an empty data directory, catches up automatically
+  (§ "Catch-up taxonomy"): the operator adds it (as a learner), watches
+  `catchingUp` on its status, and promotes it.
+- **A rebuild retires the node's identity.** It is for state that cannot
+  be trusted — a rewound data directory, mid-log corruption a backup
+  cannot splice, a full disk. The damaged id is removed from the
+  membership and a fresh node joins under a new id and catches up like
+  any new node. Reusing the id would be the rewound member the transport
+  guard exits on: the cluster remembers what that id acknowledged and
+  voted for.
 
 ---
 
@@ -1221,8 +1175,8 @@ see § "Metadata GC (system tombstones)".
 | New syncables start at            | Index 1                                         | CQRS bootstrap is the use case; no concrete need for other start points                |
 | Compaction safety                 | Local-graduated only (never past own permanent log) | Raft commit already places each entry in a quorum; the quorum-graduated constraint is unimplemented in v1 |
 | Read consistency for syncables    | Historical only                                 | No linearizability needed; cheap to fan out later                                      |
-| Apply determinism                 | Required                                        | Load-bearing for rsync rebuilds and verification                                       |
-| Catch-up v1                       | Manual rsync after fatal-exit                   | Operator-friendly; no silent stale reads                                               |
+| Apply determinism                 | Required                                        | Load-bearing for peer catch-up (segment files extend another node's log) and verification |
+| Catch-up                          | Automatic fetch from a peer before the snapshot installs | No operator step, no silent stale reads; one log generation per fetch          |
 | Catch-up v2                       | Streaming segment files                         | Future work; per-entry streaming is too slow at TB scale                               |
 | Permanent log format v1           | tidwall/wal                                     | Reuse existing dependency; custom format later when measurements demand it             |
 | RTBF mechanism                    | Physical removal (not redaction/crypto-shred)   | Only option that shrinks the log → serves metadata-GC too, keeping us single-raft      |

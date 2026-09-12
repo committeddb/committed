@@ -16,6 +16,7 @@
 //
 //   - events.retired/                            the pre-scrub event log a scrub swap renamed aside
 //   - events.scrub.<n>/                          a scrub rewrite's half-built temp log
+//   - events.fetch/                              segment files mid-download from a peer (catch-up)
 //   - raft/log.discarded/                        an entry log a snapshot install superseded
 //   - metadata/bbolt.db.{restore,compact}.<n>    orphaned bbolt swap temps
 //
@@ -46,6 +47,7 @@ const (
 const (
 	retiredSuffix = ".retired"   // events -> events.retired
 	scrubInfix    = ".scrub."    // events -> events.scrub.<n>
+	fetchSuffix   = ".fetch"     // events -> events.fetch
 	discardSuffix = ".discarded" // raft/log -> raft/log.discarded
 
 	// BoltRestorePrefix / BoltCompactPrefix name the full-DB temp files an atomic
@@ -81,6 +83,11 @@ func RetiredDir(eventsDir string) string { return eventsDir + retiredSuffix }
 func ScrubDir(eventsDir string, bound uint64) string {
 	return fmt.Sprintf("%s%s%d", eventsDir, scrubInfix, bound)
 }
+
+// FetchDir returns the staging directory a catch-up downloads a peer's
+// segment files into before adopting them into eventsDir — transient: a
+// crash mid-download leaves partial files here, and Open sweeps it.
+func FetchDir(eventsDir string) string { return eventsDir + fetchSuffix }
 
 // EntryLogDiscardDir returns where a snapshot install renames the superseded
 // entry log aside. entryLogDir is EntryLogDir(root).
@@ -119,7 +126,7 @@ func RecoverScrubDirs(root string) error {
 	}
 	scrubPrefix := eventsName + scrubInfix // "events.scrub."
 	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), scrubPrefix) {
+		if e.IsDir() && (strings.HasPrefix(e.Name(), scrubPrefix) || e.Name() == eventsName+fetchSuffix) {
 			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
 				return err
 			}
@@ -177,6 +184,8 @@ func CanonicalArchiveEntry(rel string, eventsPresent bool) (keep bool, archiveRe
 		seg[0] = eventsName
 		return true, strings.Join(seg, "/")
 	case strings.HasPrefix(seg[0], eventsName+scrubInfix): // events.scrub.<n>/
+		return false, ""
+	case seg[0] == eventsName+fetchSuffix: // events.fetch/
 		return false, ""
 	case seg[0] == raftName && len(seg) > 1 && seg[1] == entryLogName+discardSuffix: // raft/log.discarded/
 		return false, ""

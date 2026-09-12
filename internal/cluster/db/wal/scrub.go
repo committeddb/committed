@@ -451,6 +451,9 @@ func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutc
 		return nil, fmt.Errorf("rename scrubbed event log into place: %w", err)
 	}
 	swapped = true
+	// The bytes on disk are now the rewrite's: the log's generation moves with
+	// the swap, not with the completion mark (see EventLogGeneration).
+	s.swappedBound.Store(bound)
 
 	// The two renames above changed the events/ parent directory; fsync it so the
 	// completed swap survives an immediate crash (an un-persisted rename could
@@ -713,32 +716,13 @@ func (s *Storage) recomputeEventBoundsLocked() error {
 	if last == 0 {
 		return fmt.Errorf("scrub emptied the event log: the tail must always survive")
 	}
-	lb, err := s.readEventAtLocked(last)
-	if err != nil {
+	prev := s.eventIndex.Load()
+	if err := s.deriveEventBoundsLocked(); err != nil {
 		return err
 	}
-	le := &pb.Entry{}
-	if err := proto.Unmarshal(lb, le); err != nil {
-		return err
+	if got := s.eventIndex.Load(); got != prev {
+		return fmt.Errorf("scrub changed EventIndex from %d to %d; the tail must be preserved", prev, got)
 	}
-	if le.GetIndex() != s.eventIndex.Load() {
-		return fmt.Errorf("scrub changed EventIndex from %d to %d; the tail must be preserved",
-			s.eventIndex.Load(), le.GetIndex())
-	}
-
-	first, err := s.firstEventSeqLocked()
-	if err != nil {
-		return err
-	}
-	fb, err := s.readEventAtLocked(first)
-	if err != nil {
-		return err
-	}
-	fe := &pb.Entry{}
-	if err := proto.Unmarshal(fb, fe); err != nil {
-		return err
-	}
-	s.firstEventIndex.Store(fe.GetIndex())
 	return nil
 }
 

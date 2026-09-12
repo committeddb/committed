@@ -64,6 +64,14 @@ func (h *HTTP) Ready(w httpgo.ResponseWriter, r *httpgo.Request) {
 		return
 	}
 
+	// A node filling its event log from a peer before a snapshot installs
+	// (catch-up) is not serving current state yet; /node/status carries the
+	// progress.
+	if h.view.CatchingUp() {
+		writeJSONStatus(w, httpgo.StatusServiceUnavailable, ReadyResponse{Status: "not ready"})
+		return
+	}
+
 	writeJSONStatus(w, httpgo.StatusOK, ReadyResponse{Status: "ok"})
 }
 

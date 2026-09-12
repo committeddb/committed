@@ -69,7 +69,9 @@ COMMITTED_DATA_DIR=/var/lib/committed   # a fresh, empty data dir
 ```
 
 The node will log `joining cluster` and then wait — it is not yet a
-member and cannot serve traffic.
+member and cannot serve traffic. An empty data directory is all it needs:
+once added, it fetches the cluster's history from a peer by itself (see
+[rebuild.md](rebuild.md#falling-behind-is-handled-automatically)).
 
 ### Step 2 — add it to the cluster
 
@@ -81,19 +83,12 @@ committed member add --id 4 --url http://n4:9022 --target http://n1:8080
 ```
 
 The existing cluster proposes the joint-consensus add; every member
-learns node 4's address, the leader replicates the log (or a snapshot) to
-it, and node 4 becomes a voter. The command returns once the change has
-taken effect.
-
-> **Joining an established cluster? Rebuild the node first.** A brand-new node
-> started with an **empty** data directory can only join a cluster whose raft log
-> has not yet compacted past `raft index 1` — a young cluster. On any multi-day-old
-> cluster with real write traffic the log has compacted, so the leader can only
-> ship a snapshot, and a fresh node applying that snapshot lands in the
-> "severely behind" state that **fatal-exits on start**. Seed the new node from a
-> healthy peer's data directory *before* you add it — see
-> [rebuild.md](rebuild.md). This applies whether you add it as a voter (above) or
-> as a learner (below).
+learns node 4's address, the leader replicates the log to it — on any
+established cluster that is a snapshot, which node 4 catches up to by
+fetching the missing events from a peer — and node 4 becomes a voter. The
+command returns once the change has taken effect, not once node 4 has
+caught up: as a voter it counts toward quorum from that moment, which is
+why the learner flow below is the safe default.
 
 ## Growing safely with a learner
 
@@ -122,10 +117,20 @@ It begins replicating with zero effect on quorum.
 
 ### Step 2 — wait until it has caught up
 
-Poll `GET /v1/membership` (see "Observing membership") and compare node
-4's `matchIndex` against `commitIndex`. You own the threshold — "caught
-up" might mean exactly equal, or within a few thousand entries you're
-comfortable closing under load. The server does not decide this for you.
+Node 4 first fetches the cluster's event log from a peer (its `/ready` is
+503 meanwhile), then replicates normally. Watch the fetch on node 4's own
+status until the block disappears:
+
+```
+curl -s http://n4:8080/v1/node/status | jq .catchingUp
+# { "have": 118203, "need": 2410077, "since": "...", "peer": 2 }   ...then null
+```
+
+Then poll `GET /v1/membership` (see "Observing membership") and compare
+node 4's `matchIndex` against `commitIndex`. You own the threshold —
+"caught up" might mean exactly equal, or within a few thousand entries
+you're comfortable closing under load. The server does not decide this for
+you.
 
 ```
 curl -s http://n1:8080/v1/membership | jq '.members[] | select(.id==4)'

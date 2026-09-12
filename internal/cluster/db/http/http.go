@@ -71,6 +71,7 @@ type clusterView interface {
 	Leader() uint64
 	AppliedIndex() uint64
 	ApplyStalled() bool
+	CatchingUp() bool
 	LinearizableRead(ctx context.Context) error
 	MemberAPIURL(id uint64) (string, bool)
 }
