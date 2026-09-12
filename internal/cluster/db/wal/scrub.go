@@ -382,9 +382,11 @@ func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutc
 	// BeginFromZeroRead). Placed before the lock so pinned readers (and the
 	// appender) keep running while we wait; shutdown aborts the wait and the
 	// pending bound retries later.
-	if werr := s.waitFromZeroReads(); werr != nil {
+	releaseLayout, werr := s.waitLayoutQuiet()
+	if werr != nil {
 		return nil, werr
 	}
+	defer releaseLayout()
 
 	// swap.
 	s.eventMu.Lock()

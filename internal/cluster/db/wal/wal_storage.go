@@ -327,13 +327,34 @@ type Storage struct {
 	scrubStop     chan struct{}
 	scrubDone     chan struct{}
 	scrubStopOnce sync.Once
+	// layoutMu guards the two reader counters the scrub swap waits on —
+	// two counters, one waiter, because the two kinds of reader need
+	// different things held still.
+	//
 	// fromZeroReads counts in-flight from-0 log reads (a fresh syncable's
-	// replay, a rebuild, stage-state recovery). The scrub swap waits for it to
-	// reach zero so no from-0 read ever spans a rewrite swap — the invariant
+	// replay, a rebuild, stage-state recovery). They read CONTENT: the swap
+	// waits for them so no from-0 read ever spans a rewrite, the invariant
 	// the delete-key erasure gate's soundness rests on (see rtbf_erase.go and
-	// BeginFromZeroRead). Guarded by fromZeroMu.
-	fromZeroMu    sync.Mutex
-	fromZeroReads int
+	// BeginFromZeroRead). Compression under them changes nothing they see.
+	//
+	// layoutFreezes counts in-flight readers of the on-disk LAYOUT (a peer
+	// fetching this node's event log, a live backup): while it is non-zero no
+	// mover may change the set of segment files — the sealer skips, raft-log
+	// compaction defers, and the scrub swap waits. See FreezeLayout.
+	layoutMu       sync.Mutex
+	fromZeroReads  int
+	layoutFreezes  int
+	layoutFrozenAt time.Time
+	// layoutLock is the exclusion behind layoutFreezes, between two classes
+	// that are each concurrent within themselves: movers share it, one
+	// RLock per step (TryRLock, never blocking — a mover skips, it does not
+	// wait; the sealer, raft-log compaction, and the scrub swap keep running
+	// beside each other as they always have), and the freezes as a group
+	// hold it exclusively — the first freeze takes it, waiting out any step
+	// in flight, and the last release gives it back. The counter is the
+	// group's membership; the lock is what keeps a listed file on disk. See
+	// FreezeLayout/moveLayout.
+	layoutLock sync.RWMutex
 	// failCompactionForTest, when non-nil, forces compactLocked to fail — used to
 	// reproduce an ENOSPC/crashed compaction so a test can assert the erased key
 	// is re-driven out of bbolt on the next Open. Nil in production.
@@ -1568,6 +1589,11 @@ func (s *Storage) Snapshot() (*pb.Snapshot, error) {
 // we'll no longer return via Entries — benign: the data becomes
 // unreachable but isn't corrupted.
 func (s *Storage) Compact(compactIndex uint64) error {
+	release, ok := s.moveLayout()
+	if !ok {
+		return cluster.ErrCompactionDeferred
+	}
+	defer release()
 	firstIndex := s.firstIndex.Load()
 	lastIndex := s.lastIndex.Load()
 

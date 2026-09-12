@@ -388,43 +388,49 @@ func (s *Storage) HasDeleteKeyEraseBacklog() bool {
 // on. Release is idempotent. Holding a pin only delays THIS node's rewrite
 // timing; the rewrite's content is fixed by the committed command either way.
 func (s *Storage) BeginFromZeroRead() func() {
-	s.fromZeroMu.Lock()
+	s.layoutMu.Lock()
 	s.fromZeroReads++
-	s.fromZeroMu.Unlock()
+	s.layoutMu.Unlock()
 	released := false
 	return func() {
-		s.fromZeroMu.Lock()
+		s.layoutMu.Lock()
 		if !released {
 			released = true
 			s.fromZeroReads--
 		}
-		s.fromZeroMu.Unlock()
+		s.layoutMu.Unlock()
 	}
 }
 
-// waitFromZeroReads blocks the scrub worker until no from-0 reads are in
-// flight, aborting on shutdown. Called before the swap lock — never under it —
-// so pinned readers keep reading (and raft keeps appending) while it waits. A
-// long-held pin (a from-0 replay stalled on its sink) delays this node's
-// rewrite, loudly; the pending bound survives and the worker retries.
-func (s *Storage) waitFromZeroReads() error {
+// waitLayoutQuiet blocks the scrub swap until no from-0 read is in flight
+// and the layout can be claimed for the swap, aborting on shutdown. It
+// returns the claim's release, to be held across the swap: a from-0 replay
+// must observe one log state, and a peer fetch or live backup must not have
+// the events dir swapped from under the files it listed. Called before the
+// swap lock — never under it — so pinned readers keep reading (and raft keeps
+// appending) while it waits. A long-held pin or freeze (a from-0 replay
+// stalled on its sink, a slow peer fetch) delays this node's rewrite, loudly;
+// the pending bound survives and the worker retries.
+func (s *Storage) waitLayoutQuiet() (release func(), err error) {
 	warn := time.NewTicker(30 * time.Second)
 	defer warn.Stop()
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		s.fromZeroMu.Lock()
-		n := s.fromZeroReads
-		s.fromZeroMu.Unlock()
-		if n == 0 {
-			return nil
+		s.layoutMu.Lock()
+		reads, freezes := s.fromZeroReads, s.layoutFreezes
+		s.layoutMu.Unlock()
+		if reads == 0 {
+			if release, ok := s.moveLayout(); ok {
+				return release, nil
+			}
 		}
 		select {
 		case <-s.scrubStop:
-			return errScrubStopped
+			return nil, errScrubStopped
 		case <-warn.C:
-			s.logger.Warn("scrub swap waiting on in-flight from-0 log reads (a stalled fresh replay delays this node's rewrite)",
-				zap.Int("fromZeroReads", n))
+			s.logger.Warn("scrub swap waiting on in-flight from-0 log reads or a layout freeze (a stalled fresh replay, a peer fetch, or a live backup delays this node's rewrite)",
+				zap.Int("fromZeroReads", reads), zap.Int("layoutFreezes", freezes))
 		case <-tick.C:
 		}
 	}

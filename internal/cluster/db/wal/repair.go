@@ -2,7 +2,6 @@ package wal
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -178,62 +177,88 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 				return d, nil
 			}
 		}
-		off := 0
-		ordinal := 0
-		for off < len(data) {
-			size, n := binary.Uvarint(data[off:])
-			// When n > 0, binary.Uvarint consumed n <= len(data)-off bytes, so
-			// remaining is non-negative; the n <= 0 branch short-circuits first.
-			remaining := len(data) - off - n
-			if n <= 0 || uint64(remaining) < size { //nolint:gosec // G115: remaining >= 0 when n > 0
-				// A structurally incomplete record — the write did not finish.
-				if compressed {
-					// Inside a decoded compressed segment: the seal captured a
-					// complete segment, so this predates compression — real
-					// corruption regardless of position.
-					d.Status = LogCorrupt
-					d.Detail = fmt.Sprintf("incomplete record at offset %d inside compressed segment %s", off, seg.name)
-					return d, nil
-				}
-				if si != len(segs)-1 {
-					// Incomplete record before the final segment is real
-					// corruption, not a tail. Refuse.
-					d.Status = LogCorrupt
-					d.Detail = fmt.Sprintf("incomplete record at offset %d of non-final segment %s", off, seg.name)
-					return d, nil
-				}
-				d.Status = LogTornTail
-				d.Records = total
-				d.truncateSeg = seg.path
-				d.truncateOff = int64(off)
-				d.Detail = fmt.Sprintf("incomplete trailing record at offset %d of last segment %s (%d valid records precede it)", off, seg.name, total)
-				return d, nil
+		var corrupt bool
+		records, incompleteAt := walkSegmentRecords(data, func(ordinal, off, n int, rec []byte) bool {
+			if _, uerr := unframe(rec); uerr == nil {
+				return true
 			}
-			// size <= len(data)-off-n (checked just above), so it fits in int.
-			recLen := int(size) //nolint:gosec // G115: bounded by the remaining buffer length
-			rec := data[off+n : off+n+recLen]
-			if _, uerr := unframe(rec); errors.Is(uerr, ErrCorruptEntry) {
-				// A structurally complete record that fails its checksum: a
-				// bit-flip in committed data, not an unacknowledged torn write.
-				// Never truncate it — the operator rebuilds from a healthy replica.
+			// A structurally complete record that fails its checksum: a
+			// bit-flip in committed data, not an unacknowledged torn write.
+			// Never truncate it — the operator rebuilds from a healthy replica.
+			corrupt = true
+			d.Status = LogCorrupt
+			d.Records = total + ordinal
+			if !compressed {
+				d.corruptSeg, d.corruptShape = si, corruptRecord
+				d.corruptOff, d.corruptPrefix, d.corruptLen, d.corruptOrdinal = off, n, len(rec), ordinal
+			}
+			d.Detail = fmt.Sprintf("checksum mismatch on complete record %d (segment %s, offset %d) — data corruption, not a torn tail (repairable from a backup: wal repair --from)", total+ordinal, seg.name, off)
+			return false
+		})
+		if corrupt {
+			return d, nil
+		}
+		total += records
+		if incompleteAt >= 0 {
+			// A structurally incomplete record — the write did not finish.
+			off := incompleteAt
+			if compressed {
+				// Inside a decoded compressed segment: the seal captured a
+				// complete segment, so this predates compression — real
+				// corruption regardless of position.
 				d.Status = LogCorrupt
-				d.Records = total
-				if !compressed {
-					d.corruptSeg, d.corruptShape = si, corruptRecord
-					d.corruptOff, d.corruptPrefix, d.corruptLen, d.corruptOrdinal = off, n, recLen, ordinal
-				}
-				d.Detail = fmt.Sprintf("checksum mismatch on complete record %d (segment %s, offset %d) — data corruption, not a torn tail (repairable from a backup: wal repair --from)", total, seg.name, off)
+				d.Detail = fmt.Sprintf("incomplete record at offset %d inside compressed segment %s", off, seg.name)
 				return d, nil
 			}
-			off += n + recLen
-			total++
-			ordinal++
+			if si != len(segs)-1 {
+				// Incomplete record before the final segment is real
+				// corruption, not a tail. Refuse.
+				d.Status = LogCorrupt
+				d.Detail = fmt.Sprintf("incomplete record at offset %d of non-final segment %s", off, seg.name)
+				return d, nil
+			}
+			d.Status = LogTornTail
+			d.Records = total
+			d.truncateSeg = seg.path
+			d.truncateOff = int64(off)
+			d.Detail = fmt.Sprintf("incomplete trailing record at offset %d of last segment %s (%d valid records precede it)", off, seg.name, total)
+			return d, nil
 		}
 	}
 	d.Status = LogClean
 	d.Records = total
 	d.Detail = fmt.Sprintf("%d records, all valid", total)
 	return d, nil
+}
+
+// walkSegmentRecords steps through a segment's size-prefixed records — the
+// one place that knows the on-disk record layout — calling visit for each
+// complete one with its ordinal in the segment, its offset, its size-prefix
+// width, and the framed record; visit returns false to stop early. It
+// returns the number of records visited and, when the data ends inside a
+// record (the write did not finish), the offset where that record starts,
+// else -1. What an incomplete or unframeable record MEANS is the caller's
+// call: a torn tail forgiven on the last plain segment (DiagnoseLog), or a
+// fetched file refused outright (AdoptEventSegments).
+func walkSegmentRecords(data []byte, visit func(ordinal, off, prefix int, rec []byte) bool) (records, incompleteAt int) {
+	off := 0
+	for off < len(data) {
+		size, n := binary.Uvarint(data[off:])
+		// When n > 0, binary.Uvarint consumed n <= len(data)-off bytes, so
+		// remaining is non-negative; the n <= 0 branch short-circuits first.
+		remaining := len(data) - off - n
+		if n <= 0 || uint64(remaining) < size { //nolint:gosec // G115: remaining >= 0 when n > 0
+			return records, off
+		}
+		// size <= len(data)-off-n (checked just above), so it fits in int.
+		recLen := int(size) //nolint:gosec // G115: bounded by the remaining buffer length
+		if !visit(records, off, n, data[off+n:off+n+recLen]) {
+			return records, -1
+		}
+		off += n + recLen
+		records++
+	}
+	return records, -1
 }
 
 // RepairLog diagnoses one log dir and, when commit is true and the diagnosis is

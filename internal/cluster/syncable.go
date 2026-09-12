@@ -69,6 +69,12 @@ func RedactedMessage(err error) (string, bool) {
 	return err.Error(), false
 }
 
+// ErrCompactionDeferred is returned by the storage's raft-log compaction while
+// a layout freeze is in flight (a peer fetching this node's event log, or a
+// live backup): truncating segment files under a reader that listed them
+// would hand it a vanished file. The caller retries on its next cycle.
+var ErrCompactionDeferred = errors.New("raft-log compaction deferred: a layout freeze is in flight (a peer fetch or live backup)")
+
 // ErrCorruptEntry marks a stored WAL entry that failed its CRC32C checksum on
 // read, or a log that will not open. It is the corruption sentinel raised by the
 // WAL layer (aliased there as wal.ErrCorruptEntry) and lives in this shared

@@ -59,11 +59,24 @@ func (s *Storage) sealerWorker() {
 		default:
 		}
 
+		// A layout freeze (a peer fetch, a live backup) has listed the sealed
+		// segments and will read them: compressing one would remove the file
+		// it is about to read. Hold the layout for the step, or skip until
+		// the freeze lifts.
+		release, ok := s.moveLayout()
+		if !ok {
+			if !wait(s.sealerIdle) {
+				return
+			}
+			continue
+		}
+
 		s.eventMu.RLock()
 		log := s.eventLog
 		s.eventMu.RUnlock()
 
 		did, err := log.CompressNextSealed()
+		release()
 		switch {
 		case err != nil:
 			// ErrClosed is the scrub-swap window (the handle we fetched was

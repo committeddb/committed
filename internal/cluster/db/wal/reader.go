@@ -221,57 +221,12 @@ func userTopicEntities(entities []*cluster.Entity) []*cluster.Entity {
 // scrub. Binary search tolerates the gaps; only the arithmetic fast-path
 // would not, which is why this resolves by search, not by formula.
 func (r *Reader) resolveStartSeqLocked() (uint64, error) {
-	first, err := r.s.firstEventSeqLocked()
-	if err != nil {
-		return 0, err
-	}
-	last, err := r.s.lastEventSeqLocked()
-	if err != nil {
-		return 0, err
-	}
-	// A resolution must NEVER return 0: the caller caches the result as a
-	// successful resolution, and Read treats walSeq==0 as EOF — so a cached 0
-	// is a PERMANENT EOF that no append can unstick (the caller only
-	// re-resolves on the next scrub generation). "No entry newer than the
-	// reader's position exists" is not a failure — the reader is AT THE HEAD —
-	// and its next seq is last+1: at-head EOF today, readable the moment an
-	// append lands (walLast grows to meet it). Returning 0 here stranded every
-	// caught-up syncable whose first post-scrub Read happened while the log
-	// was idle: all mirrors froze at the identical pre-scrub head checkpoint,
-	// silently, while new CDC rows committed past them — a from-zero reader
-	// (the raftIndex==0 fast path) replayed the same scrubbed log fine.
-	if first == 0 || last == 0 || last < first {
-		// Empty log: the next future seq is last+1 (seq numbering starts at 1,
-		// so a fresh log resolves to 1 and reads begin with the first append).
-		return last + 1, nil
-	}
-
-	// Fast path: the common "fresh syncable" case starts at
-	// r.raftIndex == 0 and wants seq = first.
+	// The reader starts AFTER its checkpoint: the first event past raftIndex
+	// (the storage's search is shared with the peer fetch).
 	if r.raftIndex == 0 {
-		return first, nil
+		return r.s.eventSeqForIndexLocked(0)
 	}
-
-	lo, hi := first, last+1
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		bs, err := r.s.readEventAtLocked(mid)
-		if err != nil {
-			return 0, fmt.Errorf("event log read seq %d during resolve: %w", mid, err)
-		}
-		ent := &pb.Entry{}
-		if err := proto.Unmarshal(bs, ent); err != nil {
-			return 0, err
-		}
-		if ent.GetIndex() > r.raftIndex {
-			hi = mid
-		} else {
-			lo = mid + 1
-		}
-	}
-	// lo == last+1 when the reader is at the head — the correct next seq, not
-	// an error (see above).
-	return lo, nil
+	return r.s.eventSeqForIndexLocked(r.raftIndex + 1)
 }
 
 // ErrActualNotFound is returned by ActualAt when no committed Actual exists

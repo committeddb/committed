@@ -1207,7 +1207,11 @@ func (n *Raft) maybeCompact() {
 		return
 	}
 	if err := n.storage.Compact(compactTo); err != nil {
-		n.logger.Warn("compact raft log", zap.Uint64("compactTo", compactTo), zap.Error(err))
+		if errors.Is(err, cluster.ErrCompactionDeferred) {
+			n.logger.Debug("raft log compaction deferred by a layout freeze; retrying next cycle", zap.Uint64("compactTo", compactTo))
+		} else {
+			n.logger.Warn("compact raft log", zap.Uint64("compactTo", compactTo), zap.Error(err))
+		}
 		return
 	}
 	n.lastCompactedIndex.Store(compactTo)
