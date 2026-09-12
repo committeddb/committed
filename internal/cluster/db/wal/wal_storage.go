@@ -257,9 +257,13 @@ type Storage struct {
 	// swap, so they cannot race it and stay lock-free.
 	entryMu  sync.RWMutex
 	EntryLog *wal.Log
-	// entryLogEpoch counts the times the entry log was replaced whole (a
-	// snapshot install's cut-over). A live backup reads it before and after
-	// the phases an install would make inconsistent, and starts over.
+	// entryLogEpoch counts the times the entry log's files changed under a
+	// reader in a way it cannot see: replaced whole (a snapshot install's
+	// cut-over) or truncated from the back (a follower's log conflict). A
+	// live backup reads it before and after the phases such a change would
+	// make inconsistent, and starts over. Every bump FOLLOWS its change: a
+	// reader whose window overlaps the change then always sees a different
+	// value after, which a bump before the change could not guarantee.
 	entryLogEpoch atomic.Uint64
 	// eventLog is the permanent event log — the "forever" tier described
 	// in docs/event-log-architecture.md. ApplyCommitted mirrors every

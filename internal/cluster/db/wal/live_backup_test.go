@@ -164,3 +164,29 @@ func TestLiveBackup_RefusesEventsAheadOfTheRaftLog(t *testing.T) {
 	_, err := src.CaptureBackup(func(_ string, _ int64, write func(io.Writer) error) error { return write(io.Discard) })
 	require.ErrorIs(t, err, ErrLiveBackupEventsAhead)
 }
+
+// A follower's log-conflict truncation under the read rewrites the tail
+// segment the capture listed; the entry log's epoch reports it and the
+// backup starts over rather than shipping a torn last record.
+func TestLiveBackup_DetectsALogConflictTruncationUnderTheRead(t *testing.T) {
+	src := openFetchPeer(t, t.TempDir(), time.Hour)
+	seedEventLog(t, src, 1, 3)
+	for i := uint64(1); i <= 5; i++ {
+		e := &pb.Entry{Term: proto.Uint64(1), Index: proto.Uint64(i), Type: pb.EntryNormal.Enum(), Data: []byte("raft")}
+		require.NoError(t, src.Save(&pb.HardState{Term: proto.Uint64(1), Commit: proto.Uint64(3)}, []*pb.Entry{e}, nil))
+	}
+
+	truncated := false
+	_, err := src.CaptureBackup(func(name string, size int64, write func(io.Writer) error) error {
+		if !truncated && filepath.Dir(name) == "raft/state" {
+			// A new leader's entry at index 4 conflicts with the uncommitted
+			// tail: entries 4 and 5 are truncated and 4 rewritten.
+			e := &pb.Entry{Term: proto.Uint64(2), Index: proto.Uint64(4), Type: pb.EntryNormal.Enum(), Data: []byte("new")}
+			require.NoError(t, src.Save(&pb.HardState{Term: proto.Uint64(2), Commit: proto.Uint64(3)}, []*pb.Entry{e}, nil))
+			truncated = true
+		}
+		return write(io.Discard)
+	})
+	require.ErrorIs(t, err, ErrLiveBackupRaced)
+	require.True(t, truncated)
+}

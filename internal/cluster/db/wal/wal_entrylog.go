@@ -224,7 +224,6 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
-	s.entryLogEpoch.Add(1)
 
 	if err := s.EntryLog.Close(); err != nil {
 		return fmt.Errorf("close entry log: %w", err)
@@ -243,6 +242,9 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 		return fmt.Errorf("write snapshot dummy: %w", err)
 	}
 	s.EntryLog = fresh
+	// After the swap, not before: a reader compares the epoch around its
+	// copy, so the bump must follow the change it reports (see the field).
+	s.entryLogEpoch.Add(1)
 	// Durability: fsync the reset dir (its dummy segment's entry) and its parent
 	// (the rename + mkdir), so the cut-over survives power loss without relying on
 	// the Open-time entry-log reconcile to heal it. Best-effort, mirroring the
@@ -275,7 +277,6 @@ func (s *Storage) resetEntryLogToEmpty() error {
 
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
-	s.entryLogEpoch.Add(1)
 
 	if err := s.EntryLog.Close(); err != nil {
 		return fmt.Errorf("close entry log: %w", err)
@@ -291,6 +292,9 @@ func (s *Storage) resetEntryLogToEmpty() error {
 		return fmt.Errorf("reopen entry log: %w", err)
 	}
 	s.EntryLog = fresh
+	// After the swap, not before: a reader compares the epoch around its
+	// copy, so the bump must follow the change it reports (see the field).
+	s.entryLogEpoch.Add(1)
 	// Durability mirrors resetEntryLogToSnapshot: fsync the reset dir and its
 	// parent so the discard survives power loss without relying on the next boot
 	// to re-heal.
@@ -523,7 +527,13 @@ func (s *Storage) appendEntries(ents []*pb.Entry) error {
 			}
 			firstIndex, lastIndex = 0, 0
 		} else {
-			if err := s.EntryLog.TruncateBack(offset); err != nil {
+			// A live backup reading the entry log must start over: the tail
+			// segment it listed is rewritten under it (live_backup.go). The
+			// bump follows the truncation, failed or not — a failure may
+			// have changed files too.
+			err := s.EntryLog.TruncateBack(offset)
+			s.entryLogEpoch.Add(1)
+			if err != nil {
 				return err
 			}
 		}

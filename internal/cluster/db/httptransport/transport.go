@@ -313,6 +313,15 @@ func (t *HttpTransport) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if m.GetTo() != t.id {
+		// Addressed to another node: a peer dialing an address that now
+		// belongs to a different member — a replacement node under a new id
+		// at a retired node's URL, until the old id is removed. Stepping it
+		// would feed this node another member's heartbeats and appends (the
+		// rewound-member guard would then exit it on the first one).
+		http.Error(w, "message addressed to another node", http.StatusMisdirectedRequest)
+		return
+	}
 	if t.raft.IsIDRemoved(m.GetFrom()) {
 		// A removed node must not be able to inject messages.
 		http.Error(w, "sender removed from cluster", http.StatusForbidden)

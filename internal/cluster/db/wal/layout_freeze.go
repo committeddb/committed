@@ -21,8 +21,9 @@ import (
 //     files).
 //   - The raft entry log's movers: raft-log compaction (deletes whole
 //     segment files). A follower's log-conflict truncation and a snapshot
-//     install also change its files, but never wait on anything: a live
-//     backup detects them and starts over instead.
+//     install also change its files, but never wait on anything: each
+//     bumps the entry log's epoch, and a live backup that saw it change
+//     starts over instead.
 //
 // A freeze only delays maintenance; nothing it delays changes content, and
 // the holder is expected to bound it.

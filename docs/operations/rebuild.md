@@ -170,25 +170,32 @@ sudo systemctl stop committed
 sudo rm -rf /var/lib/committed/*
 
 # 2. Give it a NEW id and start it in join mode (see membership.md for
-#    the full environment). It comes up empty and waits to be added.
+#    the full environment). It comes up empty and waits to be added. The
+#    old node's peer URL can be reused: until step 4 the leader keeps
+#    addressing the old id there, and the new node refuses those messages
+#    as not its own.
 #      COMMITTED_NODE_ID=4
 #      COMMITTED_JOIN=true
 #      COMMITTED_PEERS=1=http://n1:9022,2=http://n2:9022,3=http://n3:9022,4=http://n3:9022
 sudo systemctl start committed
 
-# 3. Add it as a learner, watch it catch up, promote it.
+# 3. Add it as a learner, watch it catch up, then close the gap and
+#    promote it (membership.md's learner flow).
 committed member add --id 4 --url http://n3:9022 --learner --target http://n1:8080
 curl -s http://n3:8080/v1/node/status | jq .catchingUp   # until the block is gone
+curl -s http://n1:8080/v1/membership | jq '.members[] | select(.id==4)'   # matchIndex closing on commitIndex
 committed member promote --id 4 --target http://n1:8080
 
 # 4. Only now retire the damaged node's id.
 committed member remove --id 3 --target http://n1:8080
 ```
 
-Adding before removing keeps quorum arithmetic honest: a three-voter
-cluster with one member down is at two of three throughout, and never at
-two of two — the replacement joins as a learner (no effect on quorum), is
-promoted only once caught up, and the old id leaves last.
+Adding before removing keeps fault tolerance where it is: a three-voter
+cluster with one member down is at two of three while the replacement
+catches up as a learner (no effect on quorum); between promote and remove
+it is three of four with one dead, so the new node is commit-critical for
+that step; after remove it is three of three. At no point is it two of
+two. The old id leaves last.
 
 ## Verification
 

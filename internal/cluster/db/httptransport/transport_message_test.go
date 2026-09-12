@@ -113,6 +113,10 @@ func TestHandler_Guards(t *testing.T) {
 	require.Equal(t, httpgo.StatusPreconditionFailed,
 		post(httpgo.MethodPost, map[string]string{clusterIDHeader: clusterID, protocolHeader: "99"}, body))
 	require.Equal(t, httpgo.StatusMethodNotAllowed, post(httpgo.MethodGet, good, nil))
+	misaddressed, err := marshalMessage(&raftpb.Message{Type: raftpb.MsgHeartbeat.Enum(), From: proto.Uint64(2), To: proto.Uint64(3)})
+	require.NoError(t, err)
+	require.Equal(t, httpgo.StatusMisdirectedRequest, post(httpgo.MethodPost, good, misaddressed),
+		"a message for another node id — a replacement node at a retired node's URL — is refused, not stepped")
 	require.Equal(t, 1, rr.processedCount(), "rejected requests must not reach raft")
 
 	// A sender that has been removed from the cluster is forbidden — a removed
