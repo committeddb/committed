@@ -9,11 +9,14 @@ import (
 	nethttp "net/http"
 	"net/url"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // Cluster-aware disk admission (Phase 2 of the disk guardrail).
@@ -32,7 +35,7 @@ import (
 // it is full): each member periodically POSTs its state to the leader's
 // announced API URL, and the response carries the current verdict back, so
 // one round trip per member per interval keeps both directions fresh. Every
-// node then enforces the verdict at its own propose gate (checkDiskWritable),
+// node then enforces the verdict at its own propose gate (checkWritable),
 // which also closes the Phase 1 leak where a follower forwarded proposals to
 // a full leader over the raft transport, bypassing the leader's gate.
 //
@@ -87,6 +90,90 @@ type diskVerdictState struct {
 // tests inject a fake to drive multi-node admission scenarios in-process.
 type diskReportSender func(ctx context.Context, leaderURL string, nodeID uint64, state string) (cluster.DiskVerdict, error)
 
+// diskAdmissionDeps is the subsystem's entire view of the engine plus its
+// tunables, wired by db.New. The engine views are function fields — the
+// subsystem never holds *DB — so the field list is the exact coupling
+// surface, and admission logic is unit-testable with plain stubs.
+type diskAdmissionDeps struct {
+	selfID             func() uint64
+	leaderID           func() uint64
+	isLeader           func() bool
+	memberAPIURL       func(id uint64) (string, bool)
+	voters             func() map[uint64]struct{}
+	replicationMatch   func() map[uint64]uint64
+	transferLeadership func(transferee uint64)
+
+	// reportInterval is the coordinator cadence (0 = default; negative
+	// leaves the loop unstarted — db.New gates run() on it). send, when
+	// nil, is built from reportClient/reportToken.
+	reportInterval   time.Duration
+	transferCooldown time.Duration
+	send             diskReportSender
+	reportClient     *nethttp.Client
+	reportToken      string
+
+	ctx     context.Context
+	logger  *zap.Logger
+	metrics *metrics.Metrics
+}
+
+// diskAdmission is the write-admission subsystem: the node-local disk gate
+// (Phase 1) plus the cluster-aware verdict machinery documented above. It
+// owns all admission state; the engine consults it at the propose gate
+// (checkWritable), feeds it local disk-state changes (setLocalState), and
+// exposes it over HTTP through DB's delegators (DiskState, DiskAdmission,
+// ReportDisk).
+type diskAdmission struct {
+	diskAdmissionDeps
+
+	// local is the current node-local disk-pressure level (a diskState
+	// value), published by the disk-usage watcher via setLocalState and
+	// read by the propose gate. Stored as an int32 so it can be updated
+	// atomically without a lock on the hot propose path. Stays diskOK when
+	// no watcher is configured, so the gate is a no-op.
+	local atomic.Int32
+
+	// verdict is the cached cluster write-admission verdict the propose
+	// gate enforces (atomic pointer: the gate reads it lock-free on the hot
+	// path; nil or stale falls back to the node-local state). reports is
+	// the leader-side map of member disk reports, guarded by reportsMu.
+	// nudgeC wakes the coordinator loop early on a local disk-state change.
+	// lastTransfer rate-limits disk-pressure leadership transfers; it is
+	// touched only from coordinator cycles.
+	verdict      atomic.Pointer[diskVerdictState]
+	reportsMu    sync.Mutex
+	reports      map[uint64]diskReport
+	nudgeC       chan struct{}
+	lastTransfer time.Time
+
+	// pickTransferTargetFn is the transfer-target seam, defaulted to the
+	// subsystem's own report-driven picker; tests override it to drive the
+	// transfer decision without a live voter set.
+	pickTransferTargetFn func(now time.Time) uint64
+}
+
+// newDiskAdmission builds the subsystem with production defaults applied:
+// report interval, transfer cooldown, the HTTP report sender, and the
+// report-driven transfer-target picker.
+func newDiskAdmission(deps diskAdmissionDeps) *diskAdmission {
+	a := &diskAdmission{
+		diskAdmissionDeps: deps,
+		reports:           make(map[uint64]diskReport),
+		nudgeC:            make(chan struct{}, 1),
+	}
+	if a.reportInterval == 0 {
+		a.reportInterval = DefaultDiskReportInterval
+	}
+	if a.transferCooldown == 0 {
+		a.transferCooldown = defaultDiskTransferCooldown
+	}
+	if a.send == nil {
+		a.send = newHTTPDiskReportSender(a.reportClient, a.reportToken)
+	}
+	a.pickTransferTargetFn = a.pickTransferTarget
+	return a
+}
+
 // parseDiskState maps the wire form back to a diskState. Reports travel
 // between nodes as strings (the JSON API surface), so the leader re-parses
 // on receipt; an unknown level is rejected rather than guessed.
@@ -104,18 +191,39 @@ func parseDiskState(s string) (diskState, bool) {
 	return diskOK, false
 }
 
-// diskVerdictTTL is the freshness window for the cached verdict and for
-// member reports. Derived from the report interval so shortening the
-// interval (tests, aggressive ops) tightens staleness proportionally.
-func (db *DB) diskVerdictTTL() time.Duration {
-	interval := db.diskReportInterval
+// localState is the node-local disk-pressure level as last published by the
+// disk-usage watcher.
+func (a *diskAdmission) localState() diskState {
+	return diskState(a.local.Load())
+}
+
+// setLocalState publishes a new node-local disk-pressure level for the
+// propose gate to read. On the leader it then synchronously recomputes the
+// cluster admission verdict (so the gate never enforces a verdict older than
+// the state just published); on a follower it nudges the coordinator to
+// report the transition to the leader right away. Called from db.onDiskState
+// — the watcher's callback — and tests via SetDiskStateForTest.
+func (a *diskAdmission) setLocalState(s diskState) {
+	a.local.Store(int32(s))
+	if a.isLeader() {
+		a.recomputeVerdict(time.Now())
+		return
+	}
+	a.nudge()
+}
+
+// verdictTTL is the freshness window for the cached verdict and for member
+// reports. Derived from the report interval so shortening the interval
+// (tests, aggressive ops) tightens staleness proportionally.
+func (a *diskAdmission) verdictTTL() time.Duration {
+	interval := a.reportInterval
 	if interval <= 0 {
 		interval = DefaultDiskReportInterval
 	}
 	return diskVerdictTTLFactor * interval
 }
 
-// admissionDiskState returns the disk-pressure level the propose gate should
+// admissionState returns the disk-pressure level the propose gate should
 // enforce right now and, when that decision comes from a fresh cluster
 // verdict, the verdict itself (nil means node-local fallback). The cluster
 // verdict — when fresh — dominates the local state in BOTH directions: a
@@ -123,39 +231,27 @@ func (db *DB) diskVerdictTTL() time.Duration {
 // the leader's quorum regardless of this node's disk), and a healthy node
 // rejects writes the cluster has deemed unsafe (closing the follower→leader
 // forwarding bypass).
-func (db *DB) admissionDiskState(now time.Time) (diskState, *diskVerdictState) {
-	if v := db.diskVerdict.Load(); v != nil && now.Sub(v.at) <= db.diskVerdictTTL() {
+func (a *diskAdmission) admissionState(now time.Time) (diskState, *diskVerdictState) {
+	if v := a.verdict.Load(); v != nil && now.Sub(v.at) <= a.verdictTTL() {
 		return v.state, v
 	}
-	return diskState(db.diskState.Load()), nil
+	return a.localState(), nil
 }
 
-// checkDiskWritable returns the typed error a proposal of the given kind
-// should be rejected with under the current admission decision, or nil if it
-// may proceed. The hot path is an atomic pointer load + comparison; with no
+// checkWritable returns the typed error a proposal of the given kind should
+// be rejected with under the current admission decision, or nil if it may
+// proceed. The hot path is an atomic pointer load + comparison; with no
 // watcher and no verdict it always returns nil.
-func (db *DB) checkDiskWritable(kind string) error {
-	state, _ := db.admissionDiskState(time.Now())
+func (a *diskAdmission) checkWritable(kind string) error {
+	state, _ := a.admissionState(time.Now())
 	return diskRejection(state, kind)
 }
 
-// DiskState returns this node's own disk-pressure level as last sampled by
-// the local disk watcher. Implements cluster.Cluster for GET /node/status.
-func (db *DB) DiskState() string {
-	return diskState(db.diskState.Load()).String()
-}
-
-// SafeMode reports whether this node booted with worker spawns held
-// (db.WithSafeMode / COMMITTED_SAFE_MODE). Per-boot, node-local.
-func (db *DB) SafeMode() bool {
-	return db.safeMode
-}
-
-// DiskAdmission returns the write-admission decision this node's propose
-// gate is applying right now — the fresh cluster verdict when one is held,
-// or the node-local fallback. Implements cluster.Cluster for GET /node/status.
-func (db *DB) DiskAdmission() cluster.DiskAdmissionStatus {
-	state, v := db.admissionDiskState(time.Now())
+// status is the write-admission decision this node's propose gate is
+// applying right now — the fresh cluster verdict when one is held, or the
+// node-local fallback. Powers GET /node/status via db.DiskAdmission.
+func (a *diskAdmission) status() cluster.DiskAdmissionStatus {
+	state, v := a.admissionState(time.Now())
 	st := cluster.DiskAdmissionStatus{
 		Admitted: state < diskCritical,
 		State:    state.String(),
@@ -171,50 +267,50 @@ func (db *DB) DiskAdmission() cluster.DiskAdmissionStatus {
 	return st
 }
 
-// ReportDisk records member nodeID's disk state and returns the freshly
-// recomputed cluster verdict. Implements cluster.Cluster; powers
-// POST /v1/node/disk-report. Only the leader aggregates — on any other node
-// it returns cluster.ErrNotLeader so the reporter re-resolves the leader on
-// its next cycle.
-func (db *DB) ReportDisk(nodeID uint64, state string) (cluster.DiskVerdict, error) {
+// report records member nodeID's disk state and returns the freshly
+// recomputed cluster verdict. Powers POST /v1/node/disk-report via
+// db.ReportDisk. Only the leader aggregates — on any other node it returns
+// cluster.ErrNotLeader so the reporter re-resolves the leader on its next
+// cycle.
+func (a *diskAdmission) report(nodeID uint64, state string) (cluster.DiskVerdict, error) {
 	s, ok := parseDiskState(state)
 	if !ok {
 		return cluster.DiskVerdict{}, fmt.Errorf("unknown disk state %q", state)
 	}
-	if db.leaderState == nil || !db.leaderState.IsLeader() {
-		return cluster.DiskVerdict{LeaderID: db.Leader()}, cluster.ErrNotLeader
+	if !a.isLeader() {
+		return cluster.DiskVerdict{LeaderID: a.leaderID()}, cluster.ErrNotLeader
 	}
 
 	now := time.Now()
-	db.diskReportsMu.Lock()
-	db.diskReports[nodeID] = diskReport{state: s, at: now}
-	db.diskReportsMu.Unlock()
+	a.reportsMu.Lock()
+	a.reports[nodeID] = diskReport{state: s, at: now}
+	a.reportsMu.Unlock()
 
-	v := db.recomputeDiskVerdict(now)
+	v := a.recomputeVerdict(now)
 	return cluster.DiskVerdict{State: v.state.String(), Reason: v.reason, LeaderID: v.leaderID}, nil
 }
 
-// recomputeDiskVerdict computes, publishes, and returns the cluster verdict
-// from this node's (the leader's) own disk state plus the collected member
+// recomputeVerdict computes, publishes, and returns the cluster verdict from
+// this node's (the leader's) own disk state plus the collected member
 // reports. Called on the coordinator tick, on every report received, and on
 // a local disk-state change — so the leader's cached verdict is never older
 // than one report interval.
-func (db *DB) recomputeDiskVerdict(now time.Time) *diskVerdictState {
-	v := db.computeDiskVerdict(now)
-	db.diskVerdict.Store(v)
-	db.publishAdmissionMetrics()
+func (a *diskAdmission) recomputeVerdict(now time.Time) *diskVerdictState {
+	v := a.computeVerdict(now)
+	a.verdict.Store(v)
+	a.publishMetrics()
 	return v
 }
 
-// computeDiskVerdict gathers this node's inputs — its own state, the voter
-// set, the collected reports — and runs them through the quorum math.
-func (db *DB) computeDiskVerdict(now time.Time) *diskVerdictState {
-	local := diskState(db.diskState.Load())
-	voters, _, _ := db.raft.memberStatus()
+// computeVerdict gathers this node's inputs — its own state, the voter set,
+// the collected reports — and runs them through the quorum math.
+func (a *diskAdmission) computeVerdict(now time.Time) *diskVerdictState {
+	local := a.localState()
+	voters := a.voters()
 
-	db.diskReportsMu.Lock()
-	defer db.diskReportsMu.Unlock()
-	return diskVerdictFrom(db.ID(), local, voters, db.diskReports, now, db.diskVerdictTTL())
+	a.reportsMu.Lock()
+	defer a.reportsMu.Unlock()
+	return diskVerdictFrom(a.selfID(), local, voters, a.reports, now, a.verdictTTL())
 }
 
 // diskVerdictFrom is the quorum math. The cluster-effective state is
@@ -234,7 +330,7 @@ func (db *DB) computeDiskVerdict(now time.Time) *diskVerdictState {
 // partitioned member must not freeze a cluster that still has a healthy
 // quorum, and a cluster whose reports are broken degrades to Phase 1's
 // node-local behavior rather than below it. Stale and departed-member
-// entries are pruned from reports in place — the caller holds diskReportsMu.
+// entries are pruned from reports in place — the caller holds reportsMu.
 func diskVerdictFrom(selfID uint64, local diskState, voters map[uint64]struct{},
 	reports map[uint64]diskReport, now time.Time, ttl time.Duration,
 ) *diskVerdictState {
@@ -293,70 +389,70 @@ func diskVerdictFrom(selfID uint64, local diskState, voters map[uint64]struct{},
 	return v
 }
 
-// publishAdmissionMetrics records this node's current effective admission
-// view: the cluster-level disk state gauge plus the writes-admitted gauge
-// with its bounded reason code ("ok", "leader_disk", "quorum_at_risk", or
+// publishMetrics records this node's current effective admission view: the
+// cluster-level disk state gauge plus the writes-admitted gauge with its
+// bounded reason code ("ok", "leader_disk", "quorum_at_risk", or
 // "local_fallback" when no fresh verdict is held).
-func (db *DB) publishAdmissionMetrics() {
-	if db.metrics == nil {
+func (a *diskAdmission) publishMetrics() {
+	if a.metrics == nil {
 		return
 	}
-	state, v := db.admissionDiskState(time.Now())
+	state, v := a.admissionState(time.Now())
 	code := "local_fallback"
 	if v != nil {
 		code = v.reasonCode
 	}
-	db.metrics.SetDiskClusterState(state.String())
-	db.metrics.SetWriteAdmission(state < diskCritical, code)
+	a.metrics.SetDiskClusterState(state.String())
+	a.metrics.SetWriteAdmission(state < diskCritical, code)
 }
 
-// nudgeDiskCoordinator wakes the coordinator ahead of its next tick — called
-// on a local disk-state change so a follower reports the transition (and
-// picks up the resulting verdict) immediately instead of up to one interval
-// late. Non-blocking: a pending nudge is enough.
-func (db *DB) nudgeDiskCoordinator() {
+// nudge wakes the coordinator ahead of its next tick — called on a local
+// disk-state change so a follower reports the transition (and picks up the
+// resulting verdict) immediately instead of up to one interval late.
+// Non-blocking: a pending nudge is enough.
+func (a *diskAdmission) nudge() {
 	select {
-	case db.diskNudgeC <- struct{}{}:
+	case a.nudgeC <- struct{}{}:
 	default:
 	}
 }
 
-// diskCoordinator is the per-node admission loop, started from db.New and
-// stopped by db.Close via db.ctx. Each cycle: the leader recomputes the
-// verdict and considers transferring leadership away from its own disk
-// pressure; a follower reports its disk state to the leader's announced API
-// URL and caches the verdict the response carries. Disabled (never started)
-// when the report interval is configured to 0.
-func (db *DB) diskCoordinator() {
-	ticker := time.NewTicker(db.diskReportInterval)
+// run is the per-node admission loop, started from db.New and stopped by
+// db.Close via the wired ctx. Each cycle: the leader recomputes the verdict
+// and considers transferring leadership away from its own disk pressure; a
+// follower reports its disk state to the leader's announced API URL and
+// caches the verdict the response carries. Disabled (never started) when the
+// report interval is configured negative.
+func (a *diskAdmission) run() {
+	ticker := time.NewTicker(a.reportInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-		case <-db.diskNudgeC:
-		case <-db.ctx.Done():
+		case <-a.nudgeC:
+		case <-a.ctx.Done():
 			return
 		}
-		db.diskCoordinate(time.Now())
+		a.coordinate(time.Now())
 	}
 }
 
-// diskCoordinate runs one coordinator cycle. Split from the loop so a local
-// disk-state change (onDiskState) can run a synchronous cycle on the leader —
-// keeping the verdict the gate reads consistent with the state the watcher
-// just published, with no window where a test (or a burst of proposals)
-// observes the old verdict.
-func (db *DB) diskCoordinate(now time.Time) {
-	if db.leaderState != nil && db.leaderState.IsLeader() {
-		v := db.recomputeDiskVerdict(now)
-		db.maybeTransferLeadership(now, v)
+// coordinate runs one coordinator cycle. Split from the loop so a local
+// disk-state change (setLocalState) can run a synchronous cycle on the
+// leader — keeping the verdict the gate reads consistent with the state the
+// watcher just published, with no window where a test (or a burst of
+// proposals) observes the old verdict.
+func (a *diskAdmission) coordinate(now time.Time) {
+	if a.isLeader() {
+		v := a.recomputeVerdict(now)
+		a.maybeTransferLeadership(now, v)
 		return
 	}
-	db.reportDiskToLeader(now)
-	db.publishAdmissionMetrics()
+	a.reportToLeader(now)
+	a.publishMetrics()
 }
 
-// reportDiskToLeader performs the follower half of one cycle: resolve the
+// reportToLeader performs the follower half of one cycle: resolve the
 // leader's announced API URL, POST this node's disk state, and cache the
 // verdict from the response. Any failure leaves the cached verdict to age
 // out, after which the gate falls back to the node-local decision — so the
@@ -364,37 +460,37 @@ func (db *DB) diskCoordinate(now time.Time) {
 // just moved) all degrade to Phase 1 behavior. Failures log at Debug: a
 // persistent one shows up as the local_fallback admission metric, not log
 // spam every interval.
-func (db *DB) reportDiskToLeader(now time.Time) {
-	leaderID := db.Leader()
-	if leaderID == 0 || leaderID == db.ID() {
+func (a *diskAdmission) reportToLeader(now time.Time) {
+	leaderID := a.leaderID()
+	if leaderID == 0 || leaderID == a.selfID() {
 		return
 	}
-	leaderURL, ok := db.MemberAPIURL(leaderID)
+	leaderURL, ok := a.memberAPIURL(leaderID)
 	if !ok || leaderURL == "" {
 		return
 	}
 
-	state := diskState(db.diskState.Load())
-	ctx, cancel := context.WithTimeout(db.ctx, defaultDiskReportTimeout)
+	state := a.localState()
+	ctx, cancel := context.WithTimeout(a.ctx, defaultDiskReportTimeout)
 	defer cancel()
-	verdict, err := db.diskReportSend(ctx, leaderURL, db.ID(), state.String())
+	verdict, err := a.send(ctx, leaderURL, a.selfID(), state.String())
 	if err != nil {
-		db.logger.Debug("disk report to leader failed",
+		a.logger.Debug("disk report to leader failed",
 			zap.Uint64("leader", leaderID), zap.Error(err))
 		return
 	}
 
-	db.applyReportedVerdict(verdict, now)
+	a.applyVerdict(verdict, now)
 }
 
-// applyReportedVerdict caches a verdict the leader returned on a report
-// round trip, making it the decision this node's propose gate enforces for
-// the next TTL window. Logs only on a state change so the steady-state
-// report loop is silent.
-func (db *DB) applyReportedVerdict(verdict cluster.DiskVerdict, now time.Time) {
+// applyVerdict caches a verdict the leader returned on a report round trip,
+// making it the decision this node's propose gate enforces for the next TTL
+// window. Logs only on a state change so the steady-state report loop is
+// silent.
+func (a *diskAdmission) applyVerdict(verdict cluster.DiskVerdict, now time.Time) {
 	s, ok := parseDiskState(verdict.State)
 	if !ok {
-		db.logger.Debug("disk report: leader returned unknown verdict state",
+		a.logger.Debug("disk report: leader returned unknown verdict state",
 			zap.String("state", verdict.State))
 		return
 	}
@@ -402,8 +498,8 @@ func (db *DB) applyReportedVerdict(verdict cluster.DiskVerdict, now time.Time) {
 	if s >= diskCritical {
 		code = "cluster_reject"
 	}
-	prev := db.diskVerdict.Load()
-	db.diskVerdict.Store(&diskVerdictState{
+	prev := a.verdict.Load()
+	a.verdict.Store(&diskVerdictState{
 		state:      s,
 		reason:     verdict.Reason,
 		reasonCode: code,
@@ -411,7 +507,7 @@ func (db *DB) applyReportedVerdict(verdict cluster.DiskVerdict, now time.Time) {
 		at:         now,
 	})
 	if prev == nil || prev.state != s {
-		db.logger.Info("cluster write-admission verdict changed",
+		a.logger.Info("cluster write-admission verdict changed",
 			zap.String("state", s.String()),
 			zap.String("reason", verdict.Reason),
 			zap.Uint64("leader", verdict.LeaderID))
@@ -424,15 +520,15 @@ func (db *DB) applyReportedVerdict(verdict cluster.DiskVerdict, now time.Time) {
 // keeps admitting via the healthy quorum). Guarded against flapping: only a
 // target with a FRESH report below critical qualifies (never an assumed-ok
 // silent member), and transfers are rate-limited by the cooldown.
-func (db *DB) maybeTransferLeadership(now time.Time, v *diskVerdictState) {
-	local := diskState(db.diskState.Load())
+func (a *diskAdmission) maybeTransferLeadership(now time.Time, v *diskVerdictState) {
+	local := a.localState()
 	if local < diskCritical {
 		return
 	}
-	if now.Sub(db.lastDiskTransfer) < db.diskTransferCooldown {
+	if now.Sub(a.lastTransfer) < a.transferCooldown {
 		return
 	}
-	target := db.pickTransferTargetFn(now)
+	target := a.pickTransferTargetFn(now)
 	if target == 0 {
 		return
 	}
@@ -441,31 +537,27 @@ func (db *DB) maybeTransferLeadership(now time.Time, v *diskVerdictState) {
 	if v != nil {
 		verdict = v.state
 	}
-	db.logger.Warn("leader disk constrained; transferring leadership to a healthy voter",
+	a.logger.Warn("leader disk constrained; transferring leadership to a healthy voter",
 		zap.String("disk_state", local.String()),
 		zap.Uint64("target", target),
 		zap.String("verdict", verdict.String()))
-	if db.metrics != nil {
-		db.metrics.DiskLeadershipTransfer()
+	if a.metrics != nil {
+		a.metrics.DiskLeadershipTransfer()
 	}
-	db.lastDiskTransfer = now
-	db.transferLeadershipFn(target)
+	a.lastTransfer = now
+	a.transferLeadership(target)
 }
 
 // pickTransferTarget gathers the leader-side inputs (voter set, replication
 // progress, collected reports) for pickDiskTransferTarget. It is the default
-// value of db.pickTransferTargetFn.
-func (db *DB) pickTransferTarget(now time.Time) uint64 {
-	voters, _, _ := db.raft.memberStatus()
-	_, _, _, _, views := db.raft.membershipView()
-	match := make(map[uint64]uint64, len(views))
-	for _, mv := range views {
-		match[mv.id] = mv.match
-	}
+// value of pickTransferTargetFn.
+func (a *diskAdmission) pickTransferTarget(now time.Time) uint64 {
+	voters := a.voters()
+	match := a.replicationMatch()
 
-	db.diskReportsMu.Lock()
-	defer db.diskReportsMu.Unlock()
-	return pickDiskTransferTarget(db.ID(), voters, db.diskReports, match, now, db.diskVerdictTTL())
+	a.reportsMu.Lock()
+	defer a.reportsMu.Unlock()
+	return pickDiskTransferTarget(a.selfID(), voters, a.reports, match, now, a.verdictTTL())
 }
 
 // pickDiskTransferTarget chooses the voter to hand leadership to: among
@@ -495,6 +587,25 @@ func pickDiskTransferTarget(selfID uint64, voters map[uint64]struct{},
 		}
 	}
 	return target
+}
+
+// DiskState returns this node's own disk-pressure level as last sampled by
+// the local disk watcher. Powers GET /node/status.
+func (db *DB) DiskState() string {
+	return db.disk.localState().String()
+}
+
+// DiskAdmission returns the write-admission decision this node's propose
+// gate is applying right now — the fresh cluster verdict when one is held,
+// or the node-local fallback. Powers GET /node/status.
+func (db *DB) DiskAdmission() cluster.DiskAdmissionStatus {
+	return db.disk.status()
+}
+
+// ReportDisk records member nodeID's disk state and returns the freshly
+// recomputed cluster verdict. Powers POST /v1/node/disk-report.
+func (db *DB) ReportDisk(nodeID uint64, state string) (cluster.DiskVerdict, error) {
+	return db.disk.report(nodeID, state)
 }
 
 // defaultDiskReportTimeout bounds one report round trip. Sized like the
@@ -528,7 +639,9 @@ func newHTTPDiskReportSender(client *nethttp.Client, token string) diskReportSen
 // diskReportWire is the JSON body of POST /v1/node/disk-report, and
 // diskVerdictWire its response — mirrored by the HTTP layer's handler types.
 // Kept in sync by TestDiskReportSender_RoundTrip, which posts through a real
-// handler. (db can't import internal/cluster/http: layering, not a cycle.)
+// handler. (db can't import its own transport subpackage,
+// internal/cluster/db/http: that would be an import cycle once the handlers
+// hold *db.DB.)
 type diskReportWire struct {
 	Node  uint64 `json:"node"`
 	State string `json:"state"`

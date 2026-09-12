@@ -20,6 +20,10 @@ import (
 
 type SQLMockDialect struct {
 	db *gosql.DB
+	// CreatesTables makes TableExists answer "absent", so an Init under the
+	// mock creates and claims the table (the ownership protocol's create
+	// arm). Off by default: Init attaches and claims nothing.
+	CreatesTables bool
 }
 
 func NewSQLMockDialect() (*SQLMockDialect, sqlmock.Sqlmock, error) {
@@ -152,6 +156,54 @@ func (d *SQLMockDialect) EnsureGenerationColumn(_ context.Context, db *gosql.DB,
 // CreateGenerationSweepSQL mirrors MySQL (the dialect the mock stands in for).
 func (d *SQLMockDialect) CreateGenerationSweepSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateGenerationSweepSQL(config)
+}
+
+// EnsureRematerializationColumn is a no-op like EnsureGenerationColumn: the
+// mock's DDL surface isn't exercised.
+func (d *SQLMockDialect) EnsureRematerializationColumn(_ context.Context, db *gosql.DB, config *sql.Config) error {
+	return nil
+}
+
+// CreateRematerializationUpsertSQL / CreateRematerializationSweepSQL mirror
+// MySQL (the dialect the mock stands in for).
+func (d *SQLMockDialect) CreateRematerializationUpsertSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateRematerializationUpsertSQL(config)
+}
+
+func (d *SQLMockDialect) CreateRematerializationSweepSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateRematerializationSweepSQL(config)
+}
+
+// TableExists answers without a query, like the other probes the mock
+// short-circuits (the mock pins statement sequences): the table "existed"
+// unless the test sets CreatesTables, so a plain Init attaches and claims
+// nothing, and a test of the ownership protocol opts into the claim.
+func (d *SQLMockDialect) TableExists(_ context.Context, _ *gosql.DB, _ string) (bool, error) {
+	return !d.CreatesTables, nil
+}
+
+// The destination-note statements mirror MySQL's; EnsureDestinations is a no-op
+// like EnsureRematerializationColumn (the mock pins statement sequences).
+func (d *SQLMockDialect) EnsureDestinations(_ context.Context, _ *gosql.DB) error { return nil }
+
+func (d *SQLMockDialect) DestinationSelectSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationSelectSQL()
+}
+
+func (d *SQLMockDialect) DestinationStampSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationStampSQL()
+}
+
+func (d *SQLMockDialect) DestinationClaimSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationClaimSQL()
+}
+
+func (d *SQLMockDialect) DestinationDisownSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationDisownSQL()
+}
+
+func (d *SQLMockDialect) DestinationDeleteSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationDeleteSQL()
 }
 
 func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {

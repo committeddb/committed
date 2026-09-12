@@ -12,7 +12,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 )
 
-// typeMatrixRow is one column in the golden type matrix: a SQL type, a literal to
+// typeMatrixRow is one column in the reference type matrix: a SQL type, a literal to
 // store, and the canonical JSON it must render to on BOTH paths.
 type typeMatrixRow struct {
 	name string // column + JSON field name

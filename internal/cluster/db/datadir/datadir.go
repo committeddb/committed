@@ -16,8 +16,10 @@
 //
 //   - events.retired/                            the pre-scrub event log a scrub swap renamed aside
 //   - events.scrub.<n>/                          a scrub rewrite's half-built temp log
+//   - events.fetch/                              segment files mid-download from a peer (catch-up)
 //   - raft/log.discarded/                        an entry log a snapshot install superseded
 //   - metadata/bbolt.db.{restore,compact}.<n>    orphaned bbolt swap temps
+//   - metadata/bbolt.db.backup.<n>               a live backup's metadata spool
 //
 // events.retired/ and bbolt.db.restore.* can hold data a scrub already physically
 // erased on the live node, so they must never be carried into an off-box backup
@@ -46,6 +48,7 @@ const (
 const (
 	retiredSuffix = ".retired"   // events -> events.retired
 	scrubInfix    = ".scrub."    // events -> events.scrub.<n>
+	fetchSuffix   = ".fetch"     // events -> events.fetch
 	discardSuffix = ".discarded" // raft/log -> raft/log.discarded
 
 	// BoltRestorePrefix / BoltCompactPrefix name the full-DB temp files an atomic
@@ -53,6 +56,10 @@ const (
 	// trailing '.' keeps them from ever matching the live bbolt.db.
 	BoltRestorePrefix = boltFileName + ".restore."
 	BoltCompactPrefix = boltFileName + ".compact."
+	// BoltBackupPrefix names the file a live backup spools the metadata into
+	// under its read transaction, to stream from once the transaction has
+	// ended (a read transaction held open blocks bbolt from growing).
+	BoltBackupPrefix = boltFileName + ".backup."
 )
 
 // --- canonical path builders (keyed to match each caller's on-hand path) ---
@@ -81,6 +88,11 @@ func RetiredDir(eventsDir string) string { return eventsDir + retiredSuffix }
 func ScrubDir(eventsDir string, bound uint64) string {
 	return fmt.Sprintf("%s%s%d", eventsDir, scrubInfix, bound)
 }
+
+// FetchDir returns the staging directory a catch-up downloads a peer's
+// segment files into before adopting them into eventsDir — transient: a
+// crash mid-download leaves partial files here, and Open sweeps it.
+func FetchDir(eventsDir string) string { return eventsDir + fetchSuffix }
 
 // EntryLogDiscardDir returns where a snapshot install renames the superseded
 // entry log aside. entryLogDir is EntryLogDir(root).
@@ -119,7 +131,7 @@ func RecoverScrubDirs(root string) error {
 	}
 	scrubPrefix := eventsName + scrubInfix // "events.scrub."
 	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), scrubPrefix) {
+		if e.IsDir() && (strings.HasPrefix(e.Name(), scrubPrefix) || e.Name() == eventsName+fetchSuffix) {
 			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
 				return err
 			}
@@ -143,7 +155,7 @@ func SweepBoltTempFiles(metadataDir string) error {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, BoltRestorePrefix) || strings.HasPrefix(name, BoltCompactPrefix) {
+		if strings.HasPrefix(name, BoltRestorePrefix) || strings.HasPrefix(name, BoltCompactPrefix) || strings.HasPrefix(name, BoltBackupPrefix) {
 			if err := os.RemoveAll(filepath.Join(metadataDir, name)); err != nil {
 				return err
 			}
@@ -178,11 +190,13 @@ func CanonicalArchiveEntry(rel string, eventsPresent bool) (keep bool, archiveRe
 		return true, strings.Join(seg, "/")
 	case strings.HasPrefix(seg[0], eventsName+scrubInfix): // events.scrub.<n>/
 		return false, ""
+	case seg[0] == eventsName+fetchSuffix: // events.fetch/
+		return false, ""
 	case seg[0] == raftName && len(seg) > 1 && seg[1] == entryLogName+discardSuffix: // raft/log.discarded/
 		return false, ""
 	case seg[0] == metadataName && len(seg) > 1 &&
-		(strings.HasPrefix(seg[1], BoltRestorePrefix) || strings.HasPrefix(seg[1], BoltCompactPrefix)):
-		return false, "" // metadata/bbolt.db.{restore,compact}.<n>
+		(strings.HasPrefix(seg[1], BoltRestorePrefix) || strings.HasPrefix(seg[1], BoltCompactPrefix) || strings.HasPrefix(seg[1], BoltBackupPrefix)):
+		return false, "" // metadata/bbolt.db.{restore,compact,backup}.<n>
 	default:
 		return true, rel
 	}

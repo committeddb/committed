@@ -247,7 +247,7 @@ func TestMergeValidated(t *testing.T) {
 	require.NoError(t, ValidateShapes(chain), "merge-of-merge inherits through the chain")
 }
 
-// GOLDEN CONTRACT — fingerprint stability across binary upgrades. This
+// REFERENCE CONTRACT — fingerprint stability across binary upgrades. This
 // pins the fingerprint of a representative stage set that uses NONE of
 // the newer vocabulary. If this test fails, the binary you are building
 // will spuriously RESET the stage store of every unchanged config on
@@ -256,7 +256,7 @@ func TestMergeValidated(t *testing.T) {
 // ADDITIONS must keep this stable (declared-content marshal: omitempty
 // + WhenClause's explicit arms). Only a DELIBERATE semantic change may
 // re-pin it, and that change ships with an upgrade-notes callout.
-func TestFingerprintGoldenContract(t *testing.T) {
+func TestFingerprintReferenceContract(t *testing.T) {
 	sts := []Stage{
 		{
 			Name: "live", From: "txns", KeyPath: []string{"$.id"},
@@ -270,8 +270,8 @@ func TestFingerprintGoldenContract(t *testing.T) {
 			Emit:   []Emit{{Field: "total", Sum: "$.amt"}, {Field: "n", Count: true}},
 		},
 	}
-	const golden = "4b5151015db670971db43e9e9acbafa46ddacd98e1f74805a99c68930666914c"
-	require.Equal(t, golden, Fingerprint(sts),
+	const reference = "4b5151015db670971db43e9e9acbafa46ddacd98e1f74805a99c68930666914c"
+	require.Equal(t, reference, Fingerprint(sts),
 		"fingerprint of an unchanged config drifted — unchanged configs would reset their stores on upgrade (see comment)")
 
 	// And the stability mechanism itself: declaring a NEW vocabulary
@@ -279,5 +279,5 @@ func TestFingerprintGoldenContract(t *testing.T) {
 	withNew := make([]Stage, len(sts))
 	copy(withNew, sts)
 	withNew[1].KeyType = []string{"number"}
-	require.NotEqual(t, golden, Fingerprint(withNew), "declared new vocabulary must change the fingerprint")
+	require.NotEqual(t, reference, Fingerprint(withNew), "declared new vocabulary must change the fingerprint")
 }

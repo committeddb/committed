@@ -50,13 +50,13 @@ type RedactedError interface {
 }
 
 // RedactedMessage returns the message safe to put into ANY persisted or exposed
-// sink — a replicated dead-letter/stuck record, an HTTP body, or the node-status
+// surface — a replicated dead-letter/stuck record, an HTTP body, or the node-status
 // config-build-error list. If err (anywhere in its chain) is a RedactedError — a
 // driver/migration error that may echo a bound value or connection identity —
 // only its PII-free classifier is returned and ok is true; otherwise committed's
 // own error text is returned verbatim (it is authored PII-free) and ok is false.
 // The full Error() is meant to stay in this node's logs. This is the single
-// redaction choke point every sink shares (safeDeadLetterMessage, redactedDetail,
+// redaction choke point every surface shares (safeDeadLetterMessage, redactedDetail,
 // and the config-build-error recorder all route through it) so the contract can't
 // drift between them. A nil err yields ("", false).
 func RedactedMessage(err error) (string, bool) {
@@ -69,6 +69,12 @@ func RedactedMessage(err error) (string, bool) {
 	return err.Error(), false
 }
 
+// ErrCompactionDeferred is returned by the storage's raft-log compaction while
+// a layout freeze is in flight (a peer fetching this node's event log, or a
+// live backup): truncating segment files under a reader that listed them
+// would hand it a vanished file. The caller retries on its next cycle.
+var ErrCompactionDeferred = errors.New("raft-log compaction deferred: a layout freeze is in flight (a peer fetch or live backup)")
+
 // ErrCorruptEntry marks a stored WAL entry that failed its CRC32C checksum on
 // read, or a log that will not open. It is the corruption sentinel raised by the
 // WAL layer (aliased there as wal.ErrCorruptEntry) and lives in this shared
@@ -77,6 +83,24 @@ func RedactedMessage(err error) (string, bool) {
 // repairable with `committed wal repair`; an in-record bitflip needs a rebuild
 // from a healthy replica. See docs/operations/rebuild.md.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
+
+// ErrNotSyncableOwner is returned by RebuildSyncable / RematerializeSyncable
+// when this node does not serve the zone-pinned syncable: the verbs' worker
+// drain must run WHERE THE WORKER RUNS (the drain-before-reset ordering that
+// prevents a stale checkpoint bump from defeating the replay only holds when
+// the drain and the reset proposal originate on the worker's node). The HTTP
+// layer routes the request to the owner, so a caller normally never sees
+// this; it is the defense-in-depth guard for a stale routing view, mapped to
+// 503 (retry — the hop resolves on the next attempt).
+var ErrNotSyncableOwner = errors.New(
+	"cluster: this node does not serve the zone-pinned syncable; the request must run on the pinned owner")
+
+// ErrZonePinUnsatisfiable is returned by owner-local verbs on a pinned
+// syncable whose zone currently has no serving node: with no worker anywhere
+// there is nothing to drain or replay against. Restore a node in the zone
+// (or re-POST the config without `zone`) and retry. Mapped to 503.
+var ErrZonePinUnsatisfiable = errors.New(
+	"cluster: the zone pin has no serving node; restore a node in the pinned zone (or re-POST without `zone`) and retry")
 
 // ErrSyncNotStuck is returned by Cluster.DeadLetterStuckSyncable when the
 // syncable is not currently blocked retrying a transient error on this node
@@ -247,8 +271,29 @@ var ErrWorkerWedged = errors.New("syncable worker did not stop in time (wedged o
 // It is a destructive side effect and therefore owner-gated and live-only —
 // never run on a replaying or non-owner node. Syncables that own no external
 // state do not implement it.
+// ErrDestinationNotOwned refuses a verb that would drop a destination
+// committed did not create (the ownership protocol: delete what we created,
+// leave what we did not). The remedies are the operator's: drop the
+// destination by hand and re-POST, or converge a keyed sink in place.
+var ErrDestinationNotOwned = errors.New("the destination was not created by committed, so it cannot be dropped for a clean rebuild: drop it yourself and re-POST the config, or POST /syncable/{id}/rematerialize to converge a keyed syncable in place")
+
 type Teardownable interface {
-	Teardown() error
+	// Teardown removes the destination state committed OWNS — the tables it
+	// created (recorded next to them at creation), always its helper tables
+	// and node-local stores — and reports whether the destination itself
+	// was dropped. A destination committed attached to rather than created
+	// is left in place (dropped=false, err=nil). keep hands the destination
+	// over instead: ownership is relinquished (committed will not drop it on
+	// a later delete either), nothing is removed, and dropped is false.
+	Teardown(keep bool) (dropped bool, err error)
+	// OwnsDestination is the same question asked BEFORE anything changes:
+	// false when a destination exists that committed did not create — a
+	// Teardown(false) would leave it in place — so a verb that promises a
+	// clean slate (rebuild) can refuse instead of replaying over rows it
+	// cannot remove. A destination that does not exist yet counts as owned:
+	// the re-init creates and claims it. Part of the contract rather than an
+	// optional extension so no sink can tear down without answering it.
+	OwnsDestination(ctx context.Context) (owned bool, err error)
 }
 
 // SyncableUnwrapper is implemented by decorating wrappers (the
@@ -342,6 +387,19 @@ type DependentSyncable struct {
 // implement it contributes no dependents.
 type SyncableTopicExtractor interface {
 	TopicsFromConfig(v *ParsedConfig) []string
+}
+
+// SyncableDerivedTopicExtractor is the optional SyncableParser extension that
+// reports which topics a syncable config PRODUCES — the derivation edges a
+// loopback syncable writes back into the cluster — read straight from the
+// parsed config WITHOUT building the syncable. The propose path and the
+// apply-time build guard walk these edges to keep the derivation graph a DAG
+// (a cycle is an infinite consensus loop) and single-producer per topic (two
+// producers would interleave their refresh-epoch spaces on one topic, so one
+// source's reconciling sweep could erase the other's rows downstream). A
+// parser that does not implement it contributes no edges.
+type SyncableDerivedTopicExtractor interface {
+	DerivedTopicsFromConfig(v *ParsedConfig) []string
 }
 
 // SyncableDatabaseExtractor is the optional SyncableParser extension that reports
@@ -517,6 +575,26 @@ type StageStat struct {
 // Resolved through the Unwrap chain (SyncableAs), so mode wrappers
 // forward it.
 //
+// RenderingStamped is the capability of a sink that holds derived state in
+// its destination — the rendered rows and the helper tables committed keeps
+// beside them. Their shape is chosen by the engine, not the config, so a
+// binary that renders differently must not write into rows rendered by an
+// older one under the same config. The destination carries a STAMP, the
+// rendering version it was last converged under, next to those rows (so it
+// moves, drops, and restores with them). The worker verifies the stamp before
+// it syncs and parks on a mismatch; a rematerialization re-stamps on
+// completion (db/rendering_stamp.go). Resolved through the Unwrap chain
+// (SyncableAs), so mode wrappers forward it.
+type RenderingStamped interface {
+	// RenderingVersion is the version this binary renders.
+	RenderingVersion() uint64
+	// RenderingStamp reads the destination's stamp; present is false when
+	// the destination has never been stamped.
+	RenderingStamp(ctx context.Context) (version uint64, present bool, err error)
+	// StampRendering records RenderingVersion as the destination's stamp.
+	StampRendering(ctx context.Context) error
+}
+
 //counterfeiter:generate . SyncableParser
 type StageRecoverer interface {
 	// StageFrontier reports the highest log index folded into the local
@@ -564,10 +642,18 @@ var syncableIndexType = registerSystemType(&Type{
 type SyncableIndex struct {
 	ID    string
 	Index uint64
+	// InterpretationIndex is the second half of the determinism pair
+	// (data index, interpretation index) a derived checkpoint is pinned to:
+	// the raft index of the last interpretation-registry record (restatement)
+	// folded into the readings this syncable's outputs were derived under.
+	// Same pair ⇒ same output. 0 means "no registry records folded" (a
+	// pre-0.8.0 checkpoint, or a topic no restatement touches). Pre-feature
+	// checkpoints unmarshal as 0.
+	InterpretationIndex uint64
 }
 
 func (i *SyncableIndex) Marshal() ([]byte, error) {
-	li := &clusterpb.LogSyncableIndex{ID: i.ID, Index: i.Index}
+	li := &clusterpb.LogSyncableIndex{ID: i.ID, Index: i.Index, InterpretationIndex: i.InterpretationIndex}
 	return proto.Marshal(li)
 }
 
@@ -580,6 +666,7 @@ func (i *SyncableIndex) Unmarshal(bs []byte) error {
 
 	i.ID = li.ID
 	i.Index = li.Index
+	i.InterpretationIndex = li.InterpretationIndex
 
 	return nil
 }

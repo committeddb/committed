@@ -106,7 +106,7 @@ const sourceChangeCode = "ingestable_source_change_requires_recreate"
 // snapshot.
 //
 // Deliberately NOT flagged: a credential-only connectionString change (same host
-// + database — a routine password rotation); a slot_name change (a recreated
+// + database — a routine password rotation); a slotName change (a recreated
 // Postgres slot self-heals via the re-snapshot branch — the orphaned slot is a
 // resource concern, not data loss); and a tables ADD (additive — the
 // publication / added-table backfill reconciles it in place). A tables REMOVAL

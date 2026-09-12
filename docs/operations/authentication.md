@@ -183,6 +183,14 @@ bearer token, set a third env var:
 COMMITTED_HTTP_TLS_CLIENT_CA_FILE=/etc/committed/client-ca.pem
 ```
 
+Nodes also call each other's API (follower proxying, owner-routed verbs).
+With API TLS on, tell the proxying side how to trust the peer:
+`COMMITTED_HTTP_TLS_CA_FILE` names the CA that signs the API server certs
+(typically the same one), and `COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY=true`
+skips verification for self-signed setups with no shared CA (the same
+escape hatch as `member --insecure`). Under mTLS the node presents its own
+`COMMITTED_HTTP_TLS_CERT_FILE`/`KEY_FILE` as the client certificate.
+
 With that set, the server requires every client to present a cert
 signed by the CA in the named file. A stolen bearer token is useless
 without a client cert that chains to this CA — strictly more secure

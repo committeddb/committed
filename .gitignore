@@ -18,3 +18,8 @@ docker/db
 demo/db
 
 wal.test
+
+# Captured old-binary fixture data dirs (e2e/upgrade): generated on demand by
+# capture-fixture.sh from the pinned release tags and cached locally — real
+# old-binary bytes, but never committed.
+e2e/upgrade/testdata/*/datadir/

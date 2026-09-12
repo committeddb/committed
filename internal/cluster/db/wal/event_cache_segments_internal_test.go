@@ -19,6 +19,7 @@ func TestEventCacheSegments(t *testing.T) {
 	s, err := Open(t.TempDir(), nil, nil, nil)
 	require.NoError(t, err)
 	s.stopScrubWorker()
+	s.stopSealer()
 	require.Equal(t, DefaultEventCacheSegments, s.eventLog.SegmentCacheSize())
 	require.NotEqual(t, DefaultEventCacheSegments, s.EntryLog.SegmentCacheSize(),
 		"the entry log keeps the library default — single sequential reader, no thrash")
@@ -28,6 +29,7 @@ func TestEventCacheSegments(t *testing.T) {
 	s2, err := Open(t.TempDir(), nil, nil, nil, WithEventCacheSegments(5))
 	require.NoError(t, err)
 	s2.stopScrubWorker()
+	s2.stopSealer()
 	defer func() { _ = s2.Close() }()
 	require.Equal(t, 5, s2.eventLog.SegmentCacheSize())
 

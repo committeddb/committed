@@ -60,9 +60,9 @@ func TestPostgresSnapshotResumesAfterTransientError(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		// batch_size 2 over 5 rows = 3 batches, so the injected failure at
+		// batchSize 2 over 5 rows = 3 batches, so the injected failure at
 		// batch 2 lands mid-enumeration with rows on both sides of it.
-		Options: map[string]string{"slot_name": "slot_snapretry1", "publication": "pub_snapretry1", "batch_size": "2"},
+		Options: sql.Options{SlotName: "slot_snapretry1", Publication: "pub_snapretry1", BatchSize: 2},
 	}
 
 	var fired atomic.Bool
@@ -128,7 +128,7 @@ func TestPostgresSlotRecreateRefreshResumesAfterTransientError(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": "slot_snapretry2", "publication": "pub_snapretry2"},
+		Options:          sql.Options{SlotName: "slot_snapretry2", Publication: "pub_snapretry2"},
 	}
 
 	// Phase 1: ingest, stream 'before', capture the commit position that will
@@ -144,23 +144,7 @@ func TestPostgresSlotRecreateRefreshResumesAfterTransientError(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	deadline := time.After(15 * time.Second)
-	seen := map[string]bool{}
-	var lastPos cluster.Position
-	for !seen["before"] || lastPos == nil {
-		select {
-		case p := <-proposalChan1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-positionChan1:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("phase 1: timed out waiting for 'before' + a commit position")
-		}
-	}
+	lastPos := awaitCommit(t, proposalChan1, positionChan1, 15*time.Second, "before").Position
 	cancel1()
 
 	// Drop the slot and insert 'gap' — the row only a re-snapshot can recover.
@@ -184,7 +168,7 @@ func TestPostgresSlotRecreateRefreshResumesAfterTransientError(t *testing.T) {
 	go func() { _ = d.Ingest(ctx2, config, lastPos, 0, proposalChan2, positionChan2) }()
 	waitForSlot(t, "slot_snapretry2")
 
-	deadline = time.After(30 * time.Second)
+	deadline := time.After(30 * time.Second)
 	genByKey := map[string]uint64{}
 	sawMarker := false
 	var markerEpoch uint64
@@ -238,7 +222,7 @@ func TestPostgresAddedTableBackfillResumesAfterTransientError(t *testing.T) {
 			PrimaryKey:       []string{"pk"},
 			ConnectionString: connString,
 			Tables:           tables,
-			Options:          map[string]string{"slot_name": "slot_snapretry3", "publication": "pub_snapretry3"},
+			Options:          sql.Options{SlotName: "slot_snapretry3", Publication: "pub_snapretry3"},
 		}
 	}
 
@@ -256,23 +240,7 @@ func TestPostgresAddedTableBackfillResumesAfterTransientError(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	deadline := time.After(15 * time.Second)
-	seen := map[string]bool{}
-	var lastPos cluster.Position
-	for !seen["a1"] || lastPos == nil {
-		select {
-		case p := <-proposalChan1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-positionChan1:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("phase 1: timed out waiting for 'a1' + a commit position")
-		}
-	}
+	lastPos := awaitCommit(t, proposalChan1, positionChan1, 15*time.Second, "a1").Position
 	cancel1()
 
 	// Pre-populate table B: these rows exist before B joins the publication, so
@@ -296,8 +264,8 @@ func TestPostgresAddedTableBackfillResumesAfterTransientError(t *testing.T) {
 		_ = d.Ingest(ctx2, mkConfig([]string{tableA, tableB}), lastPos, 0, proposalChan2, positionChan2)
 	}()
 
-	deadline = time.After(30 * time.Second)
-	seen = map[string]bool{}
+	deadline := time.After(30 * time.Second)
+	seen := map[string]bool{}
 	sawMarker := false
 	for !seen["b1"] || !seen["b2"] {
 		select {
@@ -388,9 +356,9 @@ func TestPostgresAddedTableBackfillResumesAcrossRestart(t *testing.T) {
 			PrimaryKey:       []string{"pk"},
 			ConnectionString: connString,
 			Tables:           tables,
-			// batch_size 1 so the backfill checkpoints after every row — the
+			// batchSize 1 so the backfill checkpoints after every row — the
 			// "crash" below needs a persisted MID-backfill position.
-			Options: map[string]string{"slot_name": "slot_snapretry4", "publication": "pub_snapretry4", "batch_size": "1"},
+			Options: sql.Options{SlotName: "slot_snapretry4", Publication: "pub_snapretry4", BatchSize: 1},
 		}
 	}
 
@@ -408,23 +376,7 @@ func TestPostgresAddedTableBackfillResumesAcrossRestart(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	deadline := time.After(15 * time.Second)
-	seen := map[string]bool{}
-	var lastPos cluster.Position
-	for !seen["a1"] || lastPos == nil {
-		select {
-		case p := <-pr1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-po1:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("phase 1: timed out waiting for 'a1' + a commit position")
-		}
-	}
+	lastPos := awaitCommit(t, pr1, po1, 15*time.Second, "a1").Position
 	cancel1()
 
 	// Rows only a backfill can deliver.
@@ -460,7 +412,7 @@ func TestPostgresAddedTableBackfillResumesAcrossRestart(t *testing.T) {
 	// (Proposal.Position; see handOffSnapshotWindow) — the po channel only
 	// carries streaming checkpoints. b1's single-row batch is the window end,
 	// so its proposal carries the mid-backfill cursor we crash on.
-	deadline = time.After(30 * time.Second)
+	deadline := time.After(30 * time.Second)
 	var midPos cluster.Position
 	for midPos == nil {
 		select {
@@ -508,7 +460,7 @@ func TestPostgresAddedTableBackfillResumesAcrossRestart(t *testing.T) {
 		_ = (&postgres.PostgreSQLDialect{}).Ingest(ctx3, mkConfig([]string{tableA, tableB}), midPos, 0, pr3, po3)
 	}()
 
-	seen = map[string]bool{}
+	seen := map[string]bool{}
 	sawMarker := false
 	deadline = time.After(30 * time.Second)
 	for !seen["b2"] || !seen["b3"] {

@@ -15,6 +15,11 @@ import (
 // SyncableParser parses sql syncable TOML. Metrics is optional (nil
 // skips instrumentation); when set, entity-kind-misuse parses are
 // counted on committed.entity_kind.misuse alongside the warning log.
+// syncableSQLKeys is the syncable [sql] vocabulary: what ParseConfig,
+// SchemaFromConfig, TopicsFromConfig, and DatabasesFromConfig read. Pinned
+// to those reads by the vocabulary conformance test.
+var syncableSQLKeys = []string{"db", "topic", "table", "keyColumn", "primaryKey", "mappings", "indexes"}
+
 type SyncableParser struct {
 	Metrics *metrics.Metrics
 }
@@ -87,6 +92,9 @@ func (p *SyncableParser) SchemaFromConfig(v *cluster.ParsedConfig, _ cluster.Dat
 }
 
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*Config, error) {
+	if err := v.RejectUnknownKeys("sql", syncableSQLKeys...); err != nil {
+		return nil, err
+	}
 	sqlDB := v.GetString("sql.db")
 	if sqlDB == "" {
 		return nil, &cluster.FieldError{Field: "sql.db", Issue: "required (name a [database] config)"}

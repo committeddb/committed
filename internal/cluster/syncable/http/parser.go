@@ -10,6 +10,10 @@ import (
 // SyncableParser parses TOML configuration into an HTTP webhook Syncable.
 type SyncableParser struct{}
 
+// httpKeys is the [http] vocabulary (ParseConfig's and TopicsFromConfig's
+// reads), pinned by the vocabulary conformance test.
+var httpKeys = []string{"topic", "url", "method", "timeoutMs", "headers"}
+
 func (p *SyncableParser) Parse(v *cluster.ParsedConfig, _ cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v)
 	if err != nil {
@@ -30,6 +34,9 @@ func (p *SyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []string {
 }
 
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
+	if err := v.RejectUnknownKeys("http", httpKeys...); err != nil {
+		return nil, err
+	}
 	topic := v.GetString("http.topic")
 	if topic == "" {
 		return nil, fmt.Errorf("[http.syncable-parser] http.topic is required")

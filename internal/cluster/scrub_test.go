@@ -18,7 +18,7 @@ func TestScrubRoundTrip(t *testing.T) {
 }
 
 func TestNewScrubEntity(t *testing.T) {
-	e, err := NewScrubEntity(99)
+	e, err := NewScrubEntity(99, false)
 	require.Nil(t, err)
 	require.True(t, IsScrub(e.Type.ID))
 	require.True(t, IsInternal(e.Type.ID), "scrub is a built-in/internal type, hidden from syncables")

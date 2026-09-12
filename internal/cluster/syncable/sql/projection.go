@@ -64,6 +64,11 @@ type Projection struct {
 	// creating event was scrubbed before a fresh replay, surviving events build a
 	// partial row and the scrub's delete Actual removes it.
 	delete *Delete
+	// syncIndex is the Index of the Actual currently being applied — the
+	// ambiguity trackers' distinct-row identity (see cluster.AmbiguityTracker).
+	// Worker-goroutine-only state, set per Actual in Sync/SyncBatch, exactly
+	// like projectionSource.unmatchedRun.
+	syncIndex uint64
 }
 
 // projectionUnmatchedWarnRun is how many CONSECUTIVE unmatched events a
@@ -82,7 +87,11 @@ type projectionSource struct {
 	// with the projection's PrimaryKey columns (one path for a single key,
 	// several for a composite).
 	keyPaths []string
-	onDelete string
+	// keyTrackers classify each keyPath's extraction failures (entry-specific
+	// vs config-shaped), positionally aligned with keyPaths. See
+	// cluster.AmbiguityTracker.
+	keyTrackers cluster.AmbiguityTrackers
+	onDelete    string
 	// when is the source-level filter (empty = consume every event of the
 	// topic), evaluated on upsert before the rules/aggregate apply. For a
 	// stage-fed source a live delta that FAILS it is a retraction, not a
@@ -129,8 +138,11 @@ type projectionSource struct {
 type aggregateRuntime struct {
 	column     string
 	elementKey string
-	fields     []ProjectionElementField // plain fields only (stored in the sidecar)
-	sidecar    string
+	// elementKeyTracker classifies elementKey extraction failures; the
+	// per-field trackers live on fields (see cluster.AmbiguityTracker).
+	elementKeyTracker *cluster.AmbiguityTracker
+	fields            []ProjectionElementField // plain fields only (stored in the sidecar)
+	sidecar           string
 
 	upsertSidecar    *gosql.Stmt
 	upsertSidecarSQL string
@@ -222,6 +234,11 @@ type projectionStmt struct {
 	rule ProjectionRule
 	SQL  string
 	Stmt *gosql.Stmt
+	// setTrackers classify each set entry's From-extraction failures
+	// (entry-specific vs config-shaped — see cluster.AmbiguityTracker),
+	// positionally aligned with rule.Set. Runtime state kept off the
+	// config struct so parsed configs stay pure data.
+	setTrackers cluster.AmbiguityTrackers
 }
 
 // NewProjection constructs a Projection. m may be nil (no metrics);
@@ -258,33 +275,25 @@ func projectionIdentity(c *ProjectionConfig) SyncableIdentity {
 // reconstructable from the persisted config alone (it needs only the table
 // name + DB handle), which is what the delete/rebuild paths rely on. It never
 // touches prepared statements or the connection pool; call Close for those.
-func (p *Projection) Teardown() error {
+func (p *Projection) Teardown(keep bool) (bool, error) {
 	// Self-bounded — see Syncable.Teardown for the rationale.
 	ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
 	defer cancel()
 
 	p.config.applyDefaults()
-	// Drop each aggregate source's sidecar, then the projection table. Order is
-	// not load-bearing (DROP IF EXISTS is independent), but dropping sidecars
-	// first keeps teardown's footprint a strict subset of Init's.
-	for _, src := range p.config.Sources {
-		var housekeeping string
-		switch {
-		case src.Aggregate != nil:
-			housekeeping = sidecarName(p.config.Table, src.Aggregate.Column)
-		case src.Lookup != nil:
-			housekeeping = dimensionName(p.config.Table, src.Lookup.Name)
-		case src.ForEach != "":
-			// The forEach reconciliation sidecar: left behind, a rebuilt
-			// projection would inherit stale parent→element mappings and
-			// mis-reconcile from its first event.
-			housekeeping = ForEachSidecarName(p.config.Table, src.Topic)
-		default:
-			continue
-		}
-		drop := p.dialect.DropDDL(&Config{Table: housekeeping})
+	if keep {
+		return false, disown(ctx, p.db, p.dialect, p.config.Table)
+	}
+	// Drop every table the projection keeps (the same list Init's phase one
+	// creates — a left-behind sidecar would make a rebuilt projection inherit
+	// stale state and mis-reconcile from its first event), then the
+	// projection table. Order is not load-bearing (DROP IF EXISTS is
+	// independent), but dropping the kept tables first keeps teardown's
+	// footprint a strict subset of Init's.
+	for _, kt := range p.keptTables() {
+		drop := p.dialect.DropDDL(&Config{Table: kt.name})
 		if _, err := p.db.ExecContext(ctx, drop); err != nil {
-			return fmt.Errorf("teardown [%s]: %w", drop, err)
+			return false, fmt.Errorf("teardown [%s]: %w", drop, err)
 		}
 	}
 	// The stage store is part of the destination state a teardown erases:
@@ -298,16 +307,27 @@ func (p *Projection) Teardown() error {
 		}
 		if p.storeDir != "" {
 			if err := os.Remove(stagestore.FilePath(p.storeDir, p.name)); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("teardown stage store: %w", err)
+				return false, fmt.Errorf("teardown stage store: %w", err)
 			}
 		}
 	}
 
+	// The main table is committed's to drop only if committed created it;
+	// its helper tables and stage store above are always committed's.
+	note, present, err := readNote(ctx, p.db, p.dialect, p.config.Table)
+	if err != nil {
+		return false, err
+	}
+	if !present || !note.owned {
+		return false, nil // attached: the table stays, and so does its note
+	}
 	dropString := p.dialect.DropDDL(p.config.ddlConfig())
 	if _, err := p.db.ExecContext(ctx, dropString); err != nil {
-		return fmt.Errorf("teardown [%s]: %w", dropString, err)
+		return false, fmt.Errorf("teardown [%s]: %w", dropString, err)
 	}
-	return nil
+	// The note described the rows just dropped; a recreated table must not
+	// inherit it.
+	return true, deleteNote(ctx, p.db, p.dialect, p.config.Table)
 }
 
 func (p *Projection) Init() error {
@@ -344,35 +364,33 @@ func (p *Projection) Init() error {
 	p.initCtx = ctx
 
 	ddlConfig := p.config.ddlConfig()
+	// Ownership: probe before the create (IF NOT EXISTS cannot say whether it
+	// created), claim the table only if it was absent — see Syncable.Init.
+	existed, err := p.dialect.TableExists(ctx, p.db, p.config.Table)
+	if err != nil {
+		return fmt.Errorf("probe %s: %w", p.config.Table, err)
+	}
 	ddlString := p.dialect.CreateDDL(ddlConfig)
 	if _, err := p.db.ExecContext(ctx, ddlString); err != nil {
 		return fmt.Errorf("ddl [%s]: %w", ddlString, err)
 	}
-
-	// Dimension-DDL pre-pass: enriched RULE statements subquery dimension
-	// tables at prepare time, and a rule source may precede its lookup source
-	// in manifest order — so every dimension table must exist before any rule
-	// prepares. initLookup's own DDL exec later is IF NOT EXISTS-idempotent.
-	// Conditional on enrichment so an enrichment-free config's SQL traffic
-	// stays byte-identical to before the feature (compat, and the sqlmock
-	// suites pin exact sequences).
-	hasEnrichment := false
-	for _, src := range p.config.Sources {
-		for _, r := range src.Rules {
-			for _, s := range r.Set {
-				if s.IsEnrichment() {
-					hasEnrichment = true
-				}
-			}
-		}
+	if err := claimIfCreated(ctx, p.db, p.dialect, p.config.Table, existed); err != nil {
+		return err
 	}
-	for _, src := range p.config.Sources {
-		if !hasEnrichment || src.Lookup == nil {
-			continue
-		}
-		dimDDL := p.dialect.CreateLookupDimensionDDL(p.config.lookupSpec(src.Lookup))
-		if _, err := p.db.ExecContext(ctx, dimDDL); err != nil {
-			return fmt.Errorf("dimension ddl [%s]: %w", dimDDL, err)
+
+	// Phase one: every table this projection keeps — the lookup dimensions,
+	// the aggregate and forEach sidecars — exists before any statement is
+	// prepared. Prepared statements reference tables across sources (an
+	// enriched rule or element field subqueries a dimension; a lookup's
+	// fan-out reads an aggregate's sidecar), and sources come in manifest
+	// order, so ordering the work by KIND rather than by source removes the
+	// dependency structurally: nothing has to enumerate which construct
+	// references which table, and a construct added later inherits the
+	// guarantee. The per-source initializers below prepare only, so a
+	// config's DDL count is unchanged — only its position.
+	for _, kt := range p.keptTables() {
+		if _, err := p.db.ExecContext(ctx, kt.create); err != nil {
+			return fmt.Errorf("%s ddl [%s]: %w", kt.name, kt.create, err)
 		}
 	}
 
@@ -426,7 +444,8 @@ func (p *Projection) Init() error {
 		ps := &projectionSource{
 			topic: src.Topic, keyPaths: src.KeyPath, onDelete: src.OnDelete, when: src.When,
 			fromStage: src.FromStage, rowOwner: src.RowOwner, normalize: src.Normalize,
-			updateOnly: ownerDeclared && !src.RowOwner && src.FromStage != "",
+			updateOnly:  ownerDeclared && !src.RowOwner && src.FromStage != "",
+			keyTrackers: cluster.NewAmbiguityTrackers(len(src.KeyPath)),
 		}
 		// Register ps NOW, before preparing its statements, so a partway failure
 		// leaves the statements it did prepare reachable from p.sources for the
@@ -486,7 +505,7 @@ func (p *Projection) Init() error {
 				if err != nil {
 					return fmt.Errorf("prepare source %d (topic %q) rule %d sql [%s]: %w", si+1, src.Topic, i+1, sqlString, err)
 				}
-				ps.rules = append(ps.rules, &projectionStmt{rule: r, SQL: sqlString, Stmt: stmt})
+				ps.rules = append(ps.rules, &projectionStmt{rule: r, SQL: sqlString, Stmt: stmt, setTrackers: cluster.NewAmbiguityTrackers(len(r.Set))})
 			}
 			if src.OnDelete == onDeleteClear {
 				ps.clearSQL = p.dialect.CreateClearSQL(ddlConfig, src.ownedColumns())
@@ -590,15 +609,19 @@ func (p *Projection) initLookup(si int, src ProjectionSource) (*lookupRuntime, e
 	spec := p.config.lookupSpec(lk)
 	where := fmt.Sprintf("source %d (topic %q) lookup %q", si+1, src.Topic, lk.Name)
 
-	ddl := p.dialect.CreateLookupDimensionDDL(spec)
-	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
-		return nil, fmt.Errorf("%s dimension ddl [%s]: %w", where, ddl, err)
-	}
-
+	// The dimension table already exists: Init's phase one created every
+	// lookup's dimension before any source initialized. This initializer
+	// prepares only.
 	rt := &lookupRuntime{
-		name:      lk.Name,
-		fields:    lk.Fields,
+		name: lk.Name,
+		// A copy: the trackers attached below are runtime state, and the
+		// parsed config must stay pure data (aggregates get the same
+		// property from plainElementFields' filtered copy).
+		fields:    append([]ProjectionElementField(nil), lk.Fields...),
 		dimension: spec.Dimension,
+	}
+	for i := range rt.fields {
+		rt.fields[i].tracker = cluster.NewAmbiguityTracker()
 	}
 	// A partway failure below leaves rt unreturned (never stored on its source),
 	// so Projection.Close can't reach its statements — close them here.
@@ -632,16 +655,13 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 	ag := src.Aggregate
 	where := fmt.Sprintf("source %d (topic %q) aggregate %q", si+1, src.Topic, ag.Column)
 
-	ddl := p.dialect.CreateAggregateSidecarDDL(spec)
-	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
-		return nil, fmt.Errorf("%s sidecar ddl [%s]: %w", where, ddl, err)
-	}
-
+	// The sidecar exists: Init's phase one created it. Prepares only.
 	rt := &aggregateRuntime{
-		column:     ag.Column,
-		elementKey: ag.ElementKey,
-		fields:     plainElementFields(ag.Element), // enriched fields are joined in, not stored
-		sidecar:    spec.Sidecar,
+		column:            ag.Column,
+		elementKey:        ag.ElementKey,
+		elementKeyTracker: cluster.NewAmbiguityTracker(),
+		fields:            plainElementFields(ag.Element), // enriched fields are joined in, not stored
+		sidecar:           spec.Sidecar,
 		// materialize and rebuild carry one parent-key placeholder per value
 		// column plus one (the inserted key / the WHERE) — bind the parent
 		// key that many times, whichever dialect rendered the statement.
@@ -649,6 +669,9 @@ func (p *Projection) initAggregate(si int, src ProjectionSource, spec AggregateS
 	}
 	if spec.Column != "" {
 		rt.parentBinds++
+	}
+	for i := range rt.fields {
+		rt.fields[i].tracker = cluster.NewAmbiguityTracker()
 	}
 	// A partway failure below leaves rt unreturned (never stored on its source),
 	// so Projection.Close can't reach its statements — close them here.
@@ -709,6 +732,7 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 	if !relevant {
 		return false, nil
 	}
+	p.syncIndex = a.Index
 
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -794,6 +818,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 		committed := false
 		berr := p.stageStore.Update(func(stx *stagestore.Tx) error {
 			for _, a := range as {
+				p.syncIndex = a.Index
 				if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
 					return err
 				}
@@ -822,6 +847,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	}
 
 	for _, a := range as {
+		p.syncIndex = a.Index
 		for _, e := range a.Entities {
 			for _, src := range p.sources[e.Type.ID] {
 				if err := p.applyEntity(ctx, tx, nil, src, e); err != nil {
@@ -881,7 +907,7 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, stx *stagest
 		// gap's source-side deletes are not reflected, and recovery is a rebuild.
 		// The initial snapshot (generation 1) has nothing to reconcile, so stay quiet.
 		if e.Generation > 1 {
-			zap.L().Warn("refresh boundary on a projection sink is NOT reconciled: a re-snapshot recovered a source gap, so rows the source deleted in that window (RTBF/GDPR erasures among them) remain here. A rebuild does NOT fix this (the delete was never captured, and the marker no-ops on replay too) — manual reconciliation is required (and manual erasure of any source-side-forgotten subject) until projection reconciliation is implemented.",
+			zap.L().Warn("refresh boundary on a projection is NOT reconciled: a re-snapshot recovered a source gap, so rows the source deleted in that window (RTBF/GDPR erasures among them) remain here. A rebuild does NOT fix this (the delete was never captured, and the marker no-ops on replay too) — manual reconciliation is required (and manual erasure of any source-side-forgotten subject) until projection reconciliation is implemented.",
 				zap.String("syncable", p.name), zap.String("topic", e.Type.ID), zap.Uint64("generation", e.Generation))
 		}
 		return nil
@@ -990,15 +1016,49 @@ func (p *Projection) applyEntity(ctx context.Context, tx *gosql.Tx, stx *stagest
 // each value coerced to its primary-key column's declared type — shared by
 // applyRowFold and the row owner's decoration pull.
 func (p *Projection) resolveRowKeys(src *projectionSource, data, parent any) ([]any, error) {
-	keys := make([]any, len(src.keyPaths))
-	for i, kp := range src.keyPaths {
-		v, err := resolveScopedPath(kp, data, parent)
-		if err != nil {
-			return nil, cluster.Permanent(fmt.Errorf("[projection.apply] keyPath [%s]: %w", kp, err))
-		}
-		keys[i] = stages.NormalizeKeyValue(src.normalize, coerceForColumn(v, p.columnType(p.config.PrimaryKey[i])))
+	keys, err := p.resolveKeyValues(src, data, parent, "[projection.apply]")
+	if err != nil {
+		return nil, err
+	}
+	for i := range keys {
+		// Coercion is per destination column; the fold happened in the
+		// resolver. NormalizeKeyValue only touches strings, so folding
+		// before coercing is the same as after.
+		keys[i] = coerceForColumn(keys[i], p.columnType(p.config.PrimaryKey[i]))
 	}
 	return keys, nil
+}
+
+// resolveKeyValues is THE extraction of a source's key from a payload: each
+// keyPath resolved (tracker-classified on failure) and folded through the
+// source's normalize. Every payload-keyed write — rule rows, the aggregate
+// parent — obtains its key here, and the tombstone path folds through the
+// same foldKeys, so no site can bind a key the source's normalize never saw
+// (the aggregate path once did, and "TT1" and "tt1" became two rows).
+func (p *Projection) resolveKeyValues(src *projectionSource, data, parent any, where string) ([]any, error) {
+	keys := make([]any, len(src.keyPaths))
+	for i, kp := range src.keyPaths {
+		tr := src.keyTrackers.At(i)
+		v, err := resolveScopedPath(kp, data, parent)
+		if err != nil {
+			// Entry-specific (this matched row is missing its key field) or a
+			// keyPath typo failing every matched row — the tracker classifies
+			// from this path's own history (see cluster.AmbiguityTracker).
+			return nil, tr.Classify(p.syncIndex, fmt.Errorf("%s keyPath [%s]: %w", where, kp, err))
+		}
+		tr.Succeeded()
+		keys[i] = v
+	}
+	return src.foldKeys(keys), nil
+}
+
+// foldKeys applies the source's normalize to key values in place and
+// returns them: the one fold every row-key binding shares.
+func (src *projectionSource) foldKeys(keys []any) []any {
+	for i, v := range keys {
+		keys[i] = stages.NormalizeKeyValue(src.normalize, v)
+	}
+	return keys
 }
 
 // applyRowFold matches src's rules against data and applies the matched
@@ -1039,13 +1099,20 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 		// enrichment entries need their on column's COERCED value (pass 2), so
 		// the plain values must exist first regardless of Set order.
 		plain := make(map[string]any, len(r.rule.Set))
-		for _, s := range r.rule.Set {
+		for k, s := range r.rule.Set {
+			tr := r.setTrackers.At(k)
 			switch {
 			case s.From != "":
 				v, err := resolveScopedPath(s.From, data, parent)
 				if err != nil {
-					return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
+					// The set-path ambiguity: absent in this row vs a typo
+					// failing every row this rule matches. Per-site history
+					// classifies (see cluster.AmbiguityTracker) — successes of
+					// rows this rule never matched don't mask a path that fails
+					// every row it is actually evaluated against.
+					return true, "", tr.Classify(p.syncIndex, fmt.Errorf("[projection.apply] jsonpath [%s]: %w", s.From, err))
 				}
+				tr.Succeeded()
 				plain[s.Column] = coerceForColumn(v, p.columnType(s.Column))
 			case s.Expr != "":
 				v, err := evalExpr(s.compiled, data, parent)
@@ -1158,14 +1225,15 @@ func (p *Projection) applyDelete(ctx context.Context, tx *gosql.Tx, src *project
 			"[projection.apply] delete tombstone key does not decode for this projection's %d-column primaryKey (topic %q) — producer and projection key shapes disagree: %w",
 			n, src.topic, derr))
 	}
-	args := make([]any, len(keyVals))
+	// The tombstone carries the PRODUCER's key rendering; the rows were
+	// keyed through the source's normalize — bind through the same fold or
+	// an UPPERCASE tombstone silently misses the lowercased row (the worst
+	// outcome for an RTBF delete).
+	vals := make([]any, len(keyVals))
 	for i, v := range keyVals {
-		// The tombstone carries the PRODUCER's key rendering; the rows
-		// were keyed through the source's normalize — bind through the
-		// same fold or an UPPERCASE tombstone silently misses the
-		// lowercased row (the worst outcome for an RTBF delete).
-		args[i] = stages.NormalizeKeyValue(src.normalize, v)
+		vals[i] = v
 	}
+	args := src.foldKeys(vals)
 	if _, err := tx.StmtContext(ctx, stmt).ExecContext(ctx, args...); err != nil {
 		return execFailure(fmt.Sprintf("[projection.apply] exec [%s]", sqlStr), err, p.dialect.IsPermanent(err))
 	}
@@ -1189,11 +1257,15 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 	if len(src.keyPaths) == 0 {
 		return cluster.Permanent(fmt.Errorf("[projection.aggregate] no keyPath configured (topic %q)", src.topic))
 	}
-	parentKey, err := jsonpath.Get(src.keyPaths[0], jsonData)
+	// The parent key is this source's row key, obtained the way every
+	// payload-keyed write obtains its key (extraction + the source's
+	// normalize). It is bound as text — the sidecar's parent_key column is
+	// text — so the per-column coercion resolveRowKeys adds does not apply.
+	keys, err := p.resolveKeyValues(src, jsonData, nil, "[projection.aggregate]")
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[projection.aggregate] keyPath [%s]: %w", src.keyPaths[0], err))
+		return err
 	}
-
+	parentKey := keys[0]
 	// Capture the child's prior parent before the sidecar upsert overwrites it. A
 	// child re-delivered under a different parent (re-parenting) must have its old
 	// parent rebuilt too, or that parent's array keeps an element the child no
@@ -1205,14 +1277,16 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 
 	elementKey, err := jsonpath.Get(ag.elementKey, jsonData)
 	if err != nil {
-		return cluster.Permanent(fmt.Errorf("[projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
+		return ag.elementKeyTracker.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
 	}
+	ag.elementKeyTracker.Succeeded()
 	element := make(map[string]any, len(ag.fields))
 	for _, f := range ag.fields {
 		v, err := jsonpath.Get(f.From, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
+			return f.tracker.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
 		}
+		f.tracker.Succeeded()
 		element[f.Field] = v
 	}
 	elementJSON, err := json.Marshal(element)
@@ -1271,17 +1345,40 @@ func (p *Projection) removeFromAggregate(ctx context.Context, tx *gosql.Tx, src 
 // shape (child_key PK, parent_key indexed; element columns unused) so it
 // adds zero DDL surface; its name derives from the source topic, stable
 // across config edits that reorder sources.
+// keptTable is one table a projection keeps beside its own — a lookup's
+// dimension, an aggregate's or a forEach's sidecar. Init's phase one creates
+// every one before any source prepares; Teardown drops every one. Both read
+// this list, so which tables a source keeps is stated exactly once: a
+// construct that keeps a table registers it here and is thereby created
+// early and torn down, or it is neither.
+type keptTable struct {
+	name   string
+	create string
+}
+
+func (p *Projection) keptTables() []keptTable {
+	var out []keptTable
+	for _, src := range p.config.Sources {
+		switch {
+		case src.Lookup != nil:
+			spec := p.config.lookupSpec(src.Lookup)
+			out = append(out, keptTable{name: spec.Dimension, create: p.dialect.CreateLookupDimensionDDL(spec)})
+		case src.Aggregate != nil:
+			spec := p.config.aggregateSpec(src.Aggregate)
+			out = append(out, keptTable{name: spec.Sidecar, create: p.dialect.CreateAggregateSidecarDDL(spec)})
+		case src.ForEach != "":
+			spec := p.config.forEachSidecarSpec(src)
+			out = append(out, keptTable{name: spec.Sidecar, create: p.dialect.CreateAggregateSidecarDDL(spec)})
+		}
+	}
+	return out
+}
+
 func (p *Projection) initForEach(si int, src ProjectionSource) (*forEachRuntime, error) {
 	where := fmt.Sprintf("source %d (topic %q) forEach", si+1, src.Topic)
 	sidecar := ForEachSidecarName(p.config.Table, src.Topic)
 
-	ddl := p.dialect.CreateAggregateSidecarDDL(AggregateSpec{
-		Table: p.config.Table, PrimaryKey: p.config.PrimaryKey[0], Sidecar: sidecar,
-	})
-	if _, err := p.db.ExecContext(p.initCtx, ddl); err != nil {
-		return nil, fmt.Errorf("%s sidecar ddl [%s]: %w", where, ddl, err)
-	}
-
+	// The sidecar exists: Init's phase one created it. Prepares only.
 	rt := &forEachRuntime{sidecar: sidecar}
 	success := false
 	defer func() {
@@ -1689,8 +1786,9 @@ func (p *Projection) applyLookup(ctx context.Context, tx *gosql.Tx, src *project
 	for _, f := range lk.fields {
 		v, err := jsonpath.Get(f.From, jsonData)
 		if err != nil {
-			return cluster.Permanent(fmt.Errorf("[projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
+			return f.tracker.Classify(p.syncIndex, fmt.Errorf("[projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
 		}
+		f.tracker.Succeeded()
 		fields[f.Field] = v
 	}
 	fieldsJSON, err := json.Marshal(fields)

@@ -123,21 +123,24 @@ func TestFlushPending_FlagsRechunkSoftFlush(t *testing.T) {
 
 	t.Run("changed + soft-flush is flagged", func(t *testing.T) {
 		h, ch := newHandler(true)
-		require.NoError(t, h.flushPending(context.Background(), true))
+		_, ferr := h.flushPending(context.Background(), true, nil)
+		require.NoError(t, ferr)
 		require.True(t, (<-ch).DedupUnsafe,
 			"a soft-flush replayed under changed chunking must be flagged DedupUnsafe")
 	})
 
 	t.Run("changed + commit flush is not flagged", func(t *testing.T) {
 		h, ch := newHandler(true)
-		require.NoError(t, h.flushPending(context.Background(), false))
+		_, ferr := h.flushPending(context.Background(), false, nil)
+		require.NoError(t, ferr)
 		require.False(t, (<-ch).DedupUnsafe,
 			"the commit flush needs no flag — a replay trips on an earlier soft-flush first")
 	})
 
 	t.Run("unchanged + soft-flush is not flagged", func(t *testing.T) {
 		h, ch := newHandler(false)
-		require.NoError(t, h.flushPending(context.Background(), true))
+		_, ferr := h.flushPending(context.Background(), true, nil)
+		require.NoError(t, ferr)
 		require.False(t, (<-ch).DedupUnsafe,
 			"no chunking change must never flag — ordinary oversized flushes must not freeze")
 	})

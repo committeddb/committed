@@ -179,6 +179,13 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 				if err := s.recordEventTombstone(entity.Type.ID, entity.Key, entry.GetIndex()); err != nil {
 					return false, fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
 				}
+				// Track the retained delete's index (no subject data) for the
+				// delete-key erasure cadence — reconciled at scrub completion.
+				if !cluster.IsErasedKey(entity.Key) {
+					if err := s.recordUnhashedDelete(entry.GetIndex()); err != nil {
+						return false, fmt.Errorf("[wal.storage] recordUnhashedDelete: %w", err)
+					}
+				}
 			}
 
 			// Count an applied EntityKindSnapshot entity as metadata-GC backlog so
@@ -214,7 +221,15 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 		// committed proposal) and done before saveAppliedIndex so a
 		// replayed entry re-applies the idempotent max. Non-ingest
 		// proposals carry "" / 0 and no-op here.
-		if err := s.advanceIngestSourceSeq(p.IngestableID, p.SourceSeq); err != nil {
+		// The dedup record scopes by transaction ONLY for dialects that
+		// opted in (their resume granularity is per-transaction — see
+		// cluster.Proposal.TxnScopedDedup); everything else folds under the
+		// legacy scalar semantics, SourceTxnID notwithstanding.
+		dedupTxn := ""
+		if p.TxnScopedDedup {
+			dedupTxn = p.SourceTxnID
+		}
+		if err := s.advanceIngestSourceSeq(p.IngestableID, p.SourceSeq, dedupTxn); err != nil {
 			return false, fmt.Errorf("[wal.storage] advanceIngestSourceSeq: %w", err)
 		}
 

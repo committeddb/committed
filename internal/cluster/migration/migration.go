@@ -93,6 +93,21 @@ func Chain(ctx context.Context, r Resolver, typeID string, stampedVersion, lates
 		if err != nil {
 			return nil, fmt.Errorf("migration chain: fetch type %s@%d: %w", typeID, v, err)
 		}
+		// A non-convertible step is a declared impossibility, not a missing
+		// program: v requires information v-1 actuals never contained.
+		// Failing here (→ a replayable dead letter) is the honest floor —
+		// the empty-Migration skip below would silently deliver UNCONVERTED
+		// old data as if current, the exact promise-break the intent exists
+		// to name. Admission refuses always-current syncables across a
+		// declared break, so this fires only for a syncable force-stranded
+		// after admission; a restatement that later rebinds the old range heals
+		// it, and the dead letters replay.
+		if t.NonConvertible {
+			return nil, &Error{
+				TypeID: typeID, FromVersion: v - 1, ToVersion: v,
+				Err: fmt.Errorf("version %d is declared nonConvertible: v%d data cannot be upgraded (remaining stances: version-pinned or version-aware; or rebind the reading with a restatement and replay the dead letters)", v, v-1),
+			}
+		}
 		if len(t.Migration) == 0 {
 			continue
 		}

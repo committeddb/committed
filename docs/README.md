@@ -26,29 +26,39 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
 
 ## Operations
 
-- [CDC setup](operations/cdc-setup.md) — point ingest at your own Postgres or
-  MySQL: the source-side settings, what committed creates, and common failures.
+- [CDC setup](operations/cdc-setup.md) — point ingest at your own Postgres,
+  MySQL, or SQL Server: the source-side settings, what committed creates, and
+  common failures.
+- [Zone-pinned syncables](operations/zones.md) — keep sync egress inside a
+  zone, and what a strict pin does when its node is down.
+- [Iceberg syncable](operations/iceberg-syncable.md) — a current-state
+  Iceberg table on S3 as a destination: config, catalogs, and maintenance.
 - [Cluster membership](operations/membership.md) — add, remove, and grow nodes
   safely, and read cluster state.
+- [Performance envelope](operations/performance.md) — the write/apply/catch-up
+  rates to plan around, and how to re-measure them on your hardware.
 - [Metrics & observability](operations/metrics.md) — turn on metrics (OTLP push,
   no scrape endpoint), bridge to Prometheus, and the full metric catalog.
 - [Disk limits](operations/disk-limits.md) — how the cluster protects itself as
   disks fill, the thresholds and metrics, and the incident playbook.
 - [Stuck syncables](operations/stuck-syncables.md) — spot a syncable that's
   wedged or lagging, skip a bad record, and replay it after a fix.
-- [Rebuilding a node](operations/rebuild.md) — recover a node that fell too far
-  behind or lost its disk by copying from a healthy peer.
+- [Rebuilding a node](operations/rebuild.md) — a node that fell behind catches
+  up by itself; replace one whose disk or state cannot be trusted.
 - [Safe mode](operations/safe-mode.md) — boot with workers held to break a
   crashloop: inspect and delete/fix the offending config over the API, then
   restart normally.
-- [Backup and restore](operations/backup.md) — archive a stopped node to a
-  portable tarball for disaster recovery and total-loss rebuilds.
+- [Backup and restore](operations/backup.md) — archive a node, stopped or
+  live, to a portable tarball for disaster recovery and total-loss rebuilds.
 - [Rolling upgrades](operations/upgrade.md) — upgrade node-by-node with no
   downtime, and roll back if needed.
 - [Authentication](operations/authentication.md) — turn on the bearer token, API
   TLS, and peer mTLS.
 - [Secrets](operations/secrets.md) — keep database passwords and tokens out of
   the log with `${VAR}` config interpolation.
+- [Right-to-be-forgotten erasure](operations/rtbf.md) — issue subject deletes,
+  expedite the physical scrub, verify completion per node, and what can delay
+  the last identifier's erasure.
 - [Logging & personal data](operations/logging.md) — what committed writes to its
   logs, why node logs carry customer data by design, and bounding log retention to
   your right-to-be-forgotten obligations.
@@ -56,3 +66,5 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   tune the drain deadline.
 - [HTTP limits](operations/http-limits.md) — the proposal-size cap and HTTP
   server timeouts.
+- [Memory](operations/memory.md) — what drives a node's memory, and how to
+  size and bound it.

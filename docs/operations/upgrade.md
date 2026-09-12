@@ -22,8 +22,8 @@ Two properties make a rolling upgrade safe:
   permanent event log, and the BoltDB metadata are forward-compatible
   across a release within the same major line — a node upgraded in place
   reads everything its predecessor wrote, for data dirs created on
-  **0.7.2-beta or later** (the supported floor; an older dir must be
-  recreated, not upgraded — see
+  **0.7.3-beta or later** (the supported floor as of 0.8.0; an older dir must
+  be recreated, not upgraded — see
   [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)). This is a contract, documented
   in [api-compatibility.md → On-disk and wire compatibility](../api-compatibility.md#on-disk-and-wire-compatibility);
   read it before upgrading, especially the **one-way transitions** list.
@@ -58,6 +58,20 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
    orchestrator's kill grace period are set per
    [shutdown.md](shutdown.md) so the graceful path isn't `SIGKILL`ed
    mid-drain.
+5. **Plan to re-POST every `sql-projection` syncable right after upgrading
+   to 0.8.0.** 0.8.0 removes that deprecated spelling: a config stored
+   under it parks (not admissible, never retried) on the upgraded binary
+   until it is re-POSTed as `type = "projection"` with a `[projection]`
+   section and its array tables under their plural names
+   (`[[projection.sources]]`, `[[projection.stages]]`,
+   `[[…aggregate.fields]]`, `[[…aggregate.scalars]]`, `[[…lookup.fields]]`,
+   `[[…stages.joins]]`). 0.7.10 rejects the plural tables, so the re-POST
+   comes after the upgrade, not before; between the two the projection is
+   parked (its table lags, nothing is lost), and the re-POST — same id, same
+   declared content — resumes it with its stage store and checkpoint. Do the
+   rename in its own POST; the
+   rebuild-required guard cannot compare across the removed spelling, so a
+   rename combined with a schema change would not be caught.
 
 > **⚠️ Some upgrades must be full-stop, not rolling.** A release that
 > introduces a new *internal* entry type crosses a forward-only boundary: once
@@ -163,6 +177,44 @@ After the last node:
 
 ## Rolling back
 
+> **Rolling back below 0.8.0?** Event-log segments compress at rest from
+> 0.8.0 on, and an older binary does not recognize a compressed segment:
+> it does not fail, it **silently opens a partial log** whose history
+> appears to begin at the first uncompressed segment (the oldest segments
+> compress first, so that is most of it). Stop each node and run
+> `committed wal decompress --data <datadir>` before starting the older
+> binary; the runbook is the only guard, since the old binary cannot be
+> taught to refuse. Rollbacks within 0.8.x need nothing. A node rolled back
+> below 0.8.0 also loses the automatic catch-up: a member that falls behind
+> the cluster's compaction window under the older binary fatal-exits
+> instead of fetching what it missed, and a 0.8.0 node catching up can only
+> fetch from a 0.8.0 peer (older peers do not serve the fetch and are
+> skipped) — so keep at least one 0.8.0 voter up while a node catches up,
+> and finish the upgrade before adding nodes. A node rolled back
+> below 0.8.0 also **fatal-exits** on applying a committed restatement
+> (feature level 2) — once one is on the log, rolling back means a rebuild
+> from a peer — and any 0.8.0-only syncable kind (Iceberg, loopback, a
+> zone-pinned config) parks on it as not admissible. Also note: 0.8.0's
+> RTBF delete-key erasure (feature level 4) pauses on an older binary —
+> already-erased tombstones stay erased, but new erasures resume only when
+> you upgrade again. And a SQL Server ingestable that has already re-keyed
+> to the canonical lowercase `uniqueidentifier` spelling (feature level 5,
+> see [cdc-setup.md](cdc-setup.md#uniqueidentifier-rendering)) keeps that
+> spelling in its checkpoint; an older binary would resume it rendering
+> uppercase again and spell new rows differently from the rows on the destination —
+> treat the re-key as a one-way transition and rebuild the destination if you must
+> roll back past it. Finally, do not roll a node back while a
+> re-materialization is in progress (`rematerializing` on the syncable's
+> status): the verb only starts once every member is 0.8.0 (feature level
+> 6), and an older owner resuming the replay would write rows the completion
+> sweep then deletes — let it finish, or run the verb again after upgrading.
+> And an ingestable that has opted into per-transaction dedup
+> (`txnScopedDedup`) writes its dedup record in a shape an older binary
+> reads as "nothing seen": an older owner may re-ingest rows already in the
+> log, which on a keyless (append) destination are permanent duplicate
+> rows. Roll leader-last, and do not roll back an owner of such an
+> ingestable.
+
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:
 `SIGTERM`, put the **previous** binary back, start over the same data
@@ -179,6 +231,54 @@ same quorum rule applies in reverse.
 
 ## Notes and limits
 
+- **0.8.0 closes the config vocabulary.** A config key the parser does not
+  read — a typo, a misplaced field — is now rejected at POST instead of
+  being silently ignored (see [api-compatibility.md](../api-compatibility.md#config-vocabulary-is-closed)).
+  A *stored* config that carries such a key parks on the upgraded binary
+  when its worker is rebuilt (the status and the log name the key: "not
+  admissible under this binary"); re-POST it without the key. The setting
+  never took effect before, so nothing about its behavior changes except
+  that you now learn about it.
+- **0.8.0 renames the ingest options.** `[sql.options]` keys are now spelled
+  like every other key (`slotName`, `pollInterval`, `batchSize`,
+  `snapshotReaders`; `publication` is unchanged), numbers are numbers rather
+  than quoted strings, and the older `[sql.postgres]` / `[sql.mysql]` /
+  `[sql.sqlserver]` tables are gone. A *stored* ingestable config under the
+  old spelling parks on the upgraded binary with the rename in its status;
+  re-POST it renamed and it resumes from its checkpoint. Re-POST **after**
+  upgrading, not before: 0.7.x does not know the new spellings and would
+  silently fall back to the default slot and publication names.
+- **`validate` is a word.** A type's validation strategy is spelled
+  `"none"`, `"schema"`, or `"announce"` instead of `0`, `1`, `2`; the
+  integer is refused at POST naming the word it became. Stored types are
+  unaffected (the strategy is stored as data, never re-parsed), so only
+  the documents you POST need the new spelling. A validating type must
+  also name a schema language the binary can check (`JSONSchema` or
+  `Protobuf`); any other was accepted before and validated nothing.
+- **Iceberg deletes now drop what committed created.** Before 0.8.0 every
+  Iceberg table survived its syncable's deletion; from 0.8.0 the namespace
+  and table the syncable created carry a `committed.owned` property and go
+  with it (`?keepData=true` hands them over). A table you created stays.
+- **`normalize` on an aggregate source now takes effect.** It was accepted
+  and ignored; if you declared it, rematerialize that syncable after
+  upgrading so the rows folded under the two spellings converge.
+- **0.8.0 leaves a note in each SQL destination** saying which version of
+  committed wrote its rows: one row per projected table in a small
+  `committed__destinations` table in the destination database (see
+  [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+  Nothing stops on this upgrade: existing tables get the note the first
+  time 0.8.0 touches them. The note also records whether committed created
+  the table, and a table that exists before the upgrade is recorded as one
+  it did not: from then on `DELETE /v1/syncable/{id}` leaves that table in
+  place (before 0.8.0 it dropped it) — drop it yourself when you mean to.
+  Tables 0.8.0 creates are committed's and drop on DELETE as before. The
+  note's version matters when a later release changes
+  how rows are written: a syncable whose table was written by the older
+  binary stops on the new one, with its status naming the fix
+  (rematerialize, or delete and re-POST), rather than mixing the two. While
+  such a roll is in progress and ownership moves between old and new
+  nodes, that shows as sync lag, never as mixed rows; rematerialize once
+  the whole cluster is upgraded.
 - **Mixed-version window.** During the roll the cluster runs mixed
   versions (some nodes new, some old) for the duration of the procedure.
   That's expected and safe within a major line; the forward/backward

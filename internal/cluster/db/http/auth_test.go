@@ -1,0 +1,133 @@
+package http_test
+
+import (
+	"encoding/json"
+	"io"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/committeddb/committed/internal/cluster/db/http"
+)
+
+func TestBearerAuth(t *testing.T) {
+	tests := []struct {
+		name           string
+		token          string // configured token; empty = no auth
+		authHeader     string // Authorization header value
+		path           string
+		expectedStatus int
+	}{
+		{
+			name:           "no token configured, no header",
+			token:          "",
+			authHeader:     "",
+			path:           "/v1/type",
+			expectedStatus: 200,
+		},
+		{
+			name:           "no token configured, header sent anyway",
+			token:          "",
+			authHeader:     "Bearer xyz",
+			path:           "/v1/type",
+			expectedStatus: 200,
+		},
+		{
+			name:           "token configured, no header",
+			token:          "secret",
+			authHeader:     "",
+			path:           "/v1/type",
+			expectedStatus: 401,
+		},
+		{
+			name:           "token configured, wrong token",
+			token:          "secret",
+			authHeader:     "Bearer wrong",
+			path:           "/v1/type",
+			expectedStatus: 401,
+		},
+		{
+			name:           "token configured, correct token",
+			token:          "secret",
+			authHeader:     "Bearer secret",
+			path:           "/v1/type",
+			expectedStatus: 200,
+		},
+		{
+			name:           "token configured, malformed scheme",
+			token:          "secret",
+			authHeader:     "Basic secret",
+			path:           "/v1/type",
+			expectedStatus: 401,
+		},
+		{
+			name:           "token configured, Bearer with no space",
+			token:          "secret",
+			authHeader:     "Bearersecret",
+			path:           "/v1/type",
+			expectedStatus: 401,
+		},
+		{
+			name:           "health exempt, no header",
+			token:          "secret",
+			authHeader:     "",
+			path:           "/health",
+			expectedStatus: 200,
+		},
+		{
+			name:           "health exempt, wrong token",
+			token:          "secret",
+			authHeader:     "Bearer wrong",
+			path:           "/health",
+			expectedStatus: 200,
+		},
+		{
+			name:           "ready exempt, no header",
+			token:          "secret",
+			authHeader:     "",
+			path:           "/ready",
+			expectedStatus: 200, // 200 not 401 — ready is exempt from auth (the real node is ready)
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var opts []http.Option
+			if tc.token != "" {
+				opts = append(opts, http.WithBearerToken(tc.token))
+			}
+			e := newEngineHTTP(t, opts...)
+
+			req := httptest.NewRequest("GET", "http://localhost"+tc.path, nil)
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
+			}
+			w := httptest.NewRecorder()
+			e.h.ServeHTTP(w, req)
+
+			resp := w.Result()
+			require.Equal(t, tc.expectedStatus, resp.StatusCode)
+		})
+	}
+}
+
+func TestBearerAuth_ErrorBody(t *testing.T) {
+	e := newEngineHTTP(t, http.WithBearerToken("secret"))
+
+	req := httptest.NewRequest("GET", "http://localhost/v1/database", nil)
+	w := httptest.NewRecorder()
+	e.h.ServeHTTP(w, req)
+
+	resp := w.Result()
+	require.Equal(t, 401, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var errResp http.ErrorResponse
+	require.NoError(t, json.Unmarshal(body, &errResp))
+	require.Equal(t, "unauthorized", errResp.Code)
+	require.NotEmpty(t, errResp.Message)
+}

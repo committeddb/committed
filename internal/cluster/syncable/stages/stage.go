@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Stage key/order comparison types (numeric vs lexical).
@@ -68,7 +70,7 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 // Stage is one internal stage of a staged computation: a keyed
 // refold from ONE input (a topic, or a PRIOR stage by name) into a private
 // keyed object held in the syncable's stage store — never a topic, never a
-// sink write (the terminal rule: only the table is outward-facing). Stages
+// surface write (the terminal rule: only the table is outward-facing). Stages
 // chain by name in manifest order; a table source consumes a stage's
 // output via `from = "<stage name>"`.
 type Stage struct {
@@ -1136,7 +1138,7 @@ func KeyTypeAt(kts []string, i int) string {
 // that don't use them — the field lesson: a spurious reset is not "one
 // harmless rebuild", it is a silent ~30-minute (hours at scale)
 // re-derivation with live-tail latency degraded the whole way. The
-// golden contract test pins this stability; a DELIBERATE semantic
+// reference contract test pins this stability; a DELIBERATE semantic
 // change that must reset unchanged configs gets an upgrade-notes
 // callout, never an accident.
 func Fingerprint(stages []Stage) string {
@@ -1144,7 +1146,11 @@ func Fingerprint(stages []Stage) string {
 	if err != nil {
 		// Stages are plain data; Marshal cannot fail on them. Guard anyway:
 		// a non-marshalable future field must not silently reuse stale state.
-		return fmt.Sprintf("unmarshalable:%v", err)
+		// The shape is stored with the syncable's schema, so like every
+		// persisted string its error text goes through the redaction choke
+		// point.
+		msg, _ := cluster.RedactedMessage(err)
+		return "unmarshalable:" + msg
 	}
 	sum := sha256.Sum256(bs)
 	return hex.EncodeToString(sum[:])

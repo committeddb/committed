@@ -81,6 +81,29 @@ func (s *Storage) GetSyncableIndex(id string) (uint64, error) {
 	return s.getSyncableIndex(id)
 }
 
+// SyncableCheckpoint returns the syncable's full checkpoint record — index
+// AND interpretation pin — or (nil, false) when none exists. The pin loader
+// for a worker gaining leadership (GetSyncableIndex serves index-only reads).
+func (s *Storage) SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool) {
+	var raw []byte
+	_ = s.view(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(syncableIndexBucket); b != nil {
+			if v := b.Get([]byte(id)); v != nil {
+				raw = append([]byte{}, v...)
+			}
+		}
+		return nil
+	})
+	if raw == nil {
+		return nil, false
+	}
+	ck := &cluster.SyncableIndex{}
+	if err := ck.Unmarshal(raw); err != nil {
+		return nil, false
+	}
+	return ck, true
+}
+
 func (s *Storage) getSyncableIndex(id string) (uint64, error) {
 	index := &cluster.SyncableIndex{}
 	err := s.view(func(tx *bolt.Tx) error {

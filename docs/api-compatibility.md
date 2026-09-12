@@ -65,8 +65,40 @@ old and new behaviour. While something is deprecated:
 - The removal is called out in the release notes for the release that
   introduces the deprecation and again for the release that removes it.
 
+A removed config spelling is refused at POST with a message naming its
+replacement, and a config stored under it parks (not admissible) on the
+upgraded binary until re-POSTed under the current spelling. 0.8.0 removed
+the `sql-projection` syncable spelling this way (deprecated since 0.7.x).
+
 There are currently no deprecated endpoints. `/v1` is the first and only
 major version; there is no pre-`/v1` surface to keep alive.
+
+## Config vocabulary is closed
+
+A config document's keys are a closed vocabulary. Every section a config
+kind reads (`[ingestable]`, `[syncable]`, `[database]`, `[type]`,
+`[migration]`, `[restatement]`, and each type's own section such as `[sql]`,
+`[http]`, `[iceberg]`, `[loopback]`, `[projection]`) accepts exactly the keys
+its parser reads; a key outside that set — a typo, a misplaced field, or a
+probe for a feature that does not exist — is rejected at POST with a 400
+naming the key (and the nearest known one), and a misspelled section is
+rejected the same way. Free-form tables (`[iceberg.props]`, `[http.headers]`)
+take any key: their contents are the catalog's or the receiver's
+vocabulary, not committed's. `[sql.options]` is committed's own and is
+closed like everything else, per dialect. Matching stays case-insensitive.
+
+The vocabulary keeps three spellings: keys are camelCase; an enum is a word
+(`validate = "announce"`, `mode = "always-current"`), never a number; and an
+array of tables takes a plural noun (`[[projection.sources]]`,
+`[[sql.mappings]]`) while a single table takes a singular one
+(`[projection.sources.aggregate]`). A spelling the vocabulary refuses on
+purpose — a removed table, a renamed key — is refused naming its
+replacement rather than as a typo.
+
+The alternative — accepting and ignoring — manufactured belief in settings
+that never took effect. Adding a key is an ordinary additive change; a config
+written for a newer binary is refused by an older one rather than half
+applied, which is the safe direction during a rolling upgrade.
 
 ## Operational endpoints are not API surface
 
@@ -118,6 +150,74 @@ it is present. The one-way-transitions list must grow whenever an additive
 change alters how an *older* consumer has to behave — not only when it
 changes the bytes.
 
+### Derived state: stage stores and destination renderings
+
+Committed decides many details of the data it derives that your config
+never mentions: whether a UUID is written lowercase, whether a decimal is
+`5` or `5.00`, what order an array column's elements are in, how a fanned
+element is identified inside a stage store, the shape of the helper tables
+committed keeps next to yours. They are simply how this version of
+committed behaves.
+
+That creates one risk at upgrade time. Suppose a release changes one of
+them — UUIDs become uppercase. Rows written before the upgrade are
+lowercase, rows written after are uppercase, in the same table, under the
+same config, and nothing notices, because from committed's point of view
+nothing changed. Committed prevents this with a **label** on each piece of
+derived state saying which version wrote it, so a binary never writes by
+one rule into state produced by another.
+
+**Projection stage stores** (`<dataDir>/projections/`, one file per
+projection, node-local, rebuilt from the log) carry two labels: the
+**config fingerprint** (what you declared — change the config and the
+store rebuilds) and the store **format version** (the engine's own
+choices: key framing, fan-element identity, retained-input shape, synthetic
+stage names, key-part rendering, the order `collect`, `min`, and `max`
+impose). A release that changes any of those bumps the format version, and
+an existing store rebuilds from the log on the next start — on upgrade and
+on rollback alike — with no action from you. The cost is one cold replay of
+that projection, and readers never see it.
+
+**SQL destinations** (the projected rows and the helper tables beside
+them) carry a **rendering version**, written as a note into your
+database: the table `committed__destinations`, one row per projected table,
+saying "these rows were written by rendering version N" and whether
+committed created the table. The note lives next to the rows it
+describes, so it moves, drops, and restores with them — restore the
+database from a backup and the note from that backup comes along, still
+correct. The created-by-committed half is what a `DELETE` consults: it
+drops the table committed created and leaves the one it attached to (see
+[read-models.md](read-models.md#history-tables-vs-read-models)).
+
+Every time a worker starts serving a syncable it reads the note first:
+
+- The note matches the version this binary writes: serve normally.
+- The note is older: the syncable **stops** rather than mixing two
+  renderings. Its status shows `parked` with a message naming both
+  versions and the fix: `POST /v1/syncable/{id}/rematerialize` for a keyed
+  table (rewrites every row from the log under the new version, then
+  updates the note), or `DELETE` and re-POST for a table that cannot be
+  rewritten in place. This is deliberate rather than automatic because it
+  touches a table your readers are using.
+
+**Iceberg tables** carry the same note as table properties
+(`committed.rendering-version`, and `committed.owned` on the tables and
+namespaces the syncable created), beside the checkpoint the syncable already
+keeps in the table's snapshot summary, with its own version number: the
+two syncable families render nothing in common. An Iceberg syncable cannot
+converge in place, so a mismatch there names delete and re-POST: a table
+committed created is dropped and recreated; one you created, recreate
+yourself first.
+
+0.8.0 introduces the note. Existing tables have none, so 0.8.0 writes
+"version 1" the first time it touches each one, recorded as a table
+committed did not create; nothing stops on this upgrade, and a `DELETE`
+leaves such a table in place from then on (drop it yourself when you
+mean to). A table 0.8.0 creates is recorded as committed's from the
+start. The version matters the first time a later release changes how
+rows are written — that release bumps the number, and tests hold it to
+that.
+
 ### Cluster feature level (semantic compatibility gate)
 
 `version.FeatureLevel` is a monotonic integer each binary supports and
@@ -163,7 +263,9 @@ message on the permanent event log (`internal/cluster/clusterpb`):
 `LogProposal`, `LogEntity`, `LogType`, `LogConfiguration`,
 `LogSyncableIndex`, `LogIngestablePosition`, `LogSyncableDeadLetter`,
 `LogSyncableStuck`, `LogSyncableSkipRequest`, `LogTypeMigrationDeadLetter`,
-`LogScrub`, `LogNodeAPIURL`, `LogNodeVersion`. The rule is **add-only**:
+`LogScrub`, `LogNodeAPIURL`, `LogNodeVersion`, `LogNodeZone`, `LogIngestableStuck`,
+`LogIngestableCensus`, `LogContractFingerprint`, `LogRestatement`,
+`LogSyncableRematerialization`. The rule is **add-only**:
 
 - A new field gets a new, never-before-used tag number. Old binaries
   ignore unknown fields (proto3); new binaries treat an absent field as
@@ -177,11 +279,12 @@ message on the permanent event log (`internal/cluster/clusterpb`):
 `oneof body` — exactly one of `LogRow` (an upsert), `LogDelete` (a keyed
 tombstone, carrying `keep_data`), or `LogRefresh` (a reconciling-refresh
 boundary marker) — so an entity's role is explicit on the wire and impossible
-states (a refresh with a key, a row with `keep_data`) are unrepresentable. The
-flat `Key`/`Data`/`generation`/`refresh_boundary` fields on `LogEntity` are
-**legacy, decode-only**: logs written by ≤ 0.7.2-beta carry them, and readers
-map both encodings into one view at a single chokepoint
-(`cluster.logEntityView`) — writers never emit them again. The delete sentinel
+states (a refresh with a key, a row with `keep_data`) are unrepresentable.
+The pre-envelope flat `Key`/`Data`/`generation`/`refresh_boundary` fields
+were written only by ≤ 0.7.2-beta — an era no deployment ever ran — and
+**0.8.0 removed their decode path**: the field tags are reserved in the
+schema, so flat bytes trip the unknown-wire-fields guard at the decode
+chokepoint (`cluster.logEntityView`) and fail loudly. The delete sentinel
 value exists only in memory; on the wire a delete is the explicit variant.
 
 Extending the envelope with a **new variant** is a fixed recipe:
@@ -197,13 +300,16 @@ Extending the envelope with a **new variant** is a fixed recipe:
    tags the binary does not know fails decode loudly — so a feature-gate
    bypass surfaces as an apply failure, never a silent empty-entity misapply.
    Unknown tags *inside* a known variant's message stay ordinary add-only
-   evolution. The same guard defines the **data-dir support floor**: 0.7.3+
-   reads data dirs written by **0.7.2-beta and later**. Dirs older than that
-   are unsupported — pre-v0.5-beta logs carry the long-removed `Timestamp`
-   field 4, which trips the guard — and must be recreated, not upgraded.
+   evolution. The same guard defines the **data-dir support floor**: 0.8.0
+   reads data dirs written by **0.7.3-beta and later** (the envelope era).
+   Dirs older than that are unsupported — the pre-envelope flat fields
+   (≤ 0.7.2-beta) and the long-removed `Timestamp` field (pre-v0.5-beta) are
+   reserved tags that trip the guard — and must be recreated, not upgraded.
+   The floor is pinned end to end by the captured old-binary fixtures in
+   `e2e/upgrade/testdata/` (see its README).
 4. Give it a `cluster.EntityVariant` constant and handle it in every consumer
    switch. Consumers apply an entity by switching on `Entity.Variant()`
-   (sinks; the wal apply dispatch admits only row/delete to internal
+   (syncables; the wal apply dispatch admits only row/delete to internal
    handlers; the migration chain migrates only rows) — a variant a consumer
    does not handle lands in its `default` case and dead-letters/errors
    explicitly.
@@ -259,22 +365,28 @@ Entries on disk are wrapped in a self-describing frame
 [magic 0xC0 'C' 'L'][version 0x01][crc32c, 4 bytes BE][payload…]
 ```
 
-The leading magic byte is a discriminator: pre-checksum (legacy) entries
-begin with the raw protobuf/gob bytes (`0x08`/`0x24`), so a current
-binary reads **both** legacy and framed entries without a persisted
-format flag. A frame whose CRC32C doesn't match fails the read with
-`ErrCorruptEntry` (a torn or bit-rotted entry is surfaced, never applied).
+Framing shipped in v0.5-beta and every write path frames, so every log a
+supported data dir can hold (floor: 0.7.3-beta) is fully framed. From
+0.8.0 the "trust on first read" passthrough for unframed bytes is gone:
+absent or torn magic is corruption and fails the read with
+`ErrCorruptEntry`, as does a frame whose CRC32C doesn't match (a torn or
+bit-rotted entry is surfaced, never applied). The old scheme's limitation —
+corruption landing in the magic bytes silently downgraded an entry to
+"legacy" and skipped verification — is closed with it.
 A future frame-version bump (`0x02`) would be introduced the same way —
 new binaries read old versions; the bump itself is a one-way transition.
 
 ### BoltDB metadata buckets
 
 Replicated metadata lives in named BoltDB buckets: `types`, `databases`,
-`ingestables`, `ingestablePositions`, `ingestSourceSeq`, `topicRefreshEpoch`,
-`eventTombstones`, `memberAPIURLs`, `memberPeerURLs`, `memberVersions`,
-`syncables`, `syncableIndexes`, `syncableDeadLetters`, `syncableStuck`,
-`syncableSkipRequests`, `typeMigrationDeadLetters`, `appliedIndex`,
-`pendingScrub`. Adding a bucket is additive (a new binary
+`ingestables`, `ingestablePositions`, `ingestableStuck`, `ingestableCensuses`,
+`ingestSourceSeq`, `topicRefreshEpoch`, `eventTombstones`, `memberAPIURLs`,
+`memberPeerURLs`, `memberVersions`, `memberZones`, `syncables`,
+`syncableIndexes`, `syncableCreateIndexes`, `syncableDeadLetters`,
+`syncableStuck`, `syncableSkipRequests`, `syncableRematerializations`,
+`typeMigrationDeadLetters`, `typeMigrationEdits`, `contractFingerprints`,
+`restatements`, `scrubHistory`, `unhashedDeletes`, `pendingScrub`,
+`appliedIndex`, `confState`, `versions`. Adding a bucket is additive (a new binary
 creates it on open; an old binary ignores it). **Renaming or removing** a
 bucket, or changing the encoding of the values within one, requires an
 explicit migration step at open time and is a release-noted change.
@@ -322,6 +434,22 @@ the old binary cannot read:
   Rolling back means a rebuild; and the forward upgrade must be **full-stop**,
   not rolling, for the same reason (see
   [upgrade.md](operations/upgrade.md)).
+- **Rolling back below 0.8.0 with compressed event-log segments on disk.**
+  0.8.0 compresses sealed segments at rest. A pre-0.8.0 binary does not
+  recognize them and — worse than a refusal — silently opens a partial log
+  beginning at the first uncompressed segment. Run `committed wal
+  decompress` on the stopped node first ([upgrade.md](operations/upgrade.md#rolling-back));
+  nothing in the old binary can be made to guard this.
+- **Rolling back past the first committed restatement (0.8.0).** The
+  restatement record is a gated system type: a pre-0.8.0 binary
+  fatal-exits applying it. Emission waits for every member to reach feature
+  level 2, so this door only opens once you have used the feature.
+- **Rolling back an owner mid-re-materialization (0.8.0)**, or below the
+  per-transaction ingest dedup regime (`txnScopedDedup`): neither loses
+  data on its own, but the first lets an older owner write rows the closing
+  sweep then deletes, and the second lets an older owner re-ingest rows
+  that a keyless destination keeps twice. Both are described in
+  [upgrade.md](operations/upgrade.md#rolling-back).
 - **A raft transport `protocolVersion` bump.** The peer transport
   currently accepts only an exact protocol-version match, so a bump is a
   flag-day: it partitions a half-upgraded cluster until every node is on

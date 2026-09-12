@@ -128,8 +128,8 @@ tables = ["ingress.movie"]
 mapAllColumns = true
 excludeColumns = ["internal_notes"]
 
-[sql.postgres]
-slot_name = "s"
+[sql.options]
+slotName = "s"
 
 [[sql.mappings]]
 jsonName = "movieId"
@@ -164,8 +164,8 @@ primaryKey = "movie_id"
 tables = ["ingress.movie"]
 excludeColumns = ["secret"]
 
-[sql.postgres]
-slot_name = "s"
+[sql.options]
+slotName = "s"
 `
 	v := readConfig(t, "toml", bytes.NewReader([]byte(toml)))
 	tiper := &sqlfakes.FakeTyper{}
@@ -323,7 +323,7 @@ func simpleConfig() *sql.Config {
 		Mappings:         m,
 		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"simple"},
-		Options:          map[string]string{},
+		Options:          sql.Options{},
 	}
 }
 
@@ -338,7 +338,7 @@ func mysqlWithTablesConfig() *sql.Config {
 		Mappings:         m,
 		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"orders", "customers"},
-		Options:          map[string]string{},
+		Options:          sql.Options{},
 	}
 }
 
@@ -353,9 +353,9 @@ func postgresConfig() *sql.Config {
 		Mappings:         m,
 		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"public.orders"},
-		Options: map[string]string{
-			"slot_name":   "my_slot",
-			"publication": "my_pub",
+		Options: sql.Options{
+			SlotName:    "my_slot",
+			Publication: "my_pub",
 		},
 	}
 }
@@ -371,9 +371,9 @@ func postgresMultiTableConfig() *sql.Config {
 		Mappings:         m,
 		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"public.orders", "public.customers", "public.items"},
-		Options: map[string]string{
-			"slot_name":   "multi_slot",
-			"publication": "multi_pub",
+		Options: sql.Options{
+			SlotName:    "multi_slot",
+			Publication: "multi_pub",
 		},
 	}
 }
@@ -389,7 +389,7 @@ func postgresDefaultsConfig() *sql.Config {
 		Mappings:         m,
 		PrimaryKey:       []string{"pk"},
 		Tables:           []string{"public.orders"},
-		Options:          map[string]string{},
+		Options:          sql.Options{},
 	}
 }
 

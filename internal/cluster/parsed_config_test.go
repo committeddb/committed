@@ -162,3 +162,68 @@ value = "${PARSED_CONFIG_TEST_TOKEN}"
 	require.True(t, ok)
 	require.Equal(t, "tok-123", headers[0].(map[string]any)["value"])
 }
+
+func TestRejectUnknownKeys(t *testing.T) {
+	c := parseTOML(t, `
+[sql]
+Dialect = "postgres"
+batchSiz = "10"
+[sql.postgres]
+slot_name = "s"
+`)
+	require.NoError(t, c.RejectUnknownKeys("sql", "dialect", "BATCHSIZ", "postgres"),
+		"case-variant known keys pass; a nested table counts as one known key")
+
+	err := c.RejectUnknownKeys("sql", "dialect", "postgres")
+	require.Error(t, err)
+	require.True(t, cluster.IsNotAdmissible(err), "a typo can never build; the build must park, not retry")
+	ce := cluster.NewConfigError(err)
+	require.Equal(t, "sql.batchSiz", ce.Field, "the key in the document's own spelling")
+	require.Contains(t, ce.Issue, "unknown key")
+	require.NotContains(t, ce.Issue, "did you mean", "no near name among the known ones")
+
+	err = c.RejectUnknownKeys("sql", "dialect", "postgres", "batchSize")
+	require.Error(t, err)
+	require.Contains(t, cluster.NewConfigError(err).Issue, `did you mean "batchSize"?`)
+
+	require.NoError(t, c.RejectUnknownKeys("absent", "x"), "an absent section has nothing to reject")
+}
+
+// A spelling the vocabulary refuses on purpose carries its own reason (a
+// rename, a removal, a knob that cannot be honored), matched in any case and
+// named in the document's spelling; an absent section or key refuses nothing.
+func TestRejectKeys(t *testing.T) {
+	c := parseTOML(t, `
+[sql]
+dialect = "postgres"
+[sql.options]
+Slot_Name = "s"
+`)
+	reasons := map[string]string{"slot_name": `renamed: spell it "slotName"`, "postgres": "removed"}
+	err := c.RejectKeys("sql.options", reasons)
+	require.Error(t, err)
+	require.True(t, cluster.IsNotAdmissible(err))
+	ce := cluster.NewConfigError(err)
+	require.Equal(t, "sql.options.Slot_Name", ce.Field, "the document's own spelling")
+	require.Equal(t, `renamed: spell it "slotName"`, ce.Issue)
+
+	require.NoError(t, c.RejectKeys("sql", map[string]string{"mysql": "removed"}), "no refused spelling present")
+	require.NoError(t, c.RejectKeys("absent", reasons), "an absent section has nothing to refuse")
+}
+
+func TestRejectUnknownSections(t *testing.T) {
+	c := parseTOML(t, `
+[Ingestable]
+name = "n"
+[sqll]
+dialect = "postgres"
+`)
+	require.NoError(t, c.RejectUnknownSections("ingestable", "sqll"))
+	err := c.RejectUnknownSections("ingestable", "sql")
+	require.Error(t, err)
+	ce := cluster.NewConfigError(err)
+	require.Equal(t, "sqll", ce.Field)
+	require.Contains(t, ce.Issue, "unknown section")
+	require.Contains(t, ce.Issue, `did you mean "sql"?`)
+	require.True(t, cluster.IsNotAdmissible(err))
+}

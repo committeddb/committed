@@ -160,7 +160,7 @@ func NewMySQL(t *testing.T) *MySQLHarness {
 }
 
 // postMySQLIngestable registers a MySQL ingestable on the source table. Unlike
-// Postgres (which needs a [sql.postgres] slot_name/publication subsection),
+// Postgres (which needs a [sql.options] slotName/publication table),
 // MySQL needs only the dialect, topic, connection URL, primary key, table, and
 // column mappings.
 func postMySQLIngestable(t *testing.T, url string) {

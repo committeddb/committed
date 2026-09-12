@@ -1,26 +1,41 @@
 # internal/cluster
 
-Core domain package. All key interfaces are defined in `cluster.go`.
+Core domain package: the vocabulary (Proposal/Actual/Entity/Type) and the plugin contracts.
 
-## Key interfaces (cluster.go)
+## Key contracts
 
-- **Cluster**: Main interface — propose writes, manage configs, sync/ingest
+There is deliberately no aggregated service interface: the engine is
+`*db.DB` (db/), and its HTTP handlers (db/http/) hold it directly. The
+contracts here are the domain types and the PLUGIN seams:
+
 - **Syncable** (syncable.go): Consumes committed Actuals (`cluster.Actual`, in Index order) and applies them to an external system. A Syncable is handed Actuals, never Proposals — propose a `Proposal`, sync an `Actual`.
 - **Ingestable** (ingestable.go): Ingests data from an external source into topics
 - **Database** (database.go): External database connection config
 - **SyncableParser / IngestableParser / DatabaseParser** (syncable.go, ingestable.go, database.go): Parse config documents into typed structs. They receive a `*cluster.ParsedConfig` (parsed_config.go) — committed's own decode seam (go-toml/v2 + mapstructure, no third-party type in the contract). Committed's field names match case-insensitively (`Topic =` works; load-bearing compat, pinned by the tolerance_test.go corpus); user data — including map keys like jsonpaths — is preserved byte-exact. `${VAR}` secret interpolation runs at the parse boundary in db/parser, not here; type configs deliberately skip it.
 
+## Redaction contract (enforced)
+
+Error text reaches a persisted or exposed surface — a replicated dead-letter /
+stuck record, an HTTP body, the config-build-error list — only through
+`cluster.RedactedMessage` (db/http wraps it as `redactedMessage` /
+`redactedDetail`, db as `safeDeadLetterMessage`). A driver/migration/predicate
+error that may echo entity values implements `cluster.RedactedError`; the full
+text stays in the node log. `internal/lint/redaction` is a taint analyzer run
+by `go test` (`TestNoUnredactedTextReachesASurface`) that fails CI on a bypass —
+route the text through the choke point rather than working around a finding.
+
 ## Package layout
 
-- **db/**: Raft consensus, WAL storage, sync/ingest processing. `db.go` is the main Cluster implementation. `raft.go` handles Raft node lifecycle. `sync.go` handles syncable processing. `ingest.go` handles ingestable processing.
+- **db/**: Raft consensus, WAL storage, sync/ingest processing. `db.go` anchors `db.DB`, the engine. `raft.go` handles Raft node lifecycle. `sync.go` handles syncable processing. `ingest.go` handles ingestable processing.
 - **db/wal/**: Write-ahead log storage layer (tidwall/wal wrapper)
-- **http/**: REST API handlers (Chi router). `handler.go` defines all routes and handlers. `versions.go` handles config version history endpoints.
-- **syncable/sql/**: SQL sync implementations — `mysql/` and `postgres/` subdirectories
-- **ingestable/sql/**: SQL ingest implementations — `mysql/` and `postgres/` subdirectories
+- **db/http/**: REST API handlers (Chi router) — the engine's transport subpackage; `http.go` assembles the router and the route table, `versions.go` handles config version history endpoints. Lives under `db/` so handlers hold the engine directly (no aggregated service interface).
+- **syncable/sql/**: the SQL syncable family — keyed/keyless mirrors and projections; `dialects/` holds the MySQL and PostgreSQL dialects and the docker reference tests. **syncable/stages/** is the projection stage runtime and **syncable/stagestore/** its node-local store; **syncable/iceberg/**, **syncable/loopback/**, **syncable/http/** are the other kinds.
+- **ingestable/sql/**: SQL ingest — `mysql/`, `postgres/`, `sqlserver/` dialects; `options.go` is the typed `[sql.options]` vocabulary
+- **interpretation/**, **migration/**: the read-path wrappers (restatement registry, type migrations); **config/**, **backup/**, **sqlident/**, **fsutil/**, **metrics/**: support packages
 - **clusterpb/**: Protobuf definitions (generated — do not edit, regenerate with `go generate ./...`)
 - **clusterfakes/**, **db/dbfakes/**, **ingestable/sql/sqlfakes/**: Generated counterfeiter fakes (do not edit, regenerate with `go generate ./...`)
 
 ## Other files in this package
 
 - `config_error.go`: ConfigError type for configuration validation
-- `type.go`, `proposal.go`, `actual.go`, `time_point.go`, `version_info.go`: Domain types (`proposal.go` = the write request; `actual.go` = the committed fact a Syncable consumes)
+- `type.go`, `proposal.go`, `actual.go`, `version.go`: Domain types (`proposal.go` = the write request; `actual.go` = the committed fact a Syncable consumes)

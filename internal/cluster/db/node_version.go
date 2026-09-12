@@ -86,6 +86,15 @@ func (db *DB) featureEnabled(required uint64) bool {
 	return db.clusterMinFeatureLevel() >= required
 }
 
+// FeatureEnabled is featureEnabled for the composition root's wiring: a
+// plugin whose runtime BEHAVIOUR (not an emitted entry) must not change until
+// the whole cluster can follow it reads the gate through this — the SQL
+// Server ingest dialect's uniqueidentifier rendering (feature level 5) is
+// the first. Same semantics as the in-package gate.
+func (db *DB) FeatureEnabled(required uint64) bool {
+	return db.featureEnabled(required)
+}
+
 // clusterMinFeatureLevel is the lowest feature level announced across all
 // current members (voters ∪ learners). A member with no announcement — one that
 // hasn't announced yet, or a binary predating the mechanism — counts as level 0,

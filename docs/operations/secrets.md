@@ -79,7 +79,7 @@ unset).
 
 Interpolation runs on **every string value** in the config — not only
 connection strings and auth headers, but user-data fields too: a
-projection column default, a rule/mapping value, a webhook URL or body.
+projection rule's literal `expr`, a mapping value, a webhook URL or header.
 That is deliberate (it lets you reference a secret anywhere, e.g.
 `${WEBHOOK_TOKEN}` inside a webhook body), but it means a value that
 contains the literal characters `${...}` is treated as a reference and
@@ -90,9 +90,10 @@ If a value must contain a **literal** `${...}` that is not a secret
 reference, escape the leading `$`:
 
 ```toml
-# Wanted the literal string "${orderId}" as a projection default, not an
+# Wanted the literal string "${orderId}" in a webhook header, not an
 # env-var expansion:
-default = "$${orderId}"   # stored/used as the literal "${orderId}"
+[http.headers]
+X-Template = "$${orderId}"   # sent as the literal "${orderId}"
 ```
 
 The same applies to a literal double-dollar: write `$$$$` for a literal

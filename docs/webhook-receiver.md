@@ -112,7 +112,7 @@ re-snapshot:      upsert 1,3   @g2 ; refresh g2  → sweep < g2  (removes 2)
 
 Delivery is **at-least-once**. committed redelivers a transaction on retry,
 leader change, or restart (bounded by `checkpointEvery`, default `1` for a
-webhook — at most one duplicate). Unlike a SQL sink, whose `UPSERT`/`DELETE` are
+webhook — at most one duplicate). Unlike a SQL syncable, whose `UPSERT`/`DELETE` are
 idempotent by construction, committed **cannot** make an arbitrary endpoint
 idempotent — so **you** must:
 

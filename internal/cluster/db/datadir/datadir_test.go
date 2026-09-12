@@ -33,9 +33,11 @@ func TestCanonicalArchiveEntry(t *testing.T) {
 		{"retired skipped when events present", "events.retired/0001", true, false, ""},
 		{"retired remapped when events absent", "events.retired/0001", false, true, "events/0001"},
 		{"scrub temp skipped", "events.scrub.7/0001", true, false, ""},
+		{"fetch staging skipped", "events.fetch/00000000000000000042", true, false, ""},
 		{"discarded entry log skipped", "raft/log.discarded/0001", true, false, ""},
 		{"bbolt restore temp skipped", "metadata/bbolt.db.restore.123", true, false, ""},
 		{"bbolt compact temp skipped", "metadata/bbolt.db.compact.123", true, false, ""},
+		{"bbolt backup spool skipped", "metadata/bbolt.db.backup.123", true, false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -53,6 +55,7 @@ func TestRecoverScrubDirs_RollsBackAndReaps(t *testing.T) {
 	eventsDir := datadir.EventsDir(root)
 	writeFileIn(t, datadir.RetiredDir(eventsDir), "0001", "the-only-log")
 	require.NoError(t, os.MkdirAll(datadir.ScrubDir(eventsDir, 9), 0o700))
+	writeFileIn(t, datadir.FetchDir(eventsDir), "00000000000000000042", "half a download")
 
 	require.NoError(t, datadir.RecoverScrubDirs(root))
 
@@ -61,6 +64,7 @@ func TestRecoverScrubDirs_RollsBackAndReaps(t *testing.T) {
 	require.Equal(t, "the-only-log", string(got), "retired log rolled back to events/")
 	require.NoDirExists(t, datadir.RetiredDir(eventsDir))
 	require.NoDirExists(t, datadir.ScrubDir(eventsDir, 9))
+	require.NoDirExists(t, datadir.FetchDir(eventsDir), "a crashed catch-up's staging dir is swept")
 }
 
 // TestRecoverScrubDirs_DropsStaleRetiredWhenEventsPresent: a completed swap whose
@@ -86,12 +90,14 @@ func TestSweepBoltTempFiles(t *testing.T) {
 	writeFileIn(t, md, "bbolt.db", "live")
 	writeFileIn(t, md, "bbolt.db.restore.1", "orphan-restore")
 	writeFileIn(t, md, "bbolt.db.compact.2", "orphan-compact")
+	writeFileIn(t, md, "bbolt.db.backup.3", "orphan-backup-spool")
 
 	require.NoError(t, datadir.SweepBoltTempFiles(md))
 
 	require.FileExists(t, datadir.BoltPath(md), "the live db is kept")
 	require.NoFileExists(t, filepath.Join(md, "bbolt.db.restore.1"))
 	require.NoFileExists(t, filepath.Join(md, "bbolt.db.compact.2"))
+	require.NoFileExists(t, filepath.Join(md, "bbolt.db.backup.3"))
 }
 
 // TestRequireCompleteNodeDir: a complete node dir passes; dropping any canonical

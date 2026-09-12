@@ -18,7 +18,7 @@ import (
 // stopped draining the config channel, and the raft apply loop then blocked on
 // its next config send — stalling apply of ALL further committed entries (user
 // data included). The handoff must abandon a wedged worker after
-// workerDrainTimeout so the listener keeps up and the apply loop never stalls
+// workers.drainTimeout so the listener keeps up and the apply loop never stalls
 // indefinitely.
 func TestDeleteSync_BoundsWedgedWorkerDrain(t *testing.T) {
 	d := createDB()
@@ -62,11 +62,15 @@ func (b *blockingDestinationSyncable) Close() error {
 	return nil
 }
 
-func (b *blockingDestinationSyncable) Teardown() error {
+func (b *blockingDestinationSyncable) OwnsDestination(context.Context) (bool, error) {
+	return true, nil
+}
+
+func (b *blockingDestinationSyncable) Teardown(bool) (bool, error) {
 	if b.blockTeardown {
 		<-b.block
 	}
-	return nil
+	return true, nil
 }
 
 // waitForLeadership blocks until the single-node db believes it is leader —
@@ -83,7 +87,7 @@ func waitForLeadership(t *testing.T, d *DB) {
 // single-threaded listener goroutine — against the same destination that may be
 // unreachable. Unbounded, a hung DROP parked the listener and the raft apply
 // loop stalled on its next config-channel send. deleteSync must abandon the
-// teardown after workerDrainTimeout (logging the orphaned-destination error)
+// teardown after workers.drainTimeout (logging the orphaned-destination error)
 // and return.
 func TestDeleteSync_BoundsWedgedTeardown(t *testing.T) {
 	d := createDB()
@@ -110,7 +114,7 @@ func TestDeleteSync_BoundsWedgedTeardown(t *testing.T) {
 
 // TestDeleteSync_BoundsWedgedClose covers the third leg on the listener path:
 // Close writes statement-close packets to the destination and can block on a
-// dead network. closeDrainedSyncable must abandon it after workerDrainTimeout.
+// dead network. closeDrainedSyncable must abandon it after workers.drainTimeout.
 func TestDeleteSync_BoundsWedgedClose(t *testing.T) {
 	d := createDB()
 	defer d.Close()

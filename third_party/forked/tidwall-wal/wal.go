@@ -98,6 +98,11 @@ type Options struct {
 	// Perms represents the datafiles modes and permission bits
 	DirPerms  os.FileMode
 	FilePerms os.FileMode
+	// SealedSegmentCompression compresses segments once the log cycles past
+	// them (the active tail always stays plain). committeddb fork patch —
+	// see compress.go for the format, crash-safety, and downgrade story.
+	// Default CompressionNone preserves the pre-fork on-disk format.
+	SealedSegmentCompression CompressionCodec
 }
 
 // DefaultOptions for Open().
@@ -274,9 +279,45 @@ func (l *Log) load() error {
 		if err != nil || index == 0 {
 			continue
 		}
+		// committeddb fork patch (compression crash healing): a leftover
+		// ".zst.SEAL" is an incomplete seal — the plain segment is intact,
+		// so the temp is deleted and the sweep re-compresses later.
+		if len(name) == 20+len(zstSealExt) && strings.HasSuffix(name, zstSealExt) {
+			if err := os.Remove(filepath.Join(l.path, name)); err != nil {
+				return err
+			}
+			continue
+		}
 		isStart := len(name) == 26 && strings.HasSuffix(name, ".START")
 		isEnd := len(name) == 24 && strings.HasSuffix(name, ".END")
-		if len(name) == 20 || isStart || isEnd {
+		isZst := len(name) == 20+len(zstExt) && strings.HasSuffix(name, zstExt)
+		if len(name) == 20 || isStart || isEnd || isZst {
+			// committeddb fork patch: same-index coexistence healing. ReadDir
+			// is lexicographic, so a same-index sibling was already appended
+			// when the ".zst" arrives. Two crash windows produce one:
+			//
+			//   - plain + .zst: a completed seal whose plain-file cleanup was
+			//     lost. The .zst was fsync-durable before its rename, so the
+			//     PLAIN file is stale — replace it.
+			//   - .START/.END + .zst: a truncation rewrote this segment and
+			//     crashed before deleting the old compressed file. The marker
+			//     is the newer truth — the .ZST is stale; deleting the marker
+			//     would resurrect pre-truncation data.
+			if isZst && len(l.segments) > 0 &&
+				l.segments[len(l.segments)-1].index == index {
+				prev := l.segments[len(l.segments)-1]
+				if strings.HasSuffix(prev.path, ".START") || strings.HasSuffix(prev.path, ".END") {
+					if err := os.Remove(filepath.Join(l.path, name)); err != nil {
+						return err
+					}
+					continue
+				}
+				if err := os.Remove(prev.path); err != nil {
+					return err
+				}
+				prev.path = filepath.Join(l.path, name)
+				continue
+			}
 			if isStart {
 				startIdx = len(l.segments)
 			} else if isEnd && endIdx == -1 {
@@ -356,6 +397,35 @@ func (l *Log) load() error {
 		l.segments[len(l.segments)-1].path = finalPath
 	}
 	l.firstIndex = l.segments[0].index
+	// committeddb fork patch: the tail must be appendable, so it is always
+	// plain — but the last on-disk segment can be compressed (a truncation or
+	// manual surgery removed the plain tail, or every segment predates a
+	// restore). Load its entries to establish lastIndex, then start a fresh
+	// plain tail after it, mirroring the genesis path.
+	if isCompressedPath(l.segments[len(l.segments)-1].path) {
+		cseg := l.segments[len(l.segments)-1]
+		if err := l.loadSegmentEntries(cseg); err != nil {
+			return err
+		}
+		lastIndex := cseg.index + uint64(len(cseg.epos)) - 1
+		nseg := &segment{
+			index: lastIndex + 1,
+			path:  filepath.Join(l.path, segmentName(lastIndex+1)),
+		}
+		l.sfile, err = os.OpenFile(nseg.path,
+			os.O_CREATE|os.O_RDWR|os.O_TRUNC, l.opts.FilePerms)
+		if err != nil {
+			return err
+		}
+		if !l.opts.NoSync {
+			if err := syncDir(l.path); err != nil {
+				return err
+			}
+		}
+		l.segments = append(l.segments, nseg)
+		l.lastIndex = lastIndex
+		return nil
+	}
 	// Open the last segment for appending
 	lseg := l.segments[len(l.segments)-1]
 	l.sfile, err = os.OpenFile(lseg.path, os.O_WRONLY, l.opts.FilePerms)
@@ -657,6 +727,13 @@ func (l *Log) loadSegmentEntries(s *segment) error {
 // must hold s.dmu exclusively.
 func (l *Log) loadSegmentEntriesLocked(s *segment) error {
 	data, err := ioutil.ReadFile(s.path)
+	if err != nil {
+		return err
+	}
+	// committeddb fork patch: a compressed sealed segment decodes here, so
+	// the cached table (ebuf/epos) always holds DECOMPRESSED bytes and every
+	// downstream read path is format-oblivious.
+	data, err = maybeDecompressSegment(s.path, data)
 	if err != nil {
 		return err
 	}

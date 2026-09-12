@@ -50,12 +50,26 @@ is not retrying, it has stopped.
   parked anywhere?" without polling each resource. Unlike `/node/status`, it
   reads the same from any node, so it's safe behind a load balancer.
 
-**Fixing.** A park means the *config* is wrong, so the remedy is to fix it, not
-to skip a proposal: correct the syncable config and **re-POST it**
-(`POST /v1/syncable/{id}`). A new config version clears the parked record and
-starts a fresh worker; deleting the syncable also clears it. A bare restart or
-leadership change does **not** clear a park — it stays visibly parked until you
-act.
+**Fixing.** The park's `message` names its cause, and there are three:
+
+- **A systematic fault** (the circuit breaker above): the *config* is wrong,
+  so the remedy is to fix it, not to skip a proposal — correct the syncable
+  config and **re-POST it** (`POST /v1/syncable/{id}`).
+- **Not admissible under this binary**: the stored config uses a spelling
+  this release removed or a key it does not know (an upgrade parks such
+  configs rather than guessing). The message names the rename; re-POST the
+  config renamed, and it resumes where it left off.
+- **A rendering-version mismatch**: the destination's rows were written by
+  a different version of committed than this binary renders (the note in
+  the destination says which). Re-POSTing the same config does **not**
+  clear this one; the message names the verb that does — `rematerialize`
+  for a keyed syncable, or `DELETE` and re-POST for one that cannot
+  converge in place. See
+  [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings).
+
+A new config version clears the parked record and starts a fresh worker;
+deleting the syncable also clears it. A bare restart or leadership change
+does **not** clear a park — it stays visibly parked until you act.
 
 ## Degraded: the config never built
 
@@ -113,8 +127,7 @@ the one running the worker, and it survives a leader change.
   and the worker logs `transient sync error, will retry` on each attempt.
 
 The stuck threshold debounces the signal so a normal blip that recovers in a
-few seconds never flags. It is currently fixed at **30 seconds** (tunable in
-a future release).
+few seconds never flags. It is fixed at **30 seconds**.
 
 ## Telling how far behind a syncable is (lag)
 
@@ -155,17 +168,17 @@ count is non-zero, triage each record (list them via
   succeeds and clears the record.
 - **Acknowledge** (`POST /v1/syncable/{id}/deadletter/{index}/acknowledge`)
   — the record is **superseded**: the source was fixed and a later event
-  already corrected the sink row, so replaying the stale proposal would
+  already corrected the destination row, so replaying the stale proposal would
   REGRESS it, while leaving the record reads permanently red. Acknowledge
   attests "resolved out-of-band": the record moves from `deadLetters` to
   `acknowledgedDeadLetters` (completeness goes green) and stays listable
   with `acknowledged: true` as the audit trail. The worked example is an
-  embedded-NUL row against a Postgres sink: the upsert dead-letters
+  embedded-NUL row against a Postgres destination: the upsert dead-letters
   (Postgres TEXT can't store U+0000), you fix the value at the source, CDC
-  delivers the correction as a normal update — the sink row is now right,
+  delivers the correction as a normal update — the destination row is now right,
   the dead letter is history, acknowledge it.
 - **Leave it** — the row still needs a decision. An unacknowledged record
-  is the honest signal that data is missing from the sink.
+  is the honest signal that data is missing from the destination.
 
 A successful replay deletes the record entirely, acknowledged or not. See
 "Destination limits" in [read-models.md](../read-models.md) for when each
@@ -212,6 +225,16 @@ firehose of other-topic entries). Under sustained cross-topic write load its
 through (and skips) other topics to advance its consumed cursor. It returns to
 `0` at rest. The number answers "is it caught up?" correctly; it is not a
 per-topic backlog count.
+
+## Lag with no park and no stuck: a pinned owner is down
+
+A zone-pinned syncable whose owning node is down but still a cluster member
+shows neither `stuck` nor a park: there is no worker anywhere to report.
+Its `lag` simply grows, `ownerNode` names the dead node, and
+`GET /v1/membership` shows that node `active: false`. Nothing is lost — the
+log is permanent — and it catches up when the node returns; if the node is
+gone for good, `committed member remove` it and ownership moves on. See
+[zones.md](zones.md#strict-pins-what-happens-when-the-owner-dies).
 
 ## Unsticking it
 
@@ -283,7 +306,7 @@ Replay re-runs the syncable's `Sync` once for that proposal against a fresh
 build of its current config, and on success removes the dead letter. It is
 node-agnostic (config, the proposal, and the dead-letter store are all
 replicated) and safe to retry — `Sync` is idempotent, so replaying a
-proposal that already applied is a no-op at the sink. A `502` means the
+proposal that already applied is a no-op at the destination. A `502` means the
 downstream *still* won't take it: read the `details`, fix the cause, and
 replay again.
 

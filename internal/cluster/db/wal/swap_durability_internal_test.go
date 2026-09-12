@@ -51,6 +51,7 @@ func TestSwapDurability_RestoreSnapshotFsyncEnabled(t *testing.T) {
 	// Quiesce dst's Open-started scrub worker so its bbolt read can't race the
 	// restore's close→rename→reopen swap.
 	dst.stopScrubWorker()
+	dst.stopSealer()
 
 	require.NoError(t, dst.RestoreSnapshot(snap))
 	require.Equal(t, snap.Metadata.GetIndex(), dst.AppliedIndex(),
@@ -69,6 +70,7 @@ func TestSwapDurability_EntryLogResetFsyncEnabled(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	s.stopScrubWorker()
+	s.stopSealer()
 
 	require.NoError(t, s.resetEntryLogToSnapshot(9, 3))
 	require.Equal(t, uint64(9), s.firstIndex.Load(), "reset must set firstIndex to the snapshot index")
@@ -88,6 +90,7 @@ func TestRecomputeEventBoundsAfterSwap_FatalsOnRecomputeFailure(t *testing.T) {
 	s := fatalPanicStorage(t)
 	// Quiesce the Open-started scrub worker before poking the event-log handle.
 	s.stopScrubWorker()
+	s.stopSealer()
 
 	// Force the recompute to fail by closing the event log out from under it, then
 	// assert the swap site fatals (panics, via the WriteThenPanic fatal hook)
@@ -107,6 +110,7 @@ func TestRecomputeEventBoundsAfterSwap_FatalsOnRecomputeFailure(t *testing.T) {
 func TestCloseEventLogBeforeSwap_FatalsOnCloseFailure(t *testing.T) {
 	s := fatalPanicStorage(t)
 	s.stopScrubWorker()
+	s.stopSealer()
 
 	// Pre-close the event log so the helper's close is a double-close, which
 	// tidwall/wal reports as ErrClosed — the forced close failure. Assert the swap

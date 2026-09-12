@@ -1,4 +1,4 @@
-//go:build docker
+//go:build docker || integration
 
 package postgres_test
 
@@ -24,7 +24,7 @@ import (
 // every short-digit key the numeric cursor has already passed and terminate
 // early on a short batch, reporting a partial snapshot as complete (the field
 // incident: 82% of a 429K-row table, green status). Integer pks 0..24 with
-// batch_size 10 trip it exactly: text order visits 0,1,10..17 first, then
+// batchSize 10 trip it exactly: text order visits 0,1,10..17 first, then
 // "pk > 17" numerically excludes 2..9 forever — 17 of 25 rows. The earlier
 // chunking test never caught this because its VARCHAR pks are zero-padded to
 // uniform width, where text order and value order coincide. The fix qualifies
@@ -56,10 +56,10 @@ func TestPostgresSnapshotIntegerPKKeysetOrder(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_intpk_order",
-			"publication": "pub_intpk_order",
-			"batch_size":  "10", // < rowCount, and pks span 1-2 digit lengths
+		Options: sql.Options{
+			SlotName:    "slot_intpk_order",
+			Publication: "pub_intpk_order",
+			BatchSize:   10, // < rowCount, and pks span 1-2 digit lengths
 		},
 	}
 

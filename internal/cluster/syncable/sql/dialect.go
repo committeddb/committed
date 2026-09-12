@@ -36,6 +36,44 @@ type Dialect interface {
 	// row that has since vanished at the source. Postgres uses ADD COLUMN IF NOT
 	// EXISTS; MySQL (no such clause) checks information_schema first.
 	EnsureGenerationColumn(ctx context.Context, db *gosql.DB, config *Config) error
+	// EnsureRematerializationColumn idempotently adds the committed-managed
+	// RematerializationColumn to a keyed sink, mirroring
+	// EnsureGenerationColumn. Called at BeginRematerialization, not Init, so
+	// sinks that never re-materialize never carry the column.
+	EnsureRematerializationColumn(ctx context.Context, db *gosql.DB, config *Config) error
+	// CreateRematerializationUpsertSQL is CreateGenerationUpsertSQL with the
+	// RematerializationColumn additionally appended (column, placeholder,
+	// update assignment): applyEntity appends (generation, rematEpoch) after
+	// the mapped values while a re-materialization is active.
+	CreateRematerializationUpsertSQL(config *Config) string
+	// CreateRematerializationSweepSQL deletes every row whose
+	// RematerializationColumn stamp predates the bound epoch — the completion
+	// sweep of a re-materialization.
+	CreateRematerializationSweepSQL(config *Config) string
+
+	// TableExists reports whether table (optionally schema-qualified) exists
+	// in the destination — asked before CREATE TABLE IF NOT EXISTS, which
+	// cannot say whether it created, so ownership is recorded truthfully.
+	TableExists(ctx context.Context, db *gosql.DB, table string) (bool, error)
+	// EnsureDestinations creates the per-database destination-note table
+	// (DestinationsTable) if it is absent, with every column. Idempotent.
+	EnsureDestinations(ctx context.Context, db *gosql.DB) error
+	// DestinationSelectSQL selects (rendering_version, owned) by table_name
+	// (one placeholder).
+	DestinationSelectSQL() string
+	// DestinationStampSQL inserts (table_name, rendering_version, owned=false)
+	// or, on conflict, updates rendering_version ONLY — ownership is never
+	// touched by a stamp. Placeholders: table_name, rendering_version.
+	DestinationStampSQL() string
+	// DestinationClaimSQL inserts (table_name, rendering_version, owned=true)
+	// or, on conflict, sets both: committed just created the table.
+	// Placeholders: table_name, rendering_version.
+	DestinationClaimSQL() string
+	// DestinationDisownSQL sets owned=false for table_name (one placeholder):
+	// the operator kept the table; committed will not drop it again.
+	DestinationDisownSQL() string
+	// DestinationDeleteSQL deletes the row for table_name (one placeholder).
+	DestinationDeleteSQL() string
 	// CreateEnrichedUpsertSQL is CreateSQL for a projection rule with spine
 	// lookup enrichments: enriched columns' VALUES entries are scalar
 	// subqueries against the lookup dimension table — `(SELECT
@@ -209,6 +247,13 @@ const wholePayloadPath = "$"
 // user column; validateMappings rejects a config that maps to this name.
 const GenerationColumn = "committed_generation"
 
+// RematerializationColumn is the committed-managed sink column stamped by a
+// re-materialization replay: every row the replay re-emits carries the
+// replay's epoch, and the completion sweep deletes rows whose stamp predates
+// it — the rows the current projection no longer produces. BIGINT DEFAULT 0
+// (never re-materialized). Keyed plain sinks only, like GenerationColumn.
+const RematerializationColumn = "committed_rematerialized"
+
 // wholePayloadColumnTypes are the case-insensitive column-type prefixes a
 // whole-payload mapping may target. The raw document binds as a JSON string,
 // so the column must hold arbitrary text or native JSON ("JSON" also covers
@@ -237,7 +282,7 @@ func validateMappings(mappings []Mapping) error {
 		// at Init — so reject it at config time with an actionable message.
 		if strings.EqualFold(strings.TrimSpace(m.Column), GenerationColumn) {
 			return fmt.Errorf(
-				"mapping column %q is reserved: committed manages a %q column on keyed sinks for reconciling refreshes; rename this mapping",
+				"mapping column %q is reserved: committed manages a %q column on keyed tables for reconciling refreshes; rename this mapping",
 				m.Column, GenerationColumn)
 		}
 		if m.JsonPath != wholePayloadPath {
@@ -383,6 +428,15 @@ type Insert struct {
 	SQL      string
 	Stmt     *gosql.Stmt
 	JsonPath []string
+	// Trackers classify each mapping path's extraction failures
+	// (entry-specific vs config-shaped), positionally aligned with JsonPath.
+	// See cluster.AmbiguityTracker.
+	Trackers cluster.AmbiguityTrackers
+}
+
+// NewInsert builds an Insert with one ambiguity tracker per mapping path.
+func NewInsert(sqlString string, stmt *gosql.Stmt, jsonPaths []string) *Insert {
+	return &Insert{SQL: sqlString, Stmt: stmt, JsonPath: jsonPaths, Trackers: cluster.NewAmbiguityTrackers(len(jsonPaths))}
 }
 
 // Delete is the prepared `DELETE FROM <table> WHERE <keyCol> = ?` statement.

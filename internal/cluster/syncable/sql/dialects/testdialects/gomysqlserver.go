@@ -39,6 +39,46 @@ func (d *GoMySQLServerDialect) CreateGenerationSweepSQL(config *sql.Config) stri
 	return (&dialects.MySQLDialect{}).CreateGenerationSweepSQL(config)
 }
 
+func (d *GoMySQLServerDialect) EnsureRematerializationColumn(ctx context.Context, db *gosql.DB, config *sql.Config) error {
+	return (&dialects.MySQLDialect{}).EnsureRematerializationColumn(ctx, db, config)
+}
+
+func (d *GoMySQLServerDialect) CreateRematerializationUpsertSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateRematerializationUpsertSQL(config)
+}
+
+func (d *GoMySQLServerDialect) CreateRematerializationSweepSQL(config *sql.Config) string {
+	return (&dialects.MySQLDialect{}).CreateRematerializationSweepSQL(config)
+}
+
+func (d *GoMySQLServerDialect) TableExists(ctx context.Context, db *gosql.DB, table string) (bool, error) {
+	return (&dialects.MySQLDialect{}).TableExists(ctx, db, table)
+}
+
+func (d *GoMySQLServerDialect) EnsureDestinations(ctx context.Context, db *gosql.DB) error {
+	return (&dialects.MySQLDialect{}).EnsureDestinations(ctx, db)
+}
+
+func (d *GoMySQLServerDialect) DestinationSelectSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationSelectSQL()
+}
+
+func (d *GoMySQLServerDialect) DestinationStampSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationStampSQL()
+}
+
+func (d *GoMySQLServerDialect) DestinationClaimSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationClaimSQL()
+}
+
+func (d *GoMySQLServerDialect) DestinationDisownSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationDisownSQL()
+}
+
+func (d *GoMySQLServerDialect) DestinationDeleteSQL() string {
+	return (&dialects.MySQLDialect{}).DestinationDeleteSQL()
+}
+
 func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }

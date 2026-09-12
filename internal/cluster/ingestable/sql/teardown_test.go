@@ -19,6 +19,7 @@ func (stubDialect) Ingest(context.Context, *sql.Config, cluster.Position, uint64
 	return nil
 }
 func (stubDialect) Preflight(*sql.Config) error { return nil }
+func (stubDialect) OptionKeys() []string        { return nil }
 
 func (stubDialect) Status(context.Context, *sql.Config, cluster.Position) (cluster.IngestableStatus, error) {
 	return cluster.IngestableStatus{}, nil

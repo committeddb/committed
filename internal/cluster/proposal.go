@@ -34,10 +34,9 @@ var ErrInsufficientStorage = errors.New("insufficient disk space to accept the p
 
 var delete []byte = []byte("7ec589c2-3318-4a3c-839b-a9af9c9443be")
 
-// logEntityWireView is the encoding-agnostic read of a wire LogEntity: the
-// same logical fields whether the entity was written as a typed body variant
-// (the control envelope, >= 0.7.3-beta) or as the legacy flat fields
-// (<= 0.7.2-beta). It is the single decode chokepoint — Proposal.Unmarshal and
+// logEntityWireView is the logical read of a wire LogEntity's body variant
+// (the control envelope, the only supported encoding since the floor rose to
+// 0.7.3-beta). It is the single decode chokepoint — Proposal.Unmarshal and
 // the scrub traversals (FilterProposalEntities, ForEachProposalEntity) all
 // read the wire through it — so a new body variant is handled here once.
 type logEntityWireView struct {
@@ -55,24 +54,25 @@ func (v logEntityWireView) isDelete() bool {
 	return string(v.data) == string(delete)
 }
 
-// logEntityView maps a wire LogEntity to its logical view. A set body variant
-// wins; an unset body means the entity was written by a pre-envelope binary
-// (<= 0.7.2-beta) and the legacy flat fields carry the payload.
+// logEntityView maps a wire LogEntity to its logical view: exactly one body
+// variant per entity.
 //
 // An entity carrying LogEntity-level wire tags this binary does not know is an
-// ERROR, not a legacy entity: proto3 would otherwise drop the unknown tags
-// into the legacy path and the entity would silently apply as empty. Two
-// populations can trip it: a body variant from a NEWER release (the cluster
-// feature level keeps one from being committed while an older member is
-// present — this guard is the defense-in-depth behind that gate), and bytes
-// from a data dir OLDER than the supported floor (0.7.2-beta; pre-v0.5 logs
-// carry the long-removed Timestamp field 4 — see docs/api-compatibility.md).
-// Unknown tags INSIDE a known variant's message are still fine (adding a
-// field to LogRow stays add-only); only LogEntity-level unknowns trip this.
+// ERROR: proto3 would otherwise silently drop them and the entity could apply
+// with less than its written meaning. Two populations trip it: a body variant
+// from a NEWER release (the cluster feature level keeps one from being
+// committed while an older member is present — this guard is the
+// defense-in-depth behind that gate), and bytes from a data dir OLDER than the
+// supported floor of 0.7.3-beta — the pre-envelope FLAT fields (<= 0.7.2-beta,
+// tags 2/3/5/6, an era no deployment ever ran) and the long-removed Timestamp
+// (pre-v0.5, tag 4) are reserved, so their bytes land here as unknowns — see
+// docs/api-compatibility.md. Unknown tags INSIDE a known variant's message are
+// still fine (adding a field to LogRow stays add-only); only LogEntity-level
+// unknowns trip this.
 func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	if u := le.ProtoReflect().GetUnknown(); len(u) > 0 {
 		return logEntityWireView{}, fmt.Errorf(
-			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.2-beta (recreate it; see docs/api-compatibility.md)",
+			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.3-beta (recreate it; see docs/api-compatibility.md)",
 			le.Type.GetID())
 	}
 	switch b := le.GetBody().(type) {
@@ -88,13 +88,15 @@ func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	case *clusterpb.LogEntity_Refresh:
 		return logEntityWireView{generation: b.Refresh.GetGeneration(), refreshBoundary: true}, nil
 	default:
-		return logEntityWireView{
-			key:             le.GetKey(),
-			data:            le.GetData(),
-			generation:      le.GetGeneration(),
-			refreshBoundary: le.GetRefreshBoundary(),
-			// keepData has no legacy flat field — it shipped with the envelope.
-		}, nil
+		// No body variant and no unknown tags: an empty entity. Every supported
+		// writer (>= 0.7.3-beta, the envelope era) sets exactly one variant, so
+		// this is not a legal wire state — fail loudly rather than apply an
+		// empty entity. (Pre-envelope FLAT entities never reach this arm: their
+		// field tags were removed from the schema when the floor rose to
+		// 0.7.3-beta, so their bytes trip the unknown-wire-fields guard above.)
+		return logEntityWireView{}, fmt.Errorf(
+			"log entity of type %s carries no body variant: not a legal encoding for any supported era (floor 0.7.3-beta; see docs/api-compatibility.md)",
+			le.Type.GetID())
 	}
 }
 
@@ -135,10 +137,17 @@ type Proposal struct {
 	// position (Postgres LSN, MySQL binlog file+offset) set on the
 	// proposal by the Ingestable; IngestableID is stamped by the ingest
 	// worker (which knows the registry id) before propose. They drive
-	// effectively-once ingest: the apply path advances a per-ingestable
-	// highwater to max(highwater, SourceSeq), and the leader's worker
-	// skips re-emitted proposals (SourceSeq <= highwater) before they
-	// enter raft. Zero/"" means "not an ingest proposal" — never deduped.
+	// effectively-once ingest: for dialects that opt in (TxnScopedDedup
+	// below), the apply path folds (SourceSeq, SourceTxnID) into a
+	// TRANSACTION-scoped dedup record — the seq highwater within the last
+	// applied source transaction — and the leader's worker skips a
+	// re-emitted proposal only when it belongs to that same transaction with
+	// seq at or below the highwater; a different transaction resets the
+	// record. Scoping dedup to one transaction is what makes post-failover
+	// coordinates (a new binlog lineage encoding low) and
+	// coordinate-inflation across transactions harmless. Without the opt-in
+	// the record keeps the legacy global-scalar semantics. Zero/"" means
+	// "not an ingest proposal" — never deduped.
 	IngestableID string
 	SourceSeq    uint64
 
@@ -148,9 +157,43 @@ type Proposal struct {
 	// entity, keyed by IngestableID — ATOMICALLY with this proposal's entities,
 	// in one raft entry. Snapshot batches set it so a crash can never fall
 	// between a committed batch and its checkpoint (the gap SourceSeq dedup can't
-	// cover, since snapshot rows carry SourceSeq 0). Empty for non-ingest and
-	// streaming proposals, which checkpoint out-of-band.
+	// cover, since snapshot rows carry SourceSeq 0). Streaming commit flushes
+	// set it too — the final proposal of each source transaction carries the
+	// post-transaction resume position (the GTID-set watermark for a
+	// gtid_mode=ON MySQL source), which is what makes the durable watermark
+	// advance ATOMICALLY with the applied index and shrinks the resume
+	// re-emission window to the single in-flight transaction. Empty for
+	// non-ingest proposals and mid-transaction soft flushes (a position must
+	// never advance past an uncommitted transaction).
 	Position Position
+
+	// SourceCommitUnixNano and SourceTxnID are capture provenance on a CDC
+	// proposal: when the SOURCE committed this change and which source
+	// transaction produced it — both sitting in the change stream as it is
+	// read and unrecoverable once the source's binlog/WAL retention expires.
+	// Proposal-level, not per-entity: all rows in one emitted proposal come
+	// from one source transaction context. Stamped by the dialect; fidelity
+	// varies by source (MySQL binlog event-header timestamp + GTID, with a
+	// file:pos-derived identity when gtid_mode=OFF; Postgres pgoutput Begin
+	// commit-time + xid; SQL Server change-tracking version +
+	// sys.dm_tran_commit_table, best-effort). SourceCommitUnixNano is
+	// provenance only; SourceTxnID additionally scopes the ingest dedup
+	// record when — and only when — the dialect opts in via TxnScopedDedup
+	// below, so stamping provenance never changes dedup behavior by itself.
+	// Sync never reads either. Zero/empty means "not captured":
+	// snapshot-phase proposals (a snapshot row has no source transaction),
+	// direct user proposals, and pre-feature log entries.
+	SourceCommitUnixNano int64
+	SourceTxnID          string
+
+	// TxnScopedDedup is the dialect's opt-in to transaction-scoped dedup
+	// (marshaled — the apply fold reads it): set it ONLY when the dialect's
+	// commit flush bundles the post-transaction position, so a resume
+	// re-emits at most the in-flight transaction. Without it, SourceTxnID is
+	// provenance only and dedup keeps the legacy global-scalar semantics —
+	// which is what keeps a dialect whose checkpoint is coarser than its
+	// transaction stamps (SQL Server's per-poll-window checkpoint) correct.
+	TxnScopedDedup bool
 
 	// DedupUnsafe is a TRANSIENT pre-raft hint, set by an ingest dialect and
 	// consumed only by the leader's ingest-worker dedup — it is deliberately NOT
@@ -164,9 +207,28 @@ type Proposal struct {
 	// old highwater) or a same-coordinate multi-part transaction is being replayed
 	// under changed chunking inputs (config re-POST / binary upgrade), where the
 	// seq->content mapping may have shifted. The freeze converts an otherwise
-	// silent data-loss drop into an operator-visible halt. See db.ingest's dedup
-	// branch and the mysql dialect's flush path.
+	// silent data-loss drop into an operator-visible halt. With
+	// transaction-scoped dedup the lineage-regression case moved to
+	// LineageRegressed below; DedupUnsafe remains for the re-chunk case
+	// (and for lineage regression on sources without a transaction
+	// identity), where the risk is WITHIN one transaction and
+	// transaction scoping cannot help. See db.ingest's dedup branch and
+	// the mysql dialect's flush path.
 	DedupUnsafe bool
+
+	// LineageRegressed is a TRANSIENT pre-raft hint like DedupUnsafe (never
+	// marshaled): the dialect resumed by a lineage-stable transaction
+	// watermark (e.g. StartSyncGTID) and observed the source's COORDINATE
+	// lineage regress — a failover to a replica whose binlog numbering
+	// restarts low. Under the transaction-scoped dedup record this is
+	// harmless (a new transaction resets the record, so its low coordinates
+	// are never compared against the old lineage's high ones) and the worker
+	// rides through. The one exception is the upgrade window: while the
+	// stored record is still the LEGACY scalar regime (no transaction
+	// identity), scalar comparison could silently drop the new lineage's
+	// data, so the worker preserves the pre-upgrade FREEZE until the first
+	// transaction-stamped proposal applies and flips the regime.
+	LineageRegressed bool
 }
 
 type Entity struct {
@@ -300,9 +362,9 @@ func (p *Proposal) Marshal() ([]byte, error) {
 			},
 		}
 		// Every entity is encoded as exactly one body variant — the typed
-		// control envelope. The legacy flat fields are decode-only (see
-		// unmarshal); the delete sentinel exists only in memory, never on the
-		// wire (the Delete variant is explicit).
+		// control envelope (the pre-envelope flat fields are reserved tags
+		// now; see logEntityView); the delete sentinel exists only in
+		// memory, never on the wire (the Delete variant is explicit).
 		switch e.Variant() {
 		case EntityVariantRefresh:
 			le.Body = &clusterpb.LogEntity_Refresh{Refresh: &clusterpb.LogRefresh{Generation: e.Generation}}
@@ -323,11 +385,14 @@ func (p *Proposal) Marshal() ([]byte, error) {
 	}
 
 	lp := &clusterpb.LogProposal{
-		LogEntities:  es,
-		RequestID:    p.RequestID,
-		IngestableID: p.IngestableID,
-		SourceSeq:    p.SourceSeq,
-		Position:     p.Position,
+		LogEntities:          es,
+		RequestID:            p.RequestID,
+		IngestableID:         p.IngestableID,
+		SourceSeq:            p.SourceSeq,
+		Position:             p.Position,
+		SourceCommitUnixNano: p.SourceCommitUnixNano,
+		SourceTxnID:          p.SourceTxnID,
+		TxnScopedDedup:       p.TxnScopedDedup,
 	}
 
 	return proto.Marshal(lp)
@@ -389,6 +454,9 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 	p.IngestableID = lp.IngestableID
 	p.SourceSeq = lp.SourceSeq
 	p.Position = lp.Position
+	p.SourceCommitUnixNano = lp.SourceCommitUnixNano
+	p.SourceTxnID = lp.SourceTxnID
+	p.TxnScopedDedup = lp.TxnScopedDedup
 	for _, e := range lp.LogEntities {
 		ref := TypeRef{ID: e.Type.GetID(), Version: int(e.Type.GetVersion())}
 		t, err := resolveType(ref, r)

@@ -168,9 +168,10 @@ func (s *Storage) saveWithSnapshot(st *pb.HardState, ents []*pb.Entry, snap *pb.
 		s.hardState = st
 	}
 	// Clone, don't alias: raft's rd.Snapshot may point at its internal
-	// unstable snapshot, and ConfState() mutates s.snapshot.Metadata in
-	// place — so we must own this copy.
+	// unstable snapshot — we must own this copy. Its membership is this
+	// node's from here on (an install applies no conf change of its own).
 	s.snapshot = proto.Clone(snap).(*pb.Snapshot)
+	s.appliedConfState = s.snapshot.GetMetadata().GetConfState()
 	// Consumed by the appendState call below, which always persists this
 	// (newer) snapshot.
 	s.snapDirty = false
@@ -223,6 +224,7 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
+	s.entryLogEpoch.Add(1)
 
 	if err := s.EntryLog.Close(); err != nil {
 		return fmt.Errorf("close entry log: %w", err)
@@ -273,6 +275,7 @@ func (s *Storage) resetEntryLogToEmpty() error {
 
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
+	s.entryLogEpoch.Add(1)
 
 	if err := s.EntryLog.Close(); err != nil {
 		return fmt.Errorf("close entry log: %w", err)
@@ -346,12 +349,13 @@ func (s *Storage) reconcileEntryLogWithSnapshot() error {
 // the whole entry log is discarded: appendEntries re-establishes the seq mapping on
 // the next Save exactly as for a fresh node, and the node re-bootstraps (StartNode)
 // or re-catches-up from the leader (RestartNode on a join) with zero data loss.
-// Guarded to a GENESIS log with no snapshot (first retained entry at raft index 1):
-// that is the only way production reaches entries + an empty durable HardState. A
-// log whose first entry sits above index 1, or that carries a durable snapshot, has
-// a history — it once committed, so a HardState existed — so an empty HardState
-// there is a torn/inconsistent persist, left to the loud assert rather than silently
-// reset over. (boundary() == 1 only for a genesis log; a snapshot's companion
+// Guarded to a GENESIS log with no snapshot (boundary at the virtual index-0
+// dummy — the log still starts at raft index 1): that is the only way production
+// reaches entries + an empty durable HardState. A log whose first entry sits above
+// index 1, or that carries a durable snapshot, has a history — it once committed,
+// so a HardState existed — so an empty HardState there is a torn/inconsistent
+// persist, left to the loud assert rather than silently reset over. (boundary()
+// == 0 with entries present only for a genesis log; a snapshot's companion
 // HardState is written by appendState, so snapshot + empty-HardState cannot arise
 // from a correct persist.)
 func (s *Storage) reconcileEntryLogWithHardState() error {
@@ -360,7 +364,7 @@ func (s *Storage) reconcileEntryLogWithHardState() error {
 		return nil
 	}
 	if raft.IsEmptyHardState(s.hardState) {
-		if s.boundary() != 1 || s.snapshot.Metadata.GetIndex() != 0 {
+		if s.boundary() != 0 || s.snapshot.Metadata.GetIndex() != 0 {
 			return nil // not a genesis first-Save crash — leave to the loud assert
 		}
 		s.logger.Warn("recovering a first-Save crash: discarding the un-acked genesis entry log written before any durable HardState",
@@ -502,9 +506,26 @@ func (s *Storage) appendEntries(ents []*pb.Entry) error {
 			lostIDs = s.collectTruncatedRequestIDs(offset+1, l)
 		}
 
-		err := s.EntryLog.TruncateBack(offset)
-		if err != nil {
-			return err
+		if offset == 0 {
+			// The conflict overwrites EVERY retained entry — a higher-term
+			// leader replacing a fully-uncommitted log, the contested-first-
+			// election shape. tidwall's TruncateBack cannot express an empty
+			// log (index 0 is out of range), so swap in a fresh one (the
+			// same crash-safe dir swap the recovery paths use; a crash
+			// before the batch write below leaves an empty log + durable
+			// HardState, which reopen tolerates and the leader re-fills)
+			// and let the fresh-log branch below re-establish the seq
+			// mapping from the new entries. Found by the storage
+			// differential's conflict op: before this, the Save failed
+			// ErrOutOfRange and wedged the node mid-election.
+			if err := s.resetEntryLogToEmpty(); err != nil {
+				return err
+			}
+			firstIndex, lastIndex = 0, 0
+		} else {
+			if err := s.EntryLog.TruncateBack(offset); err != nil {
+				return err
+			}
 		}
 
 		// Signal only after the truncation actually executed, so a waiter

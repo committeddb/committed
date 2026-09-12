@@ -307,7 +307,7 @@ func (d *MySQLDialect) EnsureSpineIndex(ctx context.Context, db *gosql.DB, confi
 }
 
 func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
-	return mysqlUpsertSQL(config, false)
+	return mysqlUpsertSQL(config, false, false)
 }
 
 // CreateGenerationUpsertSQL implements Dialect: CreateSQL plus the
@@ -315,7 +315,107 @@ func (d *MySQLDialect) CreateSQL(config *sql.Config) string {
 // assignment), used only by the keyed plain Syncable so a refresh sweep can find
 // stale rows. Projections and keyless syncables keep the plain CreateSQL.
 func (d *MySQLDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
-	return mysqlUpsertSQL(config, true)
+	return mysqlUpsertSQL(config, true, false)
+}
+
+// CreateRematerializationUpsertSQL implements Dialect: the generation upsert
+// with the remat-epoch column additionally appended.
+func (d *MySQLDialect) CreateRematerializationUpsertSQL(config *sql.Config) string {
+	return mysqlUpsertSQL(config, true, true)
+}
+
+// EnsureRematerializationColumn implements Dialect, mirroring
+// EnsureGenerationColumn (DEFAULT 0 = never re-materialized); MySQL has no
+// ADD COLUMN IF NOT EXISTS, so check information_schema first.
+func (d *MySQLDialect) EnsureRematerializationColumn(ctx context.Context, db *gosql.DB, config *sql.Config) error {
+	var n int
+	var err error
+	if dot := strings.IndexByte(config.Table, '.'); dot >= 0 {
+		err = db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?",
+			config.Table[:dot], config.Table[dot+1:], sql.RematerializationColumn).Scan(&n)
+	} else {
+		err = db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+			config.Table, sql.RematerializationColumn).Scan(&n)
+	}
+	if err != nil {
+		return fmt.Errorf("check rematerialization column: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s BIGINT NOT NULL DEFAULT 0",
+		mysqlIdent.Table(config.Table), sql.RematerializationColumn)
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("ensure rematerialization column [%s]: %w", stmt, err)
+	}
+	return nil
+}
+
+// TableExists implements Dialect via information_schema (the same probe
+// EnsureRematerializationColumn uses; a qualified name splits into schema
+// and table, an unqualified one is looked up in the connection's database).
+func (d *MySQLDialect) TableExists(ctx context.Context, db *gosql.DB, table string) (bool, error) {
+	var n int
+	var err error
+	if dot := strings.IndexByte(table, '.'); dot >= 0 {
+		err = db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+			table[:dot], table[dot+1:]).Scan(&n)
+	} else {
+		err = db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+			table).Scan(&n)
+	}
+	if err != nil {
+		return false, fmt.Errorf("check table exists: %w", err)
+	}
+	return n > 0, nil
+}
+
+// EnsureDestinations implements Dialect: the per-database destination-note table.
+func (d *MySQLDialect) EnsureDestinations(ctx context.Context, db *gosql.DB) error {
+	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (table_name VARCHAR(255) PRIMARY KEY, rendering_version BIGINT NOT NULL, owned BOOLEAN NOT NULL DEFAULT FALSE, materialized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+		mysqlIdent.Table(sql.DestinationsTable))
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("ensure sink meta [%s]: %w", stmt, err)
+	}
+	return nil
+}
+
+// DestinationSelectSQL implements Dialect.
+func (d *MySQLDialect) DestinationSelectSQL() string {
+	return fmt.Sprintf("SELECT rendering_version, owned FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.DestinationsTable))
+}
+
+// DestinationStampSQL implements Dialect: a stamp never touches ownership.
+func (d *MySQLDialect) DestinationStampSQL() string {
+	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, FALSE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), materialized_at = CURRENT_TIMESTAMP",
+		mysqlIdent.Table(sql.DestinationsTable))
+}
+
+// DestinationClaimSQL implements Dialect: committed just created the table.
+func (d *MySQLDialect) DestinationClaimSQL() string {
+	return fmt.Sprintf("INSERT INTO %s (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, TRUE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), owned = TRUE, materialized_at = CURRENT_TIMESTAMP",
+		mysqlIdent.Table(sql.DestinationsTable))
+}
+
+// DestinationDisownSQL implements Dialect.
+func (d *MySQLDialect) DestinationDisownSQL() string {
+	return fmt.Sprintf("UPDATE %s SET owned = FALSE WHERE table_name = ?", mysqlIdent.Table(sql.DestinationsTable))
+}
+
+// DestinationDeleteSQL implements Dialect.
+func (d *MySQLDialect) DestinationDeleteSQL() string {
+	return fmt.Sprintf("DELETE FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.DestinationsTable))
+}
+
+// CreateRematerializationSweepSQL implements Dialect: delete rows this
+// replay never re-emitted (stamp below the epoch).
+func (d *MySQLDialect) CreateRematerializationSweepSQL(config *sql.Config) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s < ?",
+		mysqlIdent.Table(config.Table), sql.RematerializationColumn)
 }
 
 // mysqlUpsertSQL builds the INSERT ... ON DUPLICATE KEY UPDATE upsert.
@@ -323,7 +423,7 @@ func (d *MySQLDialect) CreateGenerationUpsertSQL(config *sql.Config) string {
 // placeholder, and update assignment; BindArgs doubles every value for the
 // UPDATE clause, so the appended epoch value is bound in both halves. With
 // withGeneration=false the output is byte-identical to the pre-feature CreateSQL.
-func mysqlUpsertSQL(config *sql.Config, withGeneration bool) string {
+func mysqlUpsertSQL(config *sql.Config, withGeneration, withRemat bool) string {
 	var sqlb strings.Builder
 
 	fmt.Fprintf(&sqlb, "INSERT INTO %s(", mysqlIdent.Table(config.Table))
@@ -337,9 +437,15 @@ func mysqlUpsertSQL(config *sql.Config, withGeneration bool) string {
 	if withGeneration {
 		fmt.Fprintf(&sqlb, ",%s", sql.GenerationColumn)
 	}
+	if withRemat {
+		fmt.Fprintf(&sqlb, ",%s", sql.RematerializationColumn)
+	}
 	fmt.Fprint(&sqlb, ") VALUES (")
 	n := len(config.Mappings)
 	if withGeneration {
+		n++
+	}
+	if withRemat {
 		n++
 	}
 	for i := 0; i < n; i++ {
@@ -359,6 +465,9 @@ func mysqlUpsertSQL(config *sql.Config, withGeneration bool) string {
 	}
 	if withGeneration {
 		fmt.Fprintf(&sqlb, ",%s=?", sql.GenerationColumn)
+	}
+	if withRemat {
+		fmt.Fprintf(&sqlb, ",%s=?", sql.RematerializationColumn)
 	}
 
 	return sqlb.String()

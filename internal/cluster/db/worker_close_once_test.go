@@ -48,7 +48,7 @@ func TestWorkerLifecycle_CloseResourcesRunsCloseExactlyOnce(t *testing.T) {
 	const goroutines = 16
 
 	t.Run("ingestable", func(t *testing.T) {
-		d := &DB{logger: zap.NewNop(), workerDrainTimeout: time.Second}
+		d := &DB{logger: zap.NewNop(), workers: newWorkerRegistry(time.Second)}
 		done := make(chan struct{})
 		close(done) // drained: the close path is eligible to run
 		ing := &countingCloseIngestable{}
@@ -69,7 +69,7 @@ func TestWorkerLifecycle_CloseResourcesRunsCloseExactlyOnce(t *testing.T) {
 	})
 
 	t.Run("syncable", func(t *testing.T) {
-		d := &DB{logger: zap.NewNop(), workerDrainTimeout: time.Second}
+		d := &DB{logger: zap.NewNop(), workers: newWorkerRegistry(time.Second)}
 		done := make(chan struct{})
 		close(done)
 		syn := &countingCloseSyncable{}

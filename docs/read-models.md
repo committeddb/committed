@@ -61,12 +61,15 @@ from index 0. Use `sql` for event-log/history tables (and for
 use `projection` to maintain current-state tables from an
 `event`-kind topic. One topic typically feeds both.
 
-> **Renamed from `sql-projection`.** The projection language is not
-> SQL-specific in principle, so the type is now `projection` with a
-> `[projection]` section. The old spelling — `type = "sql-projection"`
-> with a `[sql-projection]` section, always renamed together — remains
-> accepted for a deprecation period; posting it succeeds and the
-> response carries a `warnings[]` entry naming the rename.
+> **The former `sql-projection` spelling was removed in 0.8.0.** The type
+> is `projection` with a `[projection]` section, and the array tables are
+> plural (`[[projection.sources]]`, `[[projection.stages]]`,
+> `[[…aggregate.fields]]`, `[[…aggregate.scalars]]`, `[[…lookup.fields]]`,
+> `[[…stages.joins]]`). Posting the old spelling is
+> refused with a message naming the rename, and a config stored under it
+> parks on an upgraded node until re-POSTed renamed — its declared content is
+> unchanged, so it resumes with its stores and checkpoint (see
+> [upgrade.md](operations/upgrade.md#before-you-upgrade)).
 
 A keyless history table (no `primaryKey`) is **replay-safe**: committed dedups
 each appended row on a hidden sidecar (`<table>__committed_applied`, keyed by the
@@ -79,6 +82,25 @@ is already idempotent on the key.) Because the sidecar name is derived from the
 table name, a keyless syncable's table must be short enough that
 `<table>__committed_applied` fits the database's 63-char identifier limit;
 committed rejects a longer one at config time.
+
+You will also find a small table called `committed__destinations` in the
+destination database: one row per projected table, a note saying which
+rendering version of committed wrote its rows and whether committed
+created the table. A worker reads the version before serving, and if a
+newer committed writes rows differently than the note says, the syncable
+stops and tells you how to bring the table forward instead of mixing two
+renderings in one table (see
+[api-compatibility.md](api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+
+Whether committed created the table decides what a `DELETE` does. The
+rule is the one committed applies everywhere it touches your systems: it
+removes what it created and leaves what it did not. A table committed
+created (there was none when the syncable was first POSTed) is dropped
+with the syncable. A table you created first and pointed a syncable at
+stays, rows and all. The helper tables are always committed's and always
+go. `?keepData=true` on the DELETE hands a table committed created over
+to you: nothing is removed, and committed stops counting the table as
+its own, so a later DELETE leaves it too.
 
 The sidecar keys on the event's *raft index*, so it makes re-applying the **same
 committed event** a no-op — but each *distinct* event is still its own row. A
@@ -109,7 +131,7 @@ carries only the encoded key, and its values decode positionally in the
 producer's column order — a mismatched order mis-addresses rows, and nothing
 can detect it mechanically (topics decouple the two configs on purpose).
 A mismatched column COUNT, by contrast, is caught at delete-apply time and
-dead-letters loudly — a composite tombstone hitting a single-key sink (or
+dead-letters loudly — a composite tombstone hitting a single-key destination (or
 the reverse) would otherwise execute a WHERE that matches nothing and
 silently strand the deleted row. Every key column must also appear in the
 mappings; the parser rejects a config where it doesn't.
@@ -232,12 +254,17 @@ error handling, deletes, and schema evolution:
   `details`) rather than silently no-op'd. To
   add or change a column, replace the syncable in place:
   `DELETE /v1/syncable/{id}` (removes the config + checkpoint atomically
-  and drops the table), then re-POST the new config — the fresh table
-  replays from index 0. `?keepData=true` on the DELETE preserves the
-  destination (e.g. another consumer reads the table). To re-materialize a drifted or
-  corrupted projection *without* a schema change,
+  and drops the table if committed created it — a table you created
+  stays, so drop it yourself first), then re-POST the new config — the
+  fresh table replays from index 0. `?keepData=true` on the DELETE hands
+  the table over instead (e.g. another consumer reads it): nothing is
+  dropped, and committed no longer counts the table as its own. To
+  re-materialize a drifted or corrupted projection *without* a schema change,
   `POST /v1/syncable/{id}/rebuild` does the drop + replay-from-0 in place
-  under the same name. The log is permanent, so replay is cheap.
+  under the same name, for a table committed created. On a table you
+  created it refuses (409 `destination_not_owned`) rather than replay over
+  rows it cannot drop: drop the table yourself and re-POST, or rematerialize
+  a keyed syncable. The log is permanent, so replay is cheap.
 
 ### Computed columns (`expr`)
 
@@ -274,7 +301,7 @@ escape hatches (`nullif(x, 0)` is the division-by-zero guard).
 A projection can consume more than one topic and fold them into a single
 denormalized "BFF" row — e.g. a `movie_card` built from a normalized `movie`
 topic and a `rating` topic, one row per `movie_id`. Replace the single top-level
-`topic`/`rules` with a `[[projection.source]]` block per topic. The
+`topic`/`rules` with a `[[projection.sources]]` block per topic. The
 **topic is the discriminator** (an event only ever runs its own source's
 rules), and because each rule sets only its own columns, two sources fold
 into one row without clobbering. Each source also declares what its delete
@@ -287,19 +314,19 @@ columns it owns, the row survives), or `ignore`.
 db = "bff"; table = "movie_card"; primaryKey = "movie_id"
 # … columns: movie_id, title, year, genres, score, votes …
 
-[[projection.source]]
+[[projection.sources]]
 topic    = "movie"          # this source's discriminator
 keyPath  = "$.movie_id"     # correlate by the shared aggregate key
 onDelete = "delete-row"     # movie is the spine: its delete drops the row
-  [[projection.source.rules]]
+  [[projection.sources.rules]]
   set = [ { column = "title",  from = "$.title" },
           { column = "year",   from = "$.year" },
           { column = "genres", from = "$.genres" } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic    = "rating"
 onDelete = "clear"          # a contributor: its delete NULLs its columns, keeps the row
-  [[projection.source.rules]]
+  [[projection.sources.rules]]
   set = [ { column = "score", from = "$.score" },
           { column = "votes", from = "$.votes" } ]
 ```
@@ -324,7 +351,7 @@ instead of `rules`:
   entity identity, not by `elementKey`.)
 - **`elementKeyType`** — `number` (sort 1, 2, …, 10) or `text` (lexical, the
   default).
-- **`element`** — an array-of-tables naming the per-child object's fields (an
+- **`fields`** — an array-of-tables naming the per-child object's fields (an
   array, not an inline map, so field names survive byte-exact).
 
 A child delete removes exactly its element via `onDelete = "remove-from-aggregate"`,
@@ -336,29 +363,29 @@ different columns. Here the `credit` topic feeds `top_cast` (actors) and
 `directors` (directors):
 
 ```toml
-[[projection.source]]
+[[projection.sources]]
 topic   = "credit"
 keyPath = "$.movie_id"               # which movie row this child folds into
 when    = [ { path = "$.role", equals = "actor" } ]
-  [projection.source.aggregate]
+  [projection.sources.aggregate]
   column         = "top_cast"
   elementKey     = "$.billing"       # billing order: identity + numeric sort
   elementKeyType = "number"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "person_id"
     from  = "$.person_id"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "billing"
     from  = "$.billing"
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "credit"
 keyPath = "$.movie_id"
 when    = [ { path = "$.role", equals = "director" } ]
-  [projection.source.aggregate]
+  [projection.sources.aggregate]
   column     = "directors"
   elementKey = "$.billing"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "person_id"
     from  = "$.person_id"
 ```
@@ -379,22 +406,22 @@ min, max, countDistinct — recomputed absolutely from the sidecar at every
 child change (never incremented, so redelivery and rebuild converge):
 
 ```toml
-  [projection.source.aggregate]
+  [projection.sources.aggregate]
   elementKey = "$.id"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "hours"
     from  = "$.hours"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "status"
     from  = "$.status"
-    [[projection.source.aggregate.scalar]]
+    [[projection.sources.aggregate.scalars]]
     column = "visit_count"
     fn     = "count"
-    [[projection.source.aggregate.scalar]]
+    [[projection.sources.aggregate.scalars]]
     column = "hours_sum"
     fn     = "sum"
     of     = "hours"
-    [[projection.source.aggregate.scalar]]
+    [[projection.sources.aggregate.scalars]]
     column = "done_count"
     fn     = "count"
     where  = [ { field = "status", equals = "done" } ]
@@ -416,20 +443,20 @@ NULL when no children qualify.
 ## Staged computation (internal stages)
 
 Some read models are a *pipeline*: filter, then aggregate, then aggregate
-again. `[[projection.stage]]` blocks declare internal stages — private
-keyed refolds held in a node-local stage store, never topics, never sink
+again. `[[projection.stages]]` blocks declare internal stages — private
+keyed refolds held in a node-local stage store, never topics, never destination
 writes (only the table is outward-facing) — and a table source consumes a
 stage with `from = "<stage name>"`:
 
 ```toml
-[[projection.stage]]
+[[projection.stages]]
 name    = "live"                    # private label; stages chain by name
 from    = "txns"                    # a topic — or a PRIOR stage's name
 keyPath = "$.id"
 emit    = [ { field = "job", from = "$.jobId" },
             { field = "amt", from = "$.amount" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "by-job"
 from    = "live"                    # chained: consumes the stage above
 keyPath = "$.job"
@@ -437,9 +464,9 @@ reduce  = "aggregate"
 emit    = [ { field = "total", sum = "$.amt" },
             { field = "n",     count = true } ]
 
-[[projection.source]]
+[[projection.sources]]
 from    = "by-job"                  # a stage-fed table source
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "total", from = "$.total" },
         { column = "n",     from = "$.n" } ]
 ```
@@ -465,7 +492,7 @@ set = [ { column = "total", from = "$.total" },
   retracts entirely, cascading. `collect` is `array_agg` with determinism SQL doesn't
   promise: values fold into an ALWAYS-SORTED array (numbers
   numerically, then strings, then bools), `distinct = true` dedupes,
-  and the array lands in the sink as JSON. Any fold arm takes a
+  and the array lands in the destination as JSON. Any fold arm takes a
   per-emit `where` — SQL's `FILTER (WHERE …)`: `{ field = "reviewed",
   count = true, where = [ { path = "$.billed", equals = "true" } ] }`
   folds only matching inputs for THAT field, while row membership stays
@@ -499,7 +526,7 @@ set = [ { column = "total", from = "$.total" },
   fans ZERO elements, silently — decode it at ingest with
   `jsonColumns`); a legitimately empty array is healthy and never
   warns.
-- **Joins FILTER** (`[[projection.stage.join]]`): an input participates
+- **Joins FILTER** (`[[projection.stages.joins]]`): an input participates
   only while the joined topic's row — addressed by the input's `on`
   value against the joined entity's key — exists and matches every
   `where` clause. `on` takes one path, or a list addressing a
@@ -614,7 +641,7 @@ set = [ { column = "total", from = "$.total" },
   VALUES; keys are identity.
 - **Upgrades never reset unchanged configs**: the store fingerprint
   covers DECLARED content only, so new vocabulary in a new binary
-  leaves untouched configs' stores intact (pinned by a golden contract
+  leaves untouched configs' stores intact (pinned by a reference contract
   test). When a store genuinely resets (a stage edit, an ownership
   move), the worker re-derives before consuming and the status endpoint
   says so: `workerState: "re-deriving"` with `stageRecovery {folded,
@@ -632,16 +659,16 @@ When several sources fold one row and any of them is stage-fed, the
 table must declare which source owns row existence:
 
 ```toml
-[[projection.source]]              # the row owner: admits and removes rows
+[[projection.sources]]              # the row owner: admits and removes rows
 topic    = "jobs"
 keyPath  = "$.id"
 rowOwner = true
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "name", from = "$.name" } ]
 
-[[projection.source]]              # a decorator: fills its own columns
+[[projection.sources]]              # a decorator: fills its own columns
 from = "latest-proposal"           # decorators must be stage-fed
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "latest_proposal_id", from = "$.pid" } ]
 ```
 
@@ -675,12 +702,12 @@ Some events *contain* the rows you want: a transaction event whose
 element into its own row:
 
 ```toml
-[[projection.source]]
+[[projection.sources]]
 topic    = "txn"
 forEach  = "$.items[*]"            # deliberately multi-valued
 keyPath  = "$.sku"                 # resolves against EACH ELEMENT
 onDelete = "delete-rows"           # the default: parent delete cascades
-  [[projection.source.rules]]
+  [[projection.sources.rules]]
   set = [
     { column = "amount",  from = "$.amount" },     # element scope
     { column = "txn_id",  from = "$parent.id" },   # the enclosing event
@@ -709,30 +736,30 @@ name, which lives in a `person` topic keyed by `person_id`. A **lookup source**
 ingests that topic into a keyed dimension table, and an aggregate element
 resolves the key into it by a join — so the column carries the name and the
 query needs no join of its own. A lookup source declares a `lookup` block (its
-`name`, referenced by enrichments, and the `field`s it stores) instead of
+`name`, referenced by enrichments, and the `fields` it stores) instead of
 `rules`/`aggregate`; an element field then declares `lookup`/`on`/`select`
 instead of `from` (`on` names the plain element field holding the foreign key).
 Several enriched fields sharing a dimension coalesce into one join:
 
 ```toml
-[[projection.source]]
+[[projection.sources]]
 topic = "person"                       # the dimension topic, keyed by person_id
-  [projection.source.lookup]
+  [projection.sources.lookup]
   name = "people"                      # referenced by element enrichments below
-    [[projection.source.lookup.field]]
+    [[projection.sources.lookup.fields]]
     field = "name"
     from  = "$.name"
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "credit"
 keyPath = "$.movie_id"
-  [projection.source.aggregate]
+  [projection.sources.aggregate]
   column     = "top_cast"
   elementKey = "$.billing"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field = "person_id"                # the foreign key, stored
     from  = "$.person_id"
-    [[projection.source.aggregate.element]]
+    [[projection.sources.aggregate.fields]]
     field  = "name"                    # resolved from the people dimension
     lookup = "people"
     on     = "person_id"               # join the element's person_id …
@@ -816,6 +843,107 @@ stays consistent at every checkpoint. One syncable fills one table — a
 dimension is its own internal housekeeping, so two syncables that need the same
 data each keep their own copy.
 
+## Derived topics: transform once, N dumb consumers (loopback)
+
+When several syncables need the same cleanup — a jsonPath projection to a
+canonical shape, version normalization via `mode = "always-current"` — the
+transform logic is repeated N times and drifts. A `loopback` syncable applies
+it ONCE, inside the cluster: it consumes a source topic, transforms each
+entity, and proposes the result to a **derived topic** under that topic's own
+type. Downstream syncables then consume the derived topic with dumb mappings.
+
+```toml
+[syncable]
+name = "canonical-photos"
+type = "loopback"
+mode = "always-current"        # normalize versions before deriving (optional)
+
+[loopback]
+topic  = "photos-raw"          # source topic
+target = "photos"              # derived topic (its type must exist)
+
+[[loopback.mappings]]
+jsonPath = "$.id"
+jsonName    = "photo_id"
+
+[[loopback.mappings]]
+jsonPath = "$.meta.title"
+jsonName    = "title"
+```
+
+No mappings means whole-payload passthrough — with `always-current`, that is
+the version-normalization shape: the derived topic carries every entity
+re-written at the current type version. Because the loopback sits behind the
+same interpretation machinery as every syncable, restatements are folded in too —
+**the derived topic is the cache of the source's current interpretation**,
+and its status (`GET /v1/syncable/{id}/status`) shows `derivedFrom` /
+`derivesInto` plus `interpretationStale` when a later restatement supersedes the
+reading it was materialized under. Re-derivation is operator-triggered, never
+automatic: `POST /v1/syncable/{id}/rematerialize` replays the source from
+index 0 (a snapshot-kind derived topic converges by key).
+
+The rules that keep the chain safe:
+
+- **The derived topic is a materialization, never a source of truth.** The raw
+  topic stays sacred; the derived one is rebuildable from it forever.
+- **Keys are preserved** (re-keying is refused at POST): a delete proposed to
+  the source — including an RTBF delete — forwards as a tombstone with the
+  same key, so erasure chases the derivation chain. Generations and
+  refresh-boundary markers forward verbatim too, so an ingest full-refresh of
+  the source reconciles all the way through to the derived topic's destinations.
+- **The derivation graph is a DAG with one producer per derived topic** —
+  checked at POST and re-checked deterministically at apply (a config that
+  races past admission is persisted but loudly degraded, never run). A cycle
+  would re-derive its own output forever; a second producer would interleave
+  two refresh-epoch spaces on one topic.
+- **Producer handover must not regress the epoch space.** A loopback targeting
+  a topic whose committed refresh epochs exceed its source's is refused at
+  POST: forwarded sweeps could never reconcile the previous producer's
+  higher-stamped rows, which would linger stale on downstream keyed syncables.
+  Derive into a fresh topic instead — the old topic's log carries its history
+  permanently. A source at or *above* the target's highwater is fine (its
+  first refresh reconciles the handover), and replacing any producer with an
+  **ingestable** is always safe: the ingest epoch floor is topic-keyed and
+  sees every committed generation, forwarded ones included.
+- **Declare the derived topic's type `entityKind = "snapshot"`** (recommended):
+  replays then converge by key. Any other kind appends on replay and requires
+  an explicit `acknowledgeAppendSemantics = true`.
+- **Transforms are stateless per-entity** — no cross-entity aggregation,
+  no filtering. Sequence-context analysis belongs offline; its output lands
+  as restatements or as proposals to a topic of its own.
+
+Chains (`raw → canonical → per-team`) are fine — each hop is its own loopback.
+
+## Consumer stances: how a syncable meets a versioned topic
+
+The log is permanently heterogeneous: entities carry the type version that was
+current when they were written, and there is no ALTER TABLE — only new writes
+under new versions. Every syncable takes one of three stances toward that:
+
+- **Version-pinned** (`mode = "as-stored"`, handling one version): the syncable
+  sees the exact bytes written, and its mappings target one version's shape.
+  Immune to later type versions; blind to them too.
+- **Version-aware** (`mode = "as-stored"`, dispatching on version): the
+  syncable sees raw bytes plus each entity's stamped version and handles the
+  differences itself — the stance for consumers that genuinely want each era's
+  shape.
+- **Always-current** (`mode = "always-current"`): committed runs each entity
+  through the type's migration chain (older-version data upgraded step by step)
+  before the syncable sees it, so mappings only ever target the current shape.
+
+Always-current is a **promise, and it is checked at admission**: it is only
+admissible when the migration chain can actually carry every version's data to
+the current shape. A version declared `nonConvertible = true` in its
+`[migration]` section — meaning that version requires information older data
+never contained — breaks the chain: `POST /v1/syncable/{id}` refuses an
+always-current syncable over such a topic, naming the gap, and
+`POST /v1/type/{id}` refuses a nonConvertible bump that would strand *existing*
+always-current syncables, naming them (re-POST with `?force=true` to
+acknowledge the stranding deliberately). A force-stranded syncable does not
+silently receive unconverted data: entities below the break dead-letter at the
+migration chain, replayable later if the reading is repaired (a restatement
+rebinding the below-break range, then a dead-letter replay or a
+re-materialization).
 ## Rehearsing a config before it exists (dry-run)
 
 `POST /v1/syncable/dryrun` takes the same document a syncable POST
@@ -855,14 +983,86 @@ Authoring loop: dry-run until the findings list is empty, then POST
 for real — "valid config, wrong result, no error" costs minutes
 instead of a full replay against an oracle.
 
+## Restatements: changing how history is read — rehearse first
+
+A **restatement** is an append-only, consensus-ordered statement that rebinds
+how already-committed entities are *read* — never their bytes: entities of a
+type committed in an index range (optionally narrowed to one stamped version
+and a deterministic jq predicate) read as a different declared version from
+the moment the restatement commits. The facts never change; the reading does
+— same facts, stated a different way. That covers repairs (an unannounced
+writer that produced v2-shaped data under v1 stamps, a nonConvertible break
+whose below-range data turns out readable after all) and equally
+understanding that simply evolved — no error anywhere, just a better reading
+of the same range. Either way it feeds the same interpretation fold every
+syncable reads through.
+
+```toml
+[restatement]
+type = "photos"           # the type (topic) whose readings rebind
+fromIndex = 100           # inclusive raft-index range of EXISTING actuals
+toIndex = 250
+readAsVersion = 2       # the version matching entities read as
+# fromVersion = 1         # optional: only entities STAMPED v1
+# predicate = '.license == "cc"'   # optional deterministic jq narrowing
+```
+
+Restatements are the highest-blast-radius config in committed: they are
+**append-only** (a wrong one cannot be edited, only corrected by another —
+later in the log wins), and admitting one instantly marks every consumer of
+the topic `interpretationStale` — rows materialized before it keep the
+superseded reading until you re-materialize each syncable. So the workflow is
+**rehearse, then author**:
+
+1. `POST /v1/restatement/dryrun` with the exact body you intend to admit. Nothing
+   is admitted or stored; the rehearsal runs the restatement's own index range
+   through the *real* interpretation fold and reports what the selectors
+   actually catch (`stampEligible`, `matched`, broken down `byStampedVersion`),
+   what the restatement really *changes* (`rebound`, with before/after reading
+   `samples`), rows its predicate cannot evaluate (`predicateErrors` — each of
+   these would dead-letter or wedge a live consumer), already-applied restatements it
+   composes with (`overlaps`), and the re-materialization bill
+   (`affectedSyncables`, with each consumer's current interpretation pin).
+   Auto-generated `findings` name the authoring signatures: a restatement that
+   matches nothing, one that changes no readings, a predicate that filtered
+   nothing. Admission-level validation runs in full, with the same words the
+   real POST would refuse with — and a rehearsal works even mid-rolling-upgrade,
+   when the real POST would still be refused by the feature gate (the report
+   says so).
+2. Iterate until the findings list is empty and `matched`/`rebound` are the
+   numbers you expected.
+3. `POST /v1/restatement/{id}` with the same body — then re-materialize the
+   affected syncables (`POST /v1/syncable/{id}/rematerialize`) when you want
+   the corrected reading to reach their already-synced rows.
+
+Like the syncable dry-run, the scan is budgeted (`?maxEntries`, default 100k)
+and time-bounded (`?timeoutSeconds`); an exhausted budget yields a **partial**
+report that says so (`coverage`, `truncated`) — never a silently-complete-
+looking one. Sample rows quote entity keys verbatim (that precision is the
+diagnostic point; the trusted-appliance caveat from the syncable dry-run
+applies).
+
 ## Changing the rules after a projection is live
 
 A projection is a **disposable view of an immutable log** — its fold rules, and
 the type migration that feeds it, are *derivation logic*, not data. When you
 change that logic, committed applies the new logic to Actuals it processes *from
 that point on*; it does **not** retroactively re-render rows already written to
-the sink. Correcting history is a deliberate rebuild, and running it is your
+the destination. Correcting history is a deliberate rebuild, and running it is your
 responsibility.
+
+**Re-materializing a plain keyed `sql` mirror — in place.** For a plain
+keyed `sql` syncable, `POST /v1/syncable/{id}/rematerialize` converges the
+live table without dropping it: the worker replays from index 0 through the
+current mappings + type migrations + restatements, keyed upserts overwrite rows in
+place while the table keeps serving reads, and a completion sweep removes
+rows the replay never re-emitted. Restart-resumable, and it refreshes the
+syncable's `interpretationPin` (clearing `interpretationStale`). Projections
+and keyless syncables refuse the verb — for those, use the patterns below. The
+verb also needs every member of the cluster on 0.8.0 or later: on a
+mixed-version cluster it answers 503 `cluster_below_feature_level` until the
+rolling upgrade completes, because an older node taking ownership
+mid-replay would write rows the completion sweep then deletes.
 
 **Changing one projection's own rules — blue-green.** Because a projection
 replays from index 0 and the log stays the source of truth, the clean way to fix
@@ -901,19 +1101,19 @@ knowingly, because nothing rebuilds them on your behalf.
 A syncable's `checkpointEvery` (TOML, `[syncable]` section) is its **checkpoint
 cadence**: how many synced records may accumulate before the resume checkpoint
 is durably persisted. It is also the crash re-delivery bound — a restart
-re-delivers at most that many already-synced records, which keyed sinks absorb
-idempotently. It does **not** control sink transaction size: batches are capped
+re-delivers at most that many already-synced records, which keyed syncables absorb
+idempotently. It does **not** control destination transaction size: batches are capped
 internally (a few hundred rows) regardless of cadence.
 
-The cadence matters most during **replays** (initial sink builds, rebuilds):
-every checkpoint persist is a consensus round trip, and many sinks replaying
+The cadence matters most during **replays** (initial destination builds, rebuilds):
+every checkpoint persist is a consensus round trip, and many syncables replaying
 with a tight cadence can bottleneck on checkpoint traffic rather than data.
 The default (2500) keeps replays fast out of the box; raising it further
 (e.g. 5000) buys a little more replay throughput at a proportionally larger
 re-delivery window. Caught-up syncables persist on catch-up regardless of
 cadence, so steady-state checkpoint freshness does not depend on this value.
 
-## Destination limits: when a row cannot fit the sink
+## Destination limits: when a row cannot fit the destination
 
 Every SQL engine has physical limits on its tables, and a projection can hit
 them two ways — at **table-creation time** (loud, immediate, nothing synced
@@ -925,7 +1125,7 @@ Survey your widest tables against these before creating mirrors:
   individual rows that exceed it at apply time ("row is too big"). And a
   text value with an **embedded U+0000** is rejected at apply time
   (SQLSTATE 22021) even though MySQL and SQL Server store it — a row that
-  flowed through every other engine dead-letters only at a PG sink. The
+  flowed through every other engine dead-letters only at a Postgres destination. The
   dead-letter message names the offending payload field(s), so triage is
   read-the-record, not hand-hunting the byte across every string column;
   the remedy is fixing the value at the source (CDC delivers the
@@ -943,7 +1143,7 @@ this row's own value, where every other row would apply. It wedges the
 worker (sticks-and-waits, resumes on fix) whenever the error could be
 schema- or config-shaped. MySQL reports an over-long value as a per-column
 data error, which proves entry-specificity → the row is dead-lettered and
-the sink keeps flowing. PostgreSQL reports its row-size wall as a program
+the destination keeps flowing. PostgreSQL reports its row-size wall as a program
 limit, which doesn't → the worker wedges visibly on it. Same principle,
 different engine error vocabularies.
 
@@ -957,7 +1157,7 @@ List the skipped proposals with `GET /syncable/{id}/errors`; after fixing
 the destination (e.g. `ALTER ... LONGTEXT`), re-drive each with
 `POST /syncable/{id}/replay/{index}`, which applies the row and clears its
 record. If instead the fix happened **at the source** and a later CDC event
-already corrected the sink row, replaying the stale proposal would regress
+already corrected the destination row, replaying the stale proposal would regress
 it — acknowledge the record instead
 (`POST /syncable/{id}/deadletter/{index}/acknowledge`; see the triage flow
 in [operations/stuck-syncables.md](operations/stuck-syncables.md)). A

@@ -139,7 +139,7 @@ func memberDo(method, path string, body []byte) error {
 	}
 
 	// Surface the server's structured error body — it carries a code and a
-	// human-readable message (see internal/cluster/http/errors.go).
+	// human-readable message (see internal/cluster/db/http/errors.go).
 	msg, _ := io.ReadAll(resp.Body)
 	return fmt.Errorf("member: %s %s returned %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(msg)))
 }
@@ -148,9 +148,15 @@ func memberDo(method, path string, body []byte) error {
 // --target wins; otherwise it is derived from COMMITTED_API_ADDR the same
 // way the healthcheck probe derives its loopback URL (empty/wildcard host →
 // 127.0.0.1, https when the local API serves TLS).
-func memberBaseURL() (string, error) {
-	if memberTarget != "" {
-		return strings.TrimRight(memberTarget, "/"), nil
+func memberBaseURL() (string, error) { return apiBaseURL(memberTarget) }
+
+// apiBaseURL resolves the node API a CLI command talks to: --target wins;
+// otherwise it is derived from COMMITTED_API_ADDR the same way the node
+// binds it (a wildcard or empty host becomes 127.0.0.1, https when the
+// local API serves TLS).
+func apiBaseURL(target string) (string, error) {
+	if target != "" {
+		return strings.TrimRight(target, "/"), nil
 	}
 
 	addr := getenvDefault("COMMITTED_API_ADDR", ":8080")
@@ -171,9 +177,13 @@ func memberBaseURL() (string, error) {
 
 // memberAPIToken returns the bearer token to authenticate with: --token if
 // given, else COMMITTED_API_TOKEN, else empty (the API runs unauthenticated).
-func memberAPIToken() string {
-	if memberToken != "" {
-		return memberToken
+func memberAPIToken() string { return apiToken(memberToken) }
+
+// apiToken is the bearer token a CLI command authenticates with: the flag
+// if given, else COMMITTED_API_TOKEN.
+func apiToken(flag string) string {
+	if flag != "" {
+		return flag
 	}
 	return os.Getenv("COMMITTED_API_TOKEN")
 }
@@ -183,8 +193,16 @@ func memberAPIToken() string {
 // when the cluster uses self-signed certs or when targeting a node by an
 // address its cert doesn't list.
 func memberClient() (*nethttp.Client, error) {
-	c := &nethttp.Client{Timeout: memberRequestTimeout}
-	if memberInsecure {
+	return apiClient(memberInsecure, memberRequestTimeout), nil
+}
+
+// apiClient builds a CLI command's HTTP client. For an https target it
+// enables TLS; --insecure skips certificate verification (self-signed
+// certs, or a node targeted by an address its cert does not name). timeout
+// bounds the whole request; zero means none (a streaming download).
+func apiClient(insecure bool, timeout time.Duration) *nethttp.Client {
+	c := &nethttp.Client{Timeout: timeout}
+	if insecure {
 		c.Transport = &nethttp.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, //nolint:gosec // G402: operator opt-in via --insecure
@@ -192,7 +210,7 @@ func memberClient() (*nethttp.Client, error) {
 			},
 		}
 	}
-	return c, nil
+	return c
 }
 
 func init() {

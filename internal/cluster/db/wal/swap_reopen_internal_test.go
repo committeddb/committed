@@ -22,6 +22,13 @@ func fatalPanicStorage(t *testing.T) *Storage {
 	s, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync(), WithLogger(logger))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
+	// Quiesce every Open-started worker that touches the event-log handle
+	// (scrub worker AND sealer): these tests poke the handle directly,
+	// outside eventMu — safe only with no concurrent reader. Both stops are
+	// idempotent, so callers that also stop explicitly are unaffected.
+	s.stopScrubWorker()
+	s.stopSealer()
+	s.stopSealer()
 	return s
 }
 
@@ -37,6 +44,7 @@ func TestReopenKVAfterSwap_ReopensClosedHandle(t *testing.T) {
 	// handle swap below. stopScrubWorker waits for that startup pass to finish and
 	// is idempotent, so t.Cleanup's Close stays well-defined.
 	s.stopScrubWorker()
+	s.stopSealer()
 
 	boltPath := s.keyValueStorage.Path()
 	require.NoError(t, s.keyValueStorage.Close()) // the post-close point in the swap
@@ -70,6 +78,7 @@ func TestReopenEventLogAfterSwap_ReopensClosedHandle(t *testing.T) {
 	// Quiesce the Open-started scrub worker before the bare handle swap, as in
 	// TestReopenKVAfterSwap_ReopensClosedHandle.
 	s.stopScrubWorker()
+	s.stopSealer()
 
 	require.NoError(t, s.eventLog.Close()) // the post-close point in the swap
 

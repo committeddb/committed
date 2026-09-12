@@ -5,16 +5,14 @@
 // graceful SIGTERM shutdown, restart over the same data directory, /ready
 // gating, /version, and that persisted state survives the restart.
 //
-// It deliberately restarts the SAME binary rather than swapping an older one
-// in. The cross-version (old-binary → new-binary) read is asserted by the
-// on-disk compatibility contract (docs/api-compatibility.md) plus the fact
-// that a node which can't read its state fails to start instead of reaching
-// /ready — so "came back /ready" is itself the forward-read check. The
-// multi-node, quorum-preserving rolling mechanics are covered in-process by
-// the adversarial suite (TestAdversarial_LeaderFlapping kills + restarts the
-// leader and asserts exactly-once apply across the transition). This test
-// fills the gap those two don't: the real binary's signal + endpoint +
-// real-process-restart cycle.
+// This file deliberately restarts the SAME binary: it covers the real
+// binary's signal + endpoint + real-process-restart cycle. The cross-version
+// (old-binary → new-binary) READ contract is exercised separately by
+// old_datadir_test.go, which opens pinned data-dir fixtures genuinely written
+// by released binaries (see testdata/README.md). The multi-node,
+// quorum-preserving rolling mechanics are covered in-process by the
+// adversarial suite (TestAdversarial_LeaderFlapping kills + restarts the
+// leader and asserts exactly-once apply across the transition).
 //
 // Tagged `upgrade` so it stays out of `make test`; run via `make test/upgrade`.
 package upgrade_test
@@ -130,8 +128,9 @@ func freePort(t *testing.T) int {
 
 // startNode spawns `committed node` against dataDir on port, with auth off
 // (no COMMITTED_API_TOKEN) and single-node bootstrap (no COMMITTED_PEERS), and
-// waits for /health to flip to 200.
-func startNode(t *testing.T, bin, dataDir string, port int) *nodeProcess {
+// waits for /health to flip to 200. extraEnv entries (KEY=value) are appended
+// — the fixture capture uses this to hand the old binary a ${VAR} DB secret.
+func startNode(t *testing.T, bin, dataDir string, port int, extraEnv ...string) *nodeProcess {
 	t.Helper()
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
@@ -141,6 +140,7 @@ func startNode(t *testing.T, bin, dataDir string, port int) *nodeProcess {
 		fmt.Sprintf("COMMITTED_API_ADDR=127.0.0.1:%d", port),
 		"COMMITTED_DATA_DIR="+dataDir,
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stdout = testWriter{t, "committed:out"}
 	cmd.Stderr = testWriter{t, "committed:err"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

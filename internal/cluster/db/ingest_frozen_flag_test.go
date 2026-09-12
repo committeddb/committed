@@ -7,22 +7,22 @@ import (
 )
 
 // TestIngestFrozenFlag_Lifecycle covers the node-local recovering flag: set on
-// freeze-exit, cleared on durable progress (clearIngestFrozen), and cleared on
-// worker teardown (pruneIngestSupervisorState) so a fresh worker isn't inherited
-// as recovering.
+// freeze-exit, cleared on durable progress (db.clearIngestFrozen's setFrozen
+// half), and cleared on worker teardown (prune) so a fresh worker isn't
+// inherited as recovering.
 func TestIngestFrozenFlag_Lifecycle(t *testing.T) {
-	db := &DB{}
+	s := newIngestSupervisor(0, 0, 0)
 	const id = "ing"
 
-	require.False(t, db.isIngestFrozen(id), "unset by default")
+	require.False(t, s.isFrozen(id), "unset by default")
 
-	db.setIngestFrozen(id, true)
-	require.True(t, db.isIngestFrozen(id))
+	s.setFrozen(id, true)
+	require.True(t, s.isFrozen(id))
 
-	db.clearIngestFrozen(id) // durable progress
-	require.False(t, db.isIngestFrozen(id), "progress clears recovering")
+	s.setFrozen(id, false) // durable progress
+	require.False(t, s.isFrozen(id), "progress clears recovering")
 
-	db.setIngestFrozen(id, true)
-	db.pruneIngestSupervisorState(id) // worker teardown (re-POST / delete)
-	require.False(t, db.isIngestFrozen(id), "teardown clears recovering")
+	s.setFrozen(id, true)
+	s.prune(id) // worker teardown (re-POST / delete)
+	require.False(t, s.isFrozen(id), "teardown clears recovering")
 }

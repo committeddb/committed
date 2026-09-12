@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"time"
+
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster/metrics"
@@ -12,12 +14,14 @@ import (
 type Option func(*options)
 
 type options struct {
+	eventSegmentSize   int
 	fsyncDisabled      bool
 	logger             *zap.Logger
 	metrics            *metrics.Metrics
 	lostCallback       func([]uint64)
 	eventCacheSegments int
 	safeMode           bool
+	sealerIdleInterval time.Duration
 }
 
 // WithoutFsync disables fsync on the underlying key-value store, trading
@@ -69,6 +73,25 @@ func WithMetrics(m *metrics.Metrics) Option {
 // its reader is the single sequential Ready loop, which cannot thrash.
 func WithEventCacheSegments(n int) Option {
 	return func(o *options) { o.eventCacheSegments = n }
+}
+
+// WithEventSegmentSize overrides the event log's segment size in bytes
+// (default: the library's 20 MB). A test knob: compression and cache tests
+// need logs that cycle after a few entries; production keeps the default,
+// which the memory-sizing and compression docs assume.
+func WithEventSegmentSize(bytes int) Option {
+	return func(o *options) { o.eventSegmentSize = bytes }
+}
+
+// WithSealerIdleInterval overrides how often the background sealer re-checks
+// for newly sealed segments once everything is compressed (default:
+// sealerIdleInterval, 30s). A test knob, like WithEventSegmentSize: the
+// compression tests seed a log and wait for .zst segments to appear, and at
+// the production cadence each one sleeps a full idle tick doing nothing —
+// three tests, ninety seconds of pure sleep. Production keeps the default;
+// the cadence is a bytes-at-rest concern with no correctness stake.
+func WithSealerIdleInterval(d time.Duration) Option {
+	return func(o *options) { o.sealerIdleInterval = d }
 }
 
 // WithSafeMode holds the background scrub worker: Open does not resume a

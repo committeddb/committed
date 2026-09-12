@@ -1,0 +1,418 @@
+package http_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	httpgo "net/http"
+	"net/http/httptest"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/pb33f/libopenapi"
+	validator "github.com/pb33f/libopenapi-validator"
+	valerrors "github.com/pb33f/libopenapi-validator/errors"
+	"github.com/stretchr/testify/require"
+
+	openapiapi "github.com/committeddb/committed/api"
+	"github.com/committeddb/committed/internal/cluster"
+	httppkg "github.com/committeddb/committed/internal/cluster/db/http"
+)
+
+// newValidator parses the embedded spec and constructs a validator. Test
+// fails here if the spec is malformed or invalid OpenAPI.
+func newValidator(t *testing.T) (libopenapi.Document, validator.Validator) {
+	t.Helper()
+
+	doc, err := libopenapi.NewDocument(openapiapi.OpenAPISpec)
+	require.NoError(t, err, "spec must parse")
+
+	v, setupErrs := validator.NewValidator(doc)
+	require.Empty(t, setupErrs, "validator must build from spec")
+
+	valid, specErrs := v.ValidateDocument()
+	if !valid {
+		t.Fatalf("spec failed validation: %s", formatValidationErrors(specErrs))
+	}
+	return doc, v
+}
+
+func formatValidationErrors(errs []*valerrors.ValidationError) string {
+	if len(errs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, e := range errs {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		fmt.Fprintf(&b, "[%s] %s", e.ValidationType, e.Message)
+		if e.Reason != "" {
+			fmt.Fprintf(&b, " (%s)", e.Reason)
+		}
+	}
+	return b.String()
+}
+
+// contractCase is one row of the table. `setup` configures the fake so
+// the handler can return a valid response. `body` is the request body
+// (only meaningful for POST). `contentType` defaults to application/json
+// when empty; set to text/toml for configuration POSTs.
+type contractCase struct {
+	name        string
+	method      string
+	path        string
+	body        string
+	contentType string
+}
+
+func TestOpenAPISpec_IsValid(t *testing.T) {
+	newValidator(t)
+}
+
+func TestOpenAPIContract_SuccessResponses(t *testing.T) {
+	_, v := newValidator(t)
+
+	cases := []contractCase{
+		{
+			name:   "GET /health",
+			method: httpgo.MethodGet,
+			path:   "/health",
+		},
+		{
+			// The real engine is elected and applied by fixture time, so
+			// /ready answers 200 with no arrangement.
+			name:   "GET /ready",
+			method: httpgo.MethodGet,
+			path:   "/ready",
+		},
+		{
+			name:   "GET /openapi.yaml",
+			method: httpgo.MethodGet,
+			path:   "/openapi.yaml",
+		},
+		{
+			name:   "GET /docs",
+			method: httpgo.MethodGet,
+			path:   "/docs",
+		},
+
+		// --- proposal --- (write-only: no GET, the log is not a query interface)
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newEngineHTTP(t).h
+
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, "http://localhost"+tc.path, body)
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			require.GreaterOrEqual(t, rr.Code, 200, "handler returned an error status unexpectedly")
+			require.Less(t, rr.Code, 300, "handler returned %d; body=%s", rr.Code, rr.Body.String())
+
+			valid, errs := v.ValidateHttpResponse(req, rr.Result())
+			require.True(t, valid, "response did not match spec for %s: %s", tc.name, formatValidationErrors(errs))
+		})
+	}
+
+	// --- engine-backed groups (real engine) ---
+	// Migrated handler groups hold the engine concretely (no fake seam), so
+	// their rows validate against a real single-node engine seeded through
+	// the plugin seam; dynamic values (the replayable dead-letter index) come
+	// from the seeding itself.
+	t.Run("engine-backed groups (real engine)", func(t *testing.T) {
+		e := newEngine(t)
+		e.addType(t, "photos", "photos")
+		e.addRecorderSyncable(t, "rec-1", "photos")
+		e.addRecorderDatabase(t, "db-1")
+		lag := uint64(0)
+		e.ingest.StatusReturns(cluster.IngestableStatus{
+			WorkerState: cluster.WorkerStateRunning,
+			Phase:       "streaming",
+			Position:    "0/1A2B3C8",
+			SnapshotProgress: []cluster.TableSnapshotStatus{
+				{Table: "region", Complete: true},
+			},
+			Lag:      &lag,
+			LagUnit:  cluster.LagUnitBytes,
+			CaughtUp: true,
+		}, nil)
+		e.addRecorderIngestable(t, "ing-1", "photos")
+
+		// Seed a manual dead letter: wedge k1, skip it, heal the sink — the
+		// listing has content, the index is replayable, status has history.
+		e.sink.setErr(fmt.Errorf("constraint violation"))
+		e.proposeRow(t, "photos", "k1")
+		e.awaitStatus(t, "rec-1", func(m map[string]any) bool {
+			b, _ := m["stuck"].(bool)
+			return b
+		}, "wedged for seeding")
+		w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/deadletter")
+		require.Equal(t, 202, w.Code, w.Body.String())
+		var seeded struct {
+			Index uint64 `json:"index"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &seeded))
+		require.Eventually(t, func() bool {
+			var listed []struct{ Index uint64 }
+			e.getJSON(t, "/v1/syncable/rec-1/errors", &listed)
+			return len(listed) == 1
+		}, 15*time.Second, 10*time.Millisecond, "seeded dead letter never listed")
+		e.sink.setErr(nil)
+
+		realCases := []struct {
+			name, method, path, contentType, body string
+			pre                                   func(t *testing.T)
+		}{
+			{name: "GET /syncable", method: httpgo.MethodGet, path: "/v1/syncable"},
+			{name: "GET /node/status", method: httpgo.MethodGet, path: "/v1/node/status"},
+			{name: "GET /restatement", method: httpgo.MethodGet, path: "/v1/restatement"},
+			{
+				name: "POST /restatement/dryrun", method: httpgo.MethodPost,
+				path: "/v1/restatement/dryrun", contentType: "text/toml",
+				body: "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n",
+			},
+			{name: "GET /type", method: httpgo.MethodGet, path: "/v1/type"},
+			{
+				name: "POST /type/{id}", method: httpgo.MethodPost, path: "/v1/type/albums",
+				contentType: "text/toml", body: "[type]\nname = \"albums\"\n",
+			},
+			{name: "GET /type/{id}/versions", method: httpgo.MethodGet, path: "/v1/type/photos/versions"},
+			{name: "GET /type/{id}/versions/{version}", method: httpgo.MethodGet, path: "/v1/type/photos/versions/1"},
+			{name: "GET /type/{id}/pipeline", method: httpgo.MethodGet, path: "/v1/type/photos/pipeline"},
+			{name: "GET /type/{id}/migration-errors", method: httpgo.MethodGet, path: "/v1/type/photos/migration-errors"},
+			{name: "GET /database", method: httpgo.MethodGet, path: "/v1/database"},
+			{
+				name: "POST /database/{id}", method: httpgo.MethodPost, path: "/v1/database/db-2",
+				contentType: "text/toml", body: "[database]\nname = \"db-2\"\ntype = \"recorder\"\n",
+			},
+			{name: "GET /database/{id}/versions", method: httpgo.MethodGet, path: "/v1/database/db-1/versions"},
+			{name: "GET /database/{id}/versions/{version}", method: httpgo.MethodGet, path: "/v1/database/db-1/versions/1"},
+			{name: "POST /database/{id}/rollback", method: httpgo.MethodPost, path: "/v1/database/db-1/rollback?to=1"},
+			{name: "GET /ingestable", method: httpgo.MethodGet, path: "/v1/ingestable"},
+			{
+				name: "POST /ingestable/{id}", method: httpgo.MethodPost, path: "/v1/ingestable/ing-2",
+				contentType: "text/toml", body: "[ingestable]\nname = \"ing-2\"\ntype = \"recorder\"\n[recorder]\ntopic = \"photos\"\n",
+			},
+			{name: "GET /ingestable/{id}/versions", method: httpgo.MethodGet, path: "/v1/ingestable/ing-1/versions"},
+			{name: "GET /ingestable/{id}/versions/{version}", method: httpgo.MethodGet, path: "/v1/ingestable/ing-1/versions/1"},
+			{name: "GET /ingestable/{id}/status", method: httpgo.MethodGet, path: "/v1/ingestable/ing-1/status"},
+			{name: "POST /ingestable/{id}/rollback", method: httpgo.MethodPost, path: "/v1/ingestable/ing-1/rollback?to=1"},
+			{name: "DELETE /ingestable/{id}", method: httpgo.MethodDelete, path: "/v1/ingestable/ing-1"},
+			{
+				name: "POST /proposal", method: httpgo.MethodPost,
+				path: "/v1/proposal", contentType: "application/json",
+				body: `{"entities":[{"typeId":"photos","key":"k","data":{"hello":"world"}}]}`,
+			},
+			{name: "GET /cluster/status", method: httpgo.MethodGet, path: "/v1/cluster/status"},
+			{name: "POST /scrub", method: httpgo.MethodPost, path: "/v1/scrub"},
+			{
+				name: "POST /node/disk-report", method: httpgo.MethodPost,
+				path: "/v1/node/disk-report", contentType: "application/json",
+				body: `{"node":1,"state":"warn"}`,
+			},
+			{
+				name: "POST /syncable/{id}", method: httpgo.MethodPost, path: "/v1/syncable/rec-2",
+				contentType: "text/toml",
+				body:        "[syncable]\nname = \"rec-2\"\ntype = \"recorder\"\n[recorder]\ntopic = \"photos\"\n",
+			},
+			{name: "GET /syncable/{id}/versions", method: httpgo.MethodGet, path: "/v1/syncable/rec-1/versions"},
+			{name: "GET /syncable/{id}/versions/{version}", method: httpgo.MethodGet, path: "/v1/syncable/rec-1/versions/1"},
+			{name: "GET /syncable/{id}/errors", method: httpgo.MethodGet, path: "/v1/syncable/rec-1/errors?since=0&limit=10"},
+			{name: "POST /syncable/{id}/rollback", method: httpgo.MethodPost, path: "/v1/syncable/rec-1/rollback?to=1"},
+			{name: "GET /syncable/{id}/status", method: httpgo.MethodGet, path: "/v1/syncable/rec-1/status"},
+			{
+				name: "POST /syncable/{id}/replay/{index}", method: httpgo.MethodPost,
+				path: fmt.Sprintf("/v1/syncable/rec-1/replay/%d", seeded.Index),
+			},
+			{
+				name: "POST /syncable/{id}/deadletter", method: httpgo.MethodPost,
+				path: "/v1/syncable/rec-1/deadletter",
+				pre: func(t *testing.T) {
+					// The lever 409s unless something is blocked: re-wedge.
+					e.sink.setErr(fmt.Errorf("still broken"))
+					e.proposeRow(t, "photos", "k2")
+					e.awaitStatus(t, "rec-1", func(m map[string]any) bool {
+						b, _ := m["stuck"].(bool)
+						return b
+					}, "re-wedged for the deadletter row")
+				},
+			},
+		}
+		for _, tc := range realCases {
+			t.Run(tc.name, func(t *testing.T) {
+				if tc.pre != nil {
+					tc.pre(t)
+				}
+				var body io.Reader
+				if tc.body != "" {
+					body = strings.NewReader(tc.body)
+				}
+				req := httptest.NewRequest(tc.method, "http://localhost"+tc.path, body)
+				if tc.contentType != "" {
+					req.Header.Set("Content-Type", tc.contentType)
+				}
+				rr := httptest.NewRecorder()
+				e.h.ServeHTTP(rr, req)
+
+				require.GreaterOrEqual(t, rr.Code, 200, "handler returned an error status unexpectedly")
+				require.Less(t, rr.Code, 300, "handler returned %d; body=%s", rr.Code, rr.Body.String())
+
+				valid, errs := v.ValidateHttpResponse(req, rr.Result())
+				require.True(t, valid, "response did not match spec for %s: %s", tc.name, formatValidationErrors(errs))
+			})
+		}
+	})
+}
+
+// TestOpenAPIContract_ErrorResponses validates that the ErrorResponse
+// shape returned by a few representative error paths matches the spec.
+// We don't exhaustively cover every handler's error codes — the goal is
+// to catch shape drift on the ErrorResponse struct, not to re-test
+// error logic already covered in handler_test.go and versions_test.go.
+func TestOpenAPIContract_ErrorResponses(t *testing.T) {
+	_, v := newValidator(t)
+
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "POST /proposal with invalid JSON → 400",
+			method:     httpgo.MethodPost,
+			path:       "/v1/proposal",
+			body:       "not-json",
+			wantStatus: 400,
+		},
+		{
+			name:       "GET /database/{id}/versions/{version} with bad version → 400",
+			method:     httpgo.MethodGet,
+			path:       "/v1/database/db-1/versions/abc",
+			wantStatus: 400,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newEngineHTTP(t).h
+
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, "http://localhost"+tc.path, body)
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			require.Equal(t, tc.wantStatus, rr.Code, "body=%s", rr.Body.String())
+
+			valid, errs := v.ValidateHttpResponse(req, rr.Result())
+			require.True(t, valid, "error response did not match spec for %s: %s", tc.name, formatValidationErrors(errs))
+		})
+	}
+}
+
+// TestOpenAPIContract_UnauthorizedShape validates the 401 body shape
+// when a bearer token is required but not supplied.
+func TestOpenAPIContract_UnauthorizedShape(t *testing.T) {
+	_, v := newValidator(t)
+
+	h := newEngineHTTP(t, httppkg.WithBearerToken("secret")).h
+
+	req := httptest.NewRequest(httpgo.MethodGet, "http://localhost/v1/type", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	require.Equal(t, 401, rr.Code)
+	valid, errs := v.ValidateHttpResponse(req, rr.Result())
+	require.True(t, valid, "401 response did not match spec: %s", formatValidationErrors(errs))
+}
+
+// TestOpenAPIContract_SpecCoversAllRoutes is the drift guard: it walks the ACTUAL
+// mounted Chi router (not a hand-maintained list) and checks coverage in BOTH
+// directions AND by METHOD, so the spec and the code cannot drift apart silently:
+//   - forward: every (method, route) the server serves is documented — a new
+//     route, or a new method on an existing path, added to http.go without a spec
+//     operation fails here;
+//   - reverse: every (method, path) the spec documents is actually served — a
+//     spec entry the server doesn't back (a typo'd path, a removed handler, an
+//     aspirational operation) fails here.
+//
+// The old version deduped by path and ignored the method, so a method swap or a
+// documented-but-unserved operation passed green. OPTIONS/HEAD are chi/CORS
+// infrastructure, not part of the documented contract, so they're excluded.
+func TestOpenAPIContract_SpecCoversAllRoutes(t *testing.T) {
+	doc, _ := newValidator(t)
+
+	model, errs := doc.BuildV3Model()
+	require.Empty(t, errs, "must build v3 model from spec")
+
+	// spec: path -> set of documented methods (upper-cased for comparison).
+	specOps := map[string]map[string]bool{}
+	for p, item := range model.Model.Paths.PathItems.FromOldest() {
+		methods := map[string]bool{}
+		for m := range item.GetOperations().FromOldest() {
+			methods[strings.ToUpper(m)] = true
+		}
+		specOps[p] = methods
+	}
+
+	// router: route -> set of served methods. chi reports each (method, pattern);
+	// the pattern uses {param}, matching OpenAPI templating, so patterns map
+	// straight to spec paths.
+	h := newEngineHTTP(t).h
+	routerOps := map[string]map[string]bool{}
+	err := chi.Walk(h.RouterForTest(), func(method, route string, _ httpgo.Handler, _ ...func(httpgo.Handler) httpgo.Handler) error {
+		if route != "/" {
+			route = strings.TrimSuffix(route, "/")
+		}
+		if method == httpgo.MethodOptions || method == httpgo.MethodHead {
+			return nil // CORS / probe infrastructure, not part of the documented contract
+		}
+		if routerOps[route] == nil {
+			routerOps[route] = map[string]bool{}
+		}
+		routerOps[route][method] = true
+		return nil
+	})
+	require.NoError(t, err)
+
+	var undocumented []string
+	for route, methods := range routerOps {
+		for m := range methods {
+			if !specOps[route][m] {
+				undocumented = append(undocumented, m+" "+route)
+			}
+		}
+	}
+	sort.Strings(undocumented)
+	require.Empty(t, undocumented, "routes/methods served by http.go are missing from api/openapi.yaml (add the path item / operation)")
+
+	var unserved []string
+	for path, methods := range specOps {
+		for m := range methods {
+			if !routerOps[path][m] {
+				unserved = append(unserved, m+" "+path)
+			}
+		}
+	}
+	sort.Strings(unserved)
+	require.Empty(t, unserved, "operations documented in api/openapi.yaml are not served by http.go (remove them, or implement the route)")
+}

@@ -433,7 +433,7 @@ func TestMySQLIntegration_AggregateProjection(t *testing.T) {
 	wantCast := nconstsOf("top_cast")
 	full := append(append([]*cluster.Actual{}, seq...), replace, delActor, delDirector)
 
-	require.NoError(t, projection.Teardown())
+	dropDestination(t, projection)
 	require.NoError(t, projection.Init())
 	apply(full...)
 	require.Equal(t, wantCast, nconstsOf("top_cast"), "rebuild-from-0 reproduces top_cast")
@@ -643,7 +643,7 @@ func TestMySQLIntegration_LookupEnrichment(t *testing.T) {
 		principal(3, "nm3"), name("nm3", "Val Kilmer"),
 		name("nm1", "Alfredo James Pacino"), sourceDelete(nameType, "nm2"),
 	}
-	require.NoError(t, projection.Teardown())
+	dropDestination(t, projection)
 	require.NoError(t, projection.Init())
 	apply(full...)
 	require.Equal(t, want, names(), "rebuild-from-0 reproduces the enriched top_cast")

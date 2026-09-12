@@ -27,9 +27,9 @@ func TestBuildPgConfig(t *testing.T) {
 			config: &sql.Config{
 				ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable",
 				Tables:           []string{"public.orders", "public.items"},
-				Options: map[string]string{
-					"slot_name":   "my_slot",
-					"publication": "my_pub",
+				Options: sql.Options{
+					SlotName:    "my_slot",
+					Publication: "my_pub",
 				},
 			},
 			wantSlot:    "my_slot",
@@ -44,7 +44,7 @@ func TestBuildPgConfig(t *testing.T) {
 			config: &sql.Config{
 				ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable",
 				Tables:           []string{"mytable"},
-				Options:          map[string]string{},
+				Options:          sql.Options{},
 			},
 			wantSlot:   "committed_slot",
 			wantPub:    "committed_pub",
@@ -74,7 +74,7 @@ func TestBuildPgConfig(t *testing.T) {
 			config: &sql.Config{
 				ConnectionString: "postgres://user:pass@localhost:5432/db?sslmode=disable&replication=database",
 				Tables:           []string{"t"},
-				Options:          map[string]string{},
+				Options:          sql.Options{},
 			},
 			wantSlot:    "committed_slot",
 			wantPub:     "committed_pub",
@@ -168,27 +168,6 @@ func TestQuoteTable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			require.Equal(t, tt.want, quoteTable(tt.input))
-		})
-	}
-}
-
-func TestParseBatchSize(t *testing.T) {
-	tests := []struct {
-		name string
-		opts map[string]string
-		want int
-	}{
-		{"nil_options", nil, defaultSnapshotBatchSize},
-		{"missing_key", map[string]string{"slot_name": "s"}, defaultSnapshotBatchSize},
-		{"valid_override", map[string]string{"batch_size": "500"}, 500},
-		{"invalid_non_numeric", map[string]string{"batch_size": "abc"}, defaultSnapshotBatchSize},
-		{"zero_falls_back", map[string]string{"batch_size": "0"}, defaultSnapshotBatchSize},
-		{"negative_falls_back", map[string]string{"batch_size": "-1"}, defaultSnapshotBatchSize},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, parseBatchSize(tt.opts))
 		})
 	}
 }

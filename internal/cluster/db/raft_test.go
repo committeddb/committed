@@ -19,6 +19,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	dbtesting "github.com/committeddb/committed/internal/cluster/db/testing"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
 // multiNodeTickInterval is the per-tick interval used by multi-node raft
@@ -980,18 +981,25 @@ func (ms *MemoryStorage) ReaderAt(index uint64) db.ActualReader {
 	return &Reader{index: index, s: ms}
 }
 
-// IngestSourceSeqHighwater stubs the effectively-once dedup highwater.
-// This in-memory double doesn't run the entity apply path that would
-// advance it, so it reports 0; dedup tests use the real wal.Storage.
-func (ms *MemoryStorage) IngestSourceSeqHighwater(id string) uint64 {
-	return 0
-}
-
 // TopicRefreshEpoch stubs the delete-surviving per-topic refresh-epoch
 // highwater. This in-memory double doesn't run the entity apply path that would
 // advance it, so it reports 0; recreate-epoch tests use the real wal.Storage.
 func (ms *MemoryStorage) TopicRefreshEpoch(topic string) uint64 {
 	return 0
+}
+
+// HasContractFingerprint stubs the tripwire's announced-shape dedupe mark.
+// This in-memory double doesn't run the entity apply path that would record
+// one, so it reports false; tripwire dedupe tests use the real wal.Storage.
+func (ms *MemoryStorage) HasContractFingerprint(typeID string, version int, fingerprint string) bool {
+	return false
+}
+
+// IngestableCensus stubs the published shape census. This in-memory double
+// doesn't run the entity apply path that would record one, so it reports
+// none; census tests use the real wal.Storage.
+func (ms *MemoryStorage) IngestableCensus(id string) (*cluster.IngestableCensus, bool) {
+	return nil, false
 }
 
 func (ms *MemoryStorage) Node(id string) uint64 {
@@ -1098,4 +1106,31 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			}
 		}
 	}
+}
+
+// InterpretationRegistry stubs the restatement-registry snapshot: this double applies no
+// restatements, so readers see the empty registry (the restatement-free path).
+func (ms *MemoryStorage) InterpretationRegistry() *interpretation.Registry {
+	return interpretation.EmptyRegistry
+}
+
+// RestatementByID stubs the admission read: no restatements are ever applied here.
+func (ms *MemoryStorage) RestatementByID(id string) (*cluster.Restatement, uint64, bool) {
+	return nil, 0, false
+}
+
+// AppliedRestatements stubs the registry listing: no restatements are ever applied here.
+func (ms *MemoryStorage) AppliedRestatements() ([]cluster.AppliedRestatement, error) {
+	return nil, nil
+}
+
+// SyncableCheckpoint stubs the full-record checkpoint read.
+func (ms *MemoryStorage) SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool) {
+	return nil, false
+}
+
+// SyncableRematerialization is a stub: no re-materializations run against
+// this in-memory double.
+func (ms *MemoryStorage) SyncableRematerialization(id string) (*cluster.SyncableRematerialization, bool) {
+	return nil, false
 }

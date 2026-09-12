@@ -1,34 +1,60 @@
 # Rebuilding a Committed node
 
-This runbook is for operators. It describes the manual rebuild procedure
-an operator runs when a Committed node cannot continue safely — either
-because it fell too far behind its cluster to catch up via normal raft
-replication, or because an operator is standing up a new node and wants
-to avoid the long initial replay.
+This runbook is for operators. It describes when a Committed node has to be
+rebuilt — replaced by a fresh node that takes the cluster's history from a
+peer — and how. Falling behind is **not** one of those times: a node whose
+permanent event log is behind the cluster catches up by itself (below).
 
 Background: the relevant design lives in
-[`docs/event-log-architecture.md`](../event-log-architecture.md). Read
-the "Catch-up taxonomy" and "Storage invariant" sections before running
-this procedure.
+[`docs/event-log-architecture.md`](../event-log-architecture.md) — read the
+"Catch-up taxonomy" and "The central invariant" sections first.
+
+## Falling behind is handled automatically
+
+A node that comes back after the cluster has compacted its raft log past the
+node's position — a long outage, a slow deploy — or a brand-new node that
+starts over an empty data directory, cannot be served by normal raft
+replication: the leader can only ship a metadata snapshot, and the node's
+permanent event log is behind it. The node **catches up on its own**: it
+fetches the events it is missing from a peer, over the peer transport, then
+installs the snapshot and resumes normal replication. Nothing to configure,
+nothing to run.
+
+While it does, the node reports the catch-up on its own status and answers
+`/ready` with 503:
+
+```bash
+curl -s http://n4:8080/v1/node/status | jq .catchingUp
+# { "have": 118203, "need": 2410077, "since": "2026-09-11T14:02:10Z", "peer": 2 }
+```
+
+`have` is the raft index the node's event log has reached; `need` is the
+index of the snapshot waiting to install; the block disappears once
+replication has taken over. A catch-up that makes no progress logs a warning
+every 30 seconds naming the reason (usually: no peer is reachable, or every
+peer is on an older binary that does not serve fetches — see
+[upgrade.md](upgrade.md)); it keeps retrying until a peer answers.
+
+Two things to know:
+
+- **It needs a live peer with the history.** Any member that holds the
+  events serves them (the fetch tries peers in turn). The cluster keeps
+  serving throughout; the serving peer defers its own log maintenance —
+  raft-log compaction, segment compression, a scrub's swap — only while an
+  exchange is in flight, a few seconds at a time.
+- **A node that missed a right-to-be-forgotten scrub fetches its log whole.**
+  If a scrub completed while the node was away, its own event log still holds
+  the erased data and can no longer be brought forward, so the node discards
+  it and takes the cluster's copy in full. This is by design; expect a full
+  transfer in that case.
+
+The previous procedure — rsync a healthy peer's data directory onto the node
+— is no longer needed for a node that fell behind, and no longer documented.
 
 ## When to rebuild
 
-Rebuild is the right response when any of these hold:
-
-- The node logged a fatal error matching:
-
-  ```
-  storage invariant violation: permanent event log is behind raft applied index.
-  The cluster has compacted past this node's recovery point. Run the rebuild
-  procedure at docs/operations/rebuild.md.
-  ```
-
-  This means the cluster has compacted past this node's recoverable
-  window. Normal raft replication cannot close the gap in v1 — the
-  leader's raft log no longer carries the entries between the node's
-  `EventIndex` and `AppliedIndex`, and the metadata snapshot the
-  leader shipped cannot fill in the event log. The node has already
-  fatal-exited; continuing to run it is not safe.
+Rebuild — retire the node's identity and bring up a fresh one — when the
+node's own state cannot be trusted:
 
 - The node logged a fatal error beginning:
 
@@ -39,23 +65,16 @@ Rebuild is the right response when any of these hold:
   This node's data directory went *backward* — it previously acknowledged
   (and possibly voted on) entries its log no longer contains. In practice:
   a member was restored from a backup. This is not the same as being
-  behind (raft catches a lagging node up automatically); a rewound node
-  has broken its promises to the cluster, and running it endangers
-  cluster safety, so it exits immediately and on every restart until
-  rebuilt. **Members are rebuilt, never restored** — backup/restore is
-  for single-node deployments and whole-cluster recovery, where every
-  node rewinds together and no stale memory of the old state survives.
-
-- A brand-new node is joining a cluster that has been running long
-  enough for its raft log to have compacted past `raft index 1`. In
-  practice that's any multi-day-old cluster with non-trivial write
-  traffic. Starting the new node with an empty data directory would
-  leave it in the same "severely behind" state the fatal exit is
-  describing — rebuild it up-front instead.
+  behind (the node catches that up automatically); a rewound node has
+  broken its promises to the cluster, and running it endangers cluster
+  safety, so it exits immediately and on every restart until rebuilt.
+  **Members are rebuilt, never restored** — backup/restore is for
+  single-node deployments and whole-cluster recovery, where every node
+  rewinds together and no stale memory of the old state survives.
 
 - The node's disk is damaged (bit rot, a partial restore, or an in-record
-  corruption of a committed entry) and `committed` refuses to start. The
-  rebuild procedure replaces the data directory with a known-good copy.
+  corruption of a committed entry) and `committed` refuses to start, or a
+  syncable's read wedges on a corrupt record.
 
   Each WAL entry (raft log, permanent event log, and state log) carries a
   CRC32C checksum, verified on read. A detected mismatch fails the read
@@ -85,153 +104,91 @@ Rebuild is the right response when any of these hold:
   truncate a torn tail, after which the node restarts cleanly. The tool
   **refuses** anything that is not a torn tail — a bitflip in a committed
   record, mid-log — because that data is genuinely gone locally. *That* is
-  when you rebuild from a healthy peer (below), or restore/splice from a
-  backup on a single node.
+  when you rebuild (below) — or, on a **single node**, splice the bytes
+  back from a backup of that node:
 
-  Logs written before checksums existed are read transparently
-  (trust-on-first-read) and are not flagged; new appends are always
-  checksummed, so coverage grows as the log compacts.
+  ```
+  committed wal repair --data <node-data-dir> --from <backup.tar.gz>
+  ```
+
+  The record at a given log position is byte-identical everywhere, so a
+  backup that covers it holds the correct bytes. The tool reports the plan
+  (which record, from which archived segment) and changes nothing; re-run
+  with `--commit` to apply it. A corrupt record in a plain segment is
+  spliced byte-for-byte; a corrupt compressed segment (one flipped byte
+  fails the whole zstd frame) is replaced by the backup's copy. Every
+  splice is verified before it is written — the archive entry matches the
+  backup's manifest, the two logs agree byte-for-byte on every other record
+  they share (so a backup taken before a scrub or a truncation can never
+  re-introduce rewritten bytes), the record's raft index continues its
+  neighbours, and the assembled segment re-scans clean — and is refused
+  otherwise, leaving the log untouched. Corruption the backup does not
+  cover (it predates the record) still needs a rebuild or a restore.
+
+  Every log a supported deployment can hold is checksummed end to end
+  (framing shipped in v0.5-beta, well below the data-directory floor);
+  unframed or torn bytes are corruption, never trusted content.
 
 - A node ran out of disk and you can't expand the volume in place.
   The cluster keeps admitting writes while a quorum of voters has disk
   headroom (see [disk-limits.md](disk-limits.md)), which deliberately
   sacrifices the constrained node — its copy of the replicated log
-  keeps growing until it exits. Rebuild it onto a bigger volume; don't
-  remove it from the membership (that shrinks quorum and *reduces*
-  fault tolerance).
+  keeps growing until it exits. Rebuild it onto a bigger volume.
+
+- The node logged:
+
+  ```
+  storage invariant violation: permanent event log is behind raft applied index.
+  ```
+
+  This should not happen: the automatic catch-up fills the event log before
+  a snapshot installs. If it does, report it; rebuilding the node (below)
+  recovers it meanwhile.
 
 Rebuild is NOT the right response when:
 
-- The node briefly fell behind because of a network blip, restart, or
-  GC pause. Normal raft replication handles this case automatically
-  via `AppendEntries`; there is nothing for an operator to do.
+- The node fell behind — a long outage, a slow deploy, a brand-new node.
+  It catches up by itself (above); there is nothing for an operator to do
+  but watch `catchingUp`.
 
-- The cluster has lost quorum. Rebuild won't help — you need a quorum
-  of live peers to copy from. Fix quorum first (bring up enough
-  surviving nodes, or perform a consensus-recovery operation).
+- The cluster has lost quorum. Rebuild won't help — a fresh node needs a
+  live quorum to join and a peer to fetch from. Fix quorum first (bring up
+  enough surviving nodes, or perform a consensus-recovery operation).
 
-## What the procedure does
+## Procedure
 
-At a high level: stop the broken node, copy its data directory from a
-healthy peer with `rsync`, reset ownership, and restart. The copied
-data is a byte-for-byte snapshot of the healthy peer at the moment the
-rsync ran — meaning `P_local == R_local` holds on startup, the node
-joins raft cleanly, and the small gap that accrued during the rsync
-fills via normal replication.
-
-Apply determinism (see `docs/event-log-architecture.md` §
-"Determinism requirement") is what makes this O(diff) cheap on
-subsequent rebuilds: rsync's `--inplace` mode only transfers segments
-that changed, and every node's permanent event log is byte-identical
-under determinism. On the very first rebuild rsync ships everything; on
-later rebuilds it ships only what diverged.
-
-## Prerequisites
-
-- A **healthy peer** — another node in the cluster whose data
-  directory is complete and current. Verify this by confirming the
-  peer is accepting writes and serving the `/ready` probe with
-  `appliedIndex > 0`.
-
-- **SSH access** from the failed node to the healthy peer (or,
-  equivalently, a shared filesystem or object-store staging area).
-
-- **Root or sudo** on the failed node so you can stop and start the
-  service and fix ownership after rsync.
-
-- Enough **local disk** to hold a full copy of the healthy peer's
-  data directory. Rsync can stream over a partial failed state if
-  `--inplace` is set, reducing the transfer size on repeat rebuilds.
-
-## Procedure — existing follower
-
-Run these commands on the failed node. Adjust paths if your
-`committed` service stores data somewhere other than
-`/var/lib/committed`.
+A rebuild is a membership change: a fresh node joins under a **new id**,
+over an empty data directory, catches up like any new node, and the damaged
+node's id is removed once the replacement is a voter. Reusing the old id is
+not safe — the cluster remembers what that id acknowledged and voted for,
+and a node coming back empty under it is exactly the rewound member the
+`raft state rewound` guard exits on.
 
 ```bash
-# 1. Stop the service so nothing is writing to the data directory
-#    while rsync runs.
+# 1. Stop the damaged node and clear its data directory.
 sudo systemctl stop committed
-
-# 2. Clear the stale state. You can leave the directory in place if
-#    you prefer to let rsync's --delete handle it, but a clean slate
-#    makes the first rebuild less surprising and matches the shape
-#    of a brand-new-node bootstrap.
 sudo rm -rf /var/lib/committed/*
 
-# 3. Rsync from a healthy peer — in TWO passes. A single rsync from a
-#    live peer fails PROBABILISTICALLY ("unexpected end of file"):
-#    segment files mutate underneath a multi-GB copy, and whether the
-#    copy tears depends on timing, so a pass that worked yesterday can
-#    fail today. The pattern that is reliable:
-#      (a) one or two BULK passes while the peer serves — they move
-#          ~all the bytes and may themselves fail near the tail; rerun
-#          until one completes;
-#      (b) one short QUIESCED delta: stop the healthy peer, run the
-#          same rsync again (--inplace makes it seconds — only the
-#          diff transfers), start the peer again.
-#    Quorum note for the quiesce: while you are rebuilding one member,
-#    stopping the source peer costs a voter too — in a THREE-node
-#    cluster that leaves one voter, which is no quorum, so commits
-#    pause CLUSTER-WIDE for the delta window. Keep it short; with five
-#    or more voters a single stopped peer costs nothing.
-sudo rsync -av --inplace healthy-peer:/var/lib/committed/ /var/lib/committed/  # bulk (repeatable)
-# ...then on the peer: stop committed; rerun the rsync; start committed.
-
-# ZERO-PAUSE ALTERNATIVE: on a snapshot-capable filesystem (ZFS, btrfs,
-# LVM), skip the quiesce entirely — take an atomic filesystem snapshot
-# of the healthy peer's data directory and rsync FROM THE SNAPSHOT at
-# leisure. The snapshot is the consistency fence, every voter keeps
-# serving, and the small gap that accrued since the snapshot fills via
-# normal raft replication after the rebuilt node boots.
-
-# 4. Restore ownership. rsync preserves numeric UIDs by default; if
-#    the committed user has a different UID on this host, fix it.
-sudo chown -R committed:committed /var/lib/committed
-
-# 5. Start the service. The node loads the rsync'd state, finds
-#    P_local == R_local, joins raft, catches up the small gap that
-#    accrued during the rsync, and resumes serving.
+# 2. Give it a NEW id and start it in join mode (see membership.md for
+#    the full environment). It comes up empty and waits to be added.
+#      COMMITTED_NODE_ID=4
+#      COMMITTED_JOIN=true
+#      COMMITTED_PEERS=1=http://n1:9022,2=http://n2:9022,3=http://n3:9022,4=http://n3:9022
 sudo systemctl start committed
-```
 
-If the service fails to start, check `journalctl -u committed` for the
-specific error. The most common cause is a half-complete rsync — retry
-from step 2 with a full (not `--inplace`) transfer.
-
-## Procedure — adding a new node
-
-Same as the rebuild procedure, with one extra step: propose a raft
-configuration change adding the new node's ID.
-
-```bash
-# 1-5. Same as "existing follower" above: stop the (empty) service,
-#     rsync from a healthy peer, restore ownership, start the service.
-#
-# The node will come up in a "waiting for cluster membership" state —
-# it has rsynced state but no peer has told it it's a cluster member
-# yet.
-
-# 6. Add the new node to the cluster with committed's own member CLI,
-#    targeting any existing node — as a learner first, promoted once
-#    caught up (the safe pattern; see membership.md for the full flow):
-committed member add --id 4 --url http://n4:9022 --learner --target http://n1:8080
-#    ...wait for matchIndex to close on commitIndex (member list), then:
+# 3. Add it as a learner, watch it catch up, promote it.
+committed member add --id 4 --url http://n3:9022 --learner --target http://n1:8080
+curl -s http://n3:8080/v1/node/status | jq .catchingUp   # until the block is gone
 committed member promote --id 4 --target http://n1:8080
+
+# 4. Only now retire the damaged node's id.
+committed member remove --id 3 --target http://n1:8080
 ```
 
-After the conf change commits, the new node transitions to a voting
-member. Normal raft replication fills the gap between the rsync time
-and the conf-change time.
-
-The new node does not need any `--joining` flag or a separate
-bootstrap subcommand. Whether it is a member of the cluster is
-determined entirely by whether a conf change has been propagated for
-it. Until then, the binary runs in "standalone" mode, receiving
-heartbeats but not participating in voting. That's deliberate — it is
-also the state every brand-new cluster member was in for a few
-seconds during its first startup.
+Adding before removing keeps quorum arithmetic honest: a three-voter
+cluster with one member down is at two of three throughout, and never at
+two of two — the replacement joins as a learner (no effect on quorum), is
+promoted only once caught up, and the old id leaves last.
 
 ## Verification
 
@@ -250,42 +207,22 @@ complete remote verification; the node's own `/ready` remains the direct
 confirmation when you can reach it. (See membership.md for the one
 sampling caveat on `active`.)
 
-After the service is running, confirm the node is healthy:
-
 ```bash
-# /ready returns 200 only once raft has elected a leader AND this
-# node has applied at least one entry. An unready node blocks the
-# health check until the gap fills.
+# /ready returns 200 only once raft has elected a leader, this node has
+# applied at least one entry, and no catch-up is in progress.
 curl -sf http://localhost:8080/ready
 
 # /health is a lighter-weight liveness probe.
 curl -sf http://localhost:8080/health
 ```
 
-If `/ready` stays 5xx for more than a few minutes after startup, the
-node is stuck. Likely causes:
+If `/ready` stays 5xx for more than a few minutes after startup, check
+`/v1/node/status`:
 
-- The healthy peer you rsynced from was behind the cluster. Rsync
-  from a different peer.
-
-- The conf change (for new nodes) has not committed yet. Check the
-  proposer's logs.
-
-- The data directory permissions are wrong and the binary can't open
-  bbolt. Re-run the `chown` step.
-
-## Why this is "manual"
-
-v1 intentionally leaves severe-lag catchup to an operator. The
-architecture doc is explicit:
-
-> This is intentionally fail-fast. A node that cannot satisfy the
-> storage invariant must not be running, because it could otherwise
-> serve stale syncable reads or (if elected leader, however briefly)
-> confuse the cluster.
-
-A future v2 will automate this by streaming event log segments
-between peers inside the process, so an operator only needs to do
-disk-level recovery (bit rot, lost host) and not routine "my follower
-fell behind during a long deploy" recovery. Until then, this runbook
-is the supported path.
+- `catchingUp` present and `have` advancing: it is working; a large log
+  takes a while.
+- `catchingUp` present and `have` not advancing: no peer is serving. Check
+  that the node can reach its peers (`COMMITTED_PEERS`, network) and that at
+  least one peer runs a binary that serves fetches (0.8.0 or later).
+- No `catchingUp` and `leader` is 0: the conf change (for new nodes) has
+  not committed yet, or the node cannot reach the cluster.

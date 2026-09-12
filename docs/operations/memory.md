@@ -6,7 +6,10 @@ cache.
 
 ## The event-log segment cache — `COMMITTED_EVENT_CACHE_SEGMENTS`
 
-The permanent event log is stored in ~20MB segment files. Reading an entry
+The permanent event log is stored in ~20MB segment files (compressed to a
+few MB at rest once sealed — see disk-limits § Event-log compression; a
+resident cache slot always holds the DECOMPRESSED ~20MB, so compression
+changes nothing about memory sizing). Reading an entry
 requires its segment's parsed index in memory, and the node keeps a bounded
 number of segments resident at once:
 
@@ -32,8 +35,8 @@ disk-parse speed.
   `64` (~1.3GB worst case) is cheap insurance; size up freely with your RAM.
 - Steady-state streaming (all syncables caught up) concentrates reads in the
   newest segments and needs almost none of this — the cache earns its memory
-  during **replays**: initial sink builds, projection rebuilds, and rebuilt
-  nodes catching sinks back up.
+  during **replays**: initial destination builds, projection rebuilds, and rebuilt
+  nodes catching destinations back up.
 
 The raft entry log is not tunable and needs no tuning: its reader is the
 single sequential consensus loop, which cannot thrash.

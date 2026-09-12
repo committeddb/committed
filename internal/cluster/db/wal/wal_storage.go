@@ -20,6 +20,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -77,6 +78,16 @@ var (
 	// that gates semantically-skewed emission (a new system type, a
 	// refresh-boundary marker). See node_version.go and db.featureEnabled.
 	memberVersionBucket = []byte("memberVersions")
+	// memberZones maps node id -> announced zone (COMMITTED_ZONE) — the
+	// placement identities zone-pinned syncables resolve their owner
+	// against. See node_zone.go.
+	memberZoneBucket = []byte("memberZones")
+	// typeMigrationEdits maps type id -> the raft index of its latest
+	// IN-PLACE migration edit (same version, migration bytes changed) — the
+	// interpretation coordinate a migration fix moves, so always-current
+	// consumers' interpretationStale can flag rows synced under the previous
+	// transform. See saveType and db.SyncableInterpretation.
+	typeMigrationEditBucket = []byte("typeMigrationEdits")
 )
 
 var (
@@ -102,6 +113,26 @@ var (
 	// the apply path (handleTypeMigrationDeadLetter). See
 	// type_migration_dead_letter.go.
 	typeMigrationDeadLetterBucket = []byte("typeMigrationDeadLetters")
+	// contractFingerprintBucket holds the validation tripwire's replicated
+	// dedupe marks, keyed "typeID\x00version\x00fingerprint" (one per
+	// announced divergent shape). Written deterministically from the apply
+	// path (handleContractFingerprint), guarded/swept with the type config.
+	// See contract_fingerprint.go.
+	contractFingerprintBucket = []byte("contractFingerprints")
+	// ingestableCensusBucket holds the latest published JSON shape census per
+	// ingestable id (last-writer-wins), guarded/swept with the ingestable
+	// config. See ingestable_census.go.
+	ingestableCensusBucket = []byte("ingestableCensuses")
+	// syncableRematerializationBucket holds the in-progress re-materialization
+	// record per syncable id (upsert while replaying, deleted at sweep
+	// completion), guarded/swept with the syncable config. See
+	// syncable_rematerialization.go.
+	syncableRematerializationBucket = []byte("syncableRematerializations")
+	// restatementsBucket holds the APPEND-ONLY interpretation registry: one record
+	// per restatement id, value = 8-byte big-endian raft index || marshaled
+	// LogRestatement. Never edited, never swept (replay determinism at historical
+	// interpretation indexes needs every restatement forever). See restatement.go.
+	restatementsBucket = []byte("restatements")
 )
 
 // appliedIndexBucket holds a single key ("idx") whose value is the
@@ -138,7 +169,13 @@ var (
 var (
 	pendingScrubBucket   = []byte("pendingScrub")
 	pendingScrubBoundKey = []byte("bound")
-	scrubCompletedKey    = []byte("completed")
+	// pendingScrubHashKey and pendingScrubCmdIndexKey ride alongside "bound":
+	// whether the command that raised it authorizes the delete-key erasure
+	// pass (Scrub.HashDeleteKeys), and that command's own raft index — the
+	// deterministic cap for the erasure gate's harvest (deleteKeyEraseGate).
+	pendingScrubHashKey     = []byte("hashDeleteKeys")
+	pendingScrubCmdIndexKey = []byte("cmdIndex")
+	scrubCompletedKey       = []byte("completed")
 	// scrubCompactOwedKey marks that a scrub PRUNED RTBF tombstones but has not
 	// yet physically compacted bbolt. It is written in the SAME tx as the prune
 	// and cleared only after compaction succeeds, so a compaction that ENOSPCs or
@@ -173,9 +210,14 @@ var internalEntities = []internalEntity{
 	{cluster.IsIngestableStuck, "handleIngestableStuck", ingestableStuckBucket, (*Storage).handleIngestableStuck},
 	{cluster.IsSyncableSkipRequest, "handleSyncableSkipRequest", syncableSkipRequestBucket, (*Storage).handleSyncableSkipRequest},
 	{cluster.IsIngestablePosition, "saveIngestablePosition", ingestablePositionBucket, (*Storage).saveIngestablePosition},
+	{cluster.IsContractFingerprint, "handleContractFingerprint", contractFingerprintBucket, (*Storage).handleContractFingerprint},
+	{cluster.IsIngestableCensus, "handleIngestableCensus", ingestableCensusBucket, (*Storage).handleIngestableCensus},
+	{cluster.IsRestatement, "handleRestatement", restatementsBucket, (*Storage).handleRestatement},
+	{cluster.IsSyncableRematerialization, "handleSyncableRematerialization", syncableRematerializationBucket, (*Storage).handleSyncableRematerialization},
 	{cluster.IsScrub, "handleScrub", pendingScrubBucket, (*Storage).handleScrub},
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},
+	{cluster.IsNodeZone, "handleNodeZone", memberZoneBucket, (*Storage).handleNodeZone},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type
@@ -186,7 +228,8 @@ var buckets = func() [][]byte {
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket)
+	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
+		scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
 }()
 
 type StateType int
@@ -214,6 +257,10 @@ type Storage struct {
 	// swap, so they cannot race it and stay lock-free.
 	entryMu  sync.RWMutex
 	EntryLog *wal.Log
+	// entryLogEpoch counts the times the entry log was replaced whole (a
+	// snapshot install's cut-over). A live backup reads it before and after
+	// the phases an install would make inconsistent, and starts over.
+	entryLogEpoch atomic.Uint64
 	// eventLog is the permanent event log — the "forever" tier described
 	// in docs/event-log-architecture.md. ApplyCommitted mirrors every
 	// committed raft entry into it, keyed by raft index. Unlike EntryLog,
@@ -248,6 +295,14 @@ type Storage struct {
 	// swap is exclusive. Lock order is eventMu → kvMu (the swap clears bbolt
 	// scrub state outside the eventMu section, so the two never nest).
 	eventMu sync.RWMutex
+	// sealerStop/sealerDone/sealerStopOnce are the background sealer's
+	// lifecycle (sealer.go), mirroring the scrub worker's. sealerIdle is its
+	// re-check cadence when everything is compressed (WithSealerIdleInterval;
+	// defaults to sealerIdleInterval).
+	sealerStop     chan struct{}
+	sealerDone     chan struct{}
+	sealerStopOnce sync.Once
+	sealerIdle     time.Duration
 	// typeCache memoizes ResolveType lookups for explicit-version refs
 	// (ref.Version > 0), keyed by cluster.TypeRef. Version-0 ("latest")
 	// lookups are never cached — "latest" is mutable and stays bolt-backed.
@@ -276,6 +331,21 @@ type Storage struct {
 	scrubStop     chan struct{}
 	scrubDone     chan struct{}
 	scrubStopOnce sync.Once
+	// fromZeroReads counts in-flight from-0 log reads (a fresh syncable's
+	// replay, a rebuild, stage-state recovery). They read CONTENT: the scrub
+	// swap waits for them so no from-0 read ever spans a rewrite, the
+	// invariant the delete-key erasure gate's soundness rests on (see
+	// rtbf_erase.go and BeginFromZeroRead). Compression under them changes
+	// nothing they see. Guarded by fromZeroMu.
+	fromZeroMu    sync.Mutex
+	fromZeroReads int
+	// eventLayout and raftLayout hold each log's set of segment files still
+	// for a reader of that set (a peer fetch, a live backup) while the log's
+	// movers step aside — see layout_freeze.go. The scrub swap waits on the
+	// event log's alongside fromZeroReads: two waits, one waiter, because a
+	// from-0 replay reads content and a freeze reads layout.
+	eventLayout layoutLock
+	raftLayout  layoutLock
 	// failCompactionForTest, when non-nil, forces compactLocked to fail — used to
 	// reproduce an ENOSPC/crashed compaction so a test can assert the erased key
 	// is re-driven out of bbolt on the next Open. Nil in production.
@@ -316,6 +386,15 @@ type Storage struct {
 	// highest Scrub upper-bound this node has finished rewriting to). Loaded in
 	// Open, advanced by the worker; read by the automatic-scrub scheduler.
 	lastScrubbedBound atomic.Uint64
+	// catchingUp is set while a catch-up fills the event log from a peer (see
+	// BeginCatchUp): the scrub worker defers any pending rewrite until it
+	// clears.
+	catchingUp atomic.Bool
+	// swappedBound is the bound of the rewrite most recently swapped in —
+	// set at the swap, before the completion mark that advances
+	// lastScrubbedBound — so EventLogGeneration describes the bytes on disk
+	// through the swap-to-mark window too. Zero until a swap this process.
+	swappedBound atomic.Uint64
 	// metadataBacklog counts system-tombstonable (internal-snapshot) entities
 	// applied since the last completed scrub — a cheap, in-memory proxy for
 	// "superseded metadata is waiting to be GC'd." HasScrubBacklog consults it so
@@ -474,6 +553,14 @@ type Storage struct {
 	// never lag the applied index (confstate-lost-in-crash-window). Guarded by
 	// snapMu (ConfState already holds it); accessed only on the Ready loop.
 	pendingConfState *pb.ConfState
+	// appliedConfState is the membership as of the latest applied conf
+	// change — what the NEXT CreateSnapshot stamps. It is kept apart from
+	// s.snapshot on purpose: the snapshot raft serves a lagging peer
+	// (Snapshot()) must carry the membership as of ITS index, never a later
+	// one, or the peer restores past a conf change it then applies again
+	// from the log (raft panics: "can't leave a non-joint config"). Guarded
+	// by snapMu.
+	appliedConfState *pb.ConfState
 	// eventIndex is the highest raft index written to EventLog. Bumped
 	// before appliedIndex in ApplyCommitted so that a crash between the
 	// EventLog write and the bbolt appliedIndex persist doesn't lose
@@ -510,6 +597,12 @@ type Storage struct {
 	// (ApplyCommitted) and Open; the atomic is for race-free reads from the
 	// HTTP status path on other goroutines, not CAS.
 	dataEventIndex atomic.Uint64
+
+	// interpretationRegistry is the compiled restatements snapshot — immutable,
+	// swapped whole by handleRestatement / Open (reloadInterpretationRegistry),
+	// read lock-free on every sync read (see restatement.go and the
+	// interpretation package).
+	interpretationRegistry atomic.Pointer[interpretation.Registry]
 
 	logger *zap.Logger
 	// fsyncDisabled mirrors the WithoutFsync option (also passed to bbolt as
@@ -581,6 +674,37 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	eventLogDir := datadir.EventsDir(dir)
 	keyValueStorageDir := datadir.MetadataDir(dir)
 
+	// Take the node's exclusive bbolt lock FIRST, before any recovery
+	// mutation below (the scrub-dir rollback, the discard sweep, the log
+	// opens' own healing of .SEAL/compression leftovers). Offline
+	// maintenance — backup, wal repair, wal decompress — holds this same
+	// lock via datadir.LockStoppedNode*, so acquiring it before touching
+	// anything means a node racing a held maintenance lock fails HERE,
+	// loudly, having mutated nothing: without this ordering the node would
+	// rewrite dirs the tool is mid-walk on and only then die at the lock.
+	// Creating the (empty) metadata dir first mutates no maintained state.
+	//
+	// bbolt is excluded from the per-entry WAL checksums below: it is a
+	// B+tree with built-in page-level checksums (meta-page CRC64 + per-page
+	// validation), so torn or bitflipped pages are already detected on read.
+	if err := os.MkdirAll(keyValueStorageDir, 0o700); err != nil {
+		return nil, err
+	}
+	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
+	keyValueStorage, err := bolt.Open(datadir.BoltPath(keyValueStorageDir), 0o600, boltOpts)
+	if err != nil {
+		return nil, err
+	}
+	// Release the lock on any failed Open: flock treats a second open in the
+	// SAME process as an independent contender, so a leaked handle would
+	// wedge an in-process retry (open → repair → reopen) on its own lock.
+	opened := false
+	defer func() {
+		if !opened {
+			_ = keyValueStorage.Close()
+		}
+	}()
+
 	// Recover from a scrub that crashed mid-rewrite or mid-swap BEFORE the
 	// MkdirAll below — otherwise, if a swap had renamed events/ out of the way,
 	// MkdirAll would recreate an empty events/ and we'd open an empty event log
@@ -625,7 +749,18 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if cacheSegments <= 0 {
 		cacheSegments = DefaultEventCacheSegments
 	}
-	eventWalOpts := &wal.Options{SegmentCacheSize: cacheSegments}
+	// Sealed segments compress at rest (zstd L3, ~7-9x on JSON event
+	// payloads); the active tail stays plain and the write path never
+	// compresses — the background sealer (sealer.go) does, off the Ready
+	// loop. Reads decompress inside the segment-load path, so the cache
+	// still holds decompressed tables and its RAM sizing is unchanged.
+	// Downgrade door: `committed wal decompress` (offline) rewrites the
+	// plain format for pre-0.8.0 binaries.
+	eventWalOpts := &wal.Options{
+		SegmentCacheSize:         cacheSegments,
+		SegmentSize:              cfg.eventSegmentSize,
+		SealedSegmentCompression: wal.CompressionZstd,
+	}
 	eventLog, err := openLog(eventLogDir, "event_log", cfg.metrics, eventWalOpts)
 	if err != nil {
 		return nil, err
@@ -636,18 +771,10 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// compactLocked). Nothing else references these, so without this they linger
 	// indefinitely — a disk leak, and for the restore form an RTBF residual (a
 	// leader snapshot payload that may hold an erased key). Mirrors the scrub-dir
-	// and entry-log-discard recovery above.
+	// and entry-log-discard recovery above. (Runs after the bolt.Open above —
+	// the temps are separate files the open never touches.)
 	if err := datadir.SweepBoltTempFiles(keyValueStorageDir); err != nil {
 		return nil, fmt.Errorf("sweep orphaned bbolt temp files: %w", err)
-	}
-
-	// bbolt is excluded from the per-entry WAL checksums below: it is a
-	// B+tree with built-in page-level checksums (meta-page CRC64 + per-page
-	// validation), so torn or bitflipped pages are already detected on read.
-	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
-	keyValueStorage, err := bolt.Open(datadir.BoltPath(keyValueStorageDir), 0o600, boltOpts)
-	if err != nil {
-		return nil, err
 	}
 
 	err = keyValueStorage.Update(func(tx *bolt.Tx) error {
@@ -680,6 +807,8 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
+		eventLayout:     layoutLock{name: "event log", logger: logger},
+		raftLayout:      layoutLock{name: "raft entry log", logger: logger},
 		raftLogDir:      entryLogDir,
 		EntryLog:        entryLog,
 		eventLog:        eventLog,
@@ -700,7 +829,13 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		scrubSignal:     make(chan struct{}, 1),
 		scrubStop:       make(chan struct{}),
 		scrubDone:       make(chan struct{}),
+		sealerStop:      make(chan struct{}),
+		sealerDone:      make(chan struct{}),
+		sealerIdle:      cfg.sealerIdleInterval,
 		closeC:          make(chan struct{}),
+	}
+	if ws.sealerIdle <= 0 {
+		ws.sealerIdle = sealerIdleInterval
 	}
 
 	// The apply→listener pumps (see notifyPump): created only when a channel
@@ -738,7 +873,18 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			return nil, err
 		}
 		ws.firstIndex.Store(fe.GetIndex() - fi + 1)
-		ws.compactedUpTo.Store(fe.GetIndex())
+		// The first retained entry is the compaction/install dummy ONLY when
+		// the log no longer starts at raft index 1: Compact retains the
+		// boundary entry and a snapshot install writes one, both above 1 in
+		// any history that needed them. A log still holding index 1 was
+		// never meaningfully compacted (a Compact at exactly 1 removes
+		// nothing), so its boundary is the virtual genesis dummy at 0 and
+		// entry 1 stays servable to a from-scratch joiner — see boundary().
+		if fe.GetIndex() > 1 {
+			ws.compactedUpTo.Store(fe.GetIndex())
+		} else {
+			ws.compactedUpTo.Store(0)
+		}
 	}
 
 	li, err := entryLog.LastIndex()
@@ -767,6 +913,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	ws.hardState = st
 	ws.snapshot = snap
+	// The membership the next snapshot stamps: the crash-authoritative copy,
+	// else the persisted snapshot's (a data dir from before confStateBucket).
+	if ws.appliedConfState = ws.durableConfState(); ws.appliedConfState == nil {
+		ws.appliedConfState = snap.GetMetadata().GetConfState()
+	}
 
 	// Complete an in-place snapshot install that crashed between persisting
 	// the snapshot record (saveWithSnapshot's appendState) and cutting the
@@ -943,6 +1094,13 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		}
 	}
 
+	// Compile the interpretation registry from the applied restatements so readers
+	// resolve effective versions from the first sync after restart (entries
+	// already applied before this restart won't re-run handleRestatement).
+	if err := ws.reloadInterpretationRegistry(); err != nil {
+		return nil, err
+	}
+
 	// Load the highest completed scrub bound so the worker skips redundant
 	// rewrites and the scheduler can see progress. Then start the background
 	// scrubber: it immediately resumes any pending scrub (a Scrub command that
@@ -958,10 +1116,14 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		// stays durably recorded and resumes on the next normal open. Close
 		// waits on scrubDone, which the worker's defer normally closes; with
 		// no worker, close it here so Close returns.
+		// The sealer is held too: a diagnosis window must not have segment
+		// files rewritten (compressed) underneath it either.
 		ws.logger.Warn("SAFE MODE: scrub worker held; any pending scrub resumes on a normal restart")
 		close(ws.scrubDone)
+		close(ws.sealerDone)
 	} else {
 		go ws.scrubWorker()
+		go ws.sealerWorker()
 	}
 
 	// Complete any RTBF compaction a prior scrub pruned tombstones for but didn't
@@ -980,6 +1142,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// next makes progress. See refreshSyncStuckGauges.
 	ws.refreshWorkerStateGauges()
 
+	opened = true // ws owns keyValueStorage now; Close releases the lock
 	return ws, nil
 }
 
@@ -999,6 +1162,9 @@ func (s *Storage) Close() error {
 		// mid-flight when we close the handle below). Idempotent close of scrubStop
 		// is handled in stopScrubWorker.
 		s.stopScrubWorker()
+		// Likewise the sealer: it compresses sealed event-log segments and must
+		// not be mid-swap when the handle closes.
+		s.stopSealer()
 
 		finalErr = s.EntryLog.Close()
 
@@ -1049,20 +1215,13 @@ func (s *Storage) Close() error {
 func (s *Storage) ConfState(c *pb.ConfState) {
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
-	// raft 3.7's Snapshot/SnapshotMetadata are pointer fields, so a zero-value
-	// snapshot carries nil Metadata — initialize before storing the conf state.
-	if s.snapshot == nil {
-		s.snapshot = &pb.Snapshot{}
-	}
-	if s.snapshot.Metadata == nil {
-		s.snapshot.Metadata = &pb.SnapshotMetadata{}
-	}
-	s.snapshot.Metadata.ConfState = c
-	s.snapDirty = true
-	// Stage for the atomic durable write paired with appliedIndex. The
-	// snapshot-metadata copy above is for CreateSnapshot; confStateBucket
-	// (written with appliedIndex) is the crash-authoritative one InitialState
-	// reads back.
+	// For the next CreateSnapshot. The snapshot already held (s.snapshot)
+	// is NOT updated: raft serves it to lagging peers, and it must carry
+	// the membership as of its own index (see appliedConfState).
+	s.appliedConfState = c
+	// Stage for the atomic durable write paired with appliedIndex:
+	// confStateBucket (written with appliedIndex) is the crash-authoritative
+	// copy InitialState reads back.
 	s.pendingConfState = c
 }
 
@@ -1182,12 +1341,22 @@ func (s *Storage) InitialState() (*pb.HardState, *pb.ConfState, error) {
 // the compacted-dummy per existing wal.Storage semantics. On a
 // post-compact storage, compactedUpTo dominates and the boundary
 // moves with each Compact without disturbing the seq mapping.
+// entryReadRaceTestHook, when set (tests only), runs after Term/Entries pass
+// their initial bounds checks and before the entry reads — the injection
+// point for the racing-mutation fallback tests: a concurrent Compact or
+// full-wipe conflicting append landing mid-read must surface as a bare raft
+// sentinel, never a wrapped error, which etcd raft would panic on.
+var entryReadRaceTestHook func()
+
 func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 	var totalSize uint64
 
 	firstIndex := s.firstIndex.Load()
 	if lo <= s.boundary() {
 		return nil, raft.ErrCompacted
+	}
+	if entryReadRaceTestHook != nil {
+		entryReadRaceTestHook()
 	}
 
 	var es []*pb.Entry
@@ -1204,6 +1373,15 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 			// the sentinel if the range's head is now compacted. A failure with
 			// the boundary UNMOVED is genuine corruption and still propagates.
 			if lo <= s.boundary() {
+				return nil, raft.ErrCompacted
+			}
+			if s.lastIndex.Load() < hi-1 {
+				// A racing full-wipe conflicting append (appendEntries'
+				// resetEntryLogToEmpty arm) SHRANK the log between the
+				// bounds check and this read. ErrCompacted, not
+				// ErrUnavailable: raftLog.slice tolerates Compacted from
+				// Entries but panics on Unavailable — either way the caller
+				// re-probes against the new bounds on its next call.
 				return nil, raft.ErrCompacted
 			}
 			return nil, err
@@ -1227,13 +1405,40 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 // seq mapping, compactedUpTo moves with each Compact. max() collapses
 // them to a single boundary for callers that only care about the
 // compaction view.
+// boundary returns the compaction dummy's raft index — the index just below
+// the first servable entry, whose term Term() can still answer. That pairing
+// is the etcd Storage contract: Term(FirstIndex()-1) must succeed so a
+// leader can build the prevLog header for its very first sendable entry.
+//
+// Three regimes:
+//   - compacted or snapshot-installed (compactedUpTo > 0): the dummy is the
+//     RETAINED entry at compactedUpTo (Compact keeps the entry at the
+//     boundary; a snapshot install writes one).
+//   - never compacted, entries present: the dummy is VIRTUAL — raft index 0
+//     with term 0, the base every raft log grows from. Reporting firstIndex
+//     itself here (the old behavior) declared the first real entry
+//     unservable and Term(0) compacted, so a leader on a young,
+//     never-compacted cluster PANICKED ("need non-empty snapshot") the
+//     moment a joining member needed the log from index 1 — real-binary
+//     cluster grow was broken until the first compaction produced a
+//     snapshot to fall back on.
+//   - empty log: 0, same as the virtual dummy.
+//
+// compactedUpTo == 0 implies firstIndex <= 1: an empty follower rejects any
+// append whose prevIndex it lacks, so a first append always starts at raft
+// index 1, and every path that starts a log higher — snapshot install,
+// Compact — sets compactedUpTo. The fi > 1 arm is a defensive belt for a
+// state that should not exist: fall back to the old conservative answer
+// (treat the first entry as the dummy) rather than claim servability.
 func (s *Storage) boundary() uint64 {
-	fi := s.firstIndex.Load()
 	cu := s.compactedUpTo.Load()
-	if cu > fi {
+	if cu > 0 {
 		return cu
 	}
-	return fi
+	if fi := s.firstIndex.Load(); fi > 1 {
+		return fi
+	}
+	return 0
 }
 
 // Returns the entry, the size of the entry (in bytes) before being unmarshalled, and an error
@@ -1301,6 +1506,18 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 		return 0, raft.ErrUnavailable
 	}
 
+	// The virtual index-0 dummy: on a never-compacted log the boundary is
+	// raft index 0, whose term is 0 by axiom — there is no wal entry to
+	// read. This is what lets a leader answer Term(0) and serve the log
+	// from index 1 to a joining member instead of panicking for a snapshot
+	// it does not have.
+	if i == 0 {
+		return 0, nil
+	}
+	if entryReadRaceTestHook != nil {
+		entryReadRaceTestHook()
+	}
+
 	logIndex := i - firstIndex + 1
 	e, _, err := s.entry(logIndex)
 	if err != nil {
@@ -1309,6 +1526,13 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 		// raft compares it directly, so it must not be wrapped.
 		if i < s.boundary() {
 			return 0, raft.ErrCompacted
+		}
+		if i > s.lastIndex.Load() {
+			// A racing full-wipe conflicting append (appendEntries'
+			// resetEntryLogToEmpty arm) shrank the log between the bounds
+			// check and this read; raftLog.term handles Unavailable
+			// gracefully.
+			return 0, raft.ErrUnavailable
 		}
 		return 0, fmt.Errorf("wal index %d: %w", logIndex, err)
 	}
@@ -1320,11 +1544,12 @@ func (s *Storage) LastIndex() (uint64, error) {
 	return s.lastIndex.Load(), nil
 }
 
-// FirstIndex returns the first raft index that Entries can return.
-// The entry at index boundary() is retained for Term() match checks
-// (the compacted-dummy semantic etcd raft expects) but is not
-// returnable via Entries — so the first readable index is
-// boundary()+1.
+// FirstIndex returns the first raft index that Entries can return:
+// boundary()+1. The dummy at boundary() answers Term() but is not
+// returnable via Entries — a retained entry after a Compact or install,
+// or the VIRTUAL index-0/term-0 base on a never-compacted log (which is
+// what lets a leader serve such a log from index 1 to a joining member;
+// see boundary()).
 func (s *Storage) FirstIndex() (uint64, error) {
 	return s.boundary() + 1, nil
 }
@@ -1372,6 +1597,11 @@ func (s *Storage) Snapshot() (*pb.Snapshot, error) {
 // we'll no longer return via Entries — benign: the data becomes
 // unreachable but isn't corrupted.
 func (s *Storage) Compact(compactIndex uint64) error {
+	release, ok := s.raftLayout.move()
+	if !ok {
+		return cluster.ErrCompactionDeferred
+	}
+	defer release()
 	firstIndex := s.firstIndex.Load()
 	lastIndex := s.lastIndex.Load()
 
