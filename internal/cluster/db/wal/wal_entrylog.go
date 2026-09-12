@@ -223,6 +223,7 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
+	s.entryLogEpoch.Add(1)
 
 	if err := s.EntryLog.Close(); err != nil {
 		return fmt.Errorf("close entry log: %w", err)
@@ -273,6 +274,7 @@ func (s *Storage) resetEntryLogToEmpty() error {
 
 	s.entryMu.Lock()
 	defer s.entryMu.Unlock()
+	s.entryLogEpoch.Add(1)
 
 	if err := s.EntryLog.Close(); err != nil {
 		return fmt.Errorf("close entry log: %w", err)

@@ -63,7 +63,7 @@ func (s *Storage) sealerWorker() {
 		// segments and will read them: compressing one would remove the file
 		// it is about to read. Hold the layout for the step, or skip until
 		// the freeze lifts.
-		release, ok := s.moveLayout()
+		release, ok := s.eventLayout.move()
 		if !ok {
 			if !wait(s.sealerIdle) {
 				return

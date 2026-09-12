@@ -632,8 +632,8 @@ Operational guides live in [`docs/operations/`](docs/operations/):
   wedged or falling behind, skip a bad record, and replay it after a fix.
 - [Rebuilding a node](docs/operations/rebuild.md) — a node that fell behind
   catches up by itself; replace one whose disk or state cannot be trusted.
-- [Backup and restore](docs/operations/backup.md) — archive a stopped node to a
-  portable tarball for disaster recovery and total-loss rebuilds.
+- [Backup and restore](docs/operations/backup.md) — archive a node, stopped or
+  live, to a portable tarball for disaster recovery and total-loss rebuilds.
 - [Rolling upgrades](docs/operations/upgrade.md) — upgrade the cluster
   node-by-node with no downtime, and roll back if needed.
 - [Authentication](docs/operations/authentication.md) — turn on the bearer

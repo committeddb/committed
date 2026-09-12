@@ -388,17 +388,17 @@ func (s *Storage) HasDeleteKeyEraseBacklog() bool {
 // on. Release is idempotent. Holding a pin only delays THIS node's rewrite
 // timing; the rewrite's content is fixed by the committed command either way.
 func (s *Storage) BeginFromZeroRead() func() {
-	s.layoutMu.Lock()
+	s.fromZeroMu.Lock()
 	s.fromZeroReads++
-	s.layoutMu.Unlock()
+	s.fromZeroMu.Unlock()
 	released := false
 	return func() {
-		s.layoutMu.Lock()
+		s.fromZeroMu.Lock()
 		if !released {
 			released = true
 			s.fromZeroReads--
 		}
-		s.layoutMu.Unlock()
+		s.fromZeroMu.Unlock()
 	}
 }
 
@@ -417,11 +417,11 @@ func (s *Storage) waitLayoutQuiet() (release func(), err error) {
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		s.layoutMu.Lock()
-		reads, freezes := s.fromZeroReads, s.layoutFreezes
-		s.layoutMu.Unlock()
+		s.fromZeroMu.Lock()
+		reads := s.fromZeroReads
+		s.fromZeroMu.Unlock()
 		if reads == 0 {
-			if release, ok := s.moveLayout(); ok {
+			if release, ok := s.eventLayout.move(); ok {
 				return release, nil
 			}
 		}
@@ -429,8 +429,8 @@ func (s *Storage) waitLayoutQuiet() (release func(), err error) {
 		case <-s.scrubStop:
 			return nil, errScrubStopped
 		case <-warn.C:
-			s.logger.Warn("scrub swap waiting on in-flight from-0 log reads or a layout freeze (a stalled fresh replay, a peer fetch, or a live backup delays this node's rewrite)",
-				zap.Int("fromZeroReads", reads), zap.Int("layoutFreezes", freezes))
+			s.logger.Warn("scrub swap waiting on in-flight from-0 log reads or an event-log layout freeze (a stalled fresh replay, a peer fetch, or a live backup delays this node's rewrite)",
+				zap.Int("fromZeroReads", reads), zap.Bool("eventLayoutFrozen", s.eventLayout.frozen()))
 		case <-tick.C:
 		}
 	}

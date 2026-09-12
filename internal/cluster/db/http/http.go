@@ -293,6 +293,9 @@ func New(d *db.DB, opts ...Option) *HTTP {
 			// so use it against a node's direct address; /cluster/status below
 			// carries the cluster-wide, node-agnostic view.
 			r.Get("/node/status", h.NodeStatus)
+			// A backup archive of this node, taken live — streamed, so it is
+			// scoped to the answering node like /node/status.
+			r.Get("/node/backup", h.NodeBackup)
 
 			// Cluster-wide diagnostics that read the same from ANY node (the
 			// fan-out sibling reserved by /node/status). Today: the parked-worker

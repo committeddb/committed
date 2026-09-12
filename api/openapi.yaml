@@ -2093,6 +2093,64 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/node/backup:
+    get:
+      tags: [node]
+      summary: A backup archive of this node, taken live
+      description: |
+        Streams a backup archive of the node that answers — the same tar
+        `committed backup` takes from a stopped node, restored by the same
+        `committed restore` — while the node keeps serving. The node reads
+        its stores in an order a restart tolerates and holds each log's
+        maintenance still only while that log streams (compression and the
+        scrub swap during the event log, raft-log compaction during the
+        entry log). `MANIFEST.json` is the LAST entry: a stream that ends
+        without it was cut short — the receiver stalled, or the node's own
+        maintenance overtook the read (a snapshot install, a raft-log
+        truncation), which it detects and reports rather than finishing an
+        inconsistent archive — and must be taken again. The manifest's
+        `live`, `appliedIndex`, and `eventLogGeneration` say what was
+        captured. One backup streams at a time per node. Target a node
+        directly, not through a load balancer, and prefer a follower.
+        `committed backup --live --target <node> --to <file>` is the
+        client: it verifies the archive as it downloads. See
+        docs/operations/backup.md.
+      operationId: getNodeBackup
+      responses:
+        '200':
+          description: The archive, streamed.
+          content:
+            application/x-tar:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: A live backup of this node is already streaming (`backup_in_progress`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          description: This node's storage cannot be backed up live (`backup_unsupported`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: |
+            This node is catching up from a peer (`catching_up`; see
+            `catchingUp` on /v1/node/status): its event log runs past its raft
+            log until the snapshot installs, which is not a state to archive.
+            Take the backup once it has caught up, or from another node.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /v1/cluster/status:
     get:
       tags: [node]

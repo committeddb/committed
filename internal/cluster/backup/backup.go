@@ -85,6 +85,15 @@ type Manifest struct {
 	NodeID uint64 `json:"nodeID,omitempty"`
 	// Source is the data directory the backup was taken from (provenance).
 	Source string `json:"source,omitempty"`
+	// Live marks an archive taken from a running node (CreateLive) rather
+	// than a stopped directory; AppliedIndex is the applied index in its
+	// metadata (the point it restores to) and EventLogGeneration the scrub
+	// bound its event log's bytes reflect — a node restored from it that then
+	// joins peers at a newer generation discards that log and fetches it
+	// whole. All three are omitempty; an offline archive carries none.
+	Live               bool   `json:"live,omitempty"`
+	AppliedIndex       uint64 `json:"appliedIndex,omitempty"`
+	EventLogGeneration uint64 `json:"eventLogGeneration,omitempty"`
 	// Files lists every archived entry with its size and SHA-256. Restore treats
 	// it as the authoritative set: it verifies each staged file's hash, rejects
 	// any staged entry the manifest does not list, and requires every listed file
@@ -293,6 +302,13 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 			continue
 		}
 
+		if hdr.Name == AbortedName {
+			var a Aborted
+			if err := json.NewDecoder(tr).Decode(&a); err != nil {
+				return nil, fmt.Errorf("restore: %w (and its reason is unreadable: %v)", ErrArchiveAborted, err)
+			}
+			return nil, fmt.Errorf("restore: %w: %s", ErrArchiveAborted, a.Reason)
+		}
 		if hdr.Name == ManifestName {
 			data, err := io.ReadAll(tr)
 			if err != nil {

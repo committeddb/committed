@@ -177,7 +177,7 @@ func TestEventLogGeneration_PersistsAndResetStartsOver(t *testing.T) {
 	require.Equal(t, uint64(7), completed, "it is the completed scrub bound")
 
 	seedEventLog(t, s, 1, 50)
-	release := s.FreezeLayout()
+	release := s.FreezeEventLayout()
 	require.ErrorIs(t, s.ResetEventLog(), ErrLayoutFrozen)
 	release()
 	require.NoError(t, s.ResetEventLog())

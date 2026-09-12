@@ -77,6 +77,9 @@ type DB struct {
 	confChangeC chan<- *raftpb.ConfChangeV2
 	raft        *Raft
 	storage     Storage
+	// liveBackup is set while a live backup of this node streams (see
+	// LiveBackup): one at a time.
+	liveBackup  atomic.Bool
 	ctx         context.Context
 	cancelSyncs context.CancelFunc
 	parser      Parser

@@ -257,6 +257,10 @@ type Storage struct {
 	// swap, so they cannot race it and stay lock-free.
 	entryMu  sync.RWMutex
 	EntryLog *wal.Log
+	// entryLogEpoch counts the times the entry log was replaced whole (a
+	// snapshot install's cut-over). A live backup reads it before and after
+	// the phases an install would make inconsistent, and starts over.
+	entryLogEpoch atomic.Uint64
 	// eventLog is the permanent event log — the "forever" tier described
 	// in docs/event-log-architecture.md. ApplyCommitted mirrors every
 	// committed raft entry into it, keyed by raft index. Unlike EntryLog,
@@ -327,34 +331,21 @@ type Storage struct {
 	scrubStop     chan struct{}
 	scrubDone     chan struct{}
 	scrubStopOnce sync.Once
-	// layoutMu guards the two reader counters the scrub swap waits on —
-	// two counters, one waiter, because the two kinds of reader need
-	// different things held still.
-	//
 	// fromZeroReads counts in-flight from-0 log reads (a fresh syncable's
-	// replay, a rebuild, stage-state recovery). They read CONTENT: the swap
-	// waits for them so no from-0 read ever spans a rewrite, the invariant
-	// the delete-key erasure gate's soundness rests on (see rtbf_erase.go and
-	// BeginFromZeroRead). Compression under them changes nothing they see.
-	//
-	// layoutFreezes counts in-flight readers of the on-disk LAYOUT (a peer
-	// fetching this node's event log, a live backup): while it is non-zero no
-	// mover may change the set of segment files — the sealer skips, raft-log
-	// compaction defers, and the scrub swap waits. See FreezeLayout.
-	layoutMu       sync.Mutex
-	fromZeroReads  int
-	layoutFreezes  int
-	layoutFrozenAt time.Time
-	// layoutLock is the exclusion behind layoutFreezes, between two classes
-	// that are each concurrent within themselves: movers share it, one
-	// RLock per step (TryRLock, never blocking — a mover skips, it does not
-	// wait; the sealer, raft-log compaction, and the scrub swap keep running
-	// beside each other as they always have), and the freezes as a group
-	// hold it exclusively — the first freeze takes it, waiting out any step
-	// in flight, and the last release gives it back. The counter is the
-	// group's membership; the lock is what keeps a listed file on disk. See
-	// FreezeLayout/moveLayout.
-	layoutLock sync.RWMutex
+	// replay, a rebuild, stage-state recovery). They read CONTENT: the scrub
+	// swap waits for them so no from-0 read ever spans a rewrite, the
+	// invariant the delete-key erasure gate's soundness rests on (see
+	// rtbf_erase.go and BeginFromZeroRead). Compression under them changes
+	// nothing they see. Guarded by fromZeroMu.
+	fromZeroMu    sync.Mutex
+	fromZeroReads int
+	// eventLayout and raftLayout hold each log's set of segment files still
+	// for a reader of that set (a peer fetch, a live backup) while the log's
+	// movers step aside — see layout_freeze.go. The scrub swap waits on the
+	// event log's alongside fromZeroReads: two waits, one waiter, because a
+	// from-0 replay reads content and a freeze reads layout.
+	eventLayout layoutLock
+	raftLayout  layoutLock
 	// failCompactionForTest, when non-nil, forces compactLocked to fail — used to
 	// reproduce an ENOSPC/crashed compaction so a test can assert the erased key
 	// is re-driven out of bbolt on the next Open. Nil in production.
@@ -804,6 +795,8 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
+		eventLayout:     layoutLock{name: "event log", logger: logger},
+		raftLayout:      layoutLock{name: "raft entry log", logger: logger},
 		raftLogDir:      entryLogDir,
 		EntryLog:        entryLog,
 		eventLog:        eventLog,
@@ -1594,7 +1587,7 @@ func (s *Storage) Snapshot() (*pb.Snapshot, error) {
 // we'll no longer return via Entries — benign: the data becomes
 // unreachable but isn't corrupted.
 func (s *Storage) Compact(compactIndex uint64) error {
-	release, ok := s.moveLayout()
+	release, ok := s.raftLayout.move()
 	if !ok {
 		return cluster.ErrCompactionDeferred
 	}

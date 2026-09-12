@@ -48,8 +48,8 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
 - [Safe mode](operations/safe-mode.md) — boot with workers held to break a
   crashloop: inspect and delete/fix the offending config over the API, then
   restart normally.
-- [Backup and restore](operations/backup.md) — archive a stopped node to a
-  portable tarball for disaster recovery and total-loss rebuilds.
+- [Backup and restore](operations/backup.md) — archive a node, stopped or
+  live, to a portable tarball for disaster recovery and total-loss rebuilds.
 - [Rolling upgrades](operations/upgrade.md) — upgrade node-by-node with no
   downtime, and roll back if needed.
 - [Authentication](operations/authentication.md) — turn on the bearer token, API

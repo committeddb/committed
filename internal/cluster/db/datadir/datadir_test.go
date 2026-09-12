@@ -37,6 +37,7 @@ func TestCanonicalArchiveEntry(t *testing.T) {
 		{"discarded entry log skipped", "raft/log.discarded/0001", true, false, ""},
 		{"bbolt restore temp skipped", "metadata/bbolt.db.restore.123", true, false, ""},
 		{"bbolt compact temp skipped", "metadata/bbolt.db.compact.123", true, false, ""},
+		{"bbolt backup spool skipped", "metadata/bbolt.db.backup.123", true, false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -89,12 +90,14 @@ func TestSweepBoltTempFiles(t *testing.T) {
 	writeFileIn(t, md, "bbolt.db", "live")
 	writeFileIn(t, md, "bbolt.db.restore.1", "orphan-restore")
 	writeFileIn(t, md, "bbolt.db.compact.2", "orphan-compact")
+	writeFileIn(t, md, "bbolt.db.backup.3", "orphan-backup-spool")
 
 	require.NoError(t, datadir.SweepBoltTempFiles(md))
 
 	require.FileExists(t, datadir.BoltPath(md), "the live db is kept")
 	require.NoFileExists(t, filepath.Join(md, "bbolt.db.restore.1"))
 	require.NoFileExists(t, filepath.Join(md, "bbolt.db.compact.2"))
+	require.NoFileExists(t, filepath.Join(md, "bbolt.db.backup.3"))
 }
 
 // TestRequireCompleteNodeDir: a complete node dir passes; dropping any canonical

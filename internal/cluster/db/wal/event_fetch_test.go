@@ -76,7 +76,7 @@ func TestEventFetch_EmptyReceiverAdoptsSegmentsAndTail(t *testing.T) {
 
 	_, err := peer.EventLayout()
 	require.ErrorIs(t, err, ErrLayoutNotFrozen, "the layout is only valid under a freeze")
-	release := peer.FreezeLayout()
+	release := peer.FreezeEventLayout()
 	defer release()
 	lay, err := peer.EventLayout()
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func TestEventFetch_StaleReceiverAlignedAndMisaligned(t *testing.T) {
 	peer := openFetchPeer(t, t.TempDir(), time.Hour)
 	const n = 300
 	seedEventLog(t, peer, 1, n)
-	release := peer.FreezeLayout()
+	release := peer.FreezeEventLayout()
 	defer release()
 	lay, err := peer.EventLayout()
 	require.NoError(t, err)
@@ -161,7 +161,7 @@ func TestEventFetch_RefusesACorruptStagedSegment(t *testing.T) {
 	peer := openFetchPeer(t, t.TempDir(), time.Hour)
 	seedEventLog(t, peer, 1, 300)
 	compressOldestSealed(t, peer)
-	release := peer.FreezeLayout()
+	release := peer.FreezeEventLayout()
 	defer release()
 	lay, err := peer.EventLayout()
 	require.NoError(t, err)

@@ -19,6 +19,7 @@
 //   - events.fetch/                              segment files mid-download from a peer (catch-up)
 //   - raft/log.discarded/                        an entry log a snapshot install superseded
 //   - metadata/bbolt.db.{restore,compact}.<n>    orphaned bbolt swap temps
+//   - metadata/bbolt.db.backup.<n>               a live backup's metadata spool
 //
 // events.retired/ and bbolt.db.restore.* can hold data a scrub already physically
 // erased on the live node, so they must never be carried into an off-box backup
@@ -55,6 +56,10 @@ const (
 	// trailing '.' keeps them from ever matching the live bbolt.db.
 	BoltRestorePrefix = boltFileName + ".restore."
 	BoltCompactPrefix = boltFileName + ".compact."
+	// BoltBackupPrefix names the file a live backup spools the metadata into
+	// under its read transaction, to stream from once the transaction has
+	// ended (a read transaction held open blocks bbolt from growing).
+	BoltBackupPrefix = boltFileName + ".backup."
 )
 
 // --- canonical path builders (keyed to match each caller's on-hand path) ---
@@ -150,7 +155,7 @@ func SweepBoltTempFiles(metadataDir string) error {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, BoltRestorePrefix) || strings.HasPrefix(name, BoltCompactPrefix) {
+		if strings.HasPrefix(name, BoltRestorePrefix) || strings.HasPrefix(name, BoltCompactPrefix) || strings.HasPrefix(name, BoltBackupPrefix) {
 			if err := os.RemoveAll(filepath.Join(metadataDir, name)); err != nil {
 				return err
 			}
@@ -190,8 +195,8 @@ func CanonicalArchiveEntry(rel string, eventsPresent bool) (keep bool, archiveRe
 	case seg[0] == raftName && len(seg) > 1 && seg[1] == entryLogName+discardSuffix: // raft/log.discarded/
 		return false, ""
 	case seg[0] == metadataName && len(seg) > 1 &&
-		(strings.HasPrefix(seg[1], BoltRestorePrefix) || strings.HasPrefix(seg[1], BoltCompactPrefix)):
-		return false, "" // metadata/bbolt.db.{restore,compact}.<n>
+		(strings.HasPrefix(seg[1], BoltRestorePrefix) || strings.HasPrefix(seg[1], BoltCompactPrefix) || strings.HasPrefix(seg[1], BoltBackupPrefix)):
+		return false, "" // metadata/bbolt.db.{restore,compact,backup}.<n>
 	default:
 		return true, rel
 	}

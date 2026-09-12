@@ -65,14 +65,14 @@ type EventLayout struct {
 // records for the boundary, or replaces its log wholesale.
 var ErrSegmentsMisaligned = errors.New("event segments do not align with this node's event log")
 
-// ErrLayoutFrozen refuses a change to the set of event-log files while a
-// layout freeze stands (a peer fetch or live backup is reading them); the
+// ErrLayoutFrozen refuses a change to the set of event-log files while an
+// event-log layout freeze stands (a peer fetch or live backup is reading them); the
 // caller retries once it lifts.
 var ErrLayoutFrozen = errors.New("event log layout is frozen for a reader; retry")
 
-// ErrLayoutNotFrozen refuses EventLayout outside a FreezeLayout: a listed
+// ErrLayoutNotFrozen refuses EventLayout outside a FreezeEventLayout: a listed
 // segment could otherwise vanish (compressed) before it is read.
-var ErrLayoutNotFrozen = errors.New("event layout requires a layout freeze (FreezeLayout) for as long as the listed files are read")
+var ErrLayoutNotFrozen = errors.New("event layout requires an event-log layout freeze (FreezeEventLayout) for as long as the listed files are read")
 
 // IsCompressedName reports whether a segment file name is a compressed one.
 func IsCompressedName(name string) bool { return wal.IsCompressedSegmentPath(name) }
@@ -152,7 +152,7 @@ func (s *Storage) putScrubCompleted(bound uint64) error {
 // their cursors by raft index, as across a scrub swap. Refused while a layout
 // freeze stands.
 func (s *Storage) ResetEventLog() error {
-	release, ok := s.moveLayout()
+	release, ok := s.eventLayout.move()
 	if !ok {
 		return ErrLayoutFrozen
 	}
@@ -178,9 +178,9 @@ func (s *Storage) ResetEventLog() error {
 }
 
 // EventLayout lists this node's event-log files. Valid only under the
-// FreezeLayout that must be held when it is called.
+// FreezeEventLayout that must be held when it is called.
 func (s *Storage) EventLayout() (EventLayout, error) {
-	if !s.layoutFrozen() {
+	if !s.eventLayout.frozen() {
 		return EventLayout{}, ErrLayoutNotFrozen
 	}
 	s.eventMu.RLock()
@@ -286,7 +286,7 @@ const (
 // the edges — the segment holding the first wanted record, one extending
 // past the last, and the tail — go as records. Implements db.EventServer.
 func (s *Storage) ServeEvents(ctx context.Context, after, to uint64, sink db.EventSink) (db.EventServeResult, error) {
-	release := s.FreezeLayout()
+	release := s.FreezeEventLayout()
 	defer release()
 
 	res := db.EventServeResult{Generation: s.EventLogGeneration(), EventIndex: s.eventIndex.Load()}
@@ -506,7 +506,7 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 		}
 		files = append(files, EventSegment{Path: p, FirstSeq: seq, Compressed: compressed})
 	}
-	release, ok := s.moveLayout()
+	release, ok := s.eventLayout.move()
 	if !ok {
 		return ErrLayoutFrozen
 	}
