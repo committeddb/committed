@@ -61,9 +61,9 @@ type EventLayout struct {
 }
 
 // ErrSegmentsMisaligned refuses an adoption whose first file does not start
-// exactly where this node's event log ends: the receiver falls back to
-// records for the boundary, or replaces its log wholesale.
-var ErrSegmentsMisaligned = errors.New("event segments do not align with this node's event log")
+// exactly where this node's event log ends: the receiver (db/catchup.go)
+// discards its log and fetches it whole.
+var ErrSegmentsMisaligned = db.ErrEventLogMisaligned
 
 // ErrLayoutFrozen refuses a change to the set of event-log files while an
 // event-log layout freeze stands (a peer fetch or live backup is reading them); the
@@ -80,6 +80,20 @@ func IsCompressedName(name string) bool { return wal.IsCompressedSegmentPath(nam
 // EventFetchDir is the staging directory a catch-up downloads a peer's
 // segment files into before adopting them; Open sweeps it.
 func (s *Storage) EventFetchDir() string { return datadir.FetchDir(s.eventLogDir) }
+
+// BeginCatchUp holds this storage's pending scrub off while a catch-up fills
+// the event log: a rewrite over an emptied or partial log would either
+// fatal (nothing to keep) or stamp a generation whose content is not that
+// generation's. The release lets the worker run again — the Ready loop calls
+// it once the snapshot has installed — and pokes it, so a bound it deferred
+// is not left waiting for the next signal.
+func (s *Storage) BeginCatchUp() func() {
+	s.catchingUp.Store(true)
+	return func() {
+		s.catchingUp.Store(false)
+		s.signalScrub()
+	}
+}
 
 // EventLogGeneration identifies the content of this node's event log: the
 // scrub bound its bytes reflect — the completed bound, or the bound of a

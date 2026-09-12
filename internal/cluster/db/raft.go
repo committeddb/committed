@@ -694,18 +694,25 @@ func (n *Raft) serveChannels() {
 			// duration; the node is not-ready meanwhile. A false return is
 			// a storage without an event log (the fail-fast path below says
 			// so) or the node closing.
+			releaseCatchUp := func() {}
 			if !raft.IsEmptySnap(rd.Snapshot) {
-				if needIndex, needGen, needed := n.snapshotNeedsCatchUp(rd.Snapshot); needed && !n.catchUpEventLog(rd.Snapshot, needIndex, needGen) {
-					select {
-					case <-n.closeC:
-						return
-					default:
+				if needIndex, needGen, needed := n.snapshotNeedsCatchUp(rd.Snapshot); needed {
+					release, ok := n.catchUpEventLog(rd.Snapshot, needIndex, needGen)
+					releaseCatchUp = release
+					if !ok {
+						select {
+						case <-n.closeC:
+							release()
+							return
+						default:
+						}
 					}
 				}
 			}
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {
 				n.logger.Error("storage save", zap.Error(err))
+				releaseCatchUp()
 				select {
 				case n.raftErrorC <- err:
 				default:
@@ -716,6 +723,10 @@ func (n *Raft) serveChannels() {
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				n.processSnapshot(rd.Snapshot)
 			}
+			// The storage's own maintenance held off during a catch-up (a
+			// pending scrub) may run now, over the finished log and the
+			// installed metadata.
+			releaseCatchUp()
 			// Apply MUST complete before Advance() per the etcd raft
 			// contract. Apply errors are crash-fatal: continuing past a
 			// half-applied entry diverges the state machine, retrying

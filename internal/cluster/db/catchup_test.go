@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,6 +31,9 @@ type fakeReceiver struct {
 	genSets       []uint64
 	adopted       [][]string
 	records       int
+	resetErr      error // returned by the next ResetEventLog, once
+	fenced        int   // BeginCatchUp calls
+	released      int   // their releases
 }
 
 func (f *fakeReceiver) EventIndex() uint64 {
@@ -59,9 +63,25 @@ func (f *fakeReceiver) SetEventLogGeneration(gen uint64) error {
 func (f *fakeReceiver) ResetEventLog() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.resetErr != nil {
+		err := f.resetErr
+		f.resetErr = nil
+		return err
+	}
 	f.eventIndex, f.gen = 0, 0
 	f.resets++
 	return nil
+}
+
+func (f *fakeReceiver) BeginCatchUp() func() {
+	f.mu.Lock()
+	f.fenced++
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		f.released++
+		f.mu.Unlock()
+	}
 }
 
 func (f *fakeReceiver) AppendFetchedRecords([]byte) error {
@@ -114,6 +134,18 @@ func snapshotAt(index uint64) *raftpb.Snapshot {
 	return &raftpb.Snapshot{Metadata: &raftpb.SnapshotMetadata{Index: proto.Uint64(index)}}
 }
 
+// catchUp runs the loop as the Ready loop does: the fence is released once
+// the caller is done (there, after the snapshot installs), and the status
+// stays "catching up" until then.
+func catchUp(n *Raft, need, needGen uint64) bool {
+	release, ok := n.catchUpEventLog(snapshotAt(need), need, needGen)
+	if _, active := n.CatchUp(); ok && !active {
+		panic("catch-up status must stay active until the release")
+	}
+	release()
+	return ok
+}
+
 // The loop asks for what is missing, pinned to the log's generation once it
 // has content and to the snapshot's minimum always, and returns once the
 // event log reaches the snapshot's index; a peer that serves nothing new is
@@ -143,7 +175,7 @@ func TestCatchUp_FillsToTheSnapshotAndPinsGenerations(t *testing.T) {
 	require.True(t, needed)
 	require.Equal(t, uint64(100), needIndex)
 	require.Equal(t, uint64(3), needGen)
-	require.True(t, n.catchUpEventLog(snapshotAt(100), needIndex, needGen))
+	require.True(t, catchUp(n, needIndex, needGen))
 
 	seen := peers.seen()
 	require.Len(t, seen, 3)
@@ -152,7 +184,53 @@ func TestCatchUp_FillsToTheSnapshotAndPinsGenerations(t *testing.T) {
 	require.Equal(t, []uint64{5}, recv.genSets, "adopted once, into the empty log; pinned thereafter")
 	require.Zero(t, recv.resets)
 	_, active := n.CatchUp()
-	require.False(t, active, "the status clears when the catch-up ends")
+	require.False(t, active, "the status clears with the release, after the install")
+	require.Equal(t, 1, recv.fenced, "the storage's own maintenance is fenced for the catch-up")
+	require.Equal(t, 1, recv.released, "and released by the caller afterwards")
+}
+
+// A reset that fails (a live backup's freeze, a close error) is retried,
+// never skipped: the loop does not report done while the log's generation
+// is below what the snapshot's bbolt can carry forward.
+func TestCatchUp_ARefusedResetIsRetriedNotSkipped(t *testing.T) {
+	recv := &fakeReceiver{eventIndex: 100, gen: 2, snapCompleted: 4, resetErr: errors.New("event log layout is frozen for a reader; retry")}
+	peers := &fakePeers{recv: recv}
+	peers.answer = func(req EventFetchRequest, sink EventSink) (EventFetchResult, error) {
+		require.NoError(t, sink.Begin(6, 100))
+		recv.advance(100)
+		return EventFetchResult{Peer: 2, EventServeResult: EventServeResult{Generation: 6, EventIndex: 100, LastIndex: 100}}, nil
+	}
+	n := newCatchUpRaft(t, recv, peers)
+	// The log already reaches the snapshot's index; only its generation is
+	// behind. The first reset is refused; the loop waits and resets again.
+	require.True(t, catchUp(n, 100, 4))
+	require.Equal(t, 1, recv.resets)
+	require.Equal(t, uint64(6), recv.EventLogGeneration())
+	require.Len(t, peers.seen(), 1, "fetched whole after the reset finally succeeded")
+	require.Equal(t, EventFetchRequest{After: 0, To: 100, MinGeneration: 4}, peers.seen()[0])
+}
+
+// A peer's segment that does not align with this node's log means the two
+// are not the same log after all; the node's own content is discarded and
+// fetched whole rather than retried forever.
+func TestCatchUp_MisalignedSegmentsRefetchWhole(t *testing.T) {
+	recv := &fakeReceiver{eventIndex: 30, gen: 4, snapCompleted: 4}
+	peers := &fakePeers{recv: recv}
+	calls := 0
+	peers.answer = func(req EventFetchRequest, sink EventSink) (EventFetchResult, error) {
+		calls++
+		if calls == 1 {
+			require.NoError(t, sink.Begin(4, 100))
+			return EventFetchResult{Peer: 2}, fmt.Errorf("adopt 00000000000000000031: %w: this log ends at seq 30, the first file starts at 40", ErrEventLogMisaligned)
+		}
+		require.NoError(t, sink.Begin(4, 100))
+		recv.advance(100)
+		return EventFetchResult{Peer: 2, EventServeResult: EventServeResult{Generation: 4, EventIndex: 100, LastIndex: 100}}, nil
+	}
+	n := newCatchUpRaft(t, recv, peers)
+	require.True(t, catchUp(n, 100, 4))
+	require.Equal(t, 1, recv.resets)
+	require.Equal(t, EventFetchRequest{After: 0, To: 100, MinGeneration: 4}, peers.seen()[1], "the second exchange starts over")
 }
 
 // A log whose generation predates the snapshot's completed scrub is
@@ -172,7 +250,7 @@ func TestCatchUp_DiscardsAStaleGenerationLog(t *testing.T) {
 	n := newCatchUpRaft(t, recv, peers)
 	_, needGen, needed := n.snapshotNeedsCatchUp(snapshotAt(100))
 	require.True(t, needed)
-	require.True(t, n.catchUpEventLog(snapshotAt(100), 100, needGen))
+	require.True(t, catchUp(n, 100, needGen))
 	require.Equal(t, 1, recv.resets, "content at generation 2 cannot be brought to the snapshot's 4: fetched whole")
 	require.Equal(t, EventFetchRequest{After: 0, To: 100, MinGeneration: 4}, peers.seen()[0])
 	require.Equal(t, uint64(6), recv.EventLogGeneration())
@@ -191,7 +269,7 @@ func TestCatchUp_DiscardsAStaleGenerationLog(t *testing.T) {
 		return EventFetchResult{Peer: 2, EventServeResult: EventServeResult{Generation: 7, EventIndex: 100, LastIndex: 100}}, nil
 	}
 	n = newCatchUpRaft(t, recv, peers)
-	require.True(t, n.catchUpEventLog(snapshotAt(100), 100, 4))
+	require.True(t, catchUp(n, 100, 4))
 	require.Equal(t, 1, recv.resets, "a newer peer generation: the log is fetched whole at it")
 	require.Equal(t, uint64(7), recv.EventLogGeneration())
 
@@ -209,7 +287,7 @@ func TestCatchUp_DiscardsAStaleGenerationLog(t *testing.T) {
 		return EventFetchResult{Peer: 2, EventServeResult: EventServeResult{Generation: 4, EventIndex: 100, LastIndex: 100}}, nil
 	}
 	n = newCatchUpRaft(t, recv, peers)
-	require.True(t, n.catchUpEventLog(snapshotAt(100), 100, 4))
+	require.True(t, catchUp(n, 100, 4))
 	require.Zero(t, recv.resets)
 	require.Equal(t, uint64(4), recv.EventLogGeneration())
 }
@@ -228,7 +306,7 @@ func TestCatchUp_StopsOnCloseAndReportsProgress(t *testing.T) {
 	n := newCatchUpRaft(t, recv, peers)
 
 	done := make(chan bool, 1)
-	go func() { done <- n.catchUpEventLog(snapshotAt(100), 100, 0) }()
+	go func() { done <- catchUp(n, 100, 0) }()
 	<-started
 	st, active := n.CatchUp()
 	require.True(t, active)
@@ -309,5 +387,5 @@ func TestCatchUp_UnavailableWithoutAnEventLog(t *testing.T) {
 	n := &Raft{storage: eventIndexOnly{}, logger: zap.NewNop(), closeC: make(chan struct{})}
 	_, _, needed := n.snapshotNeedsCatchUp(snapshotAt(100))
 	require.True(t, needed, "an in-memory storage's event index is 0")
-	require.False(t, n.catchUpEventLog(snapshotAt(100), 100, 0))
+	require.False(t, catchUp(n, 100, 0))
 }

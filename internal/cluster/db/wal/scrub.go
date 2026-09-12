@@ -152,6 +152,21 @@ func (s *Storage) runPendingScrub() error {
 		if bound == 0 || bound <= s.lastScrubbedBound.Load() {
 			return nil
 		}
+		// Not over a log that is being filled from a peer (BeginCatchUp), nor
+		// over an empty one — a rewrite of nothing would fatal on the
+		// invariant that the tail survives, and a rewrite of a partial log
+		// would stamp a generation its content does not have. The release
+		// after the install re-signals.
+		if s.catchingUp.Load() {
+			s.logger.Info("pending scrub deferred: the event log is being filled from a peer", zap.Uint64("pendingBound", bound))
+			return nil
+		}
+		if last, err := s.lastEventSeq(); err != nil {
+			return err
+		} else if last == 0 {
+			s.logger.Info("pending scrub deferred: the event log is empty", zap.Uint64("pendingBound", bound))
+			return nil
+		}
 		erase, err := s.runScrub(bound, hash, cmdIndex)
 		if err != nil {
 			return err

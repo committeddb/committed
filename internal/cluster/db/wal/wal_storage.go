@@ -386,6 +386,10 @@ type Storage struct {
 	// highest Scrub upper-bound this node has finished rewriting to). Loaded in
 	// Open, advanced by the worker; read by the automatic-scrub scheduler.
 	lastScrubbedBound atomic.Uint64
+	// catchingUp is set while a catch-up fills the event log from a peer (see
+	// BeginCatchUp): the scrub worker defers any pending rewrite until it
+	// clears.
+	catchingUp atomic.Bool
 	// swappedBound is the bound of the rewrite most recently swapped in —
 	// set at the swap, before the completion mark that advances
 	// lastScrubbedBound — so EventLogGeneration describes the bytes on disk

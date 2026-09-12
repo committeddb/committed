@@ -18,10 +18,11 @@ var ErrLiveBackupUnsupported = errors.New("this node's storage cannot be backed 
 var ErrLiveBackupBusy = errors.New("a live backup of this node is already in progress")
 
 // ErrLiveBackupCatchingUp is a live backup asked of a node that is filling
-// its event log from a peer: its events run past its raft log until the
-// snapshot installs, which is not a state a node can boot from (the
-// capture refuses it too, as the backstop) — and the backup's freeze would
-// hold the catch-up's adoption meanwhile.
+// its event log from a peer, or overtaken by one that began mid-stream: its
+// events run past its raft log until the snapshot installs, which is not a
+// state a node can boot from (the capture refuses that shape too, as the
+// backstop) — and the backup's freeze would hold the catch-up's adoption
+// meanwhile. The node's own recovery comes first.
 var ErrLiveBackupCatchingUp = errors.New("this node is catching up from a peer; take the backup once it has caught up")
 
 // LiveBackup streams a backup archive of this running node's state to w —
@@ -35,12 +36,29 @@ func (db *DB) LiveBackup(w io.Writer, now time.Time) (*backup.Manifest, error) {
 	if !ok {
 		return nil, ErrLiveBackupUnsupported
 	}
-	if db.CatchingUp() {
-		return nil, ErrLiveBackupCatchingUp
+	if db.raft == nil {
+		return nil, ErrLiveBackupUnsupported
 	}
-	if !db.liveBackup.CompareAndSwap(false, true) {
-		return nil, ErrLiveBackupBusy
+	if err := db.raft.catchUp.tryBeginBackup(); err != nil {
+		return nil, err
 	}
-	defer db.liveBackup.Store(false)
-	return backup.CreateLive(w, src, db.ID(), now)
+	defer db.raft.catchUp.endBackup()
+	return backup.CreateLive(w, &catchUpAwareSource{src: src, catchingUp: db.CatchingUp}, db.ID(), now)
+}
+
+// catchUpAwareSource aborts a capture, entry by entry, once a catch-up has
+// begun on the node: the archive would not be one the node could boot from,
+// and the stream would hold the catch-up's adoptions off for its duration.
+type catchUpAwareSource struct {
+	src        backup.LiveSource
+	catchingUp func() bool
+}
+
+func (c *catchUpAwareSource) CaptureBackup(visit func(name string, size int64, write func(io.Writer) error) error) (backup.LiveInfo, error) {
+	return c.src.CaptureBackup(func(name string, size int64, write func(io.Writer) error) error {
+		if c.catchingUp() {
+			return ErrLiveBackupCatchingUp
+		}
+		return visit(name, size, write)
+	})
 }

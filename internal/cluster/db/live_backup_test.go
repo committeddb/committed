@@ -53,6 +53,46 @@ func TestLiveBackup_OneAtATime(t *testing.T) {
 	require.ErrorIs(t, err, ErrLiveBackupUnsupported)
 }
 
+// A catch-up that begins while a backup streams aborts the backup at its
+// next entry — the node's recovery comes first, and the archive would not
+// be one the node could boot from — and the abort names the reason.
+func TestLiveBackup_ACatchUpBeginningMidStreamAbortsIt(t *testing.T) {
+	src := &steppingSource{entries: 3}
+	d := &DB{storage: src, raft: &Raft{id: 1}}
+	src.onEntry = func(i int) {
+		if i == 1 {
+			d.raft.catchUp.begin(0, 100) // a snapshot arrived; the Ready loop began catching up
+		}
+	}
+	_, err := d.LiveBackup(io.Discard, time.Now())
+	require.ErrorIs(t, err, ErrLiveBackupCatchingUp)
+	require.Equal(t, 2, src.visited, "the entry after the catch-up began is refused")
+	d.raft.catchUp.end()
+	require.NoError(t, d.raft.catchUp.tryBeginBackup(), "the gate clears with the catch-up")
+	d.raft.catchUp.endBackup()
+}
+
+// steppingSource yields n tiny entries, calling onEntry before each.
+type steppingSource struct {
+	Storage
+	entries int
+	visited int
+	onEntry func(i int)
+}
+
+func (s *steppingSource) CaptureBackup(visit func(string, int64, func(io.Writer) error) error) (backup.LiveInfo, error) {
+	for i := 0; i < s.entries; i++ {
+		if s.onEntry != nil {
+			s.onEntry(i)
+		}
+		s.visited++
+		if err := visit("events/x", 1, func(w io.Writer) error { _, err := w.Write([]byte{0}); return err }); err != nil {
+			return backup.LiveInfo{}, err
+		}
+	}
+	return backup.LiveInfo{}, nil
+}
+
 // A node catching up from a peer refuses a live backup before reading
 // anything: its event log runs past its raft log until the snapshot
 // installs, and the backup's freeze would hold the catch-up's adoption.
