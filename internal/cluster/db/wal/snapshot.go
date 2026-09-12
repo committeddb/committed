@@ -71,7 +71,10 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (*pb.Sna
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
 
-	cs := s.snapshot.Metadata.GetConfState()
+	cs := s.appliedConfState
+	if cs == nil {
+		cs = s.snapshot.GetMetadata().GetConfState()
+	}
 	if confState != nil {
 		cs = confState
 	}
@@ -197,13 +200,15 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 		return fmt.Errorf("reload databases: %w", err)
 	}
 
-	// Record the snapshot so Storage.Snapshot() returns it and so
-	// InitialState reflects the restored confState.
+	// Record the snapshot so Storage.Snapshot() returns it. The installed
+	// membership is this node's membership now — what its next snapshot
+	// stamps (raft restores it without a conf change of its own, so
+	// ConfState() is not called for an install).
 	s.snapMu.Lock()
 	// Clone, don't alias: snap is raft's rd.Snapshot (it may point at raft's
-	// internal unstable snapshot), and ConfState() later mutates
-	// s.snapshot.Metadata in place — so we must own this copy.
+	// internal unstable snapshot) — we must own this copy.
 	s.snapshot = proto.Clone(snap).(*pb.Snapshot)
+	s.appliedConfState = s.snapshot.GetMetadata().GetConfState()
 	s.snapMu.Unlock()
 
 	// The swapped-in bbolt may carry syncable/ingestable configs whose creating

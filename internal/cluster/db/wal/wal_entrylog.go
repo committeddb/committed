@@ -168,9 +168,10 @@ func (s *Storage) saveWithSnapshot(st *pb.HardState, ents []*pb.Entry, snap *pb.
 		s.hardState = st
 	}
 	// Clone, don't alias: raft's rd.Snapshot may point at its internal
-	// unstable snapshot, and ConfState() mutates s.snapshot.Metadata in
-	// place — so we must own this copy.
+	// unstable snapshot — we must own this copy. Its membership is this
+	// node's from here on (an install applies no conf change of its own).
 	s.snapshot = proto.Clone(snap).(*pb.Snapshot)
+	s.appliedConfState = s.snapshot.GetMetadata().GetConfState()
 	// Consumed by the appendState call below, which always persists this
 	// (newer) snapshot.
 	s.snapDirty = false

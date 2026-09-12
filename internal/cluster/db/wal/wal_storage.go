@@ -549,6 +549,14 @@ type Storage struct {
 	// never lag the applied index (confstate-lost-in-crash-window). Guarded by
 	// snapMu (ConfState already holds it); accessed only on the Ready loop.
 	pendingConfState *pb.ConfState
+	// appliedConfState is the membership as of the latest applied conf
+	// change — what the NEXT CreateSnapshot stamps. It is kept apart from
+	// s.snapshot on purpose: the snapshot raft serves a lagging peer
+	// (Snapshot()) must carry the membership as of ITS index, never a later
+	// one, or the peer restores past a conf change it then applies again
+	// from the log (raft panics: "can't leave a non-joint config"). Guarded
+	// by snapMu.
+	appliedConfState *pb.ConfState
 	// eventIndex is the highest raft index written to EventLog. Bumped
 	// before appliedIndex in ApplyCommitted so that a crash between the
 	// EventLog write and the bbolt appliedIndex persist doesn't lose
@@ -901,6 +909,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	ws.hardState = st
 	ws.snapshot = snap
+	// The membership the next snapshot stamps: the crash-authoritative copy,
+	// else the persisted snapshot's (a data dir from before confStateBucket).
+	if ws.appliedConfState = ws.durableConfState(); ws.appliedConfState == nil {
+		ws.appliedConfState = snap.GetMetadata().GetConfState()
+	}
 
 	// Complete an in-place snapshot install that crashed between persisting
 	// the snapshot record (saveWithSnapshot's appendState) and cutting the
@@ -1198,20 +1211,13 @@ func (s *Storage) Close() error {
 func (s *Storage) ConfState(c *pb.ConfState) {
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
-	// raft 3.7's Snapshot/SnapshotMetadata are pointer fields, so a zero-value
-	// snapshot carries nil Metadata — initialize before storing the conf state.
-	if s.snapshot == nil {
-		s.snapshot = &pb.Snapshot{}
-	}
-	if s.snapshot.Metadata == nil {
-		s.snapshot.Metadata = &pb.SnapshotMetadata{}
-	}
-	s.snapshot.Metadata.ConfState = c
-	s.snapDirty = true
-	// Stage for the atomic durable write paired with appliedIndex. The
-	// snapshot-metadata copy above is for CreateSnapshot; confStateBucket
-	// (written with appliedIndex) is the crash-authoritative one InitialState
-	// reads back.
+	// For the next CreateSnapshot. The snapshot already held (s.snapshot)
+	// is NOT updated: raft serves it to lagging peers, and it must carry
+	// the membership as of its own index (see appliedConfState).
+	s.appliedConfState = c
+	// Stage for the atomic durable write paired with appliedIndex:
+	// confStateBucket (written with appliedIndex) is the crash-authoritative
+	// copy InitialState reads back.
 	s.pendingConfState = c
 }
 
