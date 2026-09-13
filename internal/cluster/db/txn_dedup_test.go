@@ -16,6 +16,7 @@ import (
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 	"github.com/committeddb/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // txnEvent is one emitted source event for txnIngestable: a SourceSeq, the
@@ -65,8 +66,21 @@ func (ti *txnIngestable) Status(context.Context, cluster.Position) (cluster.Inge
 	return cluster.IngestableStatus{}, nil
 }
 
-// txnDedupHarness wires the real wal storage + real worker + metrics reader.
+// txnDedupHarness wires the real wal storage + real worker + metrics reader,
+// on a cluster that has announced this binary's feature level — the
+// transaction-scoped regime is gated on it (featureLevelTxnScopedDedup).
 func txnDedupHarness(t *testing.T, id string) (*db.DB, *wal.Storage, *sdkmetric.ManualReader, *cluster.Type) {
+	t.Helper()
+	d, s, reader, typ := newTxnDedupHarness(t, id, true)
+	require.Eventually(t, func() bool { return d.FeatureEnabled(version.FeatureLevel) },
+		10*time.Second, 10*time.Millisecond, "feature level never announced")
+	return d, s, reader, typ
+}
+
+// newTxnDedupHarness is txnDedupHarness with the feature-level announce
+// under the test's control: announce == false leaves the node un-announced
+// (cluster minimum 0), the shape of a cluster still mid-roll.
+func newTxnDedupHarness(t *testing.T, id string, announce bool) (*db.DB, *wal.Storage, *sdkmetric.ManualReader, *cluster.Type) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -77,9 +91,14 @@ func txnDedupHarness(t *testing.T, id string) (*db.DB, *wal.Storage, *sdkmetric.
 	p := parser.New()
 	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
-	d := db.New(uint64(1), db.Peers{1: ""}, s, p, nil, nil,
+	opts := []db.Option{
 		db.WithTickInterval(testTickInterval), db.WithMetrics(m),
-		db.WithIngestSupervisorInitialBackoff(1*time.Hour))
+		db.WithIngestSupervisorInitialBackoff(1 * time.Hour),
+	}
+	if announce {
+		opts = append(opts, db.WithVersionAnnounce())
+	}
+	d := db.New(uint64(1), db.Peers{1: ""}, s, p, nil, nil, opts...)
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 
 	seedIngestableConfig(t, d, id)
@@ -234,4 +253,79 @@ func TestTxnDedup_LineageRegressionFreezesOnLegacyRecord(t *testing.T) {
 		return seq > 3
 	}, 500*time.Millisecond, 25*time.Millisecond,
 		"the frozen worker must not commit past the regression point")
+}
+
+// announceFeatureLevel proposes node 1's feature-level announcement at the
+// given level — what db.announceVersion does at startup (and what a rolled-
+// back binary does: last-writer-wins, so a lower level lands too).
+func announceFeatureLevel(t *testing.T, d *db.DB, level uint64) {
+	t.Helper()
+	entity, err := cluster.NewNodeVersionEntity(1, level)
+	require.NoError(t, err)
+	require.NoError(t, d.Propose(testCtx(t), &cluster.Proposal{Entities: []*cluster.Entity{entity}}))
+}
+
+// TestTxnDedup_RegimeFlipWaitsForTheClusterFeatureLevel pins the
+// mixed-version guard on the transaction-scoped regime: the record it writes
+// reads as "nothing seen" to a pre-level-7 binary, so a dialect's stamp is
+// honored only once every member announces the level — and, once an
+// ingestable's record has flipped, regardless of the minimum (a member
+// rolled back or still announcing reads below the level; regressing the
+// record to scalar would re-open the cross-transaction collapse).
+func TestTxnDedup_RegimeFlipWaitsForTheClusterFeatureLevel(t *testing.T) {
+	id := "txn-dedup-gate"
+	d, s, reader, typ := newTxnDedupHarness(t, id, false) // un-announced: cluster minimum 0
+
+	// Below the level: stamped proposals fold as the legacy scalar record,
+	// the shape an older binary reads.
+	require.NoError(t, d.Ingest(context.Background(), id, &txnIngestable{typ: typ, events: []txnEvent{
+		{seq: 10, txn: "A"}, {seq: 11, txn: "A"},
+	}}))
+	require.Eventually(t, func() bool {
+		_, seq := s.IngestSourceDedup(id)
+		return seq == 11
+	}, 10*time.Second, 5*time.Millisecond)
+	txn, _ := s.IngestSourceDedup(id)
+	require.Equal(t, "", txn, "the record must keep the legacy scalar shape while a member is below the level")
+
+	// The legacy comparison still dedups a same-transaction replay meanwhile.
+	require.NoError(t, d.Ingest(context.Background(), id, &txnIngestable{typ: typ, events: []txnEvent{
+		{seq: 11, txn: "A"}, {seq: 12, txn: "A"},
+	}}))
+	require.Eventually(t, func() bool {
+		_, seq := s.IngestSourceDedup(id)
+		return seq == 12
+	}, 10*time.Second, 5*time.Millisecond)
+
+	// The last member announces the level: the next stamped transaction
+	// flips the record.
+	announceFeatureLevel(t, d, db.FeatureLevelTxnScopedDedupForTest)
+	require.Eventually(t, func() bool { return d.FeatureEnabled(db.FeatureLevelTxnScopedDedupForTest) },
+		10*time.Second, 10*time.Millisecond, "feature level never announced")
+	require.NoError(t, d.Ingest(context.Background(), id, &txnIngestable{typ: typ, events: []txnEvent{
+		{seq: 13, txn: "B"},
+	}}))
+	require.Eventually(t, func() bool {
+		txn, seq := s.IngestSourceDedup(id)
+		return txn == "B" && seq == 13
+	}, 10*time.Second, 5*time.Millisecond, "the record must flip once every member is at the level")
+
+	// A member drops below the level again (a rollback re-announces its
+	// lower level): the flipped record stays transaction-scoped, so a
+	// following transaction encoding below the highwater still commits.
+	announceFeatureLevel(t, d, db.FeatureLevelTxnScopedDedupForTest-1)
+	require.Eventually(t, func() bool { return !d.FeatureEnabled(db.FeatureLevelTxnScopedDedupForTest) },
+		10*time.Second, 10*time.Millisecond)
+	require.NoError(t, d.Ingest(context.Background(), id, &txnIngestable{typ: typ, events: []txnEvent{
+		{seq: 5, txn: "C"},
+	}}))
+	require.Eventually(t, func() bool {
+		txn, seq := s.IngestSourceDedup(id)
+		return txn == "C" && seq == 5
+	}, 10*time.Second, 5*time.Millisecond, "a flipped record must not regress to scalar when the minimum drops")
+
+	seqs := committedIngestSeqs(t, s, id)
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	require.Equal(t, []uint64{5, 10, 11, 12, 13}, seqs, "the replayed part is dropped once; every transaction commits exactly once")
+	require.Zero(t, frozenGauge(t, reader, id), "the gate must never freeze the worker")
 }

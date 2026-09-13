@@ -444,11 +444,13 @@ the old binary cannot read:
   restatement record is a gated system type: a pre-0.8.0 binary
   fatal-exits applying it. Emission waits for every member to reach feature
   level 2, so this door only opens once you have used the feature.
-- **Rolling back an owner mid-re-materialization (0.8.0)**, or below the
-  per-transaction ingest dedup regime (`txnScopedDedup`): neither loses
-  data on its own, but the first lets an older owner write rows the closing
-  sweep then deletes, and the second lets an older owner re-ingest rows
-  that a keyless destination keeps twice. Both are described in
+- **Rolling back an owner mid-re-materialization (0.8.0)**, or an owner of
+  an ingestable whose dedup record has become transaction-scoped (feature
+  level 7, 0.8.0): neither loses data on its own, but the first lets an
+  older owner write rows the closing sweep then deletes, and the second
+  lets an older owner re-ingest rows that a keyless destination keeps
+  twice. Both are gated on the cluster feature level, so neither door opens
+  before the whole cluster is on 0.8.0. Both are described in
   [upgrade.md](operations/upgrade.md#rolling-back).
 - **A raft transport `protocolVersion` bump.** The peer transport
   currently accepts only an exact protocol-version match, so a bump is a

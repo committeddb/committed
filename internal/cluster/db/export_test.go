@@ -675,3 +675,8 @@ func SetMembershipSettleTimeoutForTest(d time.Duration) func() {
 	membershipSettleTimeout = d
 	return func() { membershipSettleTimeout = prev }
 }
+
+// FeatureLevelTxnScopedDedupForTest is the level the transaction-scoped
+// ingest dedup regime waits on, so the gate test announces relative to it
+// rather than to the binary's top level.
+const FeatureLevelTxnScopedDedupForTest = featureLevelTxnScopedDedup

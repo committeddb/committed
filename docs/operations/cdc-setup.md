@@ -1034,10 +1034,12 @@ that the source still has the data after that position:
   effectively-once dedup is scoped per source transaction, so a promoted
   replica's binlog numbering restarting *below* the old primary's is harmless —
   committed logs an informational "riding through" line and keeps streaming.
-  (One transitional exception: on the first resume after upgrading from a
-  release whose dedup was coordinate-keyed, a coincident failover still
-  **freezes** as a fail-safe until one transaction has committed under the new
-  watermark — recover by re-POSTing the ingestable. With `gtid_mode=OFF` the
+  (One transitional exception: after upgrading from a release whose dedup
+  was coordinate-keyed, the per-transaction watermark takes effect only once
+  every member is on 0.8.0 and one transaction has committed after that
+  (see [upgrade.md](upgrade.md#rolling-back)); a coincident failover before
+  then still **freezes** as a fail-safe — recover by re-POSTing the
+  ingestable. With `gtid_mode=OFF` the
   freeze remains the permanent behavior: coordinates are that mode's only
   identity.) If the binlog was purged past the consumed point, committed
   re-snapshots rather than resuming (see `reSnapshotRequired` above).

@@ -75,7 +75,20 @@ var (
 // delete them — silent row loss on a keyed sink. The verb is refused until
 // the cluster minimum reaches 6, so no such owner can exist while a replay
 // is in flight.
-const FeatureLevel uint64 = 6
+//
+// Level 7: the transaction-scoped ingest dedup record
+// (db.featureLevelTxnScopedDedup). A dialect that checkpoints per
+// transaction stamps its proposals TxnScopedDedup, and the apply fold then
+// writes the ingestable's dedup record with the transaction identity
+// appended — a shape a pre-level-7 binary decodes as "nothing seen". An
+// older owner taking over such an ingestable (an election mid-roll, a
+// rollback) would re-ingest its resume window, and a keyless destination
+// keeps those rows twice, permanently. The ingest worker clears the stamp
+// while the cluster minimum is below 7, so the record keeps the legacy
+// scalar shape every member can read until the roll completes; once an
+// ingestable's record has flipped it stays transaction-scoped (the
+// transition is one-way per ingestable).
+const FeatureLevel uint64 = 7
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

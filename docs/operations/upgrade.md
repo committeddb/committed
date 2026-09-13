@@ -208,12 +208,16 @@ After the last node:
 > status): the verb only starts once every member is 0.8.0 (feature level
 > 6), and an older owner resuming the replay would write rows the completion
 > sweep then deletes — let it finish, or run the verb again after upgrading.
-> And an ingestable that has opted into per-transaction dedup
-> (`txnScopedDedup`) writes its dedup record in a shape an older binary
-> reads as "nothing seen": an older owner may re-ingest rows already in the
-> log, which on a keyless (append) destination are permanent duplicate
-> rows. Roll leader-last, and do not roll back an owner of such an
-> ingestable.
+> And a MySQL or PostgreSQL ingestable dedups per source transaction from
+> 0.8.0 on (feature level 7): once every member is 0.8.0, its dedup record
+> takes a shape an older binary reads as "nothing seen" the next time its
+> worker commits a transaction. Until the roll completes the record keeps
+> the old shape (the worker logs `holding the transaction-scoped dedup
+> regime until the cluster is fully upgraded`), so a rollback mid-roll is
+> clean. After the roll completes, treat it as one-way: an older owner of
+> such an ingestable may re-ingest the transaction in flight at its last
+> checkpoint, which on a keyless (append) destination is a permanent
+> duplicate.
 
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:

@@ -27,6 +27,14 @@ const (
 	ingestExitFreeze
 )
 
+// featureLevelTxnScopedDedup gates the transaction-scoped ingest dedup
+// regime: an ingestable's dedup record first takes the transaction-carrying
+// shape (which a pre-level-7 binary reads as "nothing seen") only once every
+// member announces version.FeatureLevel >= 7. Enforced where the worker
+// receives a dialect's proposals (db.ingest), by clearing the dialect's
+// TxnScopedDedup stamp before the proposal is marshaled.
+const featureLevelTxnScopedDedup uint64 = 7
+
 // ingestBackoff{Min,Max} bound the interval at which db.ingest's
 // state-machine wakes to check for leader transitions when no
 // proposal or position is in flight. The worker reacts to its
@@ -513,6 +521,9 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 	// the dedup branch (the dialect stamps LineageRegressed on every proposal
 	// of the regressed lineage; the note only needs saying once).
 	lineageRideNoted := false
+	// dedupFlipHeldNoted likewise dedups the once-per-run Info that the
+	// transaction-scoped dedup regime is waiting on the cluster feature level.
+	dedupFlipHeldNoted := false
 
 	// The ingressLifecycle owns the inner Ingest goroutine and the
 	// channels it writes to. Holding it as a struct (not as loose
@@ -714,6 +725,28 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				if proposal.SourceSeq > 0 {
 					storedTxn, storedSeq := db.storage.IngestSourceDedup(id)
 					scalarRegime := storedTxn == ""
+					// The regime FLIP (scalar → transaction-scoped) waits on
+					// the cluster feature level: the record the flip writes
+					// reads as "nothing seen" to an older binary, and an
+					// older owner would re-ingest the resume window. Until
+					// every member can read it, the stamp is cleared here —
+					// before the proposal is marshaled — and the record keeps
+					// the legacy scalar shape. Once flipped, the stamp is
+					// honored regardless of the minimum: a member still
+					// announcing (a joining learner reads as level 0) would
+					// otherwise regress the record to scalar and re-open the
+					// cross-transaction collapse this regime exists to close.
+					if proposal.TxnScopedDedup && scalarRegime && !db.featureEnabled(featureLevelTxnScopedDedup) {
+						proposal.TxnScopedDedup = false
+						if !dedupFlipHeldNoted {
+							dedupFlipHeldNoted = true
+							db.logger.Info("ingest dedup: holding the transaction-scoped dedup regime until the cluster is fully upgraded; deduping by the legacy global highwater meanwhile",
+								zap.String("id", id),
+								zap.Uint64("required", featureLevelTxnScopedDedup),
+								zap.Uint64("clusterMin", db.clusterMinFeatureLevel()))
+						}
+					}
+					flipsRecord := proposal.TxnScopedDedup && scalarRegime
 					dedupTxn := ""
 					if proposal.TxnScopedDedup {
 						dedupTxn = proposal.SourceTxnID
@@ -757,6 +790,14 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						// promotion was absorbed without a freeze.
 						lineageRideNoted = true
 						db.logger.Info("ingest: source coordinate lineage regressed (failover/promotion) — riding through under the transaction-scoped watermark, no operator action needed",
+							zap.String("id", id))
+					}
+					if flipsRecord && dedupFlipHeldNoted {
+						// The hold this run announced is over, and this
+						// proposal is neither a replayed part nor frozen:
+						// its apply flips the record.
+						dedupFlipHeldNoted = false
+						db.logger.Info("ingest dedup: the cluster is fully upgraded; the transaction-scoped dedup regime takes effect with this transaction",
 							zap.String("id", id))
 					}
 				}

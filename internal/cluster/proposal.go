@@ -193,6 +193,9 @@ type Proposal struct {
 	// provenance only and dedup keeps the legacy global-scalar semantics —
 	// which is what keeps a dialect whose checkpoint is coarser than its
 	// transaction stamps (SQL Server's per-poll-window checkpoint) correct.
+	// The ingest worker honors the stamp only once the cluster can read the
+	// record it produces (feature level 7): until then it clears the stamp
+	// before proposing, and the record stays in the legacy shape.
 	TxnScopedDedup bool
 
 	// DedupUnsafe is a TRANSIENT pre-raft hint, set by an ingest dialect and
