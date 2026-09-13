@@ -68,8 +68,9 @@ COMMITTED_PEERS=1=http://n1:9022,2=http://n2:9022,3=http://n3:9022,4=http://n4:9
 COMMITTED_DATA_DIR=/var/lib/committed   # a fresh, empty data dir
 ```
 
-The node will log `joining cluster` and then wait — it is not yet a
-member and cannot serve traffic. An empty data directory is all it needs:
+The node will log `joining existing cluster (COMMITTED_JOIN set); membership
+will be learned from the leader` and then wait — it is not yet a member and
+cannot serve traffic. An empty data directory is all it needs:
 once added, it fetches the cluster's history from a peer by itself (see
 [rebuild.md](rebuild.md#falling-behind-is-handled-automatically)).
 

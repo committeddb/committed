@@ -88,12 +88,15 @@ committed backup --live --target http://n2:8080 --to /backups/committed-2026-09-
   TLS verification for an https target.
 - The download is **verified as it arrives**: every entry is hashed and
   checked against the trailing manifest before the file is published, so a
-  file at `--to` is a restorable archive. A backup the node abandons — its
-  own maintenance overtook the read (a snapshot install, a raft-log
-  truncation), or it is catching up from a peer — ends with the node's
-  reason, which the command reports; a stream cut by the connection or a
-  stall ends without one. Either way nothing is left at `--to`; take it
-  again.
+  file at `--to` is a restorable archive. A node that is catching up from
+  a peer refuses the backup before streaming anything (`503 catching_up`,
+  which the command reports; take it once `catchingUp` clears on
+  `GET /v1/node/status`). A backup the node abandons mid-stream — its own
+  maintenance overtook the read (a snapshot install, a raft-log
+  truncation), or a catch-up began while it streamed — ends with the
+  node's reason, which the command reports; a stream cut by the connection
+  or a stall ends without one. Either way nothing is left at `--to`; take
+  it again.
 - One live backup streams per node at a time (a second is refused with 409).
 
 The manifest records `live: true`, the `appliedIndex` the archive restores to,
@@ -167,9 +170,11 @@ this one is an ETL job, not a restore.
 > with that member cleanly stopped first. The restored log is REWOUND to the
 > backup point, but the surviving leader both remembers a higher matchIndex for
 > that node id and has usually compacted its raft log past the backup point; on
-> first contact the restored node fatals with a raft invariant panic
-> (`tocommit(...) out of range [lastIndex(...)]`). This is raft protecting the
-> cluster from a member whose log went backwards, not a recoverable hiccup.
+> the leader's first heartbeat the restored node fatal-exits with
+> `raft state rewound: the leader's heartbeat commits beyond this node's log`
+> (committed's own guard, which fires before raft's own
+> `tocommit(...) out of range` panic would). This is protecting the cluster
+> from a member whose log went backwards, not a recoverable hiccup.
 > Recovering one member of a live cluster is the **rebuild** flow — a fresh
 > node that fetches current state from a healthy peer ([rebuild.md](rebuild.md))
 > — not a restore.
@@ -220,9 +225,9 @@ not committed:
   subjects** — a right-to-be-forgotten delete physically removes the data from
   the log, leaving nothing to enumerate. You must therefore record RTBF requests
   in your own compliance system and **re-issue any that post-date the backup**
-  after a restore. The restored node's `appliedIndex` (from `GET /v1/membership`)
-  marks how far the backup covered, so you know which of your tracked requests to
-  re-apply.
+  after a restore. The restored node's `appliedIndex` (from `GET /v1/node/status`;
+  a live archive's manifest also records it) marks how far the backup covered,
+  so you know which of your tracked requests to re-apply.
 
 committed gives you the primitive and the frozen manifest; because erasure is
 physical (committed retains no record of what was deleted), managing backup

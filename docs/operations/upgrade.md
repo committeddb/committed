@@ -47,8 +47,9 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
    Confirm the upgrade does not cross a major version (`/v1` → `/v2`) or
    trigger a one-way transition you can't roll back from.
 2. **Confirm the cluster is healthy first.** `GET /v1/membership` on any
-   node should show every member present with `appliedIndex` close to
-   `commitIndex`. Don't start an upgrade on a degraded cluster — you'd
+   node should show every member present and `active: true`, with each
+   member's `matchIndex` close to `commitIndex` (the answer is the
+   leader's, whichever node you ask). Don't start an upgrade on a degraded cluster — you'd
    be removing redundancy you may need.
 3. **Have a recovery path.** A node's data directory is reusable by the
    previous binary (rollback, below); a node that loses its disk entirely
@@ -134,8 +135,12 @@ For each node:
    live — that is liveness, not readiness; gate the next step on
    `/ready`.)
 6. **Confirm the new build.** `GET /version` should report the new
-   `version`/`commit`. Re-confirm membership: `GET /v1/membership`'s
-   `appliedIndex` for this node should be tracking `commitIndex`.
+   `version`/`commit`. Re-confirm the node is caught up: its own
+   `appliedIndex` on `GET /v1/node/status` should be tracking
+   `commitIndex` from `GET /v1/membership`, where its entry should be
+   `active: true` again. (The `appliedIndex` at the top of the membership
+   answer is the leader's, not this node's — the route is answered by the
+   leader.)
 7. **Move to the next node.** Only proceed once the just-upgraded node is
    `/ready` and caught up, so you never have two nodes out at once.
 
@@ -152,9 +157,9 @@ new leader settles, upgrade the old leader like any other follower.
 After the last node:
 
 - **Every node reports the new build.** `GET /version` on each node.
-- **Every node is caught up.** `GET /v1/membership` shows every member's
-  `appliedIndex` close to `commitIndex`, and there is exactly one
-  leader.
+- **Every node is caught up.** `GET /v1/membership` shows every member
+  `active: true` with `matchIndex` close to `commitIndex`, and there is
+  exactly one leader.
 - **A write round-trips.** `POST /v1/proposal` (or any config write) and
   confirm it commits — proof the new cluster is accepting and applying
   writes.
@@ -193,8 +198,14 @@ After the last node:
 > and finish the upgrade before adding nodes. A node rolled back
 > below 0.8.0 also **fatal-exits** on applying a committed restatement
 > (feature level 2) — once one is on the log, rolling back means a rebuild
-> from a peer — and any 0.8.0-only syncable kind (Iceberg, loopback, a
-> zone-pinned config) parks on it as not admissible. Also note: 0.8.0's
+> from a peer — and a syncable of a 0.8.0-only kind (Iceberg, loopback)
+> cannot be built by the older binary, so it does not run while that node
+> owns it. Zone pins go dormant cluster-wide: the rolled-back member
+> announces its lower feature level, and every member — the older binary
+> because it does not read `zone`, the 0.8.0 members because the cluster
+> minimum fell below the pin's level — resolves each pinned syncable as
+> leader-owned until the node is upgraded again (never two writers, but
+> egress leaves the zone meanwhile). Also note: 0.8.0's
 > RTBF delete-key erasure (feature level 4) pauses on an older binary —
 > already-erased tombstones stay erased, but new erasures resume only when
 > you upgrade again. And a SQL Server ingestable that has already re-keyed
