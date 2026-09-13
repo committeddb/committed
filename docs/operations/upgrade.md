@@ -246,6 +246,17 @@ same quorum rule applies in reverse.
   admissible under this binary"); re-POST it without the key. The setting
   never took effect before, so nothing about its behavior changes except
   that you now learn about it.
+- **Hold 0.8.0-only vocabulary until the roll completes.** The flip side
+  of the point above: a 0.7.x member accepts a config document and silently
+  ignores every key it does not read, and a config is parsed by whichever
+  member receives or runs it. Until every member is 0.8.0, do not POST
+  anything only 0.8.0 understands — the census keys (`census`,
+  `censusValues`, `censusValueLimit`), `snapshotReaders` and the renamed
+  `[sql.options]` keys, `schemaChangeTopic` and the `validate` words,
+  `nonConvertible`, `zone`, Iceberg syncables, and restatements. Only
+  `zone` refuses below its feature level; the rest an older member drops
+  without a word, and the config then runs with the setting missing. The
+  same rule, stated for one case, is the ingest-options note below.
 - **0.8.0 renames the ingest options.** `[sql.options]` keys are now spelled
   like every other key (`slotName`, `pollInterval`, `batchSize`,
   `snapshotReaders`; `publication` is unchanged), numbers are numbers rather

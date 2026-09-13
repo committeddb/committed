@@ -115,11 +115,12 @@ Erasure in committed does not reach copies it doesn't manage:
   ([logging.md](logging.md)).
 - **Databases you point syncables at** got real `DELETE`s, but their own
   backups/replicas/logs are your domain.
-- **The shape census with value tracking on.** `censusValues = true` keeps
-  up to `censusValueLimit` distinct source values per string field in the
-  replicated census record, and erasure does not scrub it. Do not turn
-  value tracking on for a topic whose subjects you may need to erase; the
-  default census carries types and paths only.
+- **The [shape census](../schema-contracts.md#the-shape-census) with value
+  tracking on.** `censusValues = true` keeps up to `censusValueLimit`
+  distinct source values per string field in the replicated census record,
+  and erasure does not scrub it. Do not turn value tracking on for a topic
+  whose subjects you may need to erase; the default census carries types
+  and paths only.
 
 ## Why there is no per-subject ledger
 

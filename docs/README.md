@@ -11,6 +11,9 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
 - [Writing a webhook receiver](webhook-receiver.md) — consume a topic over HTTP
   instead of SQL: the request/payload contract, the upsert/delete/refresh ops,
   and the idempotency and sweep responsibilities you own on the receiver side.
+- [Schema contracts](schema-contracts.md) — take a shape census of an existing
+  table, draft a type from it, and choose the gate or the tripwire
+  (`schemaChangeTopic`) for payloads that diverge from the contract.
 
 ## Concepts
 

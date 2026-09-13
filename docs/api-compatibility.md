@@ -96,9 +96,13 @@ purpose — a removed table, a renamed key — is refused naming its
 replacement rather than as a typo.
 
 The alternative — accepting and ignoring — manufactured belief in settings
-that never took effect. Adding a key is an ordinary additive change; a config
-written for a newer binary is refused by an older one rather than half
-applied, which is the safe direction during a rolling upgrade.
+that never took effect. Adding a key is an ordinary additive change; from
+0.8.0 on, a config written for a newer binary is refused by an older one
+rather than half applied, which is the safe direction during a rolling
+upgrade. Releases before 0.8.0 accepted and ignored, so the upgrade *to*
+0.8.0 is the one roll during which new vocabulary must wait until every
+member is upgraded — see
+[upgrade.md](operations/upgrade.md#notes-and-limits).
 
 ## Operational endpoints are not API surface
 

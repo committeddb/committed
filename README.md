@@ -197,6 +197,10 @@ SQL and is exempt from the warning.
 
 #### The shape census: drafting a contract from the data
 
+The reference for the census, the gate, and the tripwire — every key, the
+status fields, and the event payload — is
+[docs/schema-contracts.md](docs/schema-contracts.md); this section is the why.
+
 The hardest part of blessing a contract on an existing table is that nobody
 knows what's in it — JSON columns whose shape lives only in what developers
 happened to write, evolved over years, often with several shapes interleaved.
