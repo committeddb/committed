@@ -1450,7 +1450,7 @@ func (h *MySQLEventHandler) warnSchemaDivergence(table string, missingMapped []s
 			continue
 		}
 		h.driftWarned[k] = true
-		zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the sink, which diverges from the source and must be re-snapshotted to reconcile",
+		zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the destination, which diverges from the source and must be re-snapshotted to reconcile",
 			zap.String("table", table),
 			zap.String("column", col),
 		)
@@ -1805,7 +1805,7 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 //
 // A watched-table TRUNCATE is the MySQL analogue of the Postgres logical-
 // replication TruncateMessage: committed has no clear-all primitive, so the
-// truncate is NOT propagated and the sink now diverges from the source until a
+// truncate is NOT propagated and the destination now diverges from the source until a
 // re-snapshot. It gets the same specific divergence Warn Postgres emits (see
 // postgres.go and the TRUNCATE caveat in docs/operations/cdc-setup.md) instead of
 // being buried in the generic DDL warn. Filtered through watches() because MySQL's
@@ -1831,8 +1831,8 @@ func (h *MySQLEventHandler) handleDDL(e *replication.QueryEvent) {
 			schema = string(e.Schema) // unqualified TRUNCATE — the session's current database
 		}
 		if h.watches(schema, table) {
-			zap.L().Warn("TRUNCATE on a watched table is not propagated to the sink; "+
-				"the sink now diverges from the source and must be re-snapshotted to reconcile",
+			zap.L().Warn("TRUNCATE on a watched table is not propagated to the destination; "+
+				"the destination now diverges from the source and must be re-snapshotted to reconcile",
 				zap.Strings("tables", []string{schema + "." + table}),
 			)
 			return

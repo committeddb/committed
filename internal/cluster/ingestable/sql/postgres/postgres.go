@@ -777,8 +777,8 @@ func (d *PostgreSQLDialect) stream(
 		gap := sql.PlanSnapshot(sql.SnapshotGap, nil, *epoch, epochFloor, pgCfg.tables, nil)
 		*epoch = gap.Epoch
 		zap.L().Warn("replication slot was recreated while a checkpoint survived; re-snapshotting from the new slot's consistent point. "+
-			"Rows deleted at the source in the lost WAL window (RTBF-erased subjects among them) are reconciled on KEYED sinks by the "+
-			"refresh-boundary sweep that closes this re-snapshot; keyless/append and projection sinks are NOT reconciled and require "+
+			"Rows deleted at the source in the lost WAL window (RTBF-erased subjects among them) are reconciled on KEYED destinations by the "+
+			"refresh-boundary sweep that closes this re-snapshot; keyless/append and projection destinations are NOT reconciled and require "+
 			"an operator rebuild for gap recovery.",
 			zap.String("slot", pgCfg.slotName),
 			zap.Stringer("staleLSN", *lastLSN),
@@ -967,7 +967,7 @@ func (d *PostgreSQLDialect) stream(
 						return err
 					}
 					for _, col := range drift.MissingMapped {
-						zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the sink, which diverges from the source and must be re-snapshotted to reconcile",
+						zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the destination, which diverges from the source and must be re-snapshotted to reconcile",
 							zap.String("table", m.RelationName),
 							zap.String("column", col),
 						)
@@ -1135,8 +1135,8 @@ func (d *PostgreSQLDialect) stream(
 						names = append(names, rel.Namespace+"."+rel.RelationName)
 					}
 				}
-				zap.L().Warn("TRUNCATE on a watched table is not propagated to the sink; "+
-					"the sink now diverges from the source and must be re-snapshotted to reconcile",
+				zap.L().Warn("TRUNCATE on a watched table is not propagated to the destination; "+
+					"the destination now diverges from the source and must be re-snapshotted to reconcile",
 					zap.Strings("tables", names))
 			}
 

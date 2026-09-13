@@ -154,10 +154,10 @@ func (d *SQLServerDialect) ingestOnce(ctx context.Context, s *session) error {
 	// so every GUID key and payload field on the sink is spelled the old way.
 	// Re-emit every row at a bumped epoch — the purge-hole contract applied to
 	// a rendering change: the closing refresh markers sweep the old spellings
-	// on keyed sinks (keyless/append sinks keep both until rebuilt). Cleared
+	// on keyed destinations (keyless/append sinks keep both until rebuilt). Cleared
 	// only once the re-snapshot completes, so a failed attempt retries it.
 	if s.rerender {
-		zap.L().Warn("uniqueidentifier rendering changed to canonical lowercase (cluster feature level 5) — re-snapshotting so every key and payload re-keys; the closing refresh markers sweep the uppercase rows on keyed sinks",
+		zap.L().Warn("uniqueidentifier rendering changed to canonical lowercase (cluster feature level 5) — re-snapshotting so every key and payload re-keys; the closing refresh markers sweep the uppercase rows on keyed destinations",
 			zap.Uint64("consumedVersion", s.version))
 		s.progress = nil
 		s.snapshotted = nil
@@ -556,7 +556,7 @@ func (g *schemaDriftGuard) reconcile(table string, spec *sql.TopicSpec, cols []s
 			g.warned = make(map[string]bool)
 		}
 		g.warned[k] = true
-		zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the sink, which diverges from the source and must be re-snapshotted to reconcile",
+		zap.L().Warn("mapped column dropped or renamed at the source; it now renders null on the destination, which diverges from the source and must be re-snapshotted to reconcile",
 			zap.String("table", table),
 			zap.String("column", col),
 		)

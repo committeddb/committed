@@ -379,7 +379,7 @@ func (d *MySQLDialect) EnsureDestinations(ctx context.Context, db *gosql.DB) err
 	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (table_name VARCHAR(255) PRIMARY KEY, rendering_version BIGINT NOT NULL, owned BOOLEAN NOT NULL DEFAULT FALSE, materialized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
 		mysqlIdent.Table(sql.DestinationsTable))
 	if _, err := db.ExecContext(ctx, stmt); err != nil {
-		return fmt.Errorf("ensure sink meta [%s]: %w", stmt, err)
+		return fmt.Errorf("ensure destination meta [%s]: %w", stmt, err)
 	}
 	return nil
 }

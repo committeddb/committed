@@ -111,7 +111,7 @@ func TestSQLServerUniqueidentifierRenderingUpgrade(t *testing.T) {
 	rekeyed := res.Entity(guidLower)
 	require.Equal(t, guidLower, payload(rekeyed)["ref"], "payload fields re-render too")
 	require.Equal(t, uint64(2), rekeyed.Generation, "the re-key is a bumped-epoch re-snapshot")
-	require.Equal(t, uint64(2), res.MarkerEpoch, "and closes with the marker that sweeps the uppercase rows on keyed sinks")
+	require.Equal(t, uint64(2), res.MarkerEpoch, "and closes with the marker that sweeps the uppercase rows on keyed destinations")
 	require.NotEmpty(t, observed.FilterMessageSnippet("uniqueidentifier rendering changed").All(), "the re-key is announced")
 	canonicalCheckpoint := res.Position
 

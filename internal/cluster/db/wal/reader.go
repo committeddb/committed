@@ -312,7 +312,7 @@ func (s *Storage) Reader(id string) db.ActualReader {
 		// event-append) means duplicate downstream deliveries. Never silent: log
 		// loudly so an operator can see the full re-sync and watch for
 		// duplicates, instead of an unexplained re-sync storm.
-		zap.L().Error("syncable checkpoint failed to decode (corrupt); restarting this syncable from the head of the log — a full re-sync, non-idempotent sinks may see duplicates",
+		zap.L().Error("syncable checkpoint failed to decode (corrupt); restarting this syncable from the head of the log — a full re-sync, non-idempotent destinations may see duplicates",
 			zap.String("syncable", id),
 			zap.Error(err),
 		)

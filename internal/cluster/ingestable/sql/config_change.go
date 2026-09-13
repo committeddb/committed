@@ -165,7 +165,7 @@ type TableRemovalError struct {
 
 func (e *TableRemovalError) Error() string {
 	return fmt.Sprintf(
-		"ingestable table removal (%s) will not be applied in place: a later full refresh would silently sweep the removed tables' rows from keyed sinks (a refresh re-stamps only configured tables, and the closing marker deletes everything it did not re-stamp), while a syncable replay would resurrect them. To drop the tables AND their sink rows, delete and recreate this ingestable (DELETE then POST /v1/ingestable/{id}); to keep the rows, keep the tables listed.",
+		"ingestable table removal (%s) will not be applied in place: a later full refresh would silently sweep the removed tables' rows from keyed destinations (a refresh re-stamps only configured tables, and the closing marker deletes everything it did not re-stamp), while a syncable replay would resurrect them. To drop the tables AND their destination rows, delete and recreate this ingestable (DELETE then POST /v1/ingestable/{id}); to keep the rows, keep the tables listed.",
 		strings.Join(e.RemovedTables, ", "))
 }
 
