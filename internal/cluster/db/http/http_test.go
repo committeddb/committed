@@ -101,14 +101,6 @@ func TestEndToEnd(t *testing.T) {
 	require.Nil(t, db.Close())
 
 	view(t, storage, databaseID, p1)
-
-	// TODO Restart/persistence coverage:
-	// - Do a second proposal
-	// - Shutdown and restart the cluster
-	// - Add a third proposal
-	// - Check all of the proposals are still saved
-	// - Check the database to make sure the other proposals synced properly
-	// - Ingest something else to make sure the ingestable restarts and keeps position
 }
 
 // TestEndToEnd_HonorsDelete verifies the downstream half of right-to-be-

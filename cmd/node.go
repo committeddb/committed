@@ -142,7 +142,13 @@ image can be templated per-node by an orchestrator:
                        metrics, which are PUSHED via OTLP — committed serves
                        no /metrics scrape endpoint. Unset (default) disables
                        metrics with zero overhead. See
-                       docs/operations/metrics.md.`,
+                       docs/operations/metrics.md.
+
+The remaining COMMITTED_* settings — peer and API TLS, the bearer token,
+HTTP timeouts, the proposal-size cap, the shutdown deadline, the scrub
+interval, the event-log cache, the node's zone, and pprof — are documented
+in the README's Configuration section and the guides under
+docs/operations/ it points to.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		v := version.Get()
 		zap.L().Info("committed starting",

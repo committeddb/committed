@@ -118,8 +118,6 @@ func TestResolveType(t *testing.T) {
 	require.ErrorIs(t, err, wal.ErrTypeMissing)
 }
 
-// TODO Test deletes - may have to test with a syncable because a delete doesn't have context except when read
-
 func getLastIndex(s db.Storage, ps []*cluster.Proposal) uint64 {
 	var i uint64
 	var got *cluster.Actual
