@@ -76,11 +76,25 @@ func (db *DB) MigrationEditDependents(typeID string) []cluster.DependentSyncable
 	return out
 }
 
+// featureLevelTypeDocument gates retaining a type's submitted document
+// (cluster.Type.Document): a pre-level-7 binary applies the entry by
+// unmarshaling it into its own Type and re-marshaling that, which drops the
+// field it does not know — so a document committed mid-roll would be
+// retained on some members and not others, and the read-back (served from
+// each member's own store) would differ by member. Until every member
+// announces version.FeatureLevel >= 7 the document is not proposed, and the
+// type reads back synthesized; the first document submitted after the roll
+// completes is adopted (see ProposeType).
+const featureLevelTypeDocument uint64 = 7
+
 func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ...cluster.ProposeTypeOption) error {
 	o := cluster.ResolveProposeTypeOptions(opts)
 	_, t, err := ParseType(c, db.storage)
 	if err != nil {
 		return cluster.NewConfigError(err)
+	}
+	if !db.featureEnabled(featureLevelTypeDocument) {
+		t.Document, t.DocumentMimeType = nil, ""
 	}
 
 	// Admission schema check: compile the entity schema here so a broken one is a
@@ -182,8 +196,15 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 		// refuse it (retroactive declaration) rather than silently absorbing
 		// or applying it.
 		nonConvertibleChanged := existing.NonConvertible != t.NonConvertible
+		// A type written before its document was retained adopts the first
+		// document re-submitted for it (in place, once): a re-POST is a
+		// submission, and the read-back promises the document submitted.
+		// With a document already retained, a re-POST that changes no field
+		// stays a no-op — the retained document is the one that last
+		// changed the type, not the last one seen.
+		documentAdopted := len(existing.Document) == 0 && len(t.Document) > 0
 
-		if !schemaChanged && !migrationChanged && !entityKindChanged && !discriminatorChanged && !schemaChangeTopicChanged && !nonConvertibleChanged {
+		if !schemaChanged && !migrationChanged && !entityKindChanged && !discriminatorChanged && !schemaChangeTopicChanged && !nonConvertibleChanged && !documentAdopted {
 			return nil // byte-identical, no-op
 		}
 
@@ -394,8 +415,9 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 	// JSON payload in the previous version's shape to run the proposed
 	// transform against, so a program that parses but breaks on real data
 	// is caught at propose time instead of at first-sync. Validation-only:
-	// it never becomes part of the Type (though, like the rest of the
-	// TOML, it stays visible in the raw config version history).
+	// it never becomes a field of the Type (though, like the rest of the
+	// document, it stays visible in the retained document the type reads
+	// back as).
 	if v.IsSet("migration.validateAgainst") {
 		if !hasMigrationTransform {
 			return "", nil, fmt.Errorf("migration.validateAgainst requires migration.transform (there is no program to validate)")
@@ -418,6 +440,8 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		Discriminator:     discriminator,
 		SchemaChangeTopic: schemaChangeTopic,
 		NonConvertible:    hasNonConvertible,
+		Document:          c.Data,
+		DocumentMimeType:  c.MimeType,
 		MigrationExplicit: hasMigrationTransform || hasMigrationNone || hasNonConvertible,
 	}
 

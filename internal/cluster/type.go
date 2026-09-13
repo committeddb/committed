@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	toml "github.com/pelletier/go-toml/v2"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/clusterpb"
@@ -216,12 +217,98 @@ type Type struct {
 	// refused across the break; the migration chain dead-letters old-stamped
 	// entities at it instead of silently delivering unconverted data.
 	NonConvertible bool
+	// Document is the configuration exactly as the operator submitted it,
+	// in the format DocumentMimeType names (set by ParseType, persisted
+	// with the type). The fields above are what the engine acts on; the
+	// document is what the operator wrote, and what Configuration reads
+	// back. Empty on a type written before the document was retained.
+	Document         []byte
+	DocumentMimeType string
 	// MigrationExplicit is transient (not persisted). Set by ParseType
 	// when the operator provided a [migration] section (either
 	// transform or none=true). Used by ProposeType to enforce the
 	// requirement that every version after v1 declares its migration
 	// intent explicitly.
 	MigrationExplicit bool
+}
+
+// Configuration is the type's read-back: the document the operator
+// submitted when the type carries one, else — for a type written before
+// the document was retained — a document synthesized from the stored
+// fields in the current vocabulary, which ParseType reads back to the
+// same fields (the schema included; the operator's comments and
+// formatting are gone with the original).
+func (t *Type) Configuration() (*Configuration, error) {
+	cfg := &Configuration{ID: t.ID, Name: t.Name, MimeType: t.DocumentMimeType, Data: t.Document}
+	if len(t.Document) > 0 {
+		if cfg.MimeType == "" {
+			cfg.MimeType = "text/toml" // how ParseConfigBytes read an unnamed format
+		}
+		return cfg, nil
+	}
+	doc, err := t.synthesizeDocument()
+	if err != nil {
+		return nil, err
+	}
+	cfg.MimeType = "text/toml"
+	cfg.Data = doc
+	return cfg, nil
+}
+
+// typeDocument is the TOML shape of a type configuration, key for key
+// what ParseType reads (its typeKeys / migrationKeys). Encoded rather than
+// printed so a schema or program containing quotes stays valid TOML.
+type typeDocument struct {
+	Type      typeTable           `toml:"type"`
+	Migration *typeMigrationTable `toml:"migration,omitempty"`
+}
+
+type typeTable struct {
+	Name              string `toml:"name"`
+	SchemaType        string `toml:"schemaType,omitempty"`
+	Schema            string `toml:"schema,multiline,omitempty"`
+	Validate          string `toml:"validate,omitempty"`
+	SchemaChangeTopic string `toml:"schemaChangeTopic,omitempty"`
+	EntityKind        string `toml:"entityKind,omitempty"`
+	Discriminator     string `toml:"discriminator,omitempty"`
+}
+
+type typeMigrationTable struct {
+	Transform      string `toml:"transform,multiline,omitempty"`
+	None           bool   `toml:"none,omitempty"`
+	NonConvertible bool   `toml:"nonConvertible,omitempty"`
+}
+
+// synthesizeDocument renders the stored fields as the document that
+// declares them. A version after the first declared exactly one migration
+// intent to get there: the transform when there is one, nonConvertible
+// when declared, else none.
+func (t *Type) synthesizeDocument() ([]byte, error) {
+	doc := typeDocument{Type: typeTable{
+		Name:              t.Name,
+		SchemaType:        t.SchemaType,
+		Schema:            string(t.Schema),
+		SchemaChangeTopic: t.SchemaChangeTopic,
+		Discriminator:     t.Discriminator,
+	}}
+	if t.Validate != NoValidation {
+		doc.Type.Validate = t.Validate.String()
+	}
+	if t.EntityKind != EntityKindUnspecified {
+		doc.Type.EntityKind = t.EntityKind.String()
+	}
+	if len(t.Migration) > 0 || t.NonConvertible || t.Version > 1 {
+		doc.Migration = &typeMigrationTable{}
+		switch {
+		case len(t.Migration) > 0:
+			doc.Migration.Transform = string(t.Migration)
+		case t.NonConvertible:
+			doc.Migration.NonConvertible = true
+		default:
+			doc.Migration.None = true
+		}
+	}
+	return toml.Marshal(doc)
 }
 
 // ProposeTypeOption adjusts type admission (see Cluster.ProposeType).
@@ -384,6 +471,8 @@ func (t *Type) Marshal() ([]byte, error) {
 		Discriminator:     t.Discriminator,
 		SchemaChangeTopic: t.SchemaChangeTopic,
 		NonConvertible:    t.NonConvertible,
+		Document:          t.Document,
+		DocumentMimeType:  t.DocumentMimeType,
 	}
 
 	return proto.Marshal(lt)
@@ -407,6 +496,8 @@ func (t *Type) Unmarshal(bs []byte) error {
 	t.Discriminator = lt.Discriminator
 	t.SchemaChangeTopic = lt.SchemaChangeTopic
 	t.NonConvertible = lt.NonConvertible
+	t.Document = lt.Document
+	t.DocumentMimeType = lt.DocumentMimeType
 
 	return nil
 }

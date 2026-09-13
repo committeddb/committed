@@ -88,6 +88,14 @@ var (
 // scalar shape every member can read until the roll completes; once an
 // ingestable's record has flipped it stays transaction-scoped (the
 // transition is one-way per ingestable).
+//
+// Level 7 also gates the retained type document (db.featureLevelTypeDocument):
+// a type entry carries the operator's submitted document for the read-backs
+// to return, and a pre-level-7 binary applying that entry re-marshals the
+// type from its own struct, dropping the field — members would then disagree
+// on what the type reads back as. The document is proposed only once the
+// cluster minimum reaches 7; a type written earlier reads back synthesized
+// until a document is re-submitted for it.
 const FeatureLevel uint64 = 7
 
 // Info is the JSON shape returned by /version and printed by the

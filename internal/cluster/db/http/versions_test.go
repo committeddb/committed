@@ -3,10 +3,13 @@ package http_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // The version-history machinery against the real engine, on the type
@@ -38,8 +41,13 @@ func TestGetVersions_ResourceNotFound(t *testing.T) {
 	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/type/missing/versions"), 404, "type_not_found")
 }
 
+// TestGetVersion_Success: a type version reads back as the document that
+// was POSTed for it. Retaining the document is gated on the cluster
+// feature level, so the test waits out the node's async self-announce.
 func TestGetVersion_Success(t *testing.T) {
-	e := newEngine(t)
+	e := newEngineOpts(t, db.WithVersionAnnounce())
+	require.Eventually(t, func() bool { return e.d.FeatureEnabled(version.FeatureLevel) },
+		10*time.Second, 10*time.Millisecond, "feature level never announced")
 	e.addType(t, "photos", "photos")
 
 	var result configResponse
@@ -47,7 +55,8 @@ func TestGetVersion_Success(t *testing.T) {
 	mustStatus(t, w, 200)
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
 	require.Equal(t, "photos", result.ID)
-	require.Contains(t, result.Data, `name = "photos"`)
+	require.Equal(t, "text/toml", result.MimeType)
+	require.Equal(t, "[type]\nname = \"photos\"", result.Data, "the document as POSTed by addType")
 }
 
 func TestGetVersion_VersionNotFound(t *testing.T) {

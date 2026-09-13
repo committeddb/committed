@@ -241,7 +241,9 @@ framework-enforced invariant — an ungated new entity type would ship anyway.
 
 To introduce such a feature: bump `version.FeatureLevel`, add a
 `featureLevel*` requirement constant at the emitting site, and gate the
-emission on `featureEnabled(that level)`. Never renumber or reuse a level.
+emission on `featureEnabled(that level)`. Features that ship in the same
+release share its level (each still names its own constant); a level is
+never renumbered, and never reused by a later release.
 
 Two boundaries the gate cannot cover:
 

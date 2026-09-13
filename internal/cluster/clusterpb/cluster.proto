@@ -236,6 +236,18 @@ message LogType {
     // entities at the break instead of silently delivering unconverted
     // data. Add-only: pre-feature versions unmarshal false.
     bool NonConvertible = 11;
+    // Document is the configuration exactly as the operator submitted it,
+    // in the format DocumentMimeType names — what the type read-backs
+    // (GET /v1/type, the version endpoints) return. The fields above are
+    // what the engine acts on; the document is what the operator wrote,
+    // comments and formatting included. Add-only, and gated on cluster
+    // feature level 7 at the proposer: a pre-level-7 binary re-marshals a
+    // type from its own struct on apply and would drop the field, so it is
+    // never proposed while such a member exists. A type written before the
+    // gate opened reads back as a document synthesized from the fields
+    // above until a document is re-submitted for it.
+    bytes Document = 12;
+    string DocumentMimeType = 13;
 }
 
 message LogConfiguration {

@@ -2896,14 +2896,19 @@ components:
         A versioned configuration document. `data` contains the raw bytes
         of the configuration as originally submitted, in the format
         indicated by `mimeType` (typically `text/toml` or
-        `application/json`). `name` is currently always empty; it is
-        reserved for a future human-readable label.
+        `application/json`). One exception: a type written before every
+        member was on 0.8.0 retained no document, so its `data` is
+        synthesized from the stored fields in the current vocabulary — the
+        schema included, the original comments and formatting not — until a
+        document is POSTed for it again. `name` is the type's declared name
+        for a type and empty for every other kind; it is reserved for a
+        future human-readable label.
       properties:
         id:
           type: string
         name:
           type: string
-          description: Human-readable label. Currently always empty; reserved.
+          description: Human-readable label. A type's declared name; empty for every other kind.
         mimeType:
           type: string
           examples: ["text/toml", "application/json"]

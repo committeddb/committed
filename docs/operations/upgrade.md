@@ -217,7 +217,10 @@ After the last node:
 > clean. After the roll completes, treat it as one-way: an older owner of
 > such an ingestable may re-ingest the transaction in flight at its last
 > checkpoint, which on a keyless (append) destination is a permanent
-> duplicate.
+> duplicate. A type created after the roll completed also carries its
+> submitted document (feature level 7); a member rolled back below 0.8.0
+> keeps the type but not the document, and its read-back is a name-only
+> summary again.
 
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:
@@ -259,6 +262,16 @@ same quorum rule applies in reverse.
   the documents you POST need the new spelling. A validating type must
   also name a schema language the binary can check (`JSONSchema` or
   `Protobuf`); any other was accepted before and validated nothing.
+- **Types read back as the document you submitted.** `GET /v1/type` and
+  the type version endpoints return the document you POSTed, per version
+  (before 0.8.0 they returned a name-only summary). The document is
+  retained only once every member is 0.8.0 (feature level 7). A type
+  written before that — including one POSTed mid-roll — reads back as a
+  document synthesized from its stored fields in the 0.8.0 spelling,
+  schema included, until you POST a document for it again after the roll
+  completes: the first one you submit then is retained in place (no
+  version bump), and re-POSTing the same configuration after that stays a
+  no-op.
 - **Iceberg deletes now drop what committed created.** Before 0.8.0 every
   Iceberg table survived its syncable's deletion; from 0.8.0 the namespace
   and table the syncable created carry a `committed.owned` property and go
