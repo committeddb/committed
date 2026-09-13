@@ -118,9 +118,14 @@ test/integration:
 # (4 × ADVERSARIAL_COUNT=5 = 20 total runs) to cut wall-clock ~4× without
 # weakening the gate — each shard still accumulates across its 5 in-process
 # iterations. A local `make test/adversarial` runs the full 20.
+#
+# -timeout 1500s is the per-package hang backstop: a count=5 shard runs
+# 11-12 minutes on the CI runner under -race, so 900s left no headroom and a
+# slow runner would have read as a hang. The job's timeout-minutes sits
+# above this so Go's timeout fires first and names the test that hung.
 ADVERSARIAL_COUNT ?= 20
 test/adversarial:
-	go test -tags adversarial -race -count=$(ADVERSARIAL_COUNT) -timeout 900s ./internal/cluster/db/...
+	go test -tags adversarial -race -count=$(ADVERSARIAL_COUNT) -timeout 1500s ./internal/cluster/db/...
 
 # End-to-end CDC pressure-test harness. Drives a real Postgres
 # (testcontainers) and a real committed binary spawned as a child

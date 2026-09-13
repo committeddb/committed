@@ -13,6 +13,7 @@ jobs:
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -29,6 +30,7 @@ jobs:
   test:
     name: test (race)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -40,6 +42,7 @@ jobs:
   test-integration:
     name: test (integration)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -56,6 +59,7 @@ jobs:
   test-cdc:
     name: test (cdc)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -76,6 +80,7 @@ jobs:
   test-upgrade:
     name: test (upgrade)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:
@@ -92,6 +97,7 @@ jobs:
   test-backup:
     name: test (backup)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -158,7 +164,7 @@ jobs:
   test-adversarial:
     name: test (adversarial ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -190,6 +196,7 @@ jobs:
   vuln-scan:
     name: vulnerability scan (trivy)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - name: Build runtime image
