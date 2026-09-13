@@ -1,10 +1,12 @@
 //go:build backup
 
-// Package backup_test is the end-to-end round-trip for the offline backup
-// primitive (docs/operations/backup.md) against the REAL binary: boot a node,
+// Package backup_test is the end-to-end round-trip for the backup primitives
+// (docs/operations/backup.md) against the REAL binary. Offline: boot a node,
 // write state, confirm `committed backup` refuses while it's live, stop it,
 // back it up, restore into a fresh directory, boot a node on the restored
-// directory, and confirm the state survived.
+// directory, and confirm the state survived. Live: back the node up over its
+// API while it runs, keep writing, and confirm the restored node holds the
+// backup point and nothing after it.
 //
 // Tagged `backup` so it stays out of `make test`; run via `make test/backup`.
 package backup_test
@@ -64,6 +66,50 @@ func TestBackupRestore_RoundTrip(t *testing.T) {
 	t.Cleanup(func() { restored.stopGraceful(t, base) })
 	waitReady(t, base)
 	requireTypeListed(t, base, "bk-canary")
+}
+
+// TestLiveBackupRestore_RoundTrip is the live half: `committed backup --live`
+// streams the archive from the running node, the node keeps accepting
+// writes, and a node booted on the restored directory holds exactly the
+// state the backup captured — the type written before it, not the one
+// written after.
+func TestLiveBackupRestore_RoundTrip(t *testing.T) {
+	bin := buildBinary(t)
+	srcDir := t.TempDir()
+	port := freePort(t)
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	node := startNode(t, bin, srcDir, port)
+	waitReady(t, base)
+	postType(t, base, "live-before")
+	requireTypeListed(t, base, "live-before")
+
+	// Back up the RUNNING node over its API.
+	tarPath := filepath.Join(t.TempDir(), "live.tar.gz")
+	out, err := runCLI(t, bin, "backup", "--live", "--target", base, "--to", tarPath)
+	require.NoError(t, err, "live backup: %s", out)
+	require.Contains(t, out, "live from node 1")
+	require.FileExists(t, tarPath)
+
+	// The node is still serving writes after the backup; this one must NOT
+	// be in the archive.
+	postType(t, base, "live-after")
+	requireTypeListed(t, base, "live-after")
+
+	// A restored node reuses the source's id, so the source must be gone
+	// before it boots (docs: restore is not how a live member is recovered).
+	node.stopGraceful(t, base)
+
+	dstDir := filepath.Join(t.TempDir(), "restored")
+	out, err = runCLI(t, bin, "restore", "--from", tarPath, "--data", dstDir)
+	require.NoError(t, err, "restore: %s", out)
+	require.FileExists(t, filepath.Join(dstDir, "RESTORED.json"))
+
+	restored := startNode(t, bin, dstDir, port)
+	t.Cleanup(func() { restored.stopGraceful(t, base) })
+	waitReady(t, base)
+	requireTypeListed(t, base, "live-before")
+	requireTypeNotListed(t, base, "live-after")
 }
 
 // --- harness (self-contained; mirrors e2e/upgrade) ---
@@ -208,6 +254,18 @@ func requireTypeListed(t *testing.T, base, id string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("type %q not found in GET /v1/type within 10s", id)
+}
+
+// requireTypeNotListed is the negative of requireTypeListed against a ready
+// node: one linearizable read of the listing, which must not name id.
+func requireTypeNotListed(t *testing.T, base, id string) {
+	t.Helper()
+	resp, err := http.Get(base + "/v1/type") //nolint:gosec // G107: fixed loopback URL
+	require.NoError(t, err)
+	out, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(out))
+	require.NotContains(t, string(out), id, "a write after the backup must not be in the restored node")
 }
 
 // runCLI runs `committed <args...>` to completion and returns its combined
