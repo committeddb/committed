@@ -422,7 +422,7 @@ func (m *Metrics) IngestFrozen(id string, frozen bool) {
 		v = 1.0
 	}
 	m.ingestFrozen.Record(context.Background(), v,
-		metric.WithAttributes(attribute.String("id", id)))
+		metric.WithAttributes(attribute.String("ingestable_id", id)))
 }
 
 // SetSyncStuck sets the stuck gauge for a syncable id (1 = blocked past the
@@ -442,7 +442,7 @@ func (m *Metrics) SetSyncStuck(id string, stuck bool) {
 // re-registration.
 func (m *Metrics) IngestRestart(id string) {
 	m.ingestRestarts.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("id", id)))
+		metric.WithAttributes(attribute.String("ingestable_id", id)))
 }
 
 // IngestSupervisorGiveup increments the supervisor give-up counter for
@@ -450,7 +450,7 @@ func (m *Metrics) IngestRestart(id string) {
 // after the consecutive-freeze cap.
 func (m *Metrics) IngestSupervisorGiveup(id string) {
 	m.ingestSupervisorGiveups.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("id", id)))
+		metric.WithAttributes(attribute.String("ingestable_id", id)))
 }
 
 // SyncBreakerTripped counts a sync circuit-breaker trip for a syncable id. Fires
@@ -458,7 +458,7 @@ func (m *Metrics) IngestSupervisorGiveup(id string) {
 // operator intervention rather than dead-lettering the whole topic.
 func (m *Metrics) SyncBreakerTripped(id string) {
 	m.syncBreakerTrips.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("id", id)))
+		metric.WithAttributes(attribute.String("syncable_id", id)))
 }
 
 // IngestPositionBumpCompleted records the round-trip cost of the
@@ -476,7 +476,7 @@ func (m *Metrics) IngestPositionBumpCompleted(d time.Duration) {
 // re-emit after a crash/flap that effectively-once dedup elided.
 func (m *Metrics) IngestDedupSkipped(id string) {
 	m.ingestDedupSkipped.Add(context.Background(), 1,
-		metric.WithAttributes(attribute.String("id", id)))
+		metric.WithAttributes(attribute.String("ingestable_id", id)))
 }
 
 // SetConfigBuildErrors records how many configs are currently degraded on

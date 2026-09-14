@@ -22,7 +22,9 @@ turn them on:
 
 committed uses the standard OTLP SDK, so any of the [OTLP exporter env
 vars](https://opentelemetry.io/docs/specs/otel/protocol/exporter/) apply. The
-service name is reported as `committed`.
+node declares its own resource, so `service.name` is `committed` and
+`service.version` is the build's version; set `OTEL_SERVICE_NAME` or
+`OTEL_RESOURCE_ATTRIBUTES` to override either.
 
 ## Bridging to Prometheus
 
@@ -86,7 +88,7 @@ Labels are shown in `{braces}`.
 | `committed.sync.duration` | Time to apply one Actual to a destination (histogram). |
 | `committed.sync.errors` | Sync errors, by `{syncable_id}`. (counter) |
 | `committed.sync.stuck` | 1 when a `{syncable_id}` worker has been blocked past the stuck threshold. **Alert on this.** |
-| `committed.sync.breaker_trips` | A syncable's consecutive-permanent-error breaker tripped (dead-lettering en masse). (counter) |
+| `committed.sync.breaker_trips` | A syncable's consecutive-permanent-error breaker tripped (dead-lettering en masse), by `{syncable_id}`. (counter) |
 | `committed.sync.bump.duration` | Latency of the post-sync checkpoint bump (histogram). |
 | `committed.sync.last_error.timestamp` | Unix time of a syncable's most recent error. |
 | `committed.sync.rules_unmatched` | Rows a syncable's rules matched no case for (dropped by config). (counter) |
@@ -97,10 +99,10 @@ Labels are shown in `{braces}`.
 |---|---|
 | `committed.ingest.lag` | Per-`{ingestable_id}` replication lag from the source. |
 | `committed.ingest.errors` | Ingest errors, by `{ingestable_id}`. (counter) |
-| `committed.ingest.frozen` | 1 while an ingestable is frozen — wedged on a proposal it cannot commit (e.g. a row/transaction over `COMMITTED_MAX_PROPOSAL_BYTES`). It stays 1 across supervisor restarts and clears only when the worker makes durable progress past the wedge, so a **sustained** 1 is the alert signal (needs operator attention — see [cdc-setup.md](cdc-setup.md)). `committed.ingest.supervisor_giveups` fires once the supervisor stops retrying. |
-| `committed.ingest.dedup_skipped` | Source events skipped as already-consumed (effectively-once dedup). (counter) |
-| `committed.ingest.restarts` | Ingest worker restarts (reconnect/backoff churn). (counter) |
-| `committed.ingest.supervisor_giveups` | Times the ingest supervisor exhausted its retry budget and parked the worker. (counter) |
+| `committed.ingest.frozen` | By `{ingestable_id}`: 1 while an ingestable is frozen — wedged on a proposal it cannot commit (e.g. a row/transaction over `COMMITTED_MAX_PROPOSAL_BYTES`). It stays 1 across supervisor restarts and clears only when the worker makes durable progress past the wedge, so a **sustained** 1 is the alert signal (needs operator attention — see [cdc-setup.md](cdc-setup.md)). `committed.ingest.supervisor_giveups` fires once the supervisor stops retrying. |
+| `committed.ingest.dedup_skipped` | Source events skipped as already-consumed (effectively-once dedup), by `{ingestable_id}`. (counter) |
+| `committed.ingest.restarts` | Ingest worker restarts (reconnect/backoff churn), by `{ingestable_id}`. (counter) |
+| `committed.ingest.supervisor_giveups` | Times the ingest supervisor exhausted its retry budget and parked the worker, by `{ingestable_id}`. (counter) |
 | `committed.ingest.position.bump.duration` | Latency of the ingest position checkpoint (histogram). |
 | `committed.ingest.last_error.timestamp` | Unix time of an ingestable's most recent error. |
 

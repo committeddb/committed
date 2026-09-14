@@ -16,6 +16,8 @@ import (
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -203,7 +205,26 @@ docs/operations/ it points to.`,
 			if err != nil {
 				log.Fatalf("otel exporter: %v", err)
 			}
+			// Identify the service on every exported metric. Without a
+			// resource the SDK falls back to resource.Default(), whose
+			// service.name is "unknown_service:<executable>" — the first
+			// label every dashboard and multi-cluster collector routes on,
+			// so it must say "committed". Merged over the default so the
+			// standard OTEL_* overrides (OTEL_SERVICE_NAME,
+			// OTEL_RESOURCE_ATTRIBUTES) still win.
+			res, rerr := resource.Merge(resource.Default(), resource.NewWithAttributes(
+				semconv.SchemaURL,
+				semconv.ServiceName("committed"),
+				semconv.ServiceVersion(v.Version),
+			))
+			if rerr != nil {
+				// A schema-URL conflict is the only failure here; keep the
+				// default identity rather than dropping metrics entirely.
+				zap.L().Warn("otel resource merge; falling back to the default service identity", zap.Error(rerr))
+				res = resource.Default()
+			}
 			meterProvider = sdkmetric.NewMeterProvider(
+				sdkmetric.WithResource(res),
 				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
 			)
 			defer func() { _ = meterProvider.Shutdown(context.Background()) }()
