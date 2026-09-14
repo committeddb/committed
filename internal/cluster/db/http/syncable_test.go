@@ -335,3 +335,20 @@ func TestReplaySyncableDeadLetter_BadIndex(t *testing.T) {
 	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/replay/notanumber")
 	requireEnvelope(t, w, 400, "invalid_parameter")
 }
+
+// TestRebuildSyncable_RefusedWhenNothingToDrop pins the rebuild admission's
+// fail-closed probe. A syncable that owns no droppable destination — a webhook
+// (committed cannot un-send) or a loopback (its target is a permanent,
+// append-only topic) — implements no Teardownable, and rebuild's
+// drop-then-replay would degenerate into re-delivering the topic's entire
+// history. Refused with 409 before the checkpoint reset, so nothing changed.
+func TestRebuildSyncable_RefusedWhenNothingToDrop(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addSyncableOfKind(t, "hook", "nodrop", "photos")
+
+	w := e.doEmpty(t, "POST", "/v1/syncable/hook/rebuild")
+	requireEnvelope(t, w, 409, "destination_not_droppable")
+	require.Contains(t, w.Body.String(), "rematerialize",
+		"the refusal must name the verb that does converge in place")
+}

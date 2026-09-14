@@ -756,6 +756,11 @@ func writeRebuildError(w httpgo.ResponseWriter, err error) {
 		// drop, so a clean rebuild is impossible — the message names the
 		// remedies. Refused before the checkpoint reset; nothing changed.
 		writeError(w, httpgo.StatusConflict, "destination_not_owned", redactedMessage(err))
+	case errors.Is(err, cluster.ErrDestinationNotDroppable):
+		// 409: this kind owns no droppable destination at all (webhook,
+		// loopback), so the verb cannot mean what it says. Also refused
+		// before anything changed.
+		writeError(w, httpgo.StatusConflict, "destination_not_droppable", redactedMessage(err))
 	default:
 		writeProposeError(w, err, "syncable", "rebuild syncable")
 	}

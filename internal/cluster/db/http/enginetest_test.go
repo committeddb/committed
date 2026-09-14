@@ -101,6 +101,33 @@ func (r *recorderSink) deleted() []string {
 
 func (r *recorderSink) Close() error { return nil }
 
+// noDropSink is a syncable that owns no external destination — the webhook /
+// loopback shape. It deliberately implements NEITHER Teardownable method, so
+// the rebuild admission probe must refuse it rather than replaying from zero.
+type noDropSink struct{}
+
+func (noDropSink) Sync(context.Context, *cluster.Actual) (cluster.ShouldSnapshot, error) {
+	return cluster.ShouldSnapshot(false), nil
+}
+func (noDropSink) Close() error { return nil }
+
+// OwnsDestination + Teardown make the recorder model the shape it stands in
+// for: a syncable that OWNS its destination (the sql/iceberg family), which is
+// what makes rebuild's drop-then-replay meaningful. Without these the fake
+// would be a webhook-shaped syncable, and rebuild now refuses those.
+func (r *recorderSink) OwnsDestination(context.Context) (bool, error) { return true, nil }
+
+func (r *recorderSink) Teardown(keep bool) (bool, error) {
+	if keep {
+		return false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.data = map[string]string{}
+	r.keys = nil
+	return true, nil
+}
+
 func (r *recorderSink) setErr(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -171,6 +198,11 @@ func newEngineFull(t *testing.T, dbOpts []db.Option, httpOpts []http.Option) *en
 	attachedParser := kindSyncableParser{&clusterfakes.FakeSyncableParser{}, "attached"}
 	attachedParser.ParseReturns(attachedSink{sink}, nil)
 	p.AddSyncableParser("attached", attachedParser)
+	// "nodrop" owns no destination at all — the webhook/loopback shape,
+	// which implements no Teardownable and so cannot be rebuilt.
+	noDropParser := kindSyncableParser{&clusterfakes.FakeSyncableParser{}, "nodrop"}
+	noDropParser.ParseReturns(noDropSink{}, nil)
+	p.AddSyncableParser("nodrop", noDropParser)
 
 	// Database and ingestable plugin seams, same pattern: a "recorder" kind
 	// whose parser admits real configs and hands the engine controllable

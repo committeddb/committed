@@ -1408,7 +1408,11 @@ paths:
         dropped (the ownership protocol): on a table you created and pointed
         the syncable at, the verb refuses with 409 `destination_not_owned`
         before anything changes — drop it yourself and re-POST, or
-        `/rematerialize` a keyed syncable in place. Schema changes are NOT done
+        `/rematerialize` a keyed syncable in place. A syncable that owns no
+        droppable destination at all — a webhook (committed cannot un-send) or
+        a loopback (its target is a permanent, append-only topic) — is refused
+        with 409 `destination_not_droppable`: there is nothing to drop, and the
+        replay half alone would re-deliver the topic's entire history. Schema changes are NOT done
         this way (DELETE then re-POST with the new schema). Re-runnable and
         idempotent; leader-pinned. Returns 202 once the reset + drop/recreate
         are done; the replay that refills the table runs afterward (poll
@@ -1445,6 +1449,12 @@ paths:
             committed, so it cannot be dropped for a clean rebuild. Refused
             before the checkpoint reset; nothing changed. Drop the table
             yourself and re-POST the config, or `/rematerialize` a keyed syncable.
+
+            `code: destination_not_droppable` — this syncable owns no
+            destination committed can drop (webhook, loopback), so the verb
+            cannot mean what it says. Also refused before anything changed:
+            `/rematerialize` converges a keyed destination in place, and a
+            deliberate full re-delivery is DELETE then re-POST.
           content:
             application/json:
               schema:

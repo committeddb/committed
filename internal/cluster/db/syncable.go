@@ -313,13 +313,23 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 	if err != nil {
 		return cluster.NewConfigError(fmt.Errorf("build syncable for admission: %w", err))
 	}
-	owns := true
-	if td, ok := cluster.SyncableAs[cluster.Teardownable](probe); ok {
+	td, teardownable := cluster.SyncableAs[cluster.Teardownable](probe)
+	owns := false
+	if teardownable {
 		owns, err = td.OwnsDestination(ctx)
 	}
 	_ = probe.Close()
 	if err != nil {
 		return fmt.Errorf("probe destination ownership: %w", err)
+	}
+	if !teardownable {
+		// No destination to drop at all — the verb's drop half is meaningless
+		// here, and the replay half alone is an unbounded re-delivery (and for
+		// a loopback, a permanent second copy of the derived topic). Fail
+		// CLOSED, like rematerialize's admission probe: a syncable that cannot
+		// say it owns its destination does not get a verb that promises to
+		// drop it.
+		return cluster.ErrDestinationNotDroppable
 	}
 	if !owns {
 		return cluster.ErrDestinationNotOwned

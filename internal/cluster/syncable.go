@@ -271,11 +271,33 @@ var ErrWorkerWedged = errors.New("syncable worker did not stop in time (wedged o
 // It is a destructive side effect and therefore owner-gated and live-only —
 // never run on a replaying or non-owner node. Syncables that own no external
 // state do not implement it.
+//
+// A verb whose contract depends on tearing the destination down must therefore
+// FAIL CLOSED when this is absent — refuse, never proceed with the half it can
+// still do. Rebuild is the worked example: its drop half is the whole point,
+// and replaying from zero without it re-delivers the topic's entire history
+// (see ErrDestinationNotDroppable). Every other capability probe in the engine
+// either refuses on absence or skips a step that is genuinely optional.
 // ErrDestinationNotOwned refuses a verb that would drop a destination
 // committed did not create (the ownership protocol: delete what we created,
 // leave what we did not). The remedies are the operator's: drop the
 // destination by hand and re-POST, or converge a keyed sink in place.
 var ErrDestinationNotOwned = errors.New("the destination was not created by committed, so it cannot be dropped for a clean rebuild: drop it yourself and re-POST the config, or POST /syncable/{id}/rematerialize to converge a keyed syncable in place")
+
+// ErrDestinationNotDroppable refuses rebuild on a syncable whose destination
+// committed cannot drop AT ALL — it owns no external state to tear down, so
+// the verb's drop half is not merely refused but meaningless.
+//
+// Rebuild promises drop-then-replay-from-0. Without the drop, the replay is
+// not a rebuild: for a webhook it re-POSTs the topic's whole history to the
+// receiver (committed cannot un-send), and for a loopback it re-proposes the
+// whole derived history into a permanent, never-truncated topic — doubling it
+// irreversibly. Both are worse than the state the operator was trying to fix,
+// so the verb is refused rather than silently reinterpreted as "replay
+// everything". A deliberate full re-delivery is still available by deleting
+// and re-POSTing the config, which resets the checkpoint by the same path but
+// says what it is.
+var ErrDestinationNotDroppable = errors.New("this syncable owns no destination committed can drop, so there is nothing to rebuild: a replay from zero would re-deliver the topic's entire history (for a webhook, to the receiver; for a loopback, as a second copy in the permanent target topic, which cannot be undone). To converge a keyed destination in place use POST /syncable/{id}/rematerialize; to deliberately re-deliver everything, DELETE the syncable and re-POST it")
 
 type Teardownable interface {
 	// Teardown removes the destination state committed OWNS — the tables it
