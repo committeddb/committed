@@ -85,7 +85,8 @@ node's own state cannot be trusted:
   ```
 
   and increments the `committed_wal_corrupt_entries_total` metric (labelled
-  by `log`). Hit during the startup recovery reads, this aborts `Open` and
+  by `log`; `committed.wal.corrupt_entries` in the
+  [catalog](metrics.md#metric-names-dots-vs-underscores)). Hit during the startup recovery reads, this aborts `Open` and
   the node fatal-exits. Hit on a syncable's read of the permanent event
   log, it instead wedges that syncable: the reader holds position (nothing
   is skipped), an error is logged on each retry, and the node stays up —

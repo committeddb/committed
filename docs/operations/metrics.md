@@ -49,8 +49,14 @@ service:
 
 Instruments are named with dots in committed (`committed.sync.lag`). The
 OTLP→Prometheus conversion replaces dots with underscores, so the same metric is
-`committed_sync_lag` in a Prometheus/PromQL context. Runbook alert expressions use
-the underscore form; the catalog below lists the source (dotted) names.
+`committed_sync_lag` in a Prometheus/PromQL context. The conversion also adds
+the Prometheus suffixes: a counter gains `_total` and an instrument with a unit
+gains the unit, so the catalog's `committed.wal.corrupt_entries` (a counter) is
+`committed_wal_corrupt_entries_total` in PromQL and `committed.type.migration.duration`
+(a histogram in seconds) is `committed_type_migration_duration_seconds`; a name
+that already ends in its unit (`committed.disk.free_bytes`) is left alone.
+Runbook alert expressions use the Prometheus form; the catalog below lists the
+source (dotted) names and marks every counter and histogram.
 
 ## Metric catalog
 
@@ -61,11 +67,11 @@ Labels are shown in `{braces}`.
 | Metric | What it tells you |
 |---|---|
 | `committed.leader` | 1 on the node that is currently raft leader, 0 elsewhere. |
-| `committed.leader.transitions.observed` | Count of leader changes this node has observed (churn signal). |
-| `committed.proposals` | Proposals submitted to raft, by `{kind}` (user / config / index / position). |
+| `committed.leader.transitions.observed` | Count of leader changes this node has observed (churn signal). (counter) |
+| `committed.proposals` | Proposals submitted to raft, by `{kind}` (user / config / index / position). (counter) |
 | `committed.propose.duration` | Latency of a propose→commit round-trip (histogram). |
-| `committed.propose.fail_fast.lost` | Proposals abandoned because a leader change lost them. |
-| `committed.propose.fail_fast.unknown` | Proposals that returned an unknown/uncommitted outcome. |
+| `committed.propose.fail_fast.lost` | Proposals abandoned because a leader change lost them. (counter) |
+| `committed.propose.fail_fast.unknown` | Proposals that returned an unknown/uncommitted outcome. (counter) |
 | `committed.apply.duration` | Time to apply one committed entry to the state machine (histogram). |
 | `committed.apply.index` | Highest raft index this node has applied. |
 | `committed.read_index.duration` | Latency of a linearizable read-index confirmation (histogram). |
@@ -78,23 +84,23 @@ Labels are shown in `{braces}`.
 |---|---|
 | `committed.sync.lag` | Per-`{syncable_id}` gap between the log head and what the syncable has delivered. |
 | `committed.sync.duration` | Time to apply one Actual to a destination (histogram). |
-| `committed.sync.errors` | Sync errors, by `{syncable_id}`. |
+| `committed.sync.errors` | Sync errors, by `{syncable_id}`. (counter) |
 | `committed.sync.stuck` | 1 when a `{syncable_id}` worker has been blocked past the stuck threshold. **Alert on this.** |
-| `committed.sync.breaker_trips` | A syncable's consecutive-permanent-error breaker tripped (dead-lettering en masse). |
+| `committed.sync.breaker_trips` | A syncable's consecutive-permanent-error breaker tripped (dead-lettering en masse). (counter) |
 | `committed.sync.bump.duration` | Latency of the post-sync checkpoint bump (histogram). |
 | `committed.sync.last_error.timestamp` | Unix time of a syncable's most recent error. |
-| `committed.sync.rules_unmatched` | Rows a syncable's rules matched no case for (dropped by config). |
+| `committed.sync.rules_unmatched` | Rows a syncable's rules matched no case for (dropped by config). (counter) |
 
 ### Ingest (CDC source → topic)
 
 | Metric | What it tells you |
 |---|---|
 | `committed.ingest.lag` | Per-`{ingestable_id}` replication lag from the source. |
-| `committed.ingest.errors` | Ingest errors, by `{ingestable_id}`. |
+| `committed.ingest.errors` | Ingest errors, by `{ingestable_id}`. (counter) |
 | `committed.ingest.frozen` | 1 while an ingestable is frozen — wedged on a proposal it cannot commit (e.g. a row/transaction over `COMMITTED_MAX_PROPOSAL_BYTES`). It stays 1 across supervisor restarts and clears only when the worker makes durable progress past the wedge, so a **sustained** 1 is the alert signal (needs operator attention — see [cdc-setup.md](cdc-setup.md)). `committed.ingest.supervisor_giveups` fires once the supervisor stops retrying. |
-| `committed.ingest.dedup_skipped` | Source events skipped as already-consumed (effectively-once dedup). |
-| `committed.ingest.restarts` | Ingest worker restarts (reconnect/backoff churn). |
-| `committed.ingest.supervisor_giveups` | Times the ingest supervisor exhausted its retry budget and parked the worker. |
+| `committed.ingest.dedup_skipped` | Source events skipped as already-consumed (effectively-once dedup). (counter) |
+| `committed.ingest.restarts` | Ingest worker restarts (reconnect/backoff churn). (counter) |
+| `committed.ingest.supervisor_giveups` | Times the ingest supervisor exhausted its retry budget and parked the worker. (counter) |
 | `committed.ingest.position.bump.duration` | Latency of the ingest position checkpoint (histogram). |
 | `committed.ingest.last_error.timestamp` | Unix time of an ingestable's most recent error. |
 
@@ -106,7 +112,7 @@ Labels are shown in `{braces}`.
 | `committed.disk.free_percent` | Free space as a percent of the volume. |
 | `committed.disk.state` | This node's disk level, `{level=ok\|warn\|critical\|full}`. |
 | `committed.disk.cluster_state` | The cluster-effective level the write-admission gate is enforcing. |
-| `committed.disk.leadership_transfers` | Disk-pressure leadership hand-offs. |
+| `committed.disk.leadership_transfers` | Disk-pressure leadership hand-offs. (counter) |
 | `committed.write.admitted` | 1/0: does this node's gate admit user-data writes right now. |
 | `committed.write.admission_reason` | Exactly one `{reason=ok\|leader_disk\|quorum_at_risk\|cluster_reject\|local_fallback}` is 1. |
 
@@ -114,15 +120,15 @@ Labels are shown in `{braces}`.
 
 | Metric | What it tells you |
 |---|---|
-| `committed.wal.corrupt_entries` | CRC-detected corrupt WAL/event-log entries. Any non-zero value is a rebuild signal (see [rebuild.md](rebuild.md)). |
+| `committed.wal.corrupt_entries` | CRC-detected corrupt WAL/event-log entries. Any non-zero value is a rebuild signal (see [rebuild.md](rebuild.md)). (counter) |
 | `committed.type.migration.duration` | Time to run a type-version migration transform (histogram). |
-| `committed.type.migration.errors` | Type-migration transform failures. |
+| `committed.type.migration.errors` | Type-migration transform failures. (counter) |
 | `committed.worker.running` | Sync/ingest workers currently running on this node. |
 | `committed.worker.parked` | 1 while a `{kind, id}` worker has TERMINALLY parked and needs operator intervention — a sync circuit-breaker trip or an ingest supervisor give-up. Replicated, so it reads truthfully from any node; stays 1 until the operator fixes the config (re-POST) or deletes the resource. **Alert on a sustained 1.** |
-| `committed.worker.replaces` | Worker replacements (config re-apply, rebuild). |
+| `committed.worker.replaces` | Worker replacements (config re-apply, rebuild). (counter) |
 | `committed.config.build_errors` | Configs this node persisted but could not build (degraded — usually a missing `${VAR}`). Diagnose with `GET /v1/node/status`. |
-| `committed.entity_kind.misuse` | Entities whose declared kind doesn't match how they're used (config warning). |
-| `committed.http.request_too_large` | HTTP requests rejected for exceeding the body-size limit. |
+| `committed.entity_kind.misuse` | Entities whose declared kind doesn't match how they're used (config warning). (counter) |
+| `committed.http.request_too_large` | HTTP requests rejected for exceeding the body-size limit. (counter) |
 
 ## Related runbooks
 
