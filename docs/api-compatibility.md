@@ -417,6 +417,16 @@ the old binary cannot read:
   binary means a [rebuild](operations/rebuild.md), not a binary swap.
 - **A frame-version or snapshot-format bump**, when one ships, is called
   out as one-way in that release's notes.
+- **Restoring a backup archive onto an older binary.** The manifest records
+  the feature level of the binary that wrote the archive, and a build
+  refuses an archive stamped above its own — an archive travels forward
+  across releases, never back. The gate is coarse on purpose: an archive
+  can carry both entries an older build cannot apply and an on-disk layout
+  it cannot read (from 0.8.0, compressed event-log segments, which a
+  pre-0.8.0 binary opens as a partial log rather than failing). The
+  downgrade door is a restore on the newer binary followed by `committed
+  wal decompress`, not an archive an older binary accepts — see
+  [backup.md](operations/backup.md#version-compatibility).
 - **Rolling back below a feature whose entries are already on your log.**
   The cluster feature level keeps a feature dormant until every member can
   apply it, but once it activates its entries are committed permanently.

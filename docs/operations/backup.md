@@ -181,13 +181,33 @@ this one is an ETL job, not a restore.
 
 ### Version compatibility
 
-Restore validates the archive's **format version** (it refuses a non-committed or
-future-format archive), but it does **not** check the binary version — a restore
-across binary versions that share the archive format is *allowed but unvalidated*.
-Recommendation: back up and restore with the **same binary version**, then
-upgrade (see [upgrade.md](upgrade.md)); a cross-version restore is yours to reason
-about against the on-disk compatibility contract in
-[api-compatibility.md](../api-compatibility.md).
+Restore validates two things about the archive and refuses on either.
+
+The **archive format version**, which must match exactly. A future-format
+archive is refused, and so is an older **v1** archive — its manifest carried
+only file paths, with no per-file integrity, and current binaries no longer
+decode it. Releases from 0.7.4 on write the current format, so this gate bites
+only on an archive taken with 0.7.3 or earlier; re-take those from the running
+cluster rather than trying to restore them.
+
+The **feature level of the binary that wrote it**, recorded in the manifest: a
+build refuses an archive stamped above its own, naming the level you need. This
+gate is one-directional — an archive from an older binary restores onto a newer
+one, never the reverse. It is deliberately coarse, because an archive can be
+unreadable by an older build for a reason no per-entry check would find: from
+0.8.0 sealed **event-log** segments are compressed at rest, and a pre-0.8.0
+binary does not fail on them — it silently opens a **partial log**.
+
+> **Moving 0.8.0 data onto a pre-0.8.0 binary.** Restore the archive with a
+> 0.8.0 build, stop it, run `committed wal decompress --data <datadir>`, then
+> start the older binary on that directory. Check the rest of the one-way
+> transitions in [api-compatibility.md](../api-compatibility.md#one-way-transitions-no-rollback-past-these)
+> first — a log carrying a committed restatement, for example, cannot go back
+> at all.
+
+Within a single release series, back up and restore with the same binary
+version where you can; a cross-version restore that the gate allows is still
+yours to reason about against the on-disk compatibility contract.
 
 ## Off-box shipping
 

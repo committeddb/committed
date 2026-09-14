@@ -68,12 +68,31 @@ type Manifest struct {
 	FormatVersion int    `json:"formatVersion"`
 	CreatedAt     string `json:"createdAt"` // RFC3339
 	// Version and Commit record the committed build that produced the archive —
-	// provenance for diagnosing a restore that won't boot. FeatureLevel is the
-	// data's compat axis (version.FeatureLevel): Restore REFUSES an archive whose
-	// feature level exceeds the running binary's, because it may carry feature
-	// entries this binary cannot correctly apply — the runtime apply-path gate
-	// only holds back EMITTING a feature, not ingesting one already emitted into a
-	// backup. All three are omitempty so a future read of an archive that predates
+	// provenance for diagnosing a restore that won't boot.
+	//
+	// FeatureLevel is the level of the BINARY that wrote the archive
+	// (version.FeatureLevel), and Restore REFUSES an archive stamped above the
+	// running binary's. It is deliberately a coarse, binary-wide gate rather
+	// than a measure of what the archived data happens to contain, because two
+	// independent things make an archive unreadable by an older build and only
+	// one of them is visible as "feature entries":
+	//
+	//   - Entries the older binary cannot correctly apply. The runtime gate
+	//     holds back EMITTING a feature; it does nothing about ingesting one
+	//     already committed into a backup.
+	//   - The on-disk format itself. From 0.8.0 sealed event-log segments are
+	//     compressed at rest unconditionally (wal.CompressionZstd), and a
+	//     pre-0.8.0 binary does not fail on those — it silently opens a
+	//     PARTIAL log. No per-entry inspection would catch that, since the
+	//     hazard is the file layout, not any record.
+	//
+	// So a lower, "what the data needs" stamp would be actively dangerous: it
+	// would invite an older build to restore a directory it cannot read
+	// correctly. Moving 0.8.0 data onto an older binary goes through the
+	// documented downgrade door instead — restore on 0.8.0, `committed wal
+	// decompress`, then start the older build (docs/operations/backup.md).
+	//
+	// All three are omitempty so a future read of an archive that predates
 	// them treats them as zero (no gate) rather than needing a format bump.
 	Version      string `json:"version,omitempty"`
 	Commit       string `json:"commit,omitempty"`
