@@ -341,3 +341,75 @@ func TestMySQLIntegration_KeylessAppendIdempotentOnReplay(t *testing.T) {
 	require.NoError(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+mysqlBacktick(table)).Scan(&count))
 	require.Equal(t, 5, count, "replay is a no-op: the dedup sidecar suppresses re-appends")
 }
+
+// TestMySQLIntegration_RematerializationCycle is the MySQL half of the
+// re-materialization proof (see the Postgres twin). MySQL has no ADD COLUMN IF
+// NOT EXISTS, so its EnsureRematerializationColumn probes information_schema
+// first — a path with no coverage at all until now, on a verb whose failure
+// mode is row loss on a live table.
+func TestMySQLIntegration_RematerializationCycle(t *testing.T) {
+	d := &dialects.MySQLDialect{}
+	db, err := sql.NewDB(d, mysqlConn(t))
+	require.NoError(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTableMySQL(t, db, table)
+
+	cfg := &sql.Config{
+		Topic: eventType.ID,
+		Table: table,
+		Mappings: []sql.Mapping{
+			{JsonPath: "$.pk", Column: "pk", SQLType: "VARCHAR(128)"},
+			{JsonPath: "$.value", Column: "value", SQLType: "TEXT"},
+		},
+		PrimaryKey: []string{"pk"},
+	}
+	syncable := sql.New(db, cfg)
+	require.NoError(t, syncable.Init())
+	defer syncable.Close()
+
+	up := func(pk, value string) *cluster.Actual {
+		return &cluster.Actual{Entities: []*cluster.Entity{
+			cluster.NewUpsertEntity(eventType, []byte(pk), []byte(fmt.Sprintf(`{"pk":%q,"value":%q}`, pk, value))),
+		}}
+	}
+	for _, a := range []*cluster.Actual{up("keep", "old"), up("stale", "old")} {
+		_, serr := syncable.Sync(context.Background(), a)
+		require.NoError(t, serr)
+	}
+
+	require.True(t, syncable.CanRematerialize())
+
+	const epoch = uint64(4242)
+	require.NoError(t, syncable.BeginRematerialization(context.Background(), epoch))
+	require.NoError(t, syncable.BeginRematerialization(context.Background(), epoch),
+		"the information_schema probe must make a re-begin idempotent")
+
+	_, err = syncable.Sync(context.Background(), up("keep", "new"))
+	require.NoError(t, err)
+
+	// A live write during the replay must also be marked — otherwise the
+	// sweep deletes a row that was never stale.
+	_, err = syncable.Sync(context.Background(), up("fresh", "live"))
+	require.NoError(t, err)
+
+	var before int
+	require.NoError(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+mysqlBacktick(table)).Scan(&before))
+	require.Equal(t, 3, before)
+
+	require.NoError(t, syncable.CompleteRematerialization(context.Background()))
+
+	var survivors []string
+	rows, err := db.DB.Query("SELECT pk, value FROM " + mysqlBacktick(table) + " ORDER BY pk")
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var pk, value string
+		require.NoError(t, rows.Scan(&pk, &value))
+		survivors = append(survivors, pk+"="+value)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"fresh=live", "keep=new"}, survivors,
+		"the re-emitted row and the live write both survive; only the stale row is swept")
+}
