@@ -299,6 +299,19 @@ docs/operations/ it points to.`,
 			dbOpts = append(dbOpts, db.WithScrubInterval(d))
 		}
 
+		// COMMITTED_COMPACT_MAX_BYTES / COMMITTED_COMPACT_MAX_AGE override the
+		// raft-log compaction thresholds (db.DefaultCompactMaxSize, 10 GiB, and
+		// db.DefaultCompactMaxAge, one hour; whichever fires first compacts).
+		// Lower values trade raft-log disk for a shorter window in which a
+		// lagging member catches up by replication instead of by fetching
+		// the event log from a peer. See docs/operations/disk-limits.md.
+		if n, ok := parseInt64Env("COMMITTED_COMPACT_MAX_BYTES"); ok {
+			dbOpts = append(dbOpts, db.WithCompactMaxSize(uint64(n)))
+		}
+		if d, ok := parseDurationEnv("COMMITTED_COMPACT_MAX_AGE"); ok {
+			dbOpts = append(dbOpts, db.WithCompactMaxAge(d))
+		}
+
 		// The disk-usage watcher polls the data dir's filesystem and, as free
 		// space falls, first warns, then rejects user writes (507), then goes
 		// read-only — so a filling disk degrades gracefully instead of the

@@ -298,8 +298,9 @@ production data telling us what to optimize for.
 
 The raft log is compacted when **both** of these are true:
 
-- Size > 10GB **or** age > 1 hour (whichever fires first), or disk pressure
-  demands it
+- Size > 10 GiB **or** age > 1 hour (whichever fires first;
+  `COMMITTED_COMPACT_MAX_BYTES` / `COMMITTED_COMPACT_MAX_AGE` override them),
+  or disk pressure demands it
 - The compact point ≤ the local permanent event log highwatermark
   (`min(applied − 8, EventIndex)`)
 

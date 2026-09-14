@@ -54,6 +54,7 @@ type clusterNode struct {
 	env      []string // the exact env of the last start — restarts reuse it
 	cmd      *exec.Cmd
 	stopped  bool
+	logs     logCapture // everything the process wrote, across restarts
 }
 
 func (n *clusterNode) base() string { return fmt.Sprintf("http://127.0.0.1:%d", n.apiPort) }
@@ -241,7 +242,8 @@ func postProposal(t *testing.T, base, topic, key string) {
 
 // startCluster boots n fresh nodes (ids 1..n) sharing one COMMITTED_PEERS
 // and waits for every node to serve /ready.
-func startCluster(t *testing.T, count int) []*clusterNode {
+// extra is appended to every node's env (a test that needs a knob turned).
+func startCluster(t *testing.T, count int, extra ...string) []*clusterNode {
 	t.Helper()
 	nodes := make([]*clusterNode, count)
 	peerPairs := make([]string, count)
@@ -254,7 +256,7 @@ func startCluster(t *testing.T, count int) []*clusterNode {
 	}
 	peers := strings.Join(peerPairs, ",")
 	for _, n := range nodes {
-		n.env = nodeEnv(n.id, n.dataDir, n.apiPort, peers, false)
+		n.env = nodeEnv(n.id, n.dataDir, n.apiPort, peers, false, extra...)
 		n.start(t)
 		t.Cleanup(func() { n.kill(t) })
 	}
@@ -273,7 +275,7 @@ func peersOf(nodes []*clusterNode) string {
 	return strings.Join(pairs, ",")
 }
 
-func nodeEnv(id uint64, dataDir string, apiPort int, peers string, join bool) []string {
+func nodeEnv(id uint64, dataDir string, apiPort int, peers string, join bool, extra ...string) []string {
 	env := append(os.Environ(),
 		fmt.Sprintf("COMMITTED_NODE_ID=%d", id),
 		fmt.Sprintf("COMMITTED_API_ADDR=127.0.0.1:%d", apiPort),
@@ -286,6 +288,7 @@ func nodeEnv(id uint64, dataDir string, apiPort int, peers string, join bool) []
 	if join {
 		env = append(env, "COMMITTED_JOIN=true")
 	}
+	env = append(env, extra...)
 	return env
 }
 
@@ -295,8 +298,8 @@ func (n *clusterNode) start(t *testing.T) {
 	t.Helper()
 	cmd := exec.Command(binPath, "node")
 	cmd.Env = n.env
-	cmd.Stdout = testWriter{t, fmt.Sprintf("node%d:out", n.id)}
-	cmd.Stderr = testWriter{t, fmt.Sprintf("node%d:err", n.id)}
+	cmd.Stdout = testWriter{t, fmt.Sprintf("node%d:out", n.id), &n.logs}
+	cmd.Stderr = testWriter{t, fmt.Sprintf("node%d:err", n.id), &n.logs}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, cmd.Start(), "spawn committed node %d", n.id)
 	n.cmd = cmd
@@ -497,12 +500,107 @@ func statusOK(url string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// logCapture accumulates a process's output so a test can assert on what the
+// node said about itself (the harness also echoes it into the test log).
+type logCapture struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (c *logCapture) write(p []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.buf.Write(p)
+}
+
+func (c *logCapture) contains(s string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Contains(c.buf.String(), s)
+}
+
+// waitForLog waits until the node has written a line containing s.
+func (n *clusterNode) waitForLog(t *testing.T, s string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if n.logs.contains(s) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("node %d never logged %q within %s", n.id, s, timeout)
+}
+
 type testWriter struct {
-	t      *testing.T
-	prefix string
+	t       *testing.T
+	prefix  string
+	capture *logCapture
 }
 
 func (w testWriter) Write(p []byte) (int, error) {
 	w.t.Logf("[%s] %s", w.prefix, strings.TrimRight(string(p), "\n"))
+	if w.capture != nil {
+		w.capture.write(p)
+	}
 	return len(p), nil
+}
+
+// TestMultiNodeGrow_EmptyNodeCatchesUpPastCompaction is the release's
+// headline path through the shipped binary: a cluster whose raft log has
+// been compacted grows by a node with an EMPTY data directory. Replication
+// cannot serve it (the entries are gone), so the leader sends a snapshot
+// and the new node fetches the event log from a peer — the automatic
+// catch-up — before installing it. The default thresholds (10 GiB / 1h)
+// never fire in a test, so the cluster runs with the age limb at one
+// second and debug logging on, and the test waits for every seed node to
+// report a compaction before growing, so whichever node leads must send a
+// snapshot rather than entries.
+func TestMultiNodeGrow_EmptyNodeCatchesUpPastCompaction(t *testing.T) {
+	buildBinary(t)
+	knobs := []string{"COMMITTED_COMPACT_MAX_AGE=1s", "COMMITTED_LOG_LEVEL=debug"}
+	nodes := startCluster(t, 3, knobs...)
+
+	postType(t, nodes[0].base(), "pre-grow")
+	for i := 0; i < 24; i++ {
+		postProposal(t, nodes[i%len(nodes)].base(), "pre-grow", fmt.Sprintf("row-%d", i))
+	}
+	for _, n := range nodes {
+		requireTypeListed(t, n.base(), "pre-grow")
+		n.waitForLog(t, "raft log compacted", 30*time.Second)
+	}
+
+	n4 := &clusterNode{id: 4, dataDir: t.TempDir(), apiPort: freePort(t), raftPort: freePort(t)}
+	joinPeers := fmt.Sprintf("%s,4=http://127.0.0.1:%d", peersOf(nodes), n4.raftPort)
+	n4.env = nodeEnv(4, n4.dataDir, n4.apiPort, joinPeers, true, knobs...)
+	n4.start(t)
+	t.Cleanup(func() { n4.kill(t) })
+	addMember(t, nodes[0].base(), 4, fmt.Sprintf("http://127.0.0.1:%d", n4.raftPort))
+
+	// The fetch path, in the new node's own words: its event log was behind
+	// the snapshot it was sent, it fetched from a peer, then installed.
+	n4.waitForLog(t, "event log is behind the snapshot to install; catching up from a peer before installing it", 60*time.Second)
+	n4.waitForLog(t, "caught up from a peer; installing the snapshot", 60*time.Second)
+	waitReady(t, n4.base())
+	requireNotCatchingUp(t, n4.base())
+	requireTypeListed(t, n4.base(), "pre-grow")
+
+	// Liveness through the grown cluster: a write on the new node lands
+	// everywhere.
+	postType(t, n4.base(), "post-grow")
+	for _, n := range append(nodes, n4) {
+		requireTypeListed(t, n.base(), "post-grow")
+	}
+}
+
+// requireNotCatchingUp reads the node's own status and requires the
+// catch-up block to be absent (the fetch is over).
+func requireNotCatchingUp(t *testing.T, base string) {
+	t.Helper()
+	resp, err := http.Get(base + "/v1/node/status") //nolint:gosec // G107: fixed loopback URL
+	require.NoError(t, err)
+	out, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(out))
+	require.NotContains(t, string(out), `"catchingUp"`, "the node must have finished catching up")
 }

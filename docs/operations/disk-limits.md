@@ -123,6 +123,17 @@ compaction's job (see
 watcher is unavailable on Windows (no `statfs`); there it disables
 itself and the node stays fully writable.
 
+Compaction itself runs on two thresholds, whichever fires first: raft-log
+size over `COMMITTED_COMPACT_MAX_BYTES` (default 10 GiB) or an hour since
+the last compaction (`COMMITTED_COMPACT_MAX_AGE`, a Go duration). Both must
+be positive — a limb cannot be switched off from the environment, and a
+non-positive or unparsable value logs a warning and keeps the default.
+Lowering either trades raft-log disk for a shorter window in which a lagging member
+catches up by plain replication rather than by fetching the event log from
+a peer ([rebuild.md](rebuild.md#falling-behind-is-handled-automatically));
+the defaults suit production, and the knobs exist for small disks and for
+tests.
+
 > **Scrub headroom:** the RTBF/metadata-GC scrub rewrites the permanent event
 > log into a sibling directory before swapping it in, so a scrub cycle
 > transiently needs up to **~2× the event log's size** in free space. Size the
