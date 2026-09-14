@@ -591,7 +591,13 @@ paths:
         silent-empty signatures (a when clause that never matched reports
         the value families actually seen at its path). Nothing is admitted
         or stored, no destination database is touched, and the config
-        still passes full admission validation (400 on rejection). By
+        still passes full admission validation — a rejection answers exactly
+        as `POST /v1/syncable/{id}` would, with the same
+        `invalid_syncable_config` code and `{field, issue}` details, so a
+        pipeline can reuse the rehearsal's output. A syncable kind that
+        implements no rehearsal answers 409 `dry_run_unsupported` (the config
+        is valid; there is nothing to rehearse), and a malformed query
+        parameter answers 400 `invalid_parameter`. By
         default the sampling budget spreads across several evenly-spaced
         windows of the log so late-clustering topics are covered; use
         fromIndex to drill into one region.
@@ -2473,7 +2479,12 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     NotFound:
-      description: Resource or version not found
+      description: |
+        Resource or version not found. The code names WHAT was not found:
+        `syncable_not_found`, `ingestable_not_found`, `database_not_found`,
+        `type_not_found`, or `version_not_found`. The bare `not_found` is
+        reserved for an unmatched ROUTE, so a client can tell a wrong URL
+        from an unknown id.
       content:
         application/json:
           schema:
@@ -2719,7 +2730,12 @@ components:
         kind:
           type: string
           enum: [sync, ingest]
-          description: Which worker subsystem parked.
+          description: |
+            Which worker subsystem parked. These are WORKER kinds, not resource
+            kinds: the worker that serves a syncable is the sync worker, and the
+            one that serves an ingestable is the ingest worker. (The resource
+            nouns appear on NodeStatusResponse's `degradedConfigs.kind`, which
+            reports configs rather than workers.)
         id:
           type: string
           description: The syncable or ingestable id — drill into its per-resource status for detail.
@@ -3655,4 +3671,8 @@ components:
           type: string
           description: Human-readable, safe-to-display message.
         details:
-          description: Optional structured details (e.g. per-field validation errors).
+          type: object
+          description: |
+            Optional structured details, always an OBJECT when present so a
+            typed client can model one shape — `{field, issue}` for a config
+            rejection, `{cause}` for a wrapped downstream error, and so on.

@@ -56,7 +56,7 @@ func (h *HTTP) GetSyncableErrors(w httpgo.ResponseWriter, r *httpgo.Request) {
 		writeInternalError(w, "failed to check syncable existence", err)
 		return
 	} else if !ok {
-		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+		writeError(w, httpgo.StatusNotFound, "syncable_not_found", "syncable not found")
 		return
 	}
 
@@ -188,6 +188,17 @@ func (h *HTTP) DeleteSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 			return
 		}
 		keepData = v
+	}
+
+	// A typo'd id must not read as success: deleting an id that never existed
+	// is a no-op in storage, so without this gate the caller gets 200 and
+	// believes it removed something. Same gate the status and errors reads use.
+	if ok, err := h.db.SyncableExists(id); err != nil {
+		writeInternalError(w, "failed to check syncable existence", err)
+		return
+	} else if !ok {
+		writeError(w, httpgo.StatusNotFound, "syncable_not_found", "syncable not found")
+		return
 	}
 
 	if err := h.db.DeleteSyncable(r.Context(), id, keepData); err != nil {
@@ -474,7 +485,7 @@ func (h *HTTP) GetSyncableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		writeInternalError(w, "failed to check syncable existence", err)
 		return
 	} else if !ok {
-		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+		writeError(w, httpgo.StatusNotFound, "syncable_not_found", "syncable not found")
 		return
 	}
 
@@ -739,7 +750,7 @@ func progressFields(checkpoint, head uint64) (lag uint64, caughtUp bool) {
 func writeRebuildError(w httpgo.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, cluster.ErrResourceNotFound):
-		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+		writeError(w, httpgo.StatusNotFound, "syncable_not_found", "syncable not found")
 	case errors.Is(err, cluster.ErrZonePinUnsatisfiable):
 		writeError(w, httpgo.StatusServiceUnavailable, "pin_unsatisfiable", redactedMessage(err))
 	case errors.Is(err, cluster.ErrNotSyncableOwner):
@@ -771,7 +782,7 @@ func writeRebuildError(w httpgo.ResponseWriter, err error) {
 func writeRematerializeError(w httpgo.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, cluster.ErrResourceNotFound):
-		writeError(w, httpgo.StatusNotFound, "not_found", "syncable not found")
+		writeError(w, httpgo.StatusNotFound, "syncable_not_found", "syncable not found")
 	case errors.Is(err, cluster.ErrNotRematerializable):
 		// 409: the config is fine, but this surface shape cannot converge a
 		// replay in place — the message names the alternatives.
@@ -802,7 +813,8 @@ func writeReplayDeadLetterResult(w httpgo.ResponseWriter, err error) {
 		// The downstream rejected the proposal again; the dead letter is left
 		// in place. Surface the cause so the operator can see what failed.
 		writeErrorWithDetails(w, httpgo.StatusBadGateway, "replay_failed",
-			"the syncable rejected the proposal again; dead letter left in place", redactedDetail(err))
+			"the syncable rejected the proposal again; dead letter left in place",
+			map[string]string{"cause": redactedDetail(err)})
 	default:
 		writeInternalError(w, "failed to replay the dead-lettered proposal", err)
 	}

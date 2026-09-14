@@ -139,5 +139,5 @@ func TestGetIngestableStatus(t *testing.T) {
 // must not read as "exists, but no worker here".
 func TestGetIngestableStatus_UnknownIs404(t *testing.T) {
 	e := newEngine(t)
-	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/ingestable/nope/status"), 404, "not_found")
+	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/ingestable/nope/status"), 404, "ingestable_not_found")
 }

@@ -82,7 +82,8 @@ func (h *HTTP) AddProposal(w httpgo.ResponseWriter, r *httpgo.Request) {
 				var vErr *schemaValidationError
 				if errors.As(err, &vErr) {
 					writeErrorWithDetails(w, httpgo.StatusBadRequest, "schema_validation_failed",
-						fmt.Sprintf("entity data does not match schema for type %q", t.ID), redactedMessage(vErr))
+						fmt.Sprintf("entity data does not match schema for type %q", t.ID),
+						map[string]string{"cause": redactedMessage(vErr)})
 					return
 				}
 				writeInternalError(w, fmt.Sprintf("validation error for type %q", t.ID), err)

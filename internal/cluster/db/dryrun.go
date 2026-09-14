@@ -44,12 +44,19 @@ func (db *DB) DryRunSyncable(ctx context.Context, mimeType string, data []byte, 
 	parseStart := time.Now()
 	_, s, _, err := db.parser.ParseSyncable(mimeType, data, db.storage)
 	if err != nil {
-		return nil, err
+		// Classify exactly as ProposeSyncable does. The rehearsal's whole
+		// value is answering as the real POST would, so a rejection must
+		// carry the same resource-scoped code and {field, issue} detail —
+		// an unclassified error would surface as a 500.
+		return nil, cluster.NewConfigError(err)
 	}
 	parseMs := time.Since(parseStart).Milliseconds()
 	dr, ok := s.(cluster.DryRunner)
 	if !ok {
-		return nil, fmt.Errorf("this syncable kind does not support dry-run")
+		// Not a bad config — a kind with no rehearsal to run. Surfaced as a
+		// 409 (see the http handler) rather than a 400 that would tell the
+		// author their valid config is invalid.
+		return nil, cluster.ErrDryRunUnsupported
 	}
 	if opts.MaxEntries <= 0 {
 		opts.MaxEntries = dryRunDefaultEntries

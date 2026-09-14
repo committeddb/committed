@@ -101,6 +101,13 @@ func (r *recorderSink) deleted() []string {
 
 func (r *recorderSink) Close() error { return nil }
 
+// DryRun makes the recorder rehearsable, so the dry-run handler's real
+// rejection path (a bad config → the same code and details the POST gives)
+// is reachable in this suite, not just the "kind cannot rehearse" arm.
+func (r *recorderSink) DryRun(context.Context, cluster.DryRunFeed, cluster.DryRunOptions) (*cluster.DryRunReport, error) {
+	return &cluster.DryRunReport{}, nil
+}
+
 // noDropSink is a syncable that owns no external destination — the webhook /
 // loopback shape. It deliberately implements NEITHER Teardownable method, so
 // the rebuild admission probe must refuse it rather than replaying from zero.

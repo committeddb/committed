@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -47,7 +48,7 @@ func (h *HTTP) dryRunRequest(w httpgo.ResponseWriter, r *httpgo.Request) (mimeTy
 	if q := r.URL.Query().Get("maxEntries"); q != "" {
 		n, err := strconv.Atoi(q)
 		if err != nil || n <= 0 || n > dryRunMaxEntriesCap {
-			h.writeReadError(w, r, fmt.Errorf("maxEntries must be 1..%d", dryRunMaxEntriesCap), "invalid_config", "invalid maxEntries")
+			h.writeReadError(w, r, fmt.Errorf("maxEntries must be 1..%d", dryRunMaxEntriesCap), "invalid_parameter", "invalid maxEntries")
 			return "", nil, opts, nil, nil, false
 		}
 		opts.MaxEntries = n
@@ -56,7 +57,7 @@ func (h *HTTP) dryRunRequest(w httpgo.ResponseWriter, r *httpgo.Request) (mimeTy
 	if q := r.URL.Query().Get("timeoutSeconds"); q != "" {
 		n, err := strconv.Atoi(q)
 		if err != nil || n <= 0 || time.Duration(n)*time.Second > dryRunTimeoutCap {
-			h.writeReadError(w, r, fmt.Errorf("timeoutSeconds must be 1..%d", int(dryRunTimeoutCap/time.Second)), "invalid_config", "invalid timeoutSeconds")
+			h.writeReadError(w, r, fmt.Errorf("timeoutSeconds must be 1..%d", int(dryRunTimeoutCap/time.Second)), "invalid_parameter", "invalid timeoutSeconds")
 			return "", nil, opts, nil, nil, false
 		}
 		timeout = time.Duration(n) * time.Second
@@ -84,17 +85,23 @@ func (h *HTTP) DryRunSyncable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	if q := r.URL.Query().Get("fromIndex"); q != "" {
 		n, err := strconv.ParseUint(q, 10, 64)
 		if err != nil {
-			h.writeReadError(w, r, err, "invalid_config", "invalid fromIndex")
+			h.writeReadError(w, r, err, "invalid_parameter", "invalid fromIndex")
 			return
 		}
 		opts.FromIndex = n
 	}
 	rep, err := h.db.DryRunSyncable(ctx, mimeType, body, opts)
+	if errors.Is(err, cluster.ErrDryRunUnsupported) {
+		// 409: the config is fine, this kind just has no rehearsal.
+		writeError(w, httpgo.StatusConflict, "dry_run_unsupported", redactedMessage(err))
+		return
+	}
 	if err != nil {
-		// The dry-run IS the authoring loop: a rejection must carry the
-		// parser's actual words, not a generic label (field-reported —
-		// authors had to POST to the real endpoint to learn the error).
-		writeErrorf(w, httpgo.StatusBadRequest, "invalid_config", "dry-run: %s", redactedMessage(err))
+		// The dry-run IS the authoring loop, so a rejection must answer
+		// exactly as the real POST would — same code, same {field, issue}
+		// details — or a pipeline cannot reuse the rehearsal's output to
+		// point at the offending key. writeProposeError is that one mapping.
+		writeProposeError(w, err, "syncable", "dry-run syncable")
 		return
 	}
 	writeJSONStatus(w, httpgo.StatusOK, rep)

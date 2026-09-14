@@ -41,6 +41,14 @@ func (h *HTTP) GetTypeMigrationErrors(w httpgo.ResponseWriter, r *httpgo.Request
 		return
 	}
 
+	// An unknown type's empty error list is indistinguishable from a healthy
+	// type's, and its sibling GET /syncable/{id}/errors already 404s — gate
+	// here too so a typo'd id reads as absent rather than clean.
+	if _, err := h.db.ResolveType(cluster.LatestTypeRef(id)); err != nil {
+		writeError(w, httpgo.StatusNotFound, "type_not_found", "type not found")
+		return
+	}
+
 	var since uint64
 	if qs := r.URL.Query().Get("since"); qs != "" {
 		n, err := strconv.ParseUint(qs, 10, 64)
@@ -132,7 +140,8 @@ func writeTypeMigrationReplayResult(w httpgo.ResponseWriter, err error) {
 		// The chain still fails on this payload; the record is left in
 		// place. Surface the cause so the operator can see what failed.
 		writeErrorWithDetails(w, httpgo.StatusBadGateway, "migration_retry_failed",
-			"the migration chain still fails on this proposal; dead letter left in place", redactedDetail(err))
+			"the migration chain still fails on this proposal; dead letter left in place",
+			map[string]string{"cause": redactedDetail(err)})
 	default:
 		writeInternalError(w, "failed to retry the migration", err)
 	}

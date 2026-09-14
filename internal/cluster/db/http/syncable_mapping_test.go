@@ -35,7 +35,7 @@ func TestWriteRebuildError_Mapping(t *testing.T) {
 		wantStatus int
 		wantCode   string
 	}{
-		{cluster.ErrResourceNotFound, 404, "not_found"},
+		{cluster.ErrResourceNotFound, 404, "syncable_not_found"},
 		{fmt.Errorf("%w: zone z-1 unserved", cluster.ErrZonePinUnsatisfiable), 503, "pin_unsatisfiable"},
 		{fmt.Errorf("%w: moved", cluster.ErrNotSyncableOwner), 503, "not_syncable_owner"},
 		{fmt.Errorf("%w: rebuild aborted", cluster.ErrWorkerWedged), 503, "worker_wedged"},
@@ -58,7 +58,7 @@ func TestWriteRematerializeError_Mapping(t *testing.T) {
 		wantStatus int
 		wantCode   string
 	}{
-		{cluster.ErrResourceNotFound, 404, "not_found"},
+		{cluster.ErrResourceNotFound, 404, "syncable_not_found"},
 		{fmt.Errorf("%w: keyless sink", cluster.ErrNotRematerializable), 409, "not_rematerializable"},
 		{fmt.Errorf("%w: zone z-1 unserved", cluster.ErrZonePinUnsatisfiable), 503, "pin_unsatisfiable"},
 		{fmt.Errorf("%w: moved", cluster.ErrNotSyncableOwner), 503, "not_syncable_owner"},

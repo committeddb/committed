@@ -284,6 +284,12 @@ var ErrWorkerWedged = errors.New("syncable worker did not stop in time (wedged o
 // destination by hand and re-POST, or converge a keyed sink in place.
 var ErrDestinationNotOwned = errors.New("the destination was not created by committed, so it cannot be dropped for a clean rebuild: drop it yourself and re-POST the config, or POST /syncable/{id}/rematerialize to converge a keyed syncable in place")
 
+// ErrDryRunUnsupported is a dry-run asked of a syncable kind that implements
+// no rehearsal. The config is valid — there is simply nothing to rehearse —
+// so it is a 409, never the 400 that would tell an author their good config
+// is bad.
+var ErrDryRunUnsupported = errors.New("this syncable kind does not support dry-run: POST the config to admit it, then watch GET /syncable/{id}/status")
+
 // ErrDestinationNotDroppable refuses rebuild on a syncable whose destination
 // committed cannot drop AT ALL — it owns no external state to tear down, so
 // the verb's drop half is not merely refused but meaningless.

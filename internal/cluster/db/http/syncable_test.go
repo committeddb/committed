@@ -297,7 +297,7 @@ func TestGetSyncableErrors_Defaults(t *testing.T) {
 func TestGetSyncableErrors_UnknownIs404(t *testing.T) {
 	e := newEngine(t)
 	w := e.doEmpty(t, "GET", "/v1/syncable/nope/errors")
-	requireEnvelope(t, w, 404, "not_found")
+	requireEnvelope(t, w, 404, "syncable_not_found")
 }
 
 // TestGetSyncableErrors_BadParams: invalid cursor params are rejected with

@@ -111,7 +111,7 @@ func TestSyncableStatus_InvalidParams(t *testing.T) {
 // vacuous "running, caught up" must never render.
 func TestSyncableStatus_UnknownID404s(t *testing.T) {
 	e := newEngine(t)
-	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/syncable/nope/status"), 404, "not_found")
+	requireEnvelope(t, e.doEmpty(t, "GET", "/v1/syncable/nope/status"), 404, "syncable_not_found")
 }
 
 // TestAcknowledgeSyncableDeadLetter_NotDeadLettered: acknowledging an index

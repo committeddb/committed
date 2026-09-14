@@ -116,7 +116,7 @@ func (h *HTTP) GetIngestableStatus(w httpgo.ResponseWriter, r *httpgo.Request) {
 		writeInternalError(w, "failed to check ingestable existence", err)
 		return
 	} else if !ok {
-		writeError(w, httpgo.StatusNotFound, "not_found", "ingestable not found")
+		writeError(w, httpgo.StatusNotFound, "ingestable_not_found", "ingestable not found")
 		return
 	}
 
@@ -197,6 +197,17 @@ func (h *HTTP) DeleteIngestable(w httpgo.ResponseWriter, r *httpgo.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		writeError(w, httpgo.StatusBadRequest, "invalid_parameter", "id is empty")
+		return
+	}
+
+	// A typo'd id must not read as success (see DeleteSyncable): deleting an
+	// id that never existed is a no-op in storage, so without this gate the
+	// caller gets 200 and believes it removed something.
+	if ok, err := h.db.IngestableExists(id); err != nil {
+		writeInternalError(w, "failed to check ingestable existence", err)
+		return
+	} else if !ok {
+		writeError(w, httpgo.StatusNotFound, "ingestable_not_found", "ingestable not found")
 		return
 	}
 
