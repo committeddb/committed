@@ -3,8 +3,10 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"maps"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -253,4 +255,35 @@ func shutdownTimeout() time.Duration {
 		return defaultShutdownTimeout
 	}
 	return d
+}
+
+// removedEnvVars is the environment's counterpart to the config vocabulary's
+// removed-spelling ledger: a setting 0.8.0 renamed, mapped to what it became.
+// Silence is not an option for these. Peer mTLS is configured all-or-nothing
+// and an unset trio means PLAINTEXT, so a deployment that still sets the old
+// names would come up with peer TLS quietly off — a security downgrade
+// delivered by an upgrade. Fail loudly instead, naming the new spelling.
+var removedEnvVars = map[string]string{
+	"COMMITTED_TLS_CA_FILE":                   "COMMITTED_PEER_TLS_CA_FILE",
+	"COMMITTED_TLS_CERT_FILE":                 "COMMITTED_PEER_TLS_CERT_FILE",
+	"COMMITTED_TLS_KEY_FILE":                  "COMMITTED_PEER_TLS_KEY_FILE",
+	"COMMITTED_HTTP_TLS_CA_FILE":              "COMMITTED_HTTP_CLIENT_TLS_CA_FILE",
+	"COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY": "COMMITTED_HTTP_CLIENT_TLS_INSECURE_SKIP_VERIFY",
+}
+
+// checkRemovedEnvVars reports every removed setting the environment still
+// sets, as one message naming each replacement — an operator fixes the whole
+// deployment in one pass rather than one restart per variable.
+func checkRemovedEnvVars() error {
+	var found []string
+	for _, old := range slices.Sorted(maps.Keys(removedEnvVars)) {
+		if os.Getenv(old) != "" {
+			found = append(found, old+" is now "+removedEnvVars[old])
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return fmt.Errorf("these COMMITTED_* settings were renamed in 0.8.0 and are no longer read: %s — rename them in your deployment and restart (peer TLS is all-or-nothing, so an unrenamed trio would silently run plaintext)",
+		strings.Join(found, "; "))
 }

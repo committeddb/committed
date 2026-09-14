@@ -185,8 +185,8 @@ COMMITTED_HTTP_TLS_CLIENT_CA_FILE=/etc/committed/client-ca.pem
 
 Nodes also call each other's API (follower proxying, owner-routed verbs).
 With API TLS on, tell the proxying side how to trust the peer:
-`COMMITTED_HTTP_TLS_CA_FILE` names the CA that signs the API server certs
-(typically the same one), and `COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY=true`
+`COMMITTED_HTTP_CLIENT_TLS_CA_FILE` names the CA that signs the API server certs
+(typically the same one), and `COMMITTED_HTTP_CLIENT_TLS_INSECURE_SKIP_VERIFY=true`
 skips verification for self-signed setups with no shared CA (the same
 escape hatch as `member --insecure`). Under mTLS the node presents its own
 `COMMITTED_HTTP_TLS_CERT_FILE`/`KEY_FILE` as the client certificate.
@@ -297,9 +297,9 @@ cluster-wide CA before any application bytes flow.
 Set all three environment variables on each node:
 
 ```
-COMMITTED_TLS_CA_FILE=/etc/committed/ca.pem
-COMMITTED_TLS_CERT_FILE=/etc/committed/node.pem
-COMMITTED_TLS_KEY_FILE=/etc/committed/node.key
+COMMITTED_PEER_TLS_CA_FILE=/etc/committed/ca.pem
+COMMITTED_PEER_TLS_CERT_FILE=/etc/committed/node.pem
+COMMITTED_PEER_TLS_KEY_FILE=/etc/committed/node.key
 ```
 
 All three must be set together. Any other combination (one set, two
@@ -329,7 +329,7 @@ openssl req -x509 -new -nodes \
 ```
 
 That root cert (`ca.pem`) is what every node gets as its
-`COMMITTED_TLS_CA_FILE`. The root private key (`ca.key`) is the crown
+`COMMITTED_PEER_TLS_CA_FILE`. The root private key (`ca.key`) is the crown
 jewel — anyone who has it can mint a cert the cluster will trust. It
 should live somewhere safe (a dedicated laptop kept offline, a
 hardware security module, Vault's PKI engine) and should NOT live on

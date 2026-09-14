@@ -263,6 +263,22 @@ same quorum rule applies in reverse.
   admissible under this binary"); re-POST it without the key. The setting
   never took effect before, so nothing about its behavior changes except
   that you now learn about it.
+- **0.8.0 renames the TLS environment variables.** Peer mTLS moves from
+  `COMMITTED_TLS_CA_FILE`, `COMMITTED_TLS_CERT_FILE` and
+  `COMMITTED_TLS_KEY_FILE` to `COMMITTED_PEER_TLS_CA_FILE`,
+  `COMMITTED_PEER_TLS_CERT_FILE` and `COMMITTED_PEER_TLS_KEY_FILE` — the bare
+  spelling read as "the TLS settings" when it only ever configured the raft
+  peer transport — and the node's OUTBOUND API client moves from
+  `COMMITTED_HTTP_TLS_CA_FILE` and
+  `COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY` to
+  `COMMITTED_HTTP_CLIENT_TLS_CA_FILE` and
+  `COMMITTED_HTTP_CLIENT_TLS_INSECURE_SKIP_VERIFY`, so it no longer sits one
+  word away from `COMMITTED_HTTP_TLS_CLIENT_CA_FILE`, which configures the
+  server side (the CA that verifies incoming client certs, unchanged).
+  **Rename these before you start the new binary**: a node that still sets an
+  old name refuses to boot, naming the replacement. That refusal is
+  deliberate — peer TLS is all-or-nothing, so silently ignoring the old names
+  would bring the node up in plaintext.
 - **0.8.0 renames two config keys.** A projection's array tables take plural
   nouns (`[[projection.sources]]`, `[[projection.stages]]`, and the nested
   `fields` / `scalars` / `joins`), and a restatement names its subject with

@@ -90,7 +90,7 @@ type options struct {
 	transportWrapper func(Transport) Transport
 	// tlsInfo, when non-nil, enables mTLS on the raft peer transport.
 	// Populated from WithTLSInfo by cmd/node.go when the
-	// COMMITTED_TLS_CA_FILE / CERT_FILE / KEY_FILE env vars are all set.
+	// COMMITTED_PEER_TLS_CA_FILE / CERT_FILE / KEY_FILE env vars are all set.
 	// nil (the default) leaves the peer transport as plaintext HTTP.
 	tlsInfo *transport.TLSInfo
 

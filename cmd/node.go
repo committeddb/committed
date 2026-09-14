@@ -160,6 +160,14 @@ docs/operations/ it points to.`,
 			zap.String("goVersion", v.GoVersion),
 		)
 
+		// Refuse a deployment still setting a renamed variable, BEFORE any
+		// of it takes effect. Silently ignoring one would mean booting
+		// without the setting the operator asked for — and for peer TLS,
+		// which is all-or-nothing, that means plaintext.
+		if err := checkRemovedEnvVars(); err != nil {
+			zap.L().Fatal("environment", zap.Error(err))
+		}
+
 		// Node identity and addressing come from the environment so the
 		// same image can be templated per-node by an orchestrator (Docker,
 		// Kubernetes). The historical stdlib `flag` calls here were dead —
@@ -297,8 +305,8 @@ docs/operations/ it points to.`,
 		dbOpts = append(dbOpts, db.WithLogger(zap.L()))
 
 		// mTLS for peer transport is configured via three env vars that
-		// must be set together: COMMITTED_TLS_CA_FILE,
-		// COMMITTED_TLS_CERT_FILE, COMMITTED_TLS_KEY_FILE. All three set
+		// must be set together: COMMITTED_PEER_TLS_CA_FILE,
+		// COMMITTED_PEER_TLS_CERT_FILE, COMMITTED_PEER_TLS_KEY_FILE. All three set
 		// enables mTLS; none set keeps plaintext peer transport. Any
 		// other combination is a hard startup error — silently running
 		// partial-TLS ("I thought we had TLS") is the failure mode this
