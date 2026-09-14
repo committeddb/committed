@@ -54,7 +54,7 @@ func awaitFeatureLevel(t *testing.T, d *db.DB) {
 		// The self-announce is async; probe via a restatement that fails LATER
 		// admission (unknown type) once the gate opens.
 		err := proposeRestatementTOML(t, d, "probe",
-			"[restatement]\ntype = \"no-such-type\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n")
+			"[restatement]\ntopic = \"no-such-type\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n")
 		var lvl *cluster.ClusterBelowFeatureLevelError
 		return !errors.As(err, &lvl)
 	}, 10*time.Second, 10*time.Millisecond, "feature level never announced")
@@ -73,32 +73,32 @@ func TestRestatement_AdmissionMatrix(t *testing.T) {
 	applied := s.AppliedIndex()
 
 	// Unknown type.
-	err = proposeRestatementTOML(t, d, "e-a", "[restatement]\ntype = \"nope\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 1\n")
+	err = proposeRestatementTOML(t, d, "e-a", "[restatement]\ntopic = \"nope\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 1\n")
 	require.ErrorContains(t, err, "not a declared version")
 
 	// Undeclared rebind target / stamp selector.
-	err = proposeRestatementTOML(t, d, "e-b", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 9\n")
+	err = proposeRestatementTOML(t, d, "e-b", "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 9\n")
 	require.ErrorContains(t, err, "readAsVersion 9")
-	err = proposeRestatementTOML(t, d, "e-c", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\nfromVersion = 9\n")
+	err = proposeRestatementTOML(t, d, "e-c", "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\nfromVersion = 9\n")
 	require.ErrorContains(t, err, "fromVersion 9")
 
 	// A range beyond the applied log (restatements bind the past).
 	err = proposeRestatementTOML(t, d, "e-d",
-		fmt.Sprintf("[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = %d\nreadAsVersion = 2\n", applied+1000))
+		fmt.Sprintf("[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = %d\nreadAsVersion = 2\n", applied+1000))
 	require.ErrorContains(t, err, "beyond the applied log")
 
 	// An inverted range, and a non-deterministic predicate.
-	err = proposeRestatementTOML(t, d, "e-e", "[restatement]\ntype = \"photos\"\nfromIndex = 5\ntoIndex = 2\nreadAsVersion = 2\n")
+	err = proposeRestatementTOML(t, d, "e-e", "[restatement]\ntopic = \"photos\"\nfromIndex = 5\ntoIndex = 2\nreadAsVersion = 2\n")
 	require.ErrorContains(t, err, "must not exceed")
-	err = proposeRestatementTOML(t, d, "e-f", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\npredicate = \"now\"\n")
+	err = proposeRestatementTOML(t, d, "e-f", "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\npredicate = \"now\"\n")
 	require.ErrorContains(t, err, "deterministic")
 
 	// A valid restatement admits; an identical re-POST is an idempotent no-op; a
 	// DIFFERENT re-POST under the same id is refused (append-only).
-	good := "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\n"
+	good := "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 2\n"
 	require.NoError(t, proposeRestatementTOML(t, d, "e-good", good))
 	require.NoError(t, proposeRestatementTOML(t, d, "e-good", good))
-	err = proposeRestatementTOML(t, d, "e-good", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 3\nreadAsVersion = 2\n")
+	err = proposeRestatementTOML(t, d, "e-good", "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 3\nreadAsVersion = 2\n")
 	require.ErrorContains(t, err, "append-only")
 
 	// The listing carries it with its interpretation coordinate.
@@ -118,7 +118,7 @@ func TestRestatement_FeatureGateRefusesUntilAnnounced(t *testing.T) {
 	d, _ := newWalDB(t) // no WithVersionAnnounce: cluster min stays 0
 	proposeTypeTOML(t, d, "photos", "photos", "", "")
 
-	err := proposeRestatementTOML(t, d, "e-1", "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n")
+	err := proposeRestatementTOML(t, d, "e-1", "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n")
 	var lvl *cluster.ClusterBelowFeatureLevelError
 	require.ErrorAs(t, err, &lvl)
 	require.Equal(t, uint64(2), lvl.Required)
@@ -236,7 +236,7 @@ func TestRestatement_RebindsReadingsEndToEnd(t *testing.T) {
 
 	// The restatement: k2..k3 were v2 all along.
 	require.NoError(t, proposeRestatementTOML(t, d, "backfill-v2", fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
+		"[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
 		indexByKey["k2"], indexByKey["k3"])))
 
 	// An always-current webhook sink over the topic.
@@ -289,7 +289,7 @@ func TestRestatement_RebindsReadingsEndToEnd(t *testing.T) {
 	require.False(t, stale)
 	require.NotZero(t, pin)
 	require.NoError(t, proposeRestatementTOML(t, d, "later", fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\n",
+		"[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\n",
 		indexByKey["k1"], indexByKey["k1"])))
 	require.Eventually(t, func() bool {
 		pin2, stale2, err := d.SyncableInterpretation("photos-hook")

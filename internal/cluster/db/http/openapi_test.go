@@ -181,7 +181,7 @@ func TestOpenAPIContract_SuccessResponses(t *testing.T) {
 			{
 				name: "POST /restatement/dryrun", method: httpgo.MethodPost,
 				path: "/v1/restatement/dryrun", contentType: "text/toml",
-				body: "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n",
+				body: "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 1\nreadAsVersion = 1\n",
 			},
 			{name: "GET /type", method: httpgo.MethodGet, path: "/v1/type"},
 			{

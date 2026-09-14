@@ -33,7 +33,7 @@ func TestParseType_RejectsUnknownKeys(t *testing.T) {
 func TestParseRestatement_RejectsUnknownKeys(t *testing.T) {
 	_, err := db.ParseRestatement(&cluster.Configuration{
 		ID: "r1", MimeType: "text/toml",
-		Data: []byte("[restatement]\ntype = \"t\"\nfromIndex = 1\ntoIdx = 5\nreadAsVersion = 2\n"),
+		Data: []byte("[restatement]\ntopic = \"t\"\nfromIndex = 1\ntoIdx = 5\nreadAsVersion = 2\n"),
 	})
 	require.Error(t, err)
 	require.Equal(t, "restatement.toIdx", cluster.NewConfigError(err).Field)
@@ -59,7 +59,7 @@ validateAgainst = '{"v":1}'
 		_, _, err := db.ParseType(&cluster.Configuration{ID: "11111111-1111-4111-8111-111111111111", MimeType: "text/toml", Data: []byte(typeDoc)}, nil)
 		require.NoError(t, err)
 		_, err = db.ParseRestatement(&cluster.Configuration{ID: "r1", MimeType: "text/toml", Data: []byte(
-			"[restatement]\ntype = \"t\"\nfromIndex = 1\ntoIndex = 5\nfromVersion = 1\nreadAsVersion = 2\npredicate = \".\"\n")})
+			"[restatement]\ntopic = \"t\"\nfromIndex = 1\ntoIndex = 5\nfromVersion = 1\nreadAsVersion = 2\npredicate = \".\"\n")})
 		require.NoError(t, err)
 	})
 	for _, c := range []struct {

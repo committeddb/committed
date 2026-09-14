@@ -2018,7 +2018,7 @@ paths:
         Proposes one interpretation-registry statement as TOML:
 
             [restatement]
-            type = "photo-meta"        # the type (topic) whose readings rebind
+            topic = "photo-meta"       # the topic whose readings rebind
             fromIndex = 100            # inclusive raft-index range of existing
             toIndex = 250              #   actuals (never beyond the applied log)
             readAsVersion = 2        # the version matching actuals read as

@@ -19,7 +19,7 @@ const featureLevelRestatements uint64 = 2
 // storage-dependent admission checks live in ProposeRestatement.
 // restatementKeys is the [restatement] vocabulary (ParseRestatement's reads),
 // pinned by the vocabulary conformance test.
-var restatementKeys = []string{"type", "fromIndex", "toIndex", "fromVersion", "readAsVersion", "predicate"}
+var restatementKeys = []string{"topic", "fromIndex", "toIndex", "fromVersion", "readAsVersion", "predicate"}
 
 func ParseRestatement(c *cluster.Configuration) (*cluster.Restatement, error) {
 	v, err := cluster.ParseConfigBytes(c.MimeType, c.Data)
@@ -34,7 +34,7 @@ func ParseRestatement(c *cluster.Configuration) (*cluster.Restatement, error) {
 	}
 	e := &cluster.Restatement{
 		ID:            c.ID,
-		TypeID:        v.GetString("restatement.type"),
+		TypeID:        v.GetString("restatement.topic"),
 		FromIndex:     uint64(max(v.GetInt("restatement.fromIndex"), 0)), //nolint:gosec // G115: negatives clamped, admission validates
 		ToIndex:       uint64(max(v.GetInt("restatement.toIndex"), 0)),   //nolint:gosec // G115: negatives clamped, admission validates
 		ReadAsVersion: v.GetInt("restatement.readAsVersion"),
@@ -42,7 +42,7 @@ func ParseRestatement(c *cluster.Configuration) (*cluster.Restatement, error) {
 		Predicate:     v.GetString("restatement.predicate"),
 	}
 	if e.TypeID == "" {
-		return nil, fmt.Errorf("restatement.type is required: the type (topic) whose readings this restatement rebinds")
+		return nil, fmt.Errorf("restatement.topic is required: the topic whose readings this restatement rebinds")
 	}
 	if e.FromIndex == 0 || e.ToIndex == 0 {
 		return nil, fmt.Errorf("restatement.fromIndex and restatement.toIndex are required (1-based raft indexes; a restatement binds an existing range)")
@@ -74,7 +74,7 @@ func (db *DB) admitRestatementChecks(e *cluster.Restatement) error {
 	// The rebind target — and, when narrowed, the stamp selector — must be
 	// declared versions of a USER type.
 	if cluster.IsInternal(e.TypeID) || cluster.IsReservedSystemID(e.TypeID) {
-		return cluster.NewConfigError(fmt.Errorf("restatement.type %q is a committed system type; restatements rebind user topics only", e.TypeID))
+		return cluster.NewConfigError(fmt.Errorf("restatement.topic %q is a committed system type; restatements rebind user topics only", e.TypeID))
 	}
 	if _, err := db.storage.ResolveType(cluster.TypeRefAt(e.TypeID, e.ReadAsVersion)); err != nil {
 		return cluster.NewConfigError(fmt.Errorf("restatement.readAsVersion %d is not a declared version of type %q: %w", e.ReadAsVersion, e.TypeID, err))

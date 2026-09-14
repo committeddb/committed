@@ -303,7 +303,7 @@ true; the *reading* is wrong. There is no ALTER TABLE and no rewrite:
 ```toml
 # POST /v1/restatement/photos-backfill-v2
 [restatement]
-type = "photo-meta"        # the type (topic) whose readings rebind
+topic = "photo-meta"        # the type (topic) whose readings rebind
 fromIndex = 1200           # inclusive raft-index range of existing actuals
 toIndex = 8400
 readAsVersion = 2        # read these as v2

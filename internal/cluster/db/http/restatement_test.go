@@ -17,7 +17,7 @@ import (
 // way a real rolling upgrade would; the dry-run deliberately works below
 // the gate, and the below-gate refusal itself is a real 503 here.
 
-const restatementTOML = "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 5\nreadAsVersion = 2\n"
+const restatementTOML = "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 5\nreadAsVersion = 2\n"
 
 // seedRestatementTypes gives the restatement a real type with two versions
 // to bind against.
@@ -56,7 +56,7 @@ func TestRestatementLifecycle(t *testing.T) {
 	mustStatus(t, e.doTOML(t, "POST", "/v1/restatement/r1", restatementTOML), 200)
 
 	// Immutable: different content under the same id is refused.
-	edited := "[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 6\nreadAsVersion = 2\n"
+	edited := "[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 6\nreadAsVersion = 2\n"
 	requireEnvelope(t, e.doTOML(t, "POST", "/v1/restatement/r1", edited), 400, "invalid_restatement_config")
 
 	// The listing carries the registry in log order with raft indices.
@@ -119,7 +119,7 @@ func TestDryRunRestatement(t *testing.T) {
 	}
 	e.getJSON(t, "/v1/node/status", &st)
 	require.NotZero(t, st.AppliedIndex)
-	wide := fmt.Sprintf("[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = %d\nreadAsVersion = 2\n", st.AppliedIndex)
+	wide := fmt.Sprintf("[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = %d\nreadAsVersion = 2\n", st.AppliedIndex)
 	w := e.doTOML(t, "POST", "/v1/restatement/dryrun", wide)
 	mustStatus(t, w, 200)
 	var rep struct {
@@ -132,6 +132,6 @@ func TestDryRunRestatement(t *testing.T) {
 	require.Equal(t, 1, rep.EntitiesOfType, "the census sees the real proposed row")
 
 	// A config the admission path rejects comes back with its actual words.
-	bad := "[restatement]\ntype = \"no-such-type\"\nfromIndex = 1\ntoIndex = 5\nreadAsVersion = 2\n"
+	bad := "[restatement]\ntopic = \"no-such-type\"\nfromIndex = 1\ntoIndex = 5\nreadAsVersion = 2\n"
 	requireEnvelope(t, e.doTOML(t, "POST", "/v1/restatement/dryrun", bad), 400, "invalid_config")
 }

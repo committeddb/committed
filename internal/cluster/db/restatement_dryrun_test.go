@@ -64,7 +64,7 @@ func TestRestatementDryRun_CensusSamplesAndNoAdmission(t *testing.T) {
 	d, s := newWalDBRestatements(t)
 	idx := seedRestatementDryRunRows(t, d, s)
 
-	body := fmt.Sprintf("[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
+	body := fmt.Sprintf("[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
 		idx["k2"], idx["k3"])
 	rep, err := dryRunRestatement(t, d, body, cluster.DryRunOptions{})
 	require.NoError(t, err)
@@ -109,7 +109,7 @@ func TestRestatementDryRun_PredicateNarrowsAndCountsErrors(t *testing.T) {
 		&cluster.Proposal{Entities: []*cluster.Entity{cluster.NewUpsertEntity(tp1, []byte("k5"), []byte("not json"))}}))
 	to := s.AppliedIndex()
 
-	body := fmt.Sprintf("[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\npredicate = '.license == \"cc\"'\n",
+	body := fmt.Sprintf("[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\npredicate = '.license == \"cc\"'\n",
 		idx["k1"], to)
 	rep, err := dryRunRestatement(t, d, body, cluster.DryRunOptions{})
 	require.NoError(t, err)
@@ -131,7 +131,7 @@ func TestRestatementDryRun_AuthoringFindings(t *testing.T) {
 
 	// Matches nothing: fromVersion 2 — no row is stamped v2.
 	rep, err := dryRunRestatement(t, d, fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 1\nfromVersion = 2\n",
+		"[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 1\nfromVersion = 2\n",
 		idx["k1"], idx["k4"]), cluster.DryRunOptions{})
 	require.NoError(t, err)
 	require.Zero(t, rep.Matched)
@@ -139,7 +139,7 @@ func TestRestatementDryRun_AuthoringFindings(t *testing.T) {
 
 	// A no-op: rebinding v1 stamps to version 1 — every reading already is 1.
 	rep, err = dryRunRestatement(t, d, fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 1\nfromVersion = 1\n",
+		"[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 1\nfromVersion = 1\n",
 		idx["k1"], idx["k4"]), cluster.DryRunOptions{})
 	require.NoError(t, err)
 	require.Equal(t, 4, rep.Matched)
@@ -154,15 +154,15 @@ func TestRestatementDryRun_AdmissionMirror(t *testing.T) {
 	seedRestatementDryRunRows(t, d, s)
 
 	_, err := dryRunRestatement(t, d,
-		"[restatement]\ntype = \"nope\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 1\n", cluster.DryRunOptions{})
+		"[restatement]\ntopic = \"nope\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 1\n", cluster.DryRunOptions{})
 	require.ErrorContains(t, err, "not a declared version")
 
 	_, err = dryRunRestatement(t, d, fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = %d\nreadAsVersion = 1\n", s.AppliedIndex()+100), cluster.DryRunOptions{})
+		"[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = %d\nreadAsVersion = 1\n", s.AppliedIndex()+100), cluster.DryRunOptions{})
 	require.ErrorContains(t, err, "beyond the applied log")
 
 	_, err = dryRunRestatement(t, d,
-		"[restatement]\ntype = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 1\npredicate = 'now'\n", cluster.DryRunOptions{})
+		"[restatement]\ntopic = \"photos\"\nfromIndex = 1\ntoIndex = 2\nreadAsVersion = 1\npredicate = 'now'\n", cluster.DryRunOptions{})
 	require.ErrorContains(t, err, "deterministic")
 }
 
@@ -177,7 +177,7 @@ func TestRestatementDryRun_ComposesWithAppliedRestatementsAndPreviewsStaleness(t
 	awaitFeatureLevel(t, d)
 
 	require.NoError(t, proposeRestatementTOML(t, d, "backfill-v2", fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
+		"[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
 		idx["k2"], idx["k3"])))
 
 	server := httptest.NewServer(new(webhookRecorder).handler())
@@ -190,7 +190,7 @@ func TestRestatementDryRun_ComposesWithAppliedRestatementsAndPreviewsStaleness(t
 	// Rehearse the SAME rebind again: it overlaps the applied restatement and —
 	// because the fold composes — changes nothing anymore.
 	rep, err := dryRunRestatement(t, d, fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
+		"[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
 		idx["k2"], idx["k3"]), cluster.DryRunOptions{})
 	require.NoError(t, err)
 	require.Equal(t, 2, rep.Matched)
@@ -214,7 +214,7 @@ func TestRestatementDryRun_BudgetTruncatesHonestly(t *testing.T) {
 	idx := seedRestatementDryRunRows(t, d, s)
 
 	rep, err := dryRunRestatement(t, d, fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
+		"[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
 		idx["k1"], idx["k4"]), cluster.DryRunOptions{MaxEntries: 1})
 	require.NoError(t, err)
 	require.Equal(t, "partial", rep.Coverage)
@@ -236,7 +236,7 @@ func TestRestatementDryRun_BelowFeatureLevelStillRehearses(t *testing.T) {
 
 	idx := seedRestatementDryRunRows(t, d, s)
 	rep, err := dryRunRestatement(t, d, fmt.Sprintf(
-		"[restatement]\ntype = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
+		"[restatement]\ntopic = \"photos\"\nfromIndex = %d\ntoIndex = %d\nreadAsVersion = 2\nfromVersion = 1\n",
 		idx["k2"], idx["k3"]), cluster.DryRunOptions{})
 	require.NoError(t, err, "rehearsal must work below the feature level — it admits nothing")
 	require.Equal(t, 2, rep.Matched)

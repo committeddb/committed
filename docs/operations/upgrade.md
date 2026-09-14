@@ -59,11 +59,12 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
    orchestrator's kill grace period are set per
    [shutdown.md](shutdown.md) so the graceful path isn't `SIGKILL`ed
    mid-drain.
-5. **Plan to re-POST every `sql-projection` syncable right after upgrading
-   to 0.8.0.** 0.8.0 removes that deprecated spelling: a config stored
-   under it parks (not admissible, never retried) on the upgraded binary
-   until it is re-POSTed as `type = "projection"` with a `[projection]`
-   section and its array tables under their plural names
+5. **Plan to re-POST every projection syncable right after upgrading to
+   0.8.0.** This is not only the deprecated `sql-projection` spelling: 0.8.0
+   also renamed the array tables to plural nouns, so a 0.7.10 projection
+   parks whichever type name it used. A parked config is not admissible and
+   is never retried; it resumes when re-POSTed as `type = "projection"` with
+   a `[projection]` section and its array tables under their plural names
    (`[[projection.sources]]`, `[[projection.stages]]`,
    `[[…aggregate.fields]]`, `[[…aggregate.scalars]]`, `[[…lookup.fields]]`,
    `[[…stages.joins]]`). 0.7.10 rejects the plural tables, so the re-POST
@@ -262,6 +263,15 @@ same quorum rule applies in reverse.
   admissible under this binary"); re-POST it without the key. The setting
   never took effect before, so nothing about its behavior changes except
   that you now learn about it.
+- **0.8.0 renames two config keys.** A projection's array tables take plural
+  nouns (`[[projection.sources]]`, `[[projection.stages]]`, and the nested
+  `fields` / `scalars` / `joins`), and a restatement names its subject with
+  `topic` rather than `type` — `type` means the config KIND everywhere else
+  in the vocabulary. A stored config under an old spelling parks on the
+  upgraded binary with the rename named in its refusal; re-POST it renamed
+  and the syncable resumes with its stores and checkpoint. This applies to a
+  0.7.10 projection whether it said `type = "sql-projection"` or already said
+  `type = "projection"`.
 - **Hold 0.8.0-only vocabulary until the roll completes.** The flip side
   of the point above: a 0.7.x member accepts a config document and silently
   ignores every key it does not read, and a config is parsed by whichever

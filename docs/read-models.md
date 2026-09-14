@@ -1022,7 +1022,7 @@ syncable reads through.
 
 ```toml
 [restatement]
-type = "photos"           # the type (topic) whose readings rebind
+topic = "photos"           # the type (topic) whose readings rebind
 fromIndex = 100           # inclusive raft-index range of EXISTING actuals
 toIndex = 250
 readAsVersion = 2       # the version matching entities read as
