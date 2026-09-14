@@ -502,6 +502,24 @@ type CheckpointPolicy struct {
 	MaxAge time.Duration
 }
 
+// RefuseCheckpointPolicy is for a syncable kind that cannot honor the
+// [syncable] envelope's checkpoint cadence. The keys are in the closed
+// vocabulary, so they parse — but a kind that does not batch has nothing to
+// apply them to, and accepting-then-ignoring is exactly the class the closed
+// vocabulary exists to kill (README told operators to raise checkpointEvery
+// on kinds that never read it). reason names the kind's own knob instead.
+func RefuseCheckpointPolicy(v *ParsedConfig, kind, reason string) error {
+	for _, key := range []string{"checkpointEvery", "checkpointMaxAge"} {
+		if v.IsSet("syncable." + key) {
+			return &FieldError{
+				Field: "syncable." + key,
+				Issue: fmt.Sprintf("a %s syncable cannot honor a checkpoint cadence: %s", kind, reason),
+			}
+		}
+	}
+	return nil
+}
+
 // CheckpointConfigurable is the optional Syncable extension that carries a
 // CheckpointPolicy. The worker type-asserts it (exactly like BatchSyncable);
 // a syncable that doesn't implement it runs at the default cadence. The

@@ -2,6 +2,7 @@ package sql_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -82,3 +83,64 @@ func TestProjection_RemovedNestedSpellingsNameTheirReplacement(t *testing.T) {
 		})
 	}
 }
+
+// TestProjection_HonorsCheckpointPolicy pins that the [syncable] envelope's
+// checkpoint cadence reaches a projection. It was accepted and inert before —
+// the README told operators to raise it on a projection, and nothing read it.
+func TestProjection_HonorsCheckpointPolicy(t *testing.T) {
+	p := &sql.ProjectionSyncableParser{}
+	v, err := cluster.ParseConfigBytes("text/toml", []byte(projectionCheckpointTOML))
+	require.NoError(t, err)
+
+	storage := &TestDatabaseStorage{dbs: map[string]cluster.Database{"bff": &TestDatabase{}}}
+	cfg, err := p.ParseConfig(v, storage)
+	require.NoError(t, err)
+	require.Equal(t, 7, cfg.Checkpoint.Every)
+	require.Equal(t, 250*time.Millisecond, cfg.Checkpoint.MaxAge)
+}
+
+// TestProjection_CheckpointPolicyResolvesThroughWrappers proves the cadence
+// actually reaches the worker, not just the config: the worker resolves it
+// with cluster.SyncableAs over the unwrap chain, and a projection is wrapped
+// (interpretation, and migration in always-current mode) before it gets
+// there. Implementing the method is not enough on its own — this is what
+// makes the config key take effect.
+func TestProjection_CheckpointPolicyResolvesThroughWrappers(t *testing.T) {
+	p := &sql.ProjectionSyncableParser{}
+	v, err := cluster.ParseConfigBytes("text/toml", []byte(projectionCheckpointTOML))
+	require.NoError(t, err)
+	cfg, err := p.ParseConfig(v, &TestDatabaseStorage{dbs: map[string]cluster.Database{"bff": &TestDatabase{}}})
+	require.NoError(t, err)
+
+	proj := sql.NewProjection(&sql.DB{}, cfg, nil, "p")
+	cc, ok := cluster.SyncableAs[cluster.CheckpointConfigurable](cluster.Syncable(proj))
+	require.True(t, ok, "the worker must find CheckpointConfigurable on a projection")
+	require.Equal(t, 7, cc.CheckpointPolicy().Every)
+}
+
+// projectionCheckpointTOML is a minimal complete projection that declares a
+// checkpoint cadence in the [syncable] envelope.
+const projectionCheckpointTOML = `[syncable]
+name = "p"
+type = "projection"
+checkpointEvery = 7
+checkpointMaxAge = "250ms"
+
+[projection]
+db = "bff"
+table = "t"
+primaryKey = "id"
+topic = "a"
+keyPath = "$.id"
+
+[[projection.columns]]
+name = "id"
+type = "TEXT"
+
+[[projection.columns]]
+name = "title"
+type = "TEXT"
+
+[[projection.rules]]
+set = [{ column = "title", from = "$.title" }]
+`

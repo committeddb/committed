@@ -35,6 +35,10 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 	if err := v.RejectUnknownKeys("iceberg", icebergKeys...); err != nil {
 		return nil, err
 	}
+	if err := cluster.RefuseCheckpointPolicy(v, "iceberg",
+		"it batches by `flushRows` / `flushInterval` in the [iceberg] section instead"); err != nil {
+		return nil, err
+	}
 	topic := v.GetString("iceberg.topic")
 	if topic == "" {
 		return nil, &cluster.FieldError{Field: "iceberg.topic", Issue: "required"}

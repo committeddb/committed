@@ -567,22 +567,28 @@ checkpointEvery   = 500      # checkpoint once per 500 successful syncs (default
 checkpointMaxAge  = "1s"     # ...or once 1s elapses since the first pending one
 ```
 
-- **`checkpointEvery`** (default `1`) — persist the checkpoint once per this
-  many successful syncs. The worker always also flushes when it catches up
-  (reaches the end of the log), so a low-traffic syncable never lags its
-  checkpoint regardless of this value.
+- **`checkpointEvery`** — persist the checkpoint once per this many successful
+  syncs. Default `1` for a single syncable (`http`) and `2500` for a batch
+  syncable (`sql`, `projection`). The worker always also flushes when it
+  catches up (reaches the end of the log), so a low-traffic syncable never
+  lags its checkpoint regardless of this value.
 - **`checkpointMaxAge`** (a duration like `"500ms"`; default: no age bound for
   single syncables, 50ms for batch) — flush a pending checkpoint after this
   long even if `checkpointEvery` hasn't been reached.
 
-**Duplicate bound:** a crash re-delivers **at most `checkpointEvery`**
-already-synced proposals. The default of `1` re-delivers at most one — keep it
-at `1` for **non-idempotent** destinations (an HTTP webhook, an event stream: every
-duplicate is externally visible). Raise it only for **idempotent** destinations (the
-`sql` / `projection` dialects upsert, so a replay is a harmless no-op),
-where it trades that bounded duplicate exposure for substantially fewer raft
-round-trips on a fast destination. For a `BatchSyncable` (the SQL dialects)
-`checkpointEvery` is the batch size and `checkpointMaxAge` the batch-age flush.
+Both keys apply to the kinds that batch or checkpoint per sync — `sql`,
+`projection`, and `http`. `iceberg` batches by its own `flushRows` /
+`flushInterval`, and `loopback` checkpoints per Actual; both **refuse** these
+keys rather than accepting and ignoring them.
+
+**Duplicate bound:** a crash re-delivers already-synced proposals — at most
+`checkpointEvery` for a single syncable, and up to `checkpointEvery` plus the
+batch cap for a batch syncable, since the two are sized separately. Keep it at
+`1` for **non-idempotent** destinations (an HTTP webhook, an event stream:
+every duplicate is externally visible). Raise it only for **idempotent**
+destinations (the `sql` and `projection` kinds upsert, so a replay is a
+harmless no-op), where it trades that bounded duplicate exposure for
+substantially fewer raft round-trips on a fast destination.
 
 ### Testing
 

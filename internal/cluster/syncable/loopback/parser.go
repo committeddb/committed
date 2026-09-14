@@ -72,6 +72,10 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig) (*Config, error) {
 	if err := v.RejectUnknownKeys("loopback", loopbackKeys...); err != nil {
 		return nil, err
 	}
+	if err := cluster.RefuseCheckpointPolicy(v, "loopback",
+		"it checkpoints per Actual, so there is no batch to size or age out"); err != nil {
+		return nil, err
+	}
 	source := v.GetString("loopback.topic")
 	if source == "" {
 		return nil, &cluster.FieldError{Field: "loopback.topic", Issue: "required (the source topic to derive from)"}

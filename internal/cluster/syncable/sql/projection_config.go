@@ -277,6 +277,11 @@ type ProjectionConfig struct {
 	Columns    []ProjectionColumn
 	Sources    []ProjectionSource
 	Stages     []ProjectionStage
+	// Checkpoint is the per-syncable checkpoint cadence parsed from the common
+	// [syncable] section, exactly as the plain sql syncable carries it. A
+	// projection is a BatchSyncable, so Every is its batch size and MaxAge the
+	// batch-age flush; zero fields fall back to the worker's batch defaults.
+	Checkpoint cluster.CheckpointPolicy
 
 	// Single-source shorthand. The README single-topic form (and existing
 	// configs) set these top-level fields; applyDefaults folds them into one

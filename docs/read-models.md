@@ -1124,9 +1124,10 @@ knowingly, because nothing rebuilds them on your behalf.
 A syncable's `checkpointEvery` (TOML, `[syncable]` section) is its **checkpoint
 cadence**: how many synced records may accumulate before the resume checkpoint
 is durably persisted. It is also the crash re-delivery bound — a restart
-re-delivers at most that many already-synced records, which keyed syncables absorb
-idempotently. It does **not** control destination transaction size: batches are capped
-internally (a few hundred rows) regardless of cadence.
+re-delivers at most that many already-synced records, rounded up to the
+internal batch cap, which keyed syncables absorb idempotently. It does **not**
+control destination transaction size: the sink transaction is sized separately
+and capped internally (a few hundred rows) regardless of cadence.
 
 The cadence matters most during **replays** (initial destination builds, rebuilds):
 every checkpoint persist is a consensus round trip, and many syncables replaying

@@ -274,6 +274,14 @@ func projectionIdentity(c *ProjectionConfig) SyncableIdentity {
 // CREATE. It is idempotent — dropping an already-absent table is a no-op — and
 // reconstructable from the persisted config alone (it needs only the table
 // name + DB handle), which is what the delete/rebuild paths rely on. It never
+// CheckpointPolicy implements cluster.CheckpointConfigurable: the cadence the
+// operator declared in the [syncable] envelope. A projection is a
+// BatchSyncable, so Every is the batch size and MaxAge the batch-age flush;
+// zero fields fall back to the worker's batch defaults.
+func (p *Projection) CheckpointPolicy() cluster.CheckpointPolicy {
+	return p.config.Checkpoint
+}
+
 // touches prepared statements or the connection pool; call Close for those.
 func (p *Projection) Teardown(keep bool) (bool, error) {
 	// Self-bounded — see Syncable.Teardown for the rationale.

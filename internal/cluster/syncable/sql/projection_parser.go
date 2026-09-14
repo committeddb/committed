@@ -314,6 +314,16 @@ func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.Databa
 		Sources:    sources,
 		Stages:     stages,
 	}
+	// The [syncable] envelope's checkpoint cadence applies to a projection
+	// exactly as it does to the plain sql syncable — both are BatchSyncables,
+	// and README/read-models tell operators to raise it on a projection. It
+	// was accepted and inert here before, which is the class the closed
+	// vocabulary exists to kill.
+	policy, perr := cluster.ParseCheckpointPolicy(v)
+	if perr != nil {
+		return nil, fmt.Errorf("[projection.parser] %w", perr)
+	}
+	config.Checkpoint = policy
 	config.applyDefaults()
 	return config, nil
 }

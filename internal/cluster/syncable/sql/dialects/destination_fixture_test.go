@@ -240,9 +240,14 @@ func TestDestinationReferenceFixtureCoversTheVocabulary(t *testing.T) {
 	for _, c := range []any{fx.hist, fx.keyed, fx.values, fx.single, fx.movies, fx.jobs, fx.items} {
 		walk(reflect.ValueOf(c))
 	}
+	// Excluded: fields that carry no destination RENDERING. A resolved
+	// database and its id identify where rows go, not what they look like,
+	// and a checkpoint cadence is worker timing — both syncable and
+	// projection carry one.
 	excluded := map[string]bool{
 		"Config.Database": true, "Config.DatabaseID": true, "Config.Checkpoint": true,
 		"ProjectionConfig.Database": true, "ProjectionConfig.DatabaseID": true,
+		"ProjectionConfig.Checkpoint": true,
 	}
 	var missing []string
 	for _, tp := range []reflect.Type{
