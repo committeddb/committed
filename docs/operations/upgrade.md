@@ -228,10 +228,15 @@ After the last node:
 > clean. After the roll completes, treat it as one-way: an older owner of
 > such an ingestable may re-ingest the transaction in flight at its last
 > checkpoint, which on a keyless (append) destination is a permanent
-> duplicate. A type created after the roll completed also carries its
-> submitted document (feature level 7); a member rolled back below 0.8.0
-> keeps the type but not the document, and its read-back is a name-only
-> summary again.
+> duplicate. Rolling a member back below 0.8.0 also makes it discard, on
+> any type or checkpoint it applies from then on, the fields 0.8.0 added to
+> those records (feature level 7): an older binary rebuilds each record
+> from its own struct before storing it, so the submitted document, an
+> announce-typed type's `schemaChangeTopic`, a declared `nonConvertible`
+> break, and a checkpoint's interpretation coordinate are dropped on that
+> member only, permanently, and ride its snapshots. Types are never
+> re-proposed, so a type that lost its destination or its break
+> declaration must be re-POSTed after the member is upgraded again.
 
 If the new binary misbehaves on a node — fails to start, fails `/ready`,
 or shows a regression — roll that node back the same way you upgraded it:
@@ -263,11 +268,14 @@ same quorum rule applies in reverse.
   member receives or runs it. Until every member is 0.8.0, do not POST
   anything only 0.8.0 understands — the census keys (`census`,
   `censusValues`, `censusValueLimit`), `snapshotReaders` and the renamed
-  `[sql.options]` keys, `schemaChangeTopic` and the `validate` words,
-  `nonConvertible`, `zone`, Iceberg syncables, and restatements. Only
-  `zone` refuses below its feature level; the rest an older member drops
-  without a word, and the config then runs with the setting missing. The
-  same rule, stated for one case, is the ingest-options note below.
+  `[sql.options]` keys, Iceberg syncables, and the `validate` words.
+  Committed refuses the dangerous ones for you rather than trusting the
+  runbook: a `zone`-pinned syncable, a restatement, an announce-typed type
+  (`schemaChangeTopic`), and a `nonConvertible` version bump are all
+  answered `503 cluster_below_feature_level` until every member is 0.8.0 —
+  retry after the roll. The rest an older member drops without a word, and
+  the config then runs with the setting missing. The same rule, stated for
+  one case, is the ingest-options note below.
 - **0.8.0 renames the ingest options.** `[sql.options]` keys are now spelled
   like every other key (`slotName`, `pollInterval`, `batchSize`,
   `snapshotReaders`; `publication` is unchanged), numbers are numbers rather

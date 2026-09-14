@@ -14,6 +14,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/http"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/version"
 )
 
 const tripwireSchema = `{"type":"object","properties":{"caption":{"type":"string"},"size":{"type":"number"}},"additionalProperties":false}`
@@ -66,7 +67,7 @@ func readContractExtensions(t *testing.T, s *wal.Storage, cursor string) []*clus
 // new shape announces again; conformant payloads and delete tombstones never
 // announce.
 func TestTripwire_AnnouncesEachDivergentShapeOnce(t *testing.T) {
-	d, s := newWalDB(t)
+	d, s := newWalDBAtFeatureLevel(t)
 	sv := &http.SchemaValidator{}
 	d.SetTypeSchemaValidator(sv)
 	d.SetEntityValidator(sv)
@@ -138,10 +139,15 @@ func TestTripwire_DedupeSurvivesRestart(t *testing.T) {
 	p := parser.New()
 	s1, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
-	d1 := db.New(uint64(1), db.Peers{1: ""}, s1, p, nil, nil, db.WithTickInterval(testTickInterval))
+	// Announce-typed types are gated on the cluster feature level, so this
+	// node must announce its own before it can declare the fixtures.
+	d1 := db.New(uint64(1), db.Peers{1: ""}, s1, p, nil, nil,
+		db.WithTickInterval(testTickInterval), db.WithVersionAnnounce())
 	sv := &http.SchemaValidator{}
 	d1.SetTypeSchemaValidator(sv)
 	d1.SetEntityValidator(sv)
+	require.Eventually(t, func() bool { return d1.FeatureEnabled(version.FeatureLevel) },
+		10*time.Second, 10*time.Millisecond, "feature level never announced")
 
 	tp := proposeAnnounceFixtures(t, d1, s1)
 	divergent := []byte(`{"caption":7,"ai_labels":{"model":"v9"}}`)
@@ -175,7 +181,7 @@ func TestTripwire_DedupeSurvivesRestart(t *testing.T) {
 // source position, and that ingest never pauses (the data commits and the
 // highwater advances normally).
 func TestTripwire_IngestWorkerLanesAnnounce(t *testing.T) {
-	d, s := newWalDB(t)
+	d, s := newWalDBAtFeatureLevel(t)
 	sv := &http.SchemaValidator{}
 	d.SetTypeSchemaValidator(sv)
 	d.SetEntityValidator(sv)
@@ -219,7 +225,7 @@ func TestTripwire_IngestWorkerLanesAnnounce(t *testing.T) {
 // itself be announce-typed; a destination without announce is refused; and
 // self-reference is refused.
 func TestProposeType_AnnounceAdmission(t *testing.T) {
-	d, _ := newWalDB(t)
+	d, _ := newWalDBAtFeatureLevel(t)
 
 	base := "[type]\nname = \"T\"\nschemaType = \"JSONSchema\"\nschema = '{\"type\":\"object\"}'"
 

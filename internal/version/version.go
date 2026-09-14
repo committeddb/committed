@@ -89,13 +89,21 @@ var (
 // ingestable's record has flipped it stays transaction-scoped (the
 // transition is one-way per ingestable).
 //
-// Level 7 also gates the retained type document (db.featureLevelTypeDocument):
-// a type entry carries the operator's submitted document for the read-backs
-// to return, and a pre-level-7 binary applying that entry re-marshals the
-// type from its own struct, dropping the field — members would then disagree
-// on what the type reads back as. The document is proposed only once the
-// cluster minimum reaches 7; a type written earlier reads back synthesized
-// until a document is re-submitted for it.
+// Level 7 also gates every field 0.8.0 added to two replicated records, for
+// one reason: their apply paths unmarshal the entry into the binary's own
+// struct and re-marshal it into the store, so a field the applying binary
+// does not know is DROPPED rather than ignored, permanently and per member.
+//
+//   - The type record (db.featureLevelTypeRecord) — the submitted document is
+//     cleared below the level (the read-back synthesizes without it), while
+//     an announce-typed type and a nonConvertible bump are REFUSED: a member
+//     holding either with its field discarded would have a contract that can
+//     never announce, or a break that admits the always-current syncables it
+//     exists to refuse.
+//   - The syncable checkpoint's interpretation coordinate
+//     (db.featureLevelInterpretationPin) — cleared below the level, since a
+//     checkpoint cannot be refused; every member then agrees on 0 and the
+//     first bump after the roll records the real coordinate.
 const FeatureLevel uint64 = 7
 
 // Info is the JSON shape returned by /version and printed by the

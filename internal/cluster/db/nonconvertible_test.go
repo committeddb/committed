@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -13,11 +14,13 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 	"github.com/committeddb/committed/internal/cluster/migration"
 	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // newWalDBWithHTTPSyncables is newWalDB with the webhook syncable parser
 // registered, so tests can POST real always-current syncables without a
-// destination database.
+// destination database. It announces and waits for the feature level, since a
+// nonConvertible bump is gated on it (db.featureLevelTypeRecord).
 func newWalDBWithHTTPSyncables(t *testing.T) (*db.DB, *wal.Storage) {
 	t.Helper()
 	dir := t.TempDir()
@@ -25,8 +28,11 @@ func newWalDBWithHTTPSyncables(t *testing.T) (*db.DB, *wal.Storage) {
 	p.AddSyncableParser("http", &synchttp.SyncableParser{})
 	s, err := wal.Open(dir, p, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
-	d := db.New(uint64(1), db.Peers{1: ""}, s, p, nil, nil, db.WithTickInterval(testTickInterval))
+	d := db.New(uint64(1), db.Peers{1: ""}, s, p, nil, nil,
+		db.WithTickInterval(testTickInterval), db.WithVersionAnnounce())
 	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
+	require.Eventually(t, func() bool { return d.FeatureEnabled(version.FeatureLevel) },
+		10*time.Second, 10*time.Millisecond, "feature level never announced")
 	return d, s
 }
 
@@ -47,7 +53,7 @@ func ncSyncableTOML(mode string) string {
 // without a schema change; once declared it is immutable and must be restated
 // on in-place edits; and a declared break persists on the version record.
 func TestNonConvertible_IntentDeclaration(t *testing.T) {
-	d, s := newWalDB(t)
+	d, s := newWalDBAtFeatureLevel(t)
 
 	// Two intents at once → refused.
 	err := d.ProposeType(testCtx(t), &cluster.Configuration{

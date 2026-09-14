@@ -76,16 +76,29 @@ func (db *DB) MigrationEditDependents(typeID string) []cluster.DependentSyncable
 	return out
 }
 
-// featureLevelTypeDocument gates retaining a type's submitted document
-// (cluster.Type.Document): a pre-level-7 binary applies the entry by
-// unmarshaling it into its own Type and re-marshaling that, which drops the
-// field it does not know — so a document committed mid-roll would be
-// retained on some members and not others, and the read-back (served from
-// each member's own store) would differ by member. Until every member
-// announces version.FeatureLevel >= 7 the document is not proposed, and the
-// type reads back synthesized; the first document submitted after the roll
-// completes is adopted (see ProposeType).
-const featureLevelTypeDocument uint64 = 7
+// featureLevelTypeRecord gates every field 0.8.0 added to the type record.
+//
+// The hazard is a property of the RECORD, not of any one feature: the apply
+// path unmarshals the entry into the binary's own Type and re-marshals that
+// into its store (wal.Storage.saveType). Proto3's "old binaries ignore
+// unknown fields" therefore does not hold here — a field the applying binary
+// has no struct field for is DROPPED, and types are never re-proposed, so the
+// loss is permanent on that member and rides its snapshots to new ones. Any
+// field added to cluster.Type from 0.8.0 on belongs behind this gate.
+//
+// Two enforcements, by what the loss costs:
+//
+//   - Document/DocumentMimeType are CLEARED below the level. Losing them costs
+//     a read-back nicety — the type reads back synthesized from its fields —
+//     so the write still means what it says on every member.
+//   - SchemaChangeTopic and NonConvertible are REFUSED below the level. They
+//     are not decoration: a member that stored an announce-typed type without
+//     its destination has a contract that can never announce, and a member
+//     that stored a declared break as convertible ADMITS always-current
+//     syncables the break exists to refuse and delivers unconverted rows.
+//     Storing either as absent is a correctness hazard, so the config waits
+//     for the cluster instead (the same posture as a zone-pinned syncable).
+const featureLevelTypeRecord uint64 = 7
 
 func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ...cluster.ProposeTypeOption) error {
 	o := cluster.ResolveProposeTypeOptions(opts)
@@ -93,8 +106,25 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 	if err != nil {
 		return cluster.NewConfigError(err)
 	}
-	if !db.featureEnabled(featureLevelTypeDocument) {
+	if !db.featureEnabled(featureLevelTypeRecord) {
+		// Cosmetic: the read-back synthesizes without it.
 		t.Document, t.DocumentMimeType = nil, ""
+		// Load-bearing: refuse rather than commit a record whose meaning
+		// depends on a field half the cluster would discard.
+		if t.Validate == cluster.ValidateAnnounce {
+			return &cluster.ClusterBelowFeatureLevelError{
+				Feature:    "announce-typed types (schemaChangeTopic)",
+				Required:   featureLevelTypeRecord,
+				ClusterMin: db.clusterMinFeatureLevel(),
+			}
+		}
+		if t.NonConvertible {
+			return &cluster.ClusterBelowFeatureLevelError{
+				Feature:    "a nonConvertible version bump",
+				Required:   featureLevelTypeRecord,
+				ClusterMin: db.clusterMinFeatureLevel(),
+			}
+		}
 	}
 
 	// Admission schema check: compile the entity schema here so a broken one is a

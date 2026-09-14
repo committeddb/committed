@@ -20,6 +20,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	"github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/internal/version"
 )
 
 // The real-engine fixture for migrated handler groups. Handlers that hold
@@ -437,3 +438,15 @@ type attachedSink struct{ *recorderSink }
 
 func (attachedSink) Teardown(bool) (bool, error)                   { return false, nil }
 func (attachedSink) OwnsDestination(context.Context) (bool, error) { return false, nil }
+
+// newEngineAtFeatureLevel is newEngine on a node that has announced this
+// binary's feature level and reached it — the shape production always has,
+// and what the gated records (an announce-typed type, a nonConvertible bump)
+// require before they can be proposed.
+func newEngineAtFeatureLevel(t *testing.T) *engine {
+	t.Helper()
+	e := newEngineOpts(t, db.WithVersionAnnounce())
+	require.Eventually(t, func() bool { return e.d.FeatureEnabled(version.FeatureLevel) },
+		10*time.Second, 10*time.Millisecond, "feature level never announced")
+	return e
+}

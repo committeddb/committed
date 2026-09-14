@@ -62,7 +62,8 @@ func TestValidateEntityData(t *testing.T) {
 // standing is refused 409 stranded_always_current naming the consumer, and
 // the ?force=true re-POST acknowledges the stranding and commits.
 func TestAddType_StrandedSyncablesForceFlow(t *testing.T) {
-	e := newEngine(t)
+	// A nonConvertible bump is gated on the cluster feature level.
+	e := newEngineAtFeatureLevel(t)
 	e.addType(t, "photos", "photos")
 	e.addAlwaysCurrentRecorder(t, "rec-1", "photos")
 

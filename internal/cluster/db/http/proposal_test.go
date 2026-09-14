@@ -199,7 +199,8 @@ func TestAddProposal_AnnounceCommitsDivergentPayload(t *testing.T) {
 
 	// Announce: divergence flows through to the sink. validate = "announce" requires
 	// schemaChangeTopic — the type that receives ContractExtension events.
-	e := newEngine(t)
+	// An announce-typed type is gated on the cluster feature level.
+	e := newEngineAtFeatureLevel(t)
 	e.addType(t, "capEvents", "capEvents")
 	e.addTypeWithSchemaType(t, "cap", "cap", "JSONSchema", schema, "announce", "schemaChangeTopic = \"capEvents\"\n")
 	e.addRecorderSyncable(t, "rec-1", "cap")

@@ -680,3 +680,18 @@ func SetMembershipSettleTimeoutForTest(d time.Duration) func() {
 // ingest dedup regime waits on, so the gate test announces relative to it
 // rather than to the binary's top level.
 const FeatureLevelTxnScopedDedupForTest = featureLevelTxnScopedDedup
+
+// ProposeSyncableIndexWithPinForTest proposes a checkpoint carrying an
+// interpretation coordinate, so a test can observe what the record gate does
+// to it below and at the required level.
+func (db *DB) ProposeSyncableIndexWithPinForTest(ctx context.Context, id string, index, pin uint64) error {
+	return db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: index, InterpretationIndex: pin})
+}
+
+// FeatureLevelTypeRecordForTest and FeatureLevelInterpretationPinForTest are
+// the levels the 0.8.0 record additions wait on, so a test announces relative
+// to the gate rather than to the binary's top level.
+const (
+	FeatureLevelTypeRecordForTest        = featureLevelTypeRecord
+	FeatureLevelInterpretationPinForTest = featureLevelInterpretationPin
+)

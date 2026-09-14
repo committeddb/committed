@@ -43,6 +43,11 @@ func (s *Storage) saveSyncableIndex(t *cluster.SyncableIndex) error {
 			return b.Delete([]byte(t.ID))
 		}
 
+		// NOTE: this re-marshals from THIS binary's struct, so a field the
+		// binary does not know is dropped rather than carried through — which
+		// is why every field added to this record from 0.8.0 on is gated on
+		// the cluster feature level (see db.featureLevelTypeRecord). Add a
+		// field here and you must add its gate.
 		bs, err := t.Marshal()
 		if err != nil {
 			return fmt.Errorf("[wal.syncable-index] marshal: %w", err)

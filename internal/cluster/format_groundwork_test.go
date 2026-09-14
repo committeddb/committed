@@ -68,3 +68,36 @@ func TestSyncableIndexZeroInterpretationWireBackCompatible(t *testing.T) {
 	require.NoError(t, out.Unmarshal(want))
 	require.Zero(t, out.InterpretationIndex, "pre-feature checkpoint bytes decode to 0 = nothing folded")
 }
+
+// TestRemarshaledRecordFieldCounts is a tripwire, not a claim about content.
+//
+// Five apply paths (saveType, saveSyncableIndex, saveDatabase, saveSyncable,
+// saveIngestable) rebuild their record from THIS binary's struct before
+// storing it, so a field the applying binary does not know is destroyed
+// rather than carried through — permanently on that member, and onward via
+// its snapshots. Proto3's "old binaries ignore unknown fields" does not save
+// these records. Every field added to one of them must therefore be gated on
+// the cluster feature level at its emitting site (db.featureLevelTypeRecord,
+// db.featureLevelInterpretationPin).
+//
+// Adding a field here fails this test. That is the point: bump the count in
+// the same commit that adds the gate, and say which gate in the message.
+func TestRemarshaledRecordFieldCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		m     proto.Message
+		want  int
+		gated string
+	}{
+		{"LogType", &clusterpb.LogType{}, 13, "db.featureLevelTypeRecord"},
+		{"LogSyncableIndex", &clusterpb.LogSyncableIndex{}, 3, "db.featureLevelInterpretationPin"},
+		{"LogConfiguration", &clusterpb.LogConfiguration{}, 4, "no 0.8.0 additions yet — gate the first one"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.m.ProtoReflect().Descriptor().Fields().Len()
+			require.Equal(t, tc.want, got,
+				"%s is re-marshaled on apply, so a new field is DROPPED by any binary that predates it: "+
+					"gate its emission on the cluster feature level (%s), then bump this count", tc.name, tc.gated)
+		})
+	}
+}
