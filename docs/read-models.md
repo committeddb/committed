@@ -24,7 +24,7 @@ not by default:
 |---|---|---|
 | A derived/denormalized table you query directly — a BFF row, a flat table replacing a complex join, current state per entity | **`projection`** | It maintains the table *incrementally, per event*: continuously current (no refresh step), folds **multiple topics into one row**, aggregates children into array columns, enriches from other topics. This is committed's centerpiece use case. |
 | Raw per-table replicas — ad-hoc SQL, joins you own, feeding views/BI on your terms | plain **`sql`** syncable with a `primaryKey` (a mirror) | Faithful keyed copies of source tables. If you build a materialized view over mirrors, *you* own its refresh cost and staleness — committed keeps only the mirrors current. |
-| One row per **event** — an audit/history log | plain **`sql`** syncable with no `primaryKey` | Append-only, replay-safe history. |
+| One row per **event** — an audit/history log | plain **`sql`** syncable with no `primaryKey` | Append-only, replay-safe history. Add `keyColumn` if the topic can carry deletes — without it they dead-letter (below). |
 
 The trade to understand: a materialized view over mirrors is stale from the
 moment its (often expensive) refresh completes; a projection is current
@@ -82,6 +82,29 @@ is already idempotent on the key.) Because the sidecar name is derived from the
 table name, a keyless syncable's table must be short enough that
 `<table>__committed_applied` fits the database's 63-char identifier limit;
 committed rejects a longer one at config time.
+
+**A keyless table cannot honor a delete unless you tell it where the key is.**
+A keyed syncable deletes by its `primaryKey`; a keyless one has no key to bind,
+so a delete tombstone — including a
+[right-to-be-forgotten erasure](operations/rtbf.md) — **dead-letters** rather
+than being silently dropped, and the syncable keeps running. Set `keyColumn` to
+the column whose value equals the entity's key and deletes translate to
+`DELETE FROM <table> WHERE <keyColumn> = ?`, removing the subject's whole
+history from the table:
+
+```toml
+[sql]
+db = "bff"; table = "order_events"      # no primaryKey: append-only history
+keyColumn = "order_id"                  # ...but deletes still erase by this column
+[[sql.mappings]]
+jsonPath = "$.order_id"; column = "order_id"; type = "TEXT"
+```
+
+`keyColumn` is single-column and cannot be combined with a composite
+`primaryKey`. Leaving it unset is a legitimate choice for a topic that never
+receives deletes — committed logs a warning at config time naming the
+consequence, so the decision is yours and visible. If you leave it unset on a
+topic that may carry erasures, erasing that table is your responsibility.
 
 You will also find a small table called `committed__destinations` in the
 destination database: one row per projected table, a note saying which

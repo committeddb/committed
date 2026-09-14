@@ -33,11 +33,21 @@ EOF
 A delete carries no payload and covers the key's whole history: one delete
 per `(type, key)` is enough regardless of how many events the subject has.
 Every syncable consuming the topic translates it downstream in log order — a
-SQL syncable executes `DELETE ... WHERE key = ...`, a webhook receiver gets
+keyed SQL syncable executes `DELETE ... WHERE <primaryKey> = ...`, a projection
+removes the key from the rows and aggregates it fed, a webhook receiver gets
 `op: "delete"` — so the read models you maintain through committed converge
 on their own. After all deletes are committed, note any node's
 `appliedIndex` (`GET /v1/node/status`): that index is your erasure watermark
 for the verification loop below.
+
+> **One shape cannot.** A keyless (append/history) `sql` syncable has no key to
+> bind a delete against. Unless it declares
+> [`keyColumn`](../read-models.md#history-tables-vs-read-models), the delete
+> **dead-letters** instead of being silently dropped: the erasure does not
+> reach that table, and clearing it is yours. committed warns about this at
+> config time, and the dead-letter is visible on
+> `GET /v1/syncable/{id}/errors`. Check your keyless syncables before you rely
+> on the verification loop below.
 
 ## 2. Physical scrub — automatic, or expedited
 

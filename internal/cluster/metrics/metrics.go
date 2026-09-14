@@ -48,6 +48,7 @@ type Metrics struct {
 	typeMigrationErrors   metric.Int64Counter
 	typeMigrationDuration metric.Float64Histogram
 	entityKindMisuse      metric.Int64Counter
+	syncableUndeletable   metric.Int64Counter
 
 	configBuildErrors metric.Float64Gauge
 
@@ -172,6 +173,9 @@ func New(meter metric.Meter) *Metrics {
 
 	m.entityKindMisuse, _ = meter.Int64Counter("committed.entity_kind.misuse",
 		metric.WithDescription("Syncable configs parsed against a topic whose declared entity kind they mismatch (e.g. a leaf-mapped sql syncable on an event-kind topic). Advisory: the config still runs, but the combination is a known bug class — see README § Entity kinds."))
+
+	m.syncableUndeletable, _ = meter.Int64Counter("committed.syncable.undeletable",
+		metric.WithDescription("Keyless sql syncable configs parsed with no keyColumn — they cannot translate a delete, so every delete on the topic (a right-to-be-forgotten erasure included) dead-letters. Advisory: the config still runs; the labelled table is yours to erase. See docs/operations/rtbf.md."))
 
 	m.configBuildErrors, _ = meter.Float64Gauge("committed.config.build_errors",
 		metric.WithDescription("Configs (database/ingestable/syncable) persisted on this node but not buildable locally — usually a missing ${VAR} secret. Non-zero means a degraded config, not a down node."))
@@ -573,4 +577,17 @@ func (m *Metrics) SetWriteAdmission(admitted bool, reason string) {
 // confirmed-healthy voter.
 func (m *Metrics) DiskLeadershipTransfer() {
 	m.diskLeadershipTransfers.Add(context.Background(), 1)
+}
+
+// SyncableUndeletable counts one parse of a keyless sql syncable that names no
+// keyColumn — a destination that cannot honor a delete. Labelled by the
+// destination rather than the syncable id (which never reaches this layer),
+// because the operator's question is which TABLE holds data an erasure cannot
+// reach.
+func (m *Metrics) SyncableUndeletable(topic, table string) {
+	m.syncableUndeletable.Add(context.Background(), 1,
+		metric.WithAttributes(
+			attribute.String("topic", topic),
+			attribute.String("table", table),
+		))
 }

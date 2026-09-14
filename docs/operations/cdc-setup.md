@@ -259,9 +259,11 @@ if you fan a Postgres topic into a projection or history table.
 > source for right-to-be-forgotten — lost in the gap is exactly what a keyed
 > destination's sweep removes. On keyless and projection syncables it is **retained**: the
 > subject's PII lingers with no delete. committed's own RTBF path (a delete
-> proposal + event-log scrub) still erases these destinations when the erasure goes
-> *through* committed; the exposure is specifically a source-side erasure
-> committed never captured. Treat a re-snapshot `WARN` on a PII-bearing
+> proposal + event-log scrub) reaches a projection, and reaches a keyless table
+> only if it declares [`keyColumn`](../read-models.md#history-tables-vs-read-models)
+> — without one the delete dead-letters and that table is yours to clear. So the
+> exposure is a source-side erasure committed never captured, plus any keyless
+> destination with no delete key. Treat a re-snapshot `WARN` on a PII-bearing
 > keyless or projection syncable as a **manual-erasure** action item, not just stale data.
 
 ### What to watch

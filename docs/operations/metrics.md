@@ -128,6 +128,7 @@ Labels are shown in `{braces}`.
 | `committed.worker.replaces` | Worker replacements (config re-apply, rebuild). (counter) |
 | `committed.config.build_errors` | Configs this node persisted but could not build (degraded — usually a missing `${VAR}`). Diagnose with `GET /v1/node/status`. |
 | `committed.entity_kind.misuse` | Entities whose declared kind doesn't match how they're used (config warning). (counter) |
+| `committed.syncable.undeletable` | Keyless `sql` syncable configs parsed with no `keyColumn`, by `{topic, table}` — the table cannot honor a delete, so an erasure dead-letters and clearing that table is yours (see [rtbf.md](rtbf.md)) (counter). |
 | `committed.http.request_too_large` | HTTP requests rejected for exceeding the body-size limit. (counter) |
 
 ## Related runbooks
