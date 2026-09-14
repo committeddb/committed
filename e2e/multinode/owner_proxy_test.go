@@ -26,10 +26,15 @@ import (
 //     whole request to the pinned owner's announced API URL — the scan
 //     position lives only in the owner's worker, so its presence in the
 //     response IS the proof of the hop.
-//  2. rebuild POSTed at a non-owner forwards to the pinned owner and runs
-//     there (db.RebuildSyncable refuses on a non-owner, so a 202 can only
-//     come from the owner); a request already carrying the forwarded marker
-//     is refused (503 not_syncable_owner), never re-forwarded.
+//  2. rebuild POSTed at a non-owner forwards to the pinned owner and is
+//     ADMITTED there. RebuildSyncable checks ownership first and only then
+//     probes the destination, so a non-owner answers 503 not_syncable_owner
+//     while the owner — and only the owner — reaches the destination probe.
+//     This syncable is a webhook, which owns nothing committed can drop, so
+//     the owner's answer is 409 destination_not_droppable: reaching that
+//     code at all is the proof of the hop. A request already carrying the
+//     forwarded marker is refused (503 not_syncable_owner), never
+//     re-forwarded.
 //  3. With the owner dead, the status read SOFT-DEGRADES: 200 with every
 //     replicated field and ownerNode naming who to ask, readPosition absent
 //     — not a 503.
@@ -80,11 +85,18 @@ func TestMultiNodeSyncableOwnerProxy(t *testing.T) {
 	require.Nil(t, st2.ReadPosition, "a non-owner answering locally must not synthesize readPosition")
 	require.Equal(t, owner.id, st2.OwnerNode)
 
-	// Phase 2: rebuild through the non-owner reaches the owner and runs
-	// there. db.RebuildSyncable refuses off-owner (not_syncable_owner), so
-	// 202 proves owner execution. Polled: the hop rides a bounded proxy
-	// timeout and the verb takes two consensus round-trips.
-	postRebuildUntil(t, nonOwner.base(), "wh", http.StatusAccepted)
+	// Phase 2: rebuild through the non-owner reaches the owner's admission.
+	// The ownership check runs BEFORE the destination probe, so a non-owner
+	// answers 503 not_syncable_owner and never 409 — reaching
+	// destination_not_droppable therefore proves the request was executed at
+	// the owner. (A webhook owns no destination committed can drop, so that
+	// is the owner's verdict; see cluster.ErrDestinationNotDroppable.)
+	// Polled: the hop rides a bounded proxy timeout.
+	postRebuildUntil(t, nonOwner.base(), "wh", http.StatusConflict)
+	code, proxiedBody := postRebuildOnce(t, nonOwner.base(), "wh", nil)
+	require.Equal(t, http.StatusConflict, code)
+	require.Contains(t, proxiedBody, "destination_not_droppable",
+		"the owner's refusal must come back through the proxy unchanged")
 
 	// Phase 2b: the forwarded marker pre-set on a non-owner is refused
 	// deterministically — "ownership moved while routing" — never
