@@ -1429,8 +1429,9 @@ paths:
       responses:
         '202':
           description: |
-            Rebuild accepted; the table is recreated and the replay is
-            underway. The body confirms the trigger and names the status
+            Rebuild accepted: the table was dropped and recreated, and the
+            replay is underway. (A drop that fails is 502, never a 202 — see
+            below.) The body confirms the trigger and names the status
             endpoint to poll (also carried as the `Location` header) —
             repeated triggers are safe (field-observed: multiple fires
             converged to exact parity with one clean generation).
@@ -1461,6 +1462,21 @@ paths:
             cannot mean what it says. Also refused before anything changed:
             `/rematerialize` converges a keyed destination in place, and a
             deliberate full re-delivery is DELETE then re-POST.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: |
+            `code: destination_teardown_failed` — the destination did not
+            accept (or did not answer) the drop. The checkpoint reset comes
+            first on purpose — a dropped table under an unreset checkpoint is
+            silent data loss, a reset checkpoint over an undropped table is
+            only unclean — so by the time the drop fails the replay is already
+            underway over the EXISTING rows. This is not a clean rebuild: rows
+            the replay does not reproduce remain. Sweep them with
+            `/rematerialize` (keyed syncables), or drop the table yourself and
+            POST `/rebuild` again. The node's log carries the driver error.
           content:
             application/json:
               schema:

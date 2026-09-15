@@ -772,6 +772,12 @@ func writeRebuildError(w httpgo.ResponseWriter, err error) {
 		// loopback), so the verb cannot mean what it says. Also refused
 		// before anything changed.
 		writeError(w, httpgo.StatusConflict, "destination_not_droppable", redactedMessage(err))
+	case errors.Is(err, cluster.ErrDestinationTeardownFailed):
+		// 502: the destination did not accept the drop. The checkpoint reset
+		// had already happened (deliberately — see the sentinel), so the
+		// replay is RUNNING over the existing rows. Not a clean rebuild, and
+		// it must not read as one.
+		writeError(w, httpgo.StatusBadGateway, "destination_teardown_failed", redactedMessage(err))
 	default:
 		writeProposeError(w, err, "syncable", "rebuild syncable")
 	}

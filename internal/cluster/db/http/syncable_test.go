@@ -2,6 +2,7 @@ package http_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"testing"
@@ -351,4 +352,48 @@ func TestRebuildSyncable_RefusedWhenNothingToDrop(t *testing.T) {
 	requireEnvelope(t, w, 409, "destination_not_droppable")
 	require.Contains(t, w.Body.String(), "rematerialize",
 		"the refusal must name the verb that does converge in place")
+}
+
+// A rebuild whose drop fails must not report a clean 202. The checkpoint
+// reset precedes the drop on purpose (a dropped table under an unreset
+// checkpoint is silent data loss), so by the time the drop fails the replay
+// is already inevitable — but the caller must learn that rows the replay does
+// not reproduce remain. The worker is restarted regardless: an unclean
+// syncable beats a dead one.
+func TestRebuildSyncable_ReportsAFailedDrop(t *testing.T) {
+	e := newEngine(t)
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
+	e.sink.teardownErr = errors.New("DROP TABLE photos: permission denied for schema public")
+
+	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/rebuild")
+	requireEnvelope(t, w, 502, "destination_teardown_failed")
+	require.Contains(t, w.Body.String(), "rematerialize", "the body says how to finish the job")
+	require.NotContains(t, w.Body.String(), "permission denied", "the driver's text stays in the node log")
+
+	// The syncable was restarted, not left without a worker: it still
+	// serves status, and a fresh proposal reaches it.
+	mustStatus(t, e.doEmpty(t, "GET", "/v1/syncable/rec-1/status"), 200)
+	e.sink.teardownErr = nil
+	before := e.sink.count()
+	e.proposeRow(t, "photos", "k-after-rebuild")
+	require.Eventually(t, func() bool { return e.sink.count() > before }, 5*time.Second, 10*time.Millisecond,
+		"the restarted worker must consume new proposals")
+}
+
+// With no worker registered for the id — safe mode holds every sync worker —
+// the drop used to run through the (absent) worker handle, so it was skipped
+// and the verb still answered a clean 202. The drop now runs through the
+// admission probe, so it happens regardless; the replay follows once safe
+// mode is lifted.
+func TestRebuildSyncable_DropsWithNoWorkerRegistered(t *testing.T) {
+	e := newEngineOpts(t, db.WithSafeMode())
+	e.addType(t, "photos", "photos")
+	e.addRecorderSyncable(t, "rec-1", "photos")
+	require.Zero(t, e.sink.teardowns)
+
+	w := e.doEmpty(t, "POST", "/v1/syncable/rec-1/rebuild")
+	mustStatus(t, w, 202)
+	require.Equal(t, 1, e.sink.teardowns,
+		"the drop must not depend on a worker having been registered")
 }

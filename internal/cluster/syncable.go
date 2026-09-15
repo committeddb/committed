@@ -284,6 +284,16 @@ var ErrWorkerWedged = errors.New("syncable worker did not stop in time (wedged o
 // destination by hand and re-POST, or converge a keyed sink in place.
 var ErrDestinationNotOwned = errors.New("the destination was not created by committed, so it cannot be dropped for a clean rebuild: drop it yourself and re-POST the config, or POST /syncable/{id}/rematerialize to converge a keyed syncable in place")
 
+// ErrDestinationTeardownFailed reports a rebuild whose DROP did not happen:
+// the destination refused or did not answer the teardown. The checkpoint
+// reset precedes the drop on purpose — a dropped table under an unreset
+// checkpoint is silent data loss, a reset checkpoint over an undropped table
+// is only unclean — so by the time the drop fails the replay is already
+// inevitable: the worker is restarted and refills the table in place. What
+// the caller must know is that rows the replay does not reproduce REMAIN,
+// the opposite of the verb's promise, so this is a 502 and never a clean 202.
+var ErrDestinationTeardownFailed = errors.New("rebuild: the destination was not dropped; the checkpoint was reset and the replay is running over the existing rows, so rows the replay does not reproduce remain — rematerialize a keyed syncable to sweep them, or drop the table yourself and POST /rebuild again")
+
 // ErrDryRunUnsupported is a dry-run asked of a syncable kind that implements
 // no rehearsal. The config is valid — there is simply nothing to rehearse —
 // so it is a 409, never the 400 that would tell an author their good config

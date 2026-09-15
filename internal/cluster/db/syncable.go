@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"go.uber.org/zap"
 
@@ -318,22 +319,35 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 	if teardownable {
 		owns, err = td.OwnsDestination(ctx)
 	}
-	_ = probe.Close()
-	if err != nil {
+	switch {
+	case err != nil:
+		_ = probe.Close()
 		return fmt.Errorf("probe destination ownership: %w", err)
-	}
-	if !teardownable {
+	case !teardownable:
 		// No destination to drop at all — the verb's drop half is meaningless
 		// here, and the replay half alone is an unbounded re-delivery (and for
 		// a loopback, a permanent second copy of the derived topic). Fail
 		// CLOSED, like rematerialize's admission probe: a syncable that cannot
 		// say it owns its destination does not get a verb that promises to
 		// drop it.
+		_ = probe.Close()
 		return cluster.ErrDestinationNotDroppable
-	}
-	if !owns {
+	case !owns:
+		_ = probe.Close()
 		return cluster.ErrDestinationNotOwned
 	}
+	// The probe stays open to perform the drop below. Dropping through the
+	// probe rather than the stopped worker's instance makes the drop
+	// independent of whether a worker is registered: the registry can hold
+	// no worker for the id on this node — safe mode holds them, for one —
+	// and dropping through the handle then silently skipped the drop and
+	// still answered a clean 202. (A parked worker keeps its handle; that
+	// path always dropped.) Closed explicitly right after the drop so the
+	// probe never overlaps the restarted worker; the Once covers the early
+	// returns.
+	var closeProbeOnce sync.Once
+	closeProbe := func() { closeProbeOnce.Do(func() { _ = probe.Close() }) }
+	defer closeProbe()
 
 	// 1. Stop the local worker first so it can't bump the checkpoint after the
 	//    reset below. Returns its handle so step 3 can tear the destination down.
@@ -360,17 +374,22 @@ func (db *DB) RebuildSyncable(ctx context.Context, id string) error {
 
 	// 3. Owner clean-slate: tear the destination down now that the checkpoint
 	//    is 0, so the re-apply recreates it empty.
-	db.rebuildTeardownDestinationLocal(id, handle)
-
-	// Release the stopped worker's prepared statements before step 4 builds a
-	// fresh syncable — otherwise a rebuild leaks a statement set on the pool.
-	// rebuildStopWorkerLocal confirmed the drain (we aborted otherwise), so it's safe.
+	// Close the drained worker's instance BEFORE the drop, so exactly one
+	// instance touches the destination at a time — a projection's teardown
+	// also removes its node-local stage store, which the worker instance
+	// would otherwise still hold open.
 	db.closeDrainedSyncable(handle, id)
 
-	// 4. Re-apply the unchanged config: re-initializes the destination and
-	//    restarts the worker reading from index 0. The config is identical, so
-	//    the in-place-change guard sees no change and allows it.
-	return db.ProposeSyncable(ctx, cfg)
+	teardownErr := db.rebuildTeardownDestinationLocal(id, td)
+	closeProbe()
+
+	// Restart the worker BEFORE reporting a failed drop: the checkpoint is
+	// reset either way, and a syncable left with no worker would be worse
+	// than an unclean one.
+	if err := db.ProposeSyncable(ctx, cfg); err != nil {
+		return err
+	}
+	return teardownErr
 }
 
 // rebuildStopWorkerLocal cancels and drains the local sync worker (if any) and
@@ -398,40 +417,44 @@ func (db *DB) rebuildStopWorkerLocal(id string) (*workerHandle, bool) {
 	return handle, true
 }
 
-// rebuildTeardownDestinationLocal tears the syncable's destination down on the
-// owner so the re-apply that follows recreates it empty. It is the owner-gated,
-// best-effort, live-only half of a rebuild — a failed teardown is logged and
-// the rebuild continues (replay then writes over the existing destination, a
-// degraded-but-not-fatal rebuild). handle is the worker stopped in
-// rebuildStopWorkerLocal; nil (no worker was running) or a non-Teardownable
-// syncable is a no-op.
-func (db *DB) rebuildTeardownDestinationLocal(id string, handle *workerHandle) {
-	if handle == nil || handle.syncable == nil || !db.isNode(id) {
-		return
-	}
-	// Unwrap-chain resolution — same rationale as deleteSync: the
-	// always-current wrapper masks a bare assertion, which silently made
-	// every wrapped projection's rebuild non-clean (replay over the stale
-	// table instead of drop-and-recreate).
-	teardownable, ok := cluster.SyncableAs[cluster.Teardownable](handle.syncable)
-	if !ok {
-		return
+// rebuildTeardownDestinationLocal drops the syncable's destination on the
+// owner so the re-apply that follows recreates it empty. Every outcome other
+// than a clean drop is logged in full here and REPORTED as
+// cluster.ErrDestinationTeardownFailed: the rebuild still continues (the
+// checkpoint is already reset, so the replay is inevitable and the worker
+// must be restarted), but the caller learns the drop did not happen instead
+// of reading a clean 202. td is the admission probe's Teardownable — the
+// same instance that just proved ownership — so the drop does not depend on a
+// worker having been running.
+func (db *DB) rebuildTeardownDestinationLocal(id string, td cluster.Teardownable) error {
+	if !db.isNode(id) {
+		// Unreachable in practice (pinned syncables were owner-checked above
+		// and the route is leader-pinned), but a skipped drop must never
+		// read as a clean one.
+		return fmt.Errorf("%w (this node does not serve the syncable)", cluster.ErrDestinationTeardownFailed)
 	}
 	// Bounded (runBounded): rebuild runs on an HTTP handler goroutine, and a
 	// destination that wedged the worker would otherwise hang the request (and
 	// leak the goroutine) until the kernel TCP timeout.
 	var dropped bool
-	teardown := func() (err error) { dropped, err = teardownable.Teardown(false); return err }
-	if err, completed := runBounded(db.workers.drainTimeout, teardown); !completed {
+	teardown := func() (err error) { dropped, err = td.Teardown(false); return err }
+	// The driver's own text stays in this node's log: the HTTP body carries
+	// the sentinel plus a classifier, never a raw destination error.
+	switch err, completed := runBounded(db.workers.drainTimeout, teardown); {
+	case !completed:
 		db.logger.Error("rebuild: destination teardown did not return in time (unreachable destination?); replay will write over the existing destination (rebuild not clean)",
 			zap.String("id", id), zap.Duration("timeout", db.workers.drainTimeout))
-	} else if err != nil {
+		return fmt.Errorf("%w (the destination did not answer the drop within %s)", cluster.ErrDestinationTeardownFailed, db.workers.drainTimeout)
+	case err != nil:
 		db.logger.Error("rebuild: destination teardown failed; replay will write over the existing destination (rebuild not clean)",
 			zap.String("id", id), zap.Error(err))
-	} else if !dropped {
-		db.logger.Warn("rebuild: destination kept — committed did not create it; replay writes over it (rows it never re-emits remain; rematerialize a keyed syncable to sweep them, or drop the table yourself and re-POST)",
+		return fmt.Errorf("%w (the destination refused the drop; this node's log has the driver error)", cluster.ErrDestinationTeardownFailed)
+	case !dropped:
+		db.logger.Warn("rebuild: destination kept — committed did not create it; replay writes over it (rebuild not clean)",
 			zap.String("id", id))
+		return fmt.Errorf("%w (committed did not create the destination, so it was kept)", cluster.ErrDestinationTeardownFailed)
 	}
+	return nil
 }
 
 // currentSyncableConfig returns the currently-persisted syncable configuration

@@ -43,6 +43,12 @@ type recorderSink struct {
 	typeVersions map[string]int
 	deletes      []string
 	err          error
+	// teardownErr, when set, makes Teardown fail as a destination that
+	// refuses the drop would — the rebuild path that must not report clean.
+	teardownErr error
+	// teardowns counts successful drops, so a test can prove the drop
+	// happened rather than infer it from the table refilling.
+	teardowns int
 }
 
 func (r *recorderSink) Sync(_ context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
@@ -128,10 +134,14 @@ func (r *recorderSink) Teardown(keep bool) (bool, error) {
 	if keep {
 		return false, nil
 	}
+	if r.teardownErr != nil {
+		return false, r.teardownErr
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.data = map[string]string{}
 	r.keys = nil
+	r.teardowns++
 	return true, nil
 }
 

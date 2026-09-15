@@ -287,7 +287,10 @@ error handling, deletes, and schema evolution:
   under the same name, for a table committed created. On a table you
   created it refuses (409 `destination_not_owned`) rather than replay over
   rows it cannot drop: drop the table yourself and re-POST, or rematerialize
-  a keyed syncable. The log is permanent, so replay is cheap.
+  a keyed syncable. A drop the destination refuses is reported (502
+  `destination_teardown_failed`) rather than replayed over silently — the
+  replay still runs, so the table is current, but rows it does not reproduce
+  remain until you sweep them. The log is permanent, so replay is cheap.
 
 ### Computed columns (`expr`)
 
@@ -945,7 +948,11 @@ under new versions. Every syncable takes one of three stances toward that:
 
 - **Version-pinned** (`mode = "as-stored"`, handling one version): the syncable
   sees the exact bytes written, and its mappings target one version's shape.
-  Immune to later type versions; blind to them too.
+  Nothing pins it, though: there is no version selector in the vocabulary, so
+  entities written under a later version still arrive, as written, and the
+  mappings meet a shape they were not written for. Take this stance for a
+  topic whose version is frozen; a topic that will move needs one of the two
+  below.
 - **Version-aware** (`mode = "as-stored"`, dispatching on version): the
   syncable sees raw bytes plus each entity's stamped version and handles the
   differences itself — the stance for consumers that genuinely want each era's
@@ -963,10 +970,15 @@ always-current syncable over such a topic, naming the gap, and
 `POST /v1/type/{id}` refuses a nonConvertible bump that would strand *existing*
 always-current syncables, naming them (re-POST with `?force=true` to
 acknowledge the stranding deliberately). A force-stranded syncable does not
-silently receive unconverted data: entities below the break dead-letter at the
-migration chain, replayable later if the reading is repaired (a restatement
-rebinding the below-break range, then a dead-letter replay or a
-re-materialization).
+silently receive unconverted data, and it does not shunt the whole topic to
+dead letters either. The first entities below the break dead-letter at the
+migration chain (replayable); once ten consecutive distinct rows have failed
+there, the failure is established as config-shaped and the worker **wedges**
+on the next one, visibly, rather than dead-lettering everything older than
+the break (see [stuck-syncables.md](operations/stuck-syncables.md)). The
+repair is the reading, not the syncable: a restatement rebinding the
+below-break range lets the wedged worker resume on its own, after which the
+dead letters replay.
 ## Rehearsing a config before it exists (dry-run)
 
 `POST /v1/syncable/dryrun` takes the same document a syncable POST
