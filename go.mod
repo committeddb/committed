@@ -21,7 +21,7 @@ require (
 	github.com/apache/arrow-go/v18 v18.7.0
 	github.com/apache/iceberg-go v0.6.0
 	github.com/bufbuild/protocompile v0.14.1
-	github.com/go-sql-driver/mysql v1.10.0
+	github.com/go-sql-driver/mysql v1.10.1
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/google/go-cmp v0.7.0
 	github.com/itchyny/gojq v0.12.19
@@ -29,8 +29,8 @@ require (
 	github.com/klauspost/compress v1.19.0
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.12.2
 	github.com/microsoft/go-mssqldb v1.11.0
-	github.com/moby/moby/api v1.55.0
-	github.com/moby/moby/client v0.5.1
+	github.com/moby/moby/api v1.56.0
+	github.com/moby/moby/client v0.6.0
 	github.com/pb33f/libopenapi v0.38.7
 	github.com/pb33f/libopenapi-validator v0.14.0
 	github.com/pelletier/go-toml/v2 v2.4.3

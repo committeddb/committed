@@ -9843,7 +9843,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## github.com/go-sql-driver/mysql v1.10.0
+## github.com/go-sql-driver/mysql v1.10.1
 
 ```
 Mozilla Public License Version 2.0
