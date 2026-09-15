@@ -108,8 +108,9 @@ image can be templated per-node by an orchestrator:
                        headroom), which every node enforces at its propose
                        gate. Requires COMMITTED_API_URL on every node and a
                        cluster-uniform COMMITTED_API_TOKEN; without them the
-                       gate falls back to the node-local decision. "0"
-                       disables cluster-aware admission entirely.
+                       gate falls back to the node-local decision. Any
+                       zero duration ("0", "0s") disables cluster-aware
+                       admission entirely.
 
   COMMITTED_SAFE_MODE  when truthy, boots the operator escape hatch: raft,
                        apply, and the HTTP API run normally, but sync and
@@ -262,7 +263,7 @@ docs/operations/ it points to.`,
 		// worker are held — the window to inspect and delete/fix a config
 		// whose worker would otherwise crashloop the node with no API up.
 		// Not persisted: the next boot without the flag resumes everything.
-		safeMode := boolEnv("COMMITTED_SAFE_MODE")
+		safeMode := boolEnvOrExit("COMMITTED_SAFE_MODE")
 		if safeMode {
 			walOpts = append(walOpts, wal.WithSafeMode())
 			zap.L().Warn("SAFE MODE (COMMITTED_SAFE_MODE): sync/ingest/scrub workers held; " +
@@ -321,10 +322,14 @@ docs/operations/ it points to.`,
 		}
 
 		// COMMITTED_SCRUB_INTERVAL sets the automatic right-to-be-forgotten
-		// scrub cadence (Go duration, e.g. "30m"). 0 disables the scheduler;
-		// the manual POST /v1/scrub lever still works. Unset uses the default
-		// (db.DefaultScrubInterval).
-		if d, ok := parseDurationEnv("COMMITTED_SCRUB_INTERVAL"); ok {
+		// scrub cadence (Go duration, e.g. "30m"). Any zero duration ("0",
+		// "0s") disables the scheduler — the manual POST /v1/scrub lever still
+		// works — and unset uses the default (db.DefaultScrubInterval). The
+		// disable has to go through a parser that accepts zero: the shared one
+		// treats a non-positive value as invalid and keeps the default, which
+		// left three comments promising a disable that never happened, on the
+		// erasure path.
+		if d, ok := parseDisableableDurationEnv("COMMITTED_SCRUB_INTERVAL"); ok {
 			dbOpts = append(dbOpts, db.WithScrubInterval(d))
 		}
 
@@ -363,7 +368,7 @@ docs/operations/ it points to.`,
 		// Without this flag a fresh node would StartNode the static peer set
 		// and split-brain against the cluster it meant to join. See
 		// docs/operations/membership.md.
-		if boolEnv("COMMITTED_JOIN") {
+		if boolEnvOrExit("COMMITTED_JOIN") {
 			dbOpts = append(dbOpts, db.WithJoin())
 			zap.L().Info("joining existing cluster (COMMITTED_JOIN set); membership will be learned from the leader")
 		}
@@ -383,17 +388,19 @@ docs/operations/ it points to.`,
 		// TLS client (same peer-API trust) and the cluster's API bearer
 		// token (the report endpoint is authenticated like every write).
 		// Read here, before db.New, and reused for the HTTP options below.
-		apiToken := os.Getenv("COMMITTED_API_TOKEN")
+		apiToken := apiTokenEnv()
 		proxyClient, err := loadProxyClient()
 		if err != nil {
 			// G706 false positive: values come from operator-supplied env vars.
 			log.Fatalf("leader-read proxy client: %v", err) //nolint:gosec // G706
 		}
 		dbOpts = append(dbOpts, db.WithDiskReportHTTP(proxyClient, apiToken))
-		if raw := os.Getenv("COMMITTED_DISK_REPORT_INTERVAL"); raw == "0" {
-			dbOpts = append(dbOpts, db.WithDiskReportInterval(-1))
-			zap.L().Info("cluster disk admission disabled (COMMITTED_DISK_REPORT_INTERVAL=0); the propose gate is node-local only")
-		} else if d, ok := parseDurationEnv("COMMITTED_DISK_REPORT_INTERVAL"); ok {
+		// Any zero duration disables; WithDiskReportInterval owns that
+		// mapping (<= 0 → off), so the command does not restate it.
+		if d, ok := parseDisableableDurationEnv("COMMITTED_DISK_REPORT_INTERVAL"); ok {
+			if d == 0 {
+				zap.L().Info("cluster disk admission disabled (COMMITTED_DISK_REPORT_INTERVAL is zero); the propose gate is node-local only")
+			}
 			dbOpts = append(dbOpts, db.WithDiskReportInterval(d))
 		}
 
@@ -422,7 +429,7 @@ docs/operations/ it points to.`,
 		}
 		// COMMITTED_PPROF mounts /debug/pprof/* for live CPU/heap profiling. Off by
 		// default; behind bearer auth when COMMITTED_API_TOKEN is set.
-		if boolEnv("COMMITTED_PPROF") {
+		if boolEnvOrExit("COMMITTED_PPROF") {
 			httpOpts = append(httpOpts, http.WithPprof())
 		}
 		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {

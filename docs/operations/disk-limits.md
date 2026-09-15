@@ -178,8 +178,8 @@ bypassing the leader's gate.
 
 This requires `COMMITTED_API_URL` on every node and a cluster-uniform
 `COMMITTED_API_TOKEN` (the report endpoint is authenticated like every
-other write). Setting `COMMITTED_DISK_REPORT_INTERVAL=0` disables
-cluster-aware admission.
+other write). Setting `COMMITTED_DISK_REPORT_INTERVAL` to zero (`0`, `0s`)
+disables cluster-aware admission.
 
 **Staleness and degraded modes — the gate fails open.** A verdict (or
 a member report, on the leader's side) is trusted for 3× the report

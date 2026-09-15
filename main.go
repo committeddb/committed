@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -24,7 +25,7 @@ func main() {
 	// A bad value fails fast rather than silently staying at Info — an operator
 	// who asked for debug during an incident must not be left wondering why the
 	// log looks unchanged.
-	if raw := os.Getenv("COMMITTED_LOG_LEVEL"); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv("COMMITTED_LOG_LEVEL")); raw != "" {
 		lvl, err := zap.ParseAtomicLevel(raw)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invalid COMMITTED_LOG_LEVEL %q (want one of debug, info, warn, error): %v\n", raw, err)

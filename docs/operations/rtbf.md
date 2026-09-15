@@ -55,8 +55,8 @@ Each node's scrubber physically rewrites its permanent event log, removing
 the subject's data (the delete tombstones are retained; their keys are
 erased in stage 3). The **automatic scheduler** proposes a scrub whenever
 there is erasure work outstanding, on the `COMMITTED_SCRUB_INTERVAL` cadence
-(default `1h`; a duration string; `0` disables it — don't disable it if you
-have RTBF obligations). For SLA-expedited erasure, trigger one now:
+(default `1h`; a duration string; any zero — `0`, `0s` — disables it, and
+don't, if you have RTBF obligations). For SLA-expedited erasure, trigger one now:
 
 ```sh
 curl -X POST http://localhost:8080/v1/scrub

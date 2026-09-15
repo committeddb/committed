@@ -43,6 +43,7 @@ func nodeID() uint64 {
 // mistyped identity onto ID 1 would let two nodes claim the same raft ID
 // and corrupt the group, which is far worse than refusing to start.
 func parseNodeID(raw string) (uint64, error) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 1, nil
 	}
@@ -134,7 +135,7 @@ func parseInt64Env(name string) (int64, bool) {
 	if raw == "" {
 		return 0, false
 	}
-	v, err := strconv.ParseInt(raw, 10, 64)
+	v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil || v <= 0 {
 		zap.L().Warn(name+" invalid, using default", zap.String("value", raw))
 		return 0, false
@@ -197,13 +198,54 @@ func parseListEnv(name string) []string {
 	return out
 }
 
+// apiTokenEnv is the one read of COMMITTED_API_TOKEN, shared by the node
+// (server side of the compare, and the disk-report sender) and the member
+// CLI (client side). Surrounding whitespace is trimmed like every other
+// setting: a secret materialised from a file carries a trailing newline
+// more often than not, and untrimmed it is unusable from EVERY direction —
+// the server compares against "token\n", committed's own sender is refused
+// by net/http for a control character in the header, and a curl client
+// sends the shell-stripped "token" and gets 401. A token that deliberately
+// ends in whitespace is not a real case.
+func apiTokenEnv() string {
+	return strings.TrimSpace(os.Getenv("COMMITTED_API_TOKEN"))
+}
+
 // boolEnv reports whether env var name holds a truthy value, parsed by
-// strconv.ParseBool ("1", "t", "true", "TRUE", etc.). Unset, empty, or
-// unparseable all read as false — a flag-style env var is opt-in, so any
-// non-affirmative value leaves the default behavior in place.
-func boolEnv(name string) bool {
-	v, err := strconv.ParseBool(os.Getenv(name))
-	return err == nil && v
+// strconv.ParseBool ("1", "t", "true", "TRUE", etc.). Unset or empty reads
+// as false — a flag-style env var is opt-in.
+//
+// A NON-EMPTY value that does not parse is an ERROR, never a silent false.
+// ParseBool rejects "yes", "on", "y" and "enabled", all common in deployment
+// tooling, and reading those as false is how a COMMITTED_JOIN=yes node
+// bootstraps its own raft configuration and split-brains against the cluster
+// it meant to join — the exact failure the flag exists to prevent. This
+// helper reports the error so a caller that must hand it on can (see
+// boolEnvOrExit for the node's own startup reads, which refuse to boot).
+func boolEnv(name string) (bool, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not a boolean: use true or false (also accepted: 1/0, t/f)", name, raw)
+	}
+	return v, nil
+}
+
+// boolEnvOrExit is boolEnv for the node command's own startup reads, where
+// there is no caller to hand an error to and continuing would mean running
+// without a setting the operator asked for. It stays separate from boolEnv
+// so a helper that must REPORT rather than exit — loadProxyClient documents
+// exactly that, so node_test.go can drive its failure cases — never inherits
+// a process exit from a shared parser.
+func boolEnvOrExit(name string) bool {
+	v, err := boolEnv(name)
+	if err != nil {
+		log.Fatalf("%v — refusing to start rather than silently treating it as false", err) //nolint:gosec // G706: the value is the operator's own env
+	}
+	return v
 }
 
 // parsePercentEnv reads a free-space percent threshold (0,100) for the disk
@@ -215,7 +257,7 @@ func parsePercentEnv(name string) float64 {
 	if raw == "" {
 		return 0
 	}
-	v, err := strconv.ParseFloat(raw, 64)
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 	if err != nil || v <= 0 || v >= 100 {
 		zap.L().Warn(name+" invalid (want a percent between 0 and 100), using default", zap.String("value", raw))
 		return 0
@@ -223,15 +265,41 @@ func parsePercentEnv(name string) float64 {
 	return v
 }
 
-// parseDurationEnv reads a Go-duration-formatted env var (e.g. "15s").
+// parseDurationEnv reads a Go-duration setting that must be POSITIVE — a
+// timeout or cadence where zero is meaningless. Unset says nothing; zero,
+// negative, or unparseable warns and the caller keeps its default.
 func parseDurationEnv(name string) (time.Duration, bool) {
+	return parseDurationEnvWithZero(name, false)
+}
+
+// parseDisableableDurationEnv reads a Go-duration setting where zero means
+// DISABLE rather than "use the default" — a switch, not a timeout. It accepts
+// every spelling of zero the syntax allows ("0", "0s", "0ms"), not just the
+// literal character: the help text teaches duration syntax, so an operator
+// writing "0s" meant to disable and must not silently get the default. That
+// gap left COMMITTED_SCRUB_INTERVAL=0 unable to stop the erasure scrubber.
+func parseDisableableDurationEnv(name string) (time.Duration, bool) {
+	return parseDurationEnvWithZero(name, true)
+}
+
+// parseDurationEnvWithZero is the shared body of the two above: one place
+// that trims, parses, and reports, so the two intents cannot drift in how
+// they treat whitespace or a bad value.
+func parseDurationEnvWithZero(name string, zeroDisables bool) (time.Duration, bool) {
 	raw := os.Getenv(name)
 	if raw == "" {
 		return 0, false
 	}
-	v, err := time.ParseDuration(raw)
-	if err != nil || v <= 0 {
+	v, err := time.ParseDuration(strings.TrimSpace(raw))
+	switch {
+	case err != nil:
 		zap.L().Warn(name+" invalid, using default", zap.String("value", raw))
+		return 0, false
+	case v < 0 && zeroDisables:
+		zap.L().Warn(name+" must not be negative (zero disables), using default", zap.String("value", raw))
+		return 0, false
+	case v <= 0 && !zeroDisables:
+		zap.L().Warn(name+" must be a positive duration, using default", zap.String("value", raw))
 		return 0, false
 	}
 	return v, true
@@ -243,18 +311,13 @@ func parseDurationEnv(name string) (time.Duration, bool) {
 // with a warning — a misconfigured env var should not silently disable
 // the graceful path.
 func shutdownTimeout() time.Duration {
-	raw := os.Getenv("COMMITTED_SHUTDOWN_TIMEOUT")
-	if raw == "" {
-		return defaultShutdownTimeout
+	// Through the shared parser: a third hand-rolled copy is how the three
+	// duration settings came to disagree about whitespace and about what a
+	// bad value says.
+	if d, ok := parseDurationEnv("COMMITTED_SHUTDOWN_TIMEOUT"); ok {
+		return d
 	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d <= 0 {
-		zap.L().Warn("COMMITTED_SHUTDOWN_TIMEOUT invalid, using default",
-			zap.String("value", raw),
-			zap.Duration("default", defaultShutdownTimeout))
-		return defaultShutdownTimeout
-	}
-	return d
+	return defaultShutdownTimeout
 }
 
 // removedEnvVars is the environment's counterpart to the config vocabulary's

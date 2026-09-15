@@ -695,3 +695,14 @@ const (
 	FeatureLevelTypeRecordForTest        = featureLevelTypeRecord
 	FeatureLevelInterpretationPinForTest = featureLevelInterpretationPin
 )
+
+// ScrubIntervalForTest exposes the resolved automatic-scrub cadence, so a
+// test can prove that a zero interval actually disables the scheduler rather
+// than falling back to the default. COMMITTED_SCRUB_INTERVAL=0 promised that
+// disable for three releases and could not deliver it.
+func (db *DB) ScrubIntervalForTest() time.Duration { return db.scrubInterval }
+
+// DiskReportIntervalForTest exposes the resolved cluster-admission cadence:
+// negative means the coordinator is off, which is what a zero
+// COMMITTED_DISK_REPORT_INTERVAL must produce.
+func (db *DB) DiskReportIntervalForTest() time.Duration { return db.disk.reportInterval }

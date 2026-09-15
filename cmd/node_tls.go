@@ -209,7 +209,10 @@ const proxyClientTimeout = 5 * time.Second
 // matching loadAPITLSConfig.
 func loadProxyClient() (*nethttp.Client, error) {
 	caFile := os.Getenv("COMMITTED_HTTP_CLIENT_TLS_CA_FILE")
-	insecure := boolEnv("COMMITTED_HTTP_CLIENT_TLS_INSECURE_SKIP_VERIFY")
+	insecure, err := boolEnv("COMMITTED_HTTP_CLIENT_TLS_INSECURE_SKIP_VERIFY")
+	if err != nil {
+		return nil, err
+	}
 	if caFile == "" && !insecure {
 		return nil, nil
 	}

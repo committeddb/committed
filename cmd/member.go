@@ -185,7 +185,7 @@ func apiToken(flag string) string {
 	if flag != "" {
 		return flag
 	}
-	return os.Getenv("COMMITTED_API_TOKEN")
+	return apiTokenEnv()
 }
 
 // memberClient builds the HTTP client. For an https target it enables TLS;

@@ -12,7 +12,6 @@ import (
 	nethttp "net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -92,8 +91,10 @@ func runBackup() error {
 	}
 	nodeID := backupNodeID
 	if nodeID == 0 {
-		// Provenance only; best-effort from the env, 0 if unset/invalid.
-		if v, err := strconv.ParseUint(os.Getenv("COMMITTED_NODE_ID"), 10, 64); err == nil {
+		// Provenance only; best-effort from the env, 0 if invalid. Through
+		// the node's own parser so the two never disagree about what a
+		// valid id is (parseNodeID also supplies the unset default of 1).
+		if v, err := parseNodeID(os.Getenv("COMMITTED_NODE_ID")); err == nil {
 			nodeID = v
 		}
 	}

@@ -8,7 +8,7 @@ import (
 
 // defaultReadIndexTimeout bounds how long a default (linearizable) GET waits
 // for the raft ReadIndex quorum confirmation before the handler gives up and
-// returns 503. Sized well under the server WriteTimeout (30s) so a
+// returns 503. Sized well under the server WriteTimeout (120s) so a
 // partitioned node returns a clean error rather than holding the connection
 // open. Overridable per server via WithReadIndexTimeout.
 const defaultReadIndexTimeout = 5 * time.Second
