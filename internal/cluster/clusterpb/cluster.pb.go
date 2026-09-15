@@ -725,7 +725,7 @@ type LogType struct {
 	// (GET /v1/type, the version endpoints) return. The fields above are
 	// what the engine acts on; the document is what the operator wrote,
 	// comments and formatting included. Add-only, and gated on cluster
-	// feature level 7 at the proposer: a pre-level-7 binary re-marshals a
+	// feature level 2 at the proposer: a pre-level-2 binary re-marshals a
 	// type from its own struct on apply and would drop the field, so it is
 	// never proposed while such a member exists. A type written before the
 	// gate opened reads back as a document synthesized from the fields

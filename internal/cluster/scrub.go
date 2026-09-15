@@ -41,7 +41,7 @@ func IsScrub(id string) bool {
 // user-delete entries whose consumption gate has opened (see the scrubber's
 // deleteKeyEraseGate) get their raw subject key rewritten to ErasedKey.
 // The proposer sets it only once the cluster minimum feature level supports
-// the pass (version.FeatureLevel 4), so every replica computes the identical
+// the pass (version.FeatureLevel 2), so every replica computes the identical
 // rewrite — carried in the committed command for the same reason UpperBound is.
 type Scrub struct {
 	UpperBound     uint64
@@ -67,7 +67,7 @@ func (s *Scrub) Unmarshal(bs []byte) error {
 // node's apply records a pending scrub and kicks its background scrubber.
 // hashDeleteKeys authorizes the delete-key erasure pass for the rewrite; pass
 // it true only when the cluster minimum feature level is at least
-// version.FeatureLevel 4 (see Scrub.HashDeleteKeys).
+// version.FeatureLevel 2 (see Scrub.HashDeleteKeys).
 func NewScrubEntity(b uint64, hashDeleteKeys bool) (*Entity, error) {
 	bs, err := (&Scrub{UpperBound: b, HashDeleteKeys: hashDeleteKeys}).Marshal()
 	if err != nil {

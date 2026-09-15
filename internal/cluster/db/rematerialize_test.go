@@ -187,7 +187,7 @@ func TestRematerialize_FeatureGateRefusesUntilAnnounced(t *testing.T) {
 	err := d.RematerializeSyncable(testCtx(t), "photos-mirror")
 	var lvl *cluster.ClusterBelowFeatureLevelError
 	require.ErrorAs(t, err, &lvl)
-	require.Equal(t, uint64(6), lvl.Required)
+	require.Equal(t, db.FeatureLevelRematerializationForTest, lvl.Required)
 	_, began, completed := sink.snapshot()
 	require.Empty(t, began, "nothing began")
 	require.Zero(t, completed)

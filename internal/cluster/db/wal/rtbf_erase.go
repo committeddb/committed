@@ -25,7 +25,7 @@ import (
 //
 // The pass runs inside the scrub rewrite, authorized by the committed Scrub
 // command (Scrub.HashDeleteKeys — feature-gated at the proposer, see
-// version.FeatureLevel level 4), and its decision is a pure function of
+// version.FeatureLevel level 2), and its decision is a pure function of
 // replicated state so every replica rewrites identically:
 //
 //   - A delete at raft index D is eligible once every syncable alive at the

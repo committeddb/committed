@@ -140,7 +140,7 @@ func TestZonePin_FeatureGateRefusesOnColdCluster(t *testing.T) {
 	err := proposePinnedRecorder(t, d, "pinned", "z-east")
 	var lvl *cluster.ClusterBelowFeatureLevelError
 	require.ErrorAs(t, err, &lvl, "a pin on a below-level cluster must be refused, got: %v", err)
-	require.Equal(t, uint64(3), lvl.Required)
+	require.Equal(t, db.FeatureLevelZonePinningForTest, lvl.Required)
 }
 
 // TestZonePin_UnsatisfiableStrictStallAndCatchUp pins the strict-pin

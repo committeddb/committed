@@ -17,7 +17,7 @@ import (
 
 // TestRTBFErase_EndToEnd drives the whole delete-key erasure chain the way a
 // live node runs it, with no storage-level levers: the node announces feature
-// level 4, a consuming syncable checkpoints past the delete, the automatic
+// level 2, a consuming syncable checkpoints past the delete, the automatic
 // scrub scheduler proposes (first the PII removal, then — once the checkpoint
 // evidence lands — the authorized erase), and the retained tombstone's raw
 // subject key ends as the erased sentinel. After it, the subject identifier

@@ -706,3 +706,10 @@ func (db *DB) ScrubIntervalForTest() time.Duration { return db.scrubInterval }
 // negative means the coordinator is off, which is what a zero
 // COMMITTED_DISK_REPORT_INTERVAL must produce.
 func (db *DB) DiskReportIntervalForTest() time.Duration { return db.disk.reportInterval }
+
+// FeatureLevelRematerializationForTest exposes the verb's gate so tests assert
+// against the constant, not a literal rung.
+const FeatureLevelRematerializationForTest = featureLevelRematerialization
+
+// FeatureLevelZonePinningForTest exposes the pin gate for the same reason.
+const FeatureLevelZonePinningForTest = featureLevelZonePinning

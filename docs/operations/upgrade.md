@@ -207,10 +207,10 @@ After the last node:
 > minimum fell below the pin's level — resolves each pinned syncable as
 > leader-owned until the node is upgraded again (never two writers, but
 > egress leaves the zone meanwhile). Also note: 0.8.0's
-> RTBF delete-key erasure (feature level 4) pauses on an older binary —
+> RTBF delete-key erasure (feature level 2) pauses on an older binary —
 > already-erased tombstones stay erased, but new erasures resume only when
 > you upgrade again. And a SQL Server ingestable that has already re-keyed
-> to the canonical lowercase `uniqueidentifier` spelling (feature level 5,
+> to the canonical lowercase `uniqueidentifier` spelling (feature level 2,
 > see [cdc-setup.md](cdc-setup.md#uniqueidentifier-rendering)) keeps that
 > spelling in its checkpoint; an older binary would resume it rendering
 > uppercase again and spell new rows differently from the rows on the destination —
@@ -221,7 +221,7 @@ After the last node:
 > 6), and an older owner resuming the replay would write rows the completion
 > sweep then deletes — let it finish, or run the verb again after upgrading.
 > And a MySQL or PostgreSQL ingestable dedups per source transaction from
-> 0.8.0 on (feature level 7): once every member is 0.8.0, its dedup record
+> 0.8.0 on (feature level 2): once every member is 0.8.0, its dedup record
 > takes a shape an older binary reads as "nothing seen" the next time its
 > worker commits a transaction. Until the roll completes the record keeps
 > the old shape (the worker logs `holding the transaction-scoped dedup
@@ -231,7 +231,7 @@ After the last node:
 > checkpoint, which on a keyless (append) destination is a permanent
 > duplicate. Rolling a member back below 0.8.0 also makes it discard, on
 > any type or checkpoint it applies from then on, the fields 0.8.0 added to
-> those records (feature level 7): an older binary rebuilds each record
+> those records (feature level 2): an older binary rebuilds each record
 > from its own struct before storing it, so the submitted document, an
 > announce-typed type's `schemaChangeTopic`, a declared `nonConvertible`
 > break, and a checkpoint's interpretation coordinate are dropped on that
@@ -321,7 +321,7 @@ same quorum rule applies in reverse.
 - **Types read back as the document you submitted.** `GET /v1/type` and
   the type version endpoints return the document you POSTed, per version
   (before 0.8.0 they returned a name-only summary). The document is
-  retained only once every member is 0.8.0 (feature level 7). A type
+  retained only once every member is 0.8.0 (feature level 2). A type
   written before that — including one POSTed mid-roll — reads back as a
   document synthesized from its stored fields in the 0.8.0 spelling,
   schema included, until you POST a document for it again after the roll

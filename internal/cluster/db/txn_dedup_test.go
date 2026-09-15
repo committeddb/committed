@@ -267,7 +267,7 @@ func announceFeatureLevel(t *testing.T, d *db.DB, level uint64) {
 
 // TestTxnDedup_RegimeFlipWaitsForTheClusterFeatureLevel pins the
 // mixed-version guard on the transaction-scoped regime: the record it writes
-// reads as "nothing seen" to a pre-level-7 binary, so a dialect's stamp is
+// reads as "nothing seen" to a pre-level-2 binary, so a dialect's stamp is
 // honored only once every member announces the level — and, once an
 // ingestable's record has flipped, regardless of the minimum (a member
 // rolled back or still announcing reads below the level; regressing the

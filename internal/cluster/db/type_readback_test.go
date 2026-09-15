@@ -131,7 +131,7 @@ func TestProposeType_RepointsTheSchemaChangeTopicInPlace(t *testing.T) {
 
 // TestTypeReadBack_AdoptsTheDocumentOnRePost walks a type through the
 // roll: POSTed while a member is still below the level, its document is
-// not retained (a pre-level-7 member would drop the field on apply and
+// not retained (a pre-level-2 member would drop the field on apply and
 // members would disagree on the read-back) and it reads back synthesized;
 // once every member announces the level, the next document submitted for
 // it is adopted in place and once; a further re-POST that changes nothing

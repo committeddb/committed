@@ -36,10 +36,10 @@ import (
 //     record, begins epoch marking, replays from 0, and sweeps at the target.
 //
 // featureLevelRematerialization gates the re-materialization verb: every
-// member must announce version.FeatureLevel >= 6 before a replay may start,
+// member must announce version.FeatureLevel >= 2 before a replay may start,
 // so no older binary can own the syncable while epoch-stamped rows and the
 // closing sweep are in flight.
-const featureLevelRematerialization uint64 = 6
+const featureLevelRematerialization uint64 = 2
 
 func (db *DB) RematerializeSyncable(ctx context.Context, id string) error {
 	cfg := db.currentSyncableConfig(id)
@@ -74,7 +74,7 @@ func (db *DB) RematerializeSyncable(ctx context.Context, id string) error {
 
 	// Mixed-version safety: an older owner resuming this replay would write
 	// unstamped rows the completion sweep then deletes (see
-	// version.FeatureLevel, level 6). Refuse until every member is past that.
+	// version.FeatureLevel, level 2). Refuse until every member is past that.
 	if !db.featureEnabled(featureLevelRematerialization) {
 		return &cluster.ClusterBelowFeatureLevelError{
 			Feature: "rematerialization", Required: featureLevelRematerialization, ClusterMin: db.clusterMinFeatureLevel(),

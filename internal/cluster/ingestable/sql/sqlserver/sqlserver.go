@@ -475,8 +475,8 @@ type FeatureReader interface {
 // uniqueidentifier rendering. The spelling is in entity KEYS: a cluster where
 // one owner renders uppercase and the next lowercase would key the same row
 // twice, so every node keeps the pre-0.8.0 uppercase rendering until every
-// member announces level 5. See version.FeatureLevel and sessionUUIDRendering.
-const featureLevelCanonicalUUID uint64 = 5
+// member announces level 2. See version.FeatureLevel and sessionUUIDRendering.
+const featureLevelCanonicalUUID uint64 = 2
 
 // The two uniqueidentifier renderings a checkpoint can record
 // (SQLServerPosition.uuid_rendering).

@@ -157,7 +157,7 @@ func (d *SQLServerDialect) ingestOnce(ctx context.Context, s *session) error {
 	// on keyed destinations (keyless/append sinks keep both until rebuilt). Cleared
 	// only once the re-snapshot completes, so a failed attempt retries it.
 	if s.rerender {
-		zap.L().Warn("uniqueidentifier rendering changed to canonical lowercase (cluster feature level 5) — re-snapshotting so every key and payload re-keys; the closing refresh markers sweep the uppercase rows on keyed destinations",
+		zap.L().Warn("uniqueidentifier rendering changed to canonical lowercase (cluster feature level 2) — re-snapshotting so every key and payload re-keys; the closing refresh markers sweep the uppercase rows on keyed destinations",
 			zap.Uint64("consumedVersion", s.version))
 		s.progress = nil
 		s.snapshotted = nil

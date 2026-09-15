@@ -1342,7 +1342,7 @@ paths:
         or a loopback into a snapshot-kind topic: keyless/append, webhook,
         projection, and Iceberg syncables refuse with 409 `not_rematerializable`
         (use `/rebuild` or a blue-green replacement). Leader-pinned. The verb needs every
-        member on a binary that knows it (cluster feature level 6): on a
+        member on a binary that knows it (cluster feature level 2): on a
         mixed-version cluster it answers 503 `cluster_below_feature_level`
         until the rolling upgrade completes, because an older node taking
         ownership mid-replay would write rows the completion sweep then

@@ -131,7 +131,7 @@ func TestDeleteKeyErase_LaggingSyncableBlocksThenErases(t *testing.T) {
 
 // TestDeleteKeyErase_UnauthorizedScrubNeverErases pins the feature gate's
 // deterministic carrier: a Scrub command without HashDeleteKeys (an older
-// proposer, or a cluster below feature level 4) removes upserts but never
+// proposer, or a cluster below feature level 2) removes upserts but never
 // touches a delete's key — every replica, old or new, computes that same
 // rewrite.
 func TestDeleteKeyErase_UnauthorizedScrubNeverErases(t *testing.T) {

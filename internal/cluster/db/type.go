@@ -98,7 +98,7 @@ func (db *DB) MigrationEditDependents(typeID string) []cluster.DependentSyncable
 //     syncables the break exists to refuse and delivers unconverted rows.
 //     Storing either as absent is a correctness hazard, so the config waits
 //     for the cluster instead (the same posture as a zone-pinned syncable).
-const featureLevelTypeRecord uint64 = 7
+const featureLevelTypeRecord uint64 = 2
 
 func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ...cluster.ProposeTypeOption) error {
 	o := cluster.ResolveProposeTypeOptions(opts)

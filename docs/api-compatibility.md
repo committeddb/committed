@@ -462,7 +462,7 @@ the old binary cannot read:
   level 2, so this door only opens once you have used the feature.
 - **Rolling back an owner mid-re-materialization (0.8.0)**, or an owner of
   an ingestable whose dedup record has become transaction-scoped (feature
-  level 7, 0.8.0): neither loses data on its own, but the first lets an
+  level 2, 0.8.0): neither loses data on its own, but the first lets an
   older owner write rows the closing sweep then deletes, and the second
   lets an older owner re-ingest rows that a keyless destination keeps
   twice. Both are gated on the cluster feature level, so neither door opens

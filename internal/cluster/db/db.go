@@ -793,8 +793,8 @@ func (db *DB) ProposeDeleteType(ctx context.Context, id string) error {
 // (Scrub.HashDeleteKeys): the pass changes the deterministic event-log rewrite
 // every replica performs, so it must not be authorized until every member runs
 // a binary that computes it — an older scrubber would produce a diverging
-// (un-erased) rewrite of the same command. See version.FeatureLevel level 4.
-const featureLevelRTBFErase uint64 = 4
+// (un-erased) rewrite of the same command. See version.FeatureLevel level 2.
+const featureLevelRTBFErase uint64 = 2
 
 // Scrub proposes a Scrub command at the current applied index (the freeze line)
 // and returns once it has been applied — each node then runs the physical

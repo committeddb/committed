@@ -89,7 +89,7 @@ func (db *DB) featureEnabled(required uint64) bool {
 // FeatureEnabled is featureEnabled for the composition root's wiring: a
 // plugin whose runtime BEHAVIOUR (not an emitted entry) must not change until
 // the whole cluster can follow it reads the gate through this — the SQL
-// Server ingest dialect's uniqueidentifier rendering (feature level 5) is
+// Server ingest dialect's uniqueidentifier rendering (feature level 2) is
 // the first. Same semantics as the in-package gate.
 func (db *DB) FeatureEnabled(required uint64) bool {
 	return db.featureEnabled(required)

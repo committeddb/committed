@@ -29,7 +29,7 @@ const (
 	guidLower = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
 )
 
-// TestSQLServerUniqueidentifierRenderingUpgrade pins the feature-level-5
+// TestSQLServerUniqueidentifierRenderingUpgrade pins the feature-level-2
 // transition end to end. Run 1 (gate closed — a mixed-version cluster) keeps
 // the pre-0.8.0 uppercase spelling in keys and payloads and records it in the
 // checkpoint. Run 2 (gate open) resuming that checkpoint re-snapshots once at

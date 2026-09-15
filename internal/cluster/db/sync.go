@@ -1453,14 +1453,14 @@ func (db *DB) logSyncReadError(id string, readErr error) {
 // featureLevelInterpretationPin gates the interpretation coordinate carried on
 // a checkpoint (cluster.SyncableIndex.InterpretationIndex). Same record hazard
 // as the type fields (see featureLevelTypeRecord): the apply path re-marshals
-// the checkpoint from the binary's own struct, so a pre-level-7 member writes
+// the checkpoint from the binary's own struct, so a pre-level-2 member writes
 // the field away and members disagree on the bytes of one committed entry.
 // Unlike a type, a checkpoint cannot be refused — the worker must record its
 // progress — so the pin is CLEARED below the level: every member then agrees
 // on 0, which reads as "derived under no restatements", and the first bump
 // after the roll completes records the real coordinate. Reachable without any
 // restatement, since the pin also folds an in-place migration edit.
-const featureLevelInterpretationPin uint64 = 7
+const featureLevelInterpretationPin uint64 = 2
 
 func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex) error {
 	if i.InterpretationIndex != 0 && !db.featureEnabled(featureLevelInterpretationPin) {

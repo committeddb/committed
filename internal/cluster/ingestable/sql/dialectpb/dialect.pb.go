@@ -239,7 +239,7 @@ type SQLServerPosition struct {
 	// uniqueidentifier values (keys and payload fields): 0 = the pre-0.8.0
 	// driver rendering (UPPERCASE GUID; also every checkpoint written before
 	// this field existed), 1 = RFC 4122 canonical lowercase (cluster feature
-	// level 5). A session that renders canonically but resumes a checkpoint
+	// level 2). A session that renders canonically but resumes a checkpoint
 	// spelled the old way re-snapshots once at a bumped epoch so the sink
 	// re-keys. Once canonical, a checkpoint stays canonical.
 	UuidRendering uint32 `protobuf:"varint,5,opt,name=uuid_rendering,json=uuidRendering,proto3" json:"uuid_rendering,omitempty"`

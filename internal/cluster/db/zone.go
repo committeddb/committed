@@ -32,8 +32,8 @@ import (
 // would stream to the same sink twice.
 
 // featureLevelZonePinning gates zone-pin ownership resolution and admission
-// of `zone` syncable configs. See version.FeatureLevel level 3.
-const featureLevelZonePinning uint64 = 3
+// of `zone` syncable configs. See version.FeatureLevel level 2.
+const featureLevelZonePinning uint64 = 2
 
 // zoneOwner resolves the owning node for a pinned zone: the LOWEST node id
 // among current members announcing that zone (the deterministic tie-break

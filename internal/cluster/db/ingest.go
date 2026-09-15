@@ -29,11 +29,11 @@ const (
 
 // featureLevelTxnScopedDedup gates the transaction-scoped ingest dedup
 // regime: an ingestable's dedup record first takes the transaction-carrying
-// shape (which a pre-level-7 binary reads as "nothing seen") only once every
-// member announces version.FeatureLevel >= 7. Enforced where the worker
+// shape (which a pre-level-2 binary reads as "nothing seen") only once every
+// member announces version.FeatureLevel >= 2. Enforced where the worker
 // receives a dialect's proposals (db.ingest), by clearing the dialect's
 // TxnScopedDedup stamp before the proposal is marshaled.
-const featureLevelTxnScopedDedup uint64 = 7
+const featureLevelTxnScopedDedup uint64 = 2
 
 // ingestBackoff{Min,Max} bound the interval at which db.ingest's
 // state-machine wakes to check for leader transitions when no

@@ -18,7 +18,7 @@ import (
 
 // TestPostgresUUIDRendersCanonicalLowercase is the PostgreSQL half of the
 // cross-engine UUID contract (SQL Server's uniqueidentifier renders the same
-// bytes from feature level 5): a uuid value — however it was written —
+// bytes from feature level 2): a uuid value — however it was written —
 // ingests as RFC 4122 lowercase in keys and payloads, on the snapshot and the
 // stream alike.
 func TestPostgresUUIDRendersCanonicalLowercase(t *testing.T) {
