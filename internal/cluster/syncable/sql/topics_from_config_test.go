@@ -36,43 +36,25 @@ func TestTopicsFromConfig_ProjectionMultiSource(t *testing.T) {
 	v := readConfig(t, "toml", strings.NewReader(`
 [syncable]
 name = "denorm"
-type = "sql-projection"
+type = "projection"
 
-[sql-projection]
+[projection]
 db = "mydb"
 table = "denorm"
 primaryKey = "id"
 
-[[sql-projection.source]]
+[[projection.sources]]
 topic = "movies"
 keyPath = "$.id"
 
-[[sql-projection.source]]
+[[projection.sources]]
 topic = "ratings"
 keyPath = "$.movieId"
 
-[[sql-projection.source]]
+[[projection.sources]]
 topic = "movies"
 keyPath = "$.id"
 `))
 	// Distinct, order-preserving: movies once (deduped), then ratings.
 	require.Equal(t, []string{"movies", "ratings"}, (&sql.ProjectionSyncableParser{}).TopicsFromConfig(v))
-}
-
-// The back-compat single-source projection shape names its topic at the top
-// level rather than in a [[source]] block.
-func TestTopicsFromConfig_ProjectionBackCompat(t *testing.T) {
-	v := readConfig(t, "toml", strings.NewReader(`
-[syncable]
-name = "legacy"
-type = "sql-projection"
-
-[sql-projection]
-db = "mydb"
-table = "legacy"
-primaryKey = "id"
-topic = "movies"
-keyPath = "$.id"
-`))
-	require.Equal(t, []string{"movies"}, (&sql.ProjectionSyncableParser{}).TopicsFromConfig(v))
 }

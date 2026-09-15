@@ -10,6 +10,6 @@ primaryKey = "person_id"
 tables = ["ingress.person"]
 mapAllColumns = true
 
-[sql.postgres]
-slot_name = "committed_person_slot"
+[sql.options]
+slotName = "committed_person_slot"
 publication = "committed_person_pub"

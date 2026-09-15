@@ -149,7 +149,7 @@ func TestSave_SevereLagSnapshotPersistsNothing(t *testing.T) {
 
 	// The fatal trigger the Ready loop relies on must still fire.
 	err = s.RestoreSnapshot(snap)
-	require.ErrorContains(t, err, "run rebuild procedure")
+	require.ErrorContains(t, err, "the automatic catch-up from a peer did not fill the event log first")
 }
 
 // Open completes an install that crashed between persisting the snapshot

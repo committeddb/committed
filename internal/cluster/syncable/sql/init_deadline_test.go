@@ -77,6 +77,17 @@ func TestInitBoundedOnHungDestination(t *testing.T) {
 // Init's operation set fails this test loudly rather than silently passing.
 type hangTestDialect struct{ Dialect }
 
+// TableExists probes through the (hung) driver as the production dialects
+// do: the probe is the first thing Init asks the destination, so it is the
+// first thing the deadline must bound.
+func (hangTestDialect) TableExists(ctx context.Context, db *gosql.DB, _ string) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM x").Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (hangTestDialect) CreateDDL(c *Config) string { return "CREATE TABLE x (pk TEXT)" }
 func (hangTestDialect) DropDDL(c *Config) string   { return "DROP TABLE IF EXISTS x" }
 func (hangTestDialect) CreateSQL(c *Config) string { return "INSERT INTO x (pk) VALUES (?)" }

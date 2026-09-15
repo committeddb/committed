@@ -50,6 +50,10 @@ type Dialect interface {
 	// omits its value, so it is present on the snapshot but null on every later
 	// CDC row). Read-only introspection with its own short connection timeout.
 	SourceColumns(config *Config) (columns, generated map[string][]string, err error)
+	// OptionKeys declares which [sql.options] keys this dialect reads
+	// (Option* constants). A configured key outside the list is refused at
+	// admission: accepted-and-ignored is the failure mode this closes.
+	OptionKeys() []string
 }
 
 // TopicSpec routes one topic (its Type) to be fed from one-or-more source Tables,
@@ -113,7 +117,8 @@ type Config struct {
 	// leading column don't collide. See CompositeKey.
 	PrimaryKey []string
 	Tables     []string
-	Options    map[string]string
+	// Options is the [sql.options] table, typed; see Options.
+	Options Options
 }
 
 // EnsureTopics backfills Topics from the flat singular fields (Type, Tables,

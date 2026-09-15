@@ -39,65 +39,65 @@ type = "JSONB"
 name = "directors"
 type = "JSONB"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "movie"
 onDelete = "delete-row"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [
   { column = "title", from = "$.title" },
   { column = "year", from = "$.year" },
   { column = "genres", from = "$.genres" },
 ]
 
-[[projection.source]]
+[[projection.sources]]
 topic = "rating"
 onDelete = "clear"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [
   { column = "score", from = "$.score" },
   { column = "votes", from = "$.votes" },
 ]
 
-[[projection.source]]
+[[projection.sources]]
 topic = "person"
-[projection.source.lookup]
+[projection.sources.lookup]
 name = "people"
-[[projection.source.lookup.field]]
+[[projection.sources.lookup.fields]]
 field = "name"
 from = "$.name"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "credit"
 keyPath = "$.movie_id"
 when = [ { path = "$.role", equals = "actor" } ]
-[projection.source.aggregate]
+[projection.sources.aggregate]
 column = "top_cast"
 elementKey = "$.billing"
 elementKeyType = "number"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "billing"
 from = "$.billing"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "person_id"
 from = "$.person_id"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "name"
 lookup = "people"
 on = "person_id"
 select = "name"
 
-[[projection.source]]
+[[projection.sources]]
 topic = "credit"
 keyPath = "$.movie_id"
 when = [ { path = "$.role", equals = "director" } ]
-[projection.source.aggregate]
+[projection.sources.aggregate]
 column = "directors"
 elementKey = "$.billing"
 elementKeyType = "number"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "person_id"
 from = "$.person_id"
-[[projection.source.aggregate.element]]
+[[projection.sources.aggregate.fields]]
 field = "name"
 lookup = "people"
 on = "person_id"

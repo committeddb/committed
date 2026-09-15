@@ -462,6 +462,50 @@ func TestSyncDeleteWithoutKeyColumnIsPermanent(t *testing.T) {
 	require.Nil(t, mock.ExpectationsWereMet())
 }
 
+// TestSyncKeylessWithKeyColumnHonorsDelete pins the documented remedy for the
+// case above: a keyless (append/history) table that names keyColumn CAN
+// translate a delete, so a right-to-be-forgotten erasure reaches it —
+// DELETE FROM <table> WHERE <keyColumn> = <entity key>, removing the subject's
+// whole history from the table. Without this, the only keyless shape that
+// honors erasure would be undocumented and untested (see read-models.md).
+func TestSyncKeylessWithKeyColumnHonorsDelete(t *testing.T) {
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.Nil(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.Nil(t, err)
+	defer db.Close()
+
+	// Keyless: no primaryKey. keyColumn names where the entity key lands.
+	config := &sql.Config{
+		Topic:     "simple",
+		Table:     "foo",
+		KeyColumn: "pk",
+		Mappings:  []sql.Mapping{{JsonPath: "$.key", Column: "pk", SQLType: "TEXT"}},
+	}
+	require.False(t, config.Keyed(), "the shape under test is the keyless one")
+	require.Equal(t, []string{"pk"}, config.DeleteKeyColumns())
+
+	mock.ExpectExec(dialect.CreateDDL(config)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectPrepare(dialect.CreateSQL(config))
+	deletePrepare := mock.ExpectPrepare(dialect.CreateDeleteSQL(config))
+	// Keyless, so Init also creates the dedup sidecar and prepares its mark.
+	mock.ExpectExec(dialect.CreateAppliedSidecarDDL(config)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectPrepare(dialect.CreateAppliedMarkSQL(config))
+
+	syncable := sql.New(db, config)
+	require.Nil(t, syncable.Init())
+
+	const subjectKey = "subject-12345"
+	mock.ExpectBegin()
+	deletePrepare.ExpectExec().WithArgs(subjectKey).WillReturnResult(sqlmock.NewResult(0, 3))
+	mock.ExpectCommit()
+	_, err = syncable.Sync(context.Background(), &cluster.Actual{Entities: []*cluster.Entity{
+		cluster.NewDeleteEntity(simpleType, []byte(subjectKey)),
+	}})
+	require.NoError(t, err, "a keyless table with keyColumn must honor the erasure, not dead-letter it")
+	require.Nil(t, mock.ExpectationsWereMet())
+}
+
 // TestSyncKeylessAppendIdempotentMySQL is the no-primaryKey replay regression on
 // the MySQL path (the INSERT IGNORE dedup mark): re-syncing the same Actuals must
 // not duplicate rows in an append/history table. Runs against the in-process

@@ -9,7 +9,7 @@ import (
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 )
 
-// Pins envelope-level decode tolerances (the golden corpus from
+// Pins envelope-level decode tolerances (the reference corpus from
 // .claude-scratch/tickets/viper-containment.md): the [syncable] /
 // [ingestable] / [database] envelopes keep accepting case-variant
 // section and field names, JSON-mimetype payloads keep working, and
@@ -96,13 +96,13 @@ func TestParseDatabaseInterpolatesSecrets(t *testing.T) {
 	p := parser.New()
 	p.AddDatabaseParser("foo", fakeParser)
 
-	toml := "[database]\nname = \"bar\"\ntype = \"foo\"\npassword = \"${TOLERANCE_TEST_SECRET}\"\n"
+	toml := "[database]\nname = \"bar\"\ntype = \"foo\"\n[foo]\npassword = \"${TOLERANCE_TEST_SECRET}\"\n"
 	_, _, err := p.ParseDatabase("text/toml", []byte(toml))
 	require.NoError(t, err)
 
 	require.Equal(t, 1, fakeParser.ParseCallCount())
 	v := fakeParser.ParseArgsForCall(0)
-	require.Equal(t, "s3cr3t", v.GetString("database.password"))
+	require.Equal(t, "s3cr3t", v.GetString("foo.password"))
 
 	// A missing secret is a *config.MissingVarError at the boundary.
 	toml = "[database]\nname = \"bar\"\ntype = \"foo\"\npassword = \"${TOLERANCE_TEST_UNSET}\"\n"

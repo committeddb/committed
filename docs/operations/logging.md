@@ -35,7 +35,7 @@ classifier. Node-local logs are the other side of that boundary: they deliberate
 keep the **full, unredacted detail** an operator needs to diagnose a failure on
 the node where it happened.
 
-The one place customer data reaches a log is a **failed sink apply**. When a
+The one place customer data reaches a log is a **failed destination apply**. When a
 syncable's write to your destination database is rejected, committed logs the
 driver's error verbatim so you can see *why* — and a driver error routinely echoes
 the offending row: a PostgreSQL unique/foreign-key violation includes
@@ -44,7 +44,7 @@ entity's key or data. A recovered panic can, rarely, carry a value the same way.
 **Treat your node logs as potentially containing customer personal data.**
 
 This is a deliberate diagnosability choice, not an oversight: the full reason a
-sink rejected a row is exactly what an operator needs, and it stays on the node
+destination rejected a row is exactly what an operator needs, and it stays on the node
 rather than crossing the boundary into an API response or a replicated record.
 
 ## What is not in the logs

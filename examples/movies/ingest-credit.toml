@@ -11,6 +11,6 @@ primaryKey = ["movie_id", "billing"]
 tables = ["ingress.credit"]
 mapAllColumns = true
 
-[sql.postgres]
-slot_name = "committed_credit_slot"
+[sql.options]
+slotName = "committed_credit_slot"
 publication = "committed_credit_pub"

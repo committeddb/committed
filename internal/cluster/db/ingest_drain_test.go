@@ -73,7 +73,7 @@ func (s *faithfulBlockApplyStorage) Unblock() {
 }
 
 // TestIngest_FreezeDrainsApplyBeforeRestart proves the freeze-exit apply-drain
-// (spawnIngestWorkerLocked): under apply-lag (commit ahead of applied), a frozen
+// (newIngestWorker): under apply-lag (commit ahead of applied), a frozen
 // ingest worker must NOT be restarted from its durable position until apply
 // catches up. Restarting on a stale position would re-read behind committed-but-
 // unapplied batches and re-emit them into the permanent event log — the

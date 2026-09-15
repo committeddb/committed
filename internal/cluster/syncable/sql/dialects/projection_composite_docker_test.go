@@ -14,7 +14,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 )
 
-// projectionCompositeFlow drives a composite-keyed sql-projection against a
+// projectionCompositeFlow drives a composite-keyed projection against a
 // real destination — the VisitWorkareaStatuses shape from the pilot (a
 // latest-event-wins reduction keyed by a composite identity, previously only
 // expressible as a window function). Init creates the real two-column

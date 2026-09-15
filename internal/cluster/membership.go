@@ -28,9 +28,8 @@ var ErrNotLearner = errors.New("cluster: not a learner")
 var ErrWouldRemoveLastVoter = errors.New("cluster: would remove the last voter")
 
 // Member roles reported by Membership. A node is a voter (counts toward
-// quorum) or a learner (replicates the log but does not vote). Learners are
-// not yet added by this build; the role is reported generally so the
-// learner-promotion work layers on without a response-shape change.
+// quorum) or a learner (replicates the log but does not vote): a node joins
+// as a learner and is promoted to voter once it has caught up.
 const (
 	MemberRoleVoter   = "voter"
 	MemberRoleLearner = "learner"

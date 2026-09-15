@@ -46,7 +46,7 @@ raises that value, raise `COMMITTED_SHUTDOWN_TIMEOUT` to match so `SIGKILL`
 doesn't preempt the graceful path.
 
 ```bash
-COMMITTED_SHUTDOWN_TIMEOUT=45s ./committed node --id 1 ...
+COMMITTED_SHUTDOWN_TIMEOUT=45s ./committed node   # alongside the usual COMMITTED_* environment
 ```
 
 An unparseable value (`COMMITTED_SHUTDOWN_TIMEOUT=forever`) or a
@@ -83,7 +83,7 @@ graceful path can finish before Kubernetes sends `SIGKILL`.
 
 ```ini
 [Service]
-ExecStart=/usr/local/bin/committed node --id 1 ...
+ExecStart=/usr/local/bin/committed node
 Environment=COMMITTED_SHUTDOWN_TIMEOUT=30s
 # Give the graceful path its full deadline before systemd escalates
 # to SIGKILL. Keep this slightly larger than COMMITTED_SHUTDOWN_TIMEOUT.

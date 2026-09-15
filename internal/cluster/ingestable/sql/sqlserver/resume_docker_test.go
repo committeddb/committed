@@ -1,10 +1,11 @@
-//go:build docker
+//go:build docker || integration
 
 package sqlserver_test
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,37 +15,6 @@ import (
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 )
-
-// drainUntilPosition collects entities until a position checkpoint arrives
-// AFTER at least `want` entities, returning the entities and the latest
-// position seen. Used to capture resume points between phases.
-func drainUntilPosition(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position, want int, deadline time.Duration) ([]*cluster.Entity, cluster.Position) {
-	t.Helper()
-	var got []*cluster.Entity
-	var lastPos cluster.Position
-	timeout := time.After(deadline)
-	for {
-		select {
-		case p := <-pr:
-			for _, e := range p.Entities {
-				if e.IsRefreshBoundary() {
-					continue
-				}
-				got = append(got, e)
-			}
-			if len(p.Position) > 0 {
-				lastPos = p.Position
-			}
-		case pos := <-po:
-			lastPos = pos
-			if len(got) >= want {
-				return got, lastPos
-			}
-		case <-timeout:
-			t.Fatalf("timed out with %d of %d entities (lastPos %d bytes)", len(got), want, len(lastPos))
-		}
-	}
-}
 
 // TestSQLServerResumeFromStreamingCheckpoint pins the third resume state
 // (fresh and mid-snapshot are covered by the e2e and hook tests): a worker
@@ -68,7 +38,7 @@ func TestSQLServerResumeFromStreamingCheckpoint(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_resume"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	// Run 1: snapshot the one row, reach streaming, capture the checkpoint.
@@ -77,8 +47,7 @@ func TestSQLServerResumeFromStreamingCheckpoint(t *testing.T) {
 	po1 := make(chan cluster.Position, 64)
 	d1 := &sqlserver.SQLServerDialect{}
 	go func() { _ = d1.Ingest(ctx1, config, nil, 0, pr1, po1) }()
-	run1, checkpoint := drainUntilPosition(t, pr1, po1, 1, 2*time.Minute)
-	require.Len(t, run1, 1, "run 1 snapshots the pre-existing row")
+	checkpoint := awaitStreaming(t, pr1, po1, 2*time.Minute, "1").Position
 	cancel1()
 	require.NotEmpty(t, checkpoint)
 
@@ -149,9 +118,9 @@ func TestSQLServerCompositePKAndUniqueidentifier(t *testing.T) {
 		PrimaryKey:       []string{"a", "b"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_comp"},
-		// batch_size 2 forces the composite keyset's expanded-OR resume WHERE
+		// batchSize 2 forces the composite keyset's expanded-OR resume WHERE
 		// across batches (3 rows → two batches).
-		Options: map[string]string{"poll_interval": "300ms", "batch_size": "2"},
+		Options: sql.Options{PollInterval: 300 * time.Millisecond, BatchSize: 2},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -169,9 +138,9 @@ func TestSQLServerCompositePKAndUniqueidentifier(t *testing.T) {
 	require.Len(t, byKey, 3, "composite keyset pagination must enumerate every row exactly once")
 	require.Contains(t, byKey, `["1","b1"]`, "composite keys are the JSON-array encoding")
 	require.JSONEq(t,
-		fmt.Sprintf(`{"a":1,"b":"b1","g":"%s","v":"v1"}`, guid),
+		fmt.Sprintf(`{"a":1,"b":"b1","g":"%s","v":"v1"}`, strings.ToLower(guid)),
 		string(byKey[`["1","b1"]`].Data),
-		"uniqueidentifier must render as the canonical GUID string, not raw bytes")
+		"uniqueidentifier must render as the canonical RFC 4122 lowercase GUID, not raw bytes or the driver's uppercase")
 
 	// A delete keyed by the composite PK through the CT path.
 	_, err = db.Exec("DELETE FROM dbo.ct_comp WHERE a = 2 AND b = 'b2'")

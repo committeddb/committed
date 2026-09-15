@@ -73,25 +73,25 @@ type = "VARCHAR(64)"
 name = "amount"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "live"
 from    = "txns"
 keyPath = "$.id"
 emit    = [ { field = "job", from = "$.jobId" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "joined"
 from    = "visits"
 keyPath = "$.id"
 emit    = [ { field = "id", from = "$.id" } ]
 
-[[projection.stage.join]]
+[[projection.stages.joins]]
 topic = "workareas"
 on    = "$.waId"
 
-[[projection.source]]
+[[projection.sources]]
 from = "live"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.job" } ]
 `)
 
@@ -151,10 +151,10 @@ type = "VARCHAR(64)"
 name = "amount"
 type = "VARCHAR(64)"
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "billing"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 when = [ { path = "$.billed", equals = "true" } ]
 set  = [ { column = "amount", from = "$.amount" } ]
 `)
@@ -192,15 +192,15 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "live"
 from    = "txns"
 keyPath = "$.id"
 emit    = [ { field = "v", from = "$.id" } ]
 
-[[projection.source]]
+[[projection.sources]]
 from = "live"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `)
 	rep, err := p.DryRun(context.Background(), feedOf(
@@ -232,15 +232,15 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "live"
 from    = "txns"
 keyPath = "$.id"
 emit    = [ { field = "v", from = "$.id" } ]
 
-[[projection.source]]
+[[projection.sources]]
 from = "live"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `)
 	rep, err := p.DryRun(context.Background(), feedOf(
@@ -273,27 +273,27 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "a"
 from    = "topic-a"
 keyPath = "$.k"
 emit    = [ { field = "x", from = "$.x" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "b"
 from    = "topic-b"
 keyPath = "$.k"
 emit    = [ { field = "y", from = "$.y" } ]
 
-[[projection.stage]]
+[[projection.stages]]
 name  = "m"
 merge = [ "a", "b" ]
 when  = [ { path = "$.b.y", notNull = true } ]
 emit  = [ { field = "v", expr = "coalesce($.a.x, 0)" } ]
 
-[[projection.source]]
+[[projection.sources]]
 from = "m"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `)
 	// Varied payloads so each fold emits a delta (identical re-emissions
@@ -328,10 +328,10 @@ type = "VARCHAR(64)"
 name = "amount"
 type = "VARCHAR(64)"
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "billing"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 when = [ { path = "$.billed", equals = "true" } ]
 set  = [ { column = "amount", from = "$.amount" } ]
 `)

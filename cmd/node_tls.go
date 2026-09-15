@@ -82,16 +82,16 @@ func warnInsecurePosture(addr, apiToken string, apiTLS *tls.Config, peerMTLS boo
 	}
 }
 
-// loadPeerTLSInfo reads the three COMMITTED_TLS_* env vars and returns
+// loadPeerTLSInfo reads the three COMMITTED_PEER_TLS_* env vars and returns
 // the corresponding transport.TLSInfo. Returns nil when none of them are
 // set (plaintext — today's default). Fatal-exits if some are set but not
 // all three, since a half-configured TLS setup is almost always an
 // operator mistake and silent fallback to plaintext is worse than a loud
 // startup failure.
 func loadPeerTLSInfo() *transport.TLSInfo {
-	ca := os.Getenv("COMMITTED_TLS_CA_FILE")
-	cert := os.Getenv("COMMITTED_TLS_CERT_FILE")
-	key := os.Getenv("COMMITTED_TLS_KEY_FILE")
+	ca := os.Getenv("COMMITTED_PEER_TLS_CA_FILE")
+	cert := os.Getenv("COMMITTED_PEER_TLS_CERT_FILE")
+	key := os.Getenv("COMMITTED_PEER_TLS_KEY_FILE")
 
 	set := 0
 	if ca != "" {
@@ -110,7 +110,7 @@ func loadPeerTLSInfo() *transport.TLSInfo {
 		// G706 false positive: the "user-controlled" values are env
 		// vars from the process operator, who already has full control
 		// over the process. Log-injection is not a coherent threat here.
-		log.Fatalf("peer mTLS: all of COMMITTED_TLS_CA_FILE, COMMITTED_TLS_CERT_FILE, COMMITTED_TLS_KEY_FILE must be set together (got CA=%q CERT=%q KEY=%q)", ca, cert, key) //nolint:gosec // G706
+		log.Fatalf("peer mTLS: all of COMMITTED_PEER_TLS_CA_FILE, COMMITTED_PEER_TLS_CERT_FILE, COMMITTED_PEER_TLS_KEY_FILE must be set together (got CA=%q CERT=%q KEY=%q)", ca, cert, key) //nolint:gosec // G706
 	}
 	return &transport.TLSInfo{
 		TrustedCAFile: ca,
@@ -196,9 +196,9 @@ const proxyClientTimeout = 5 * time.Second
 // certs chain to a public CA.
 //
 // For a TLS cluster with a private CA or self-signed certs the operator sets:
-//   - COMMITTED_HTTP_TLS_CA_FILE — CA bundle to trust when dialing a peer's
+//   - COMMITTED_HTTP_CLIENT_TLS_CA_FILE — CA bundle to trust when dialing a peer's
 //     API as a client (typically the same CA that signs the server certs).
-//   - COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY — skip verification entirely
+//   - COMMITTED_HTTP_CLIENT_TLS_INSECURE_SKIP_VERIFY — skip verification entirely
 //     (self-signed without a shared CA; the same escape hatch as the
 //     `member --insecure` flag).
 //
@@ -208,15 +208,18 @@ const proxyClientTimeout = 5 * time.Second
 // instead of log.Fatalf lets node_test.go exercise the error cases directly,
 // matching loadAPITLSConfig.
 func loadProxyClient() (*nethttp.Client, error) {
-	caFile := os.Getenv("COMMITTED_HTTP_TLS_CA_FILE")
-	insecure := boolEnv("COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY")
+	caFile := os.Getenv("COMMITTED_HTTP_CLIENT_TLS_CA_FILE")
+	insecure, err := boolEnv("COMMITTED_HTTP_CLIENT_TLS_INSECURE_SKIP_VERIFY")
+	if err != nil {
+		return nil, err
+	}
 	if caFile == "" && !insecure {
 		return nil, nil
 	}
 
 	tlsCfg := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: insecure, //nolint:gosec // G402: operator opt-in via COMMITTED_HTTP_TLS_INSECURE_SKIP_VERIFY
+		InsecureSkipVerify: insecure, //nolint:gosec // G402: operator opt-in via COMMITTED_HTTP_CLIENT_TLS_INSECURE_SKIP_VERIFY
 	}
 	if caFile != "" {
 		// G304 false positive: the path comes from an operator-set env var.

@@ -74,7 +74,7 @@ type Raft struct {
 	compactionPressure atomic.Bool
 
 	node    raft.Node
-	storage Storage
+	storage raftStorage
 
 	// applyNotifier is invoked after each successful Storage.ApplyCommitted
 	// call with the raw entry data. db.New supplies db.notifyApplied here
@@ -101,6 +101,9 @@ type Raft struct {
 
 	transport      Transport
 	transportStopC chan struct{} // signals http transport to shutdown
+	// catchUp is the progress of a catch-up in flight (see catchup.go), read
+	// by the status surface.
+	catchUp        catchUpProgress
 	transportDoneC chan struct{} // signals http transport shutdown complete
 
 	// transportWrapper is captured from the options in newRaftWithOptions
@@ -139,7 +142,18 @@ type Raft struct {
 	metrics *metrics.Metrics
 }
 
-func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, opts ...Option) (<-chan error, *Raft) {
+// raftStorage is the raft layer's caller-site slice of Storage: the Ready
+// loop's persistence surface (ConsensusStorage) plus the membership-registry
+// writes applyConfChange makes as conf changes commit (MembershipStorage).
+// Narrower than Storage so the compiler enforces that the consensus loop
+// never reaches into configs, worker state, or event-log reads; any Storage
+// satisfies it.
+type raftStorage interface {
+	ConsensusStorage
+	MembershipStorage
+}
+
+func NewRaft(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, opts ...Option) (<-chan error, *Raft) {
 	cfg := defaultOptions()
 	for _, opt := range opts {
 		opt(&cfg)
@@ -147,7 +161,7 @@ func NewRaft(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, propo
 	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s Storage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
@@ -213,7 +227,7 @@ const raftElectionTicks = 10
 // implicit precondition that HardState.Term is at least the term of the last log
 // entry. See the call site in startRaft for why a violation is fatal: it makes a
 // pre-vote rejection emit a sub-term (down to 0) MsgPreVoteResp that panics raft.
-func assertStorageTermInvariant(id uint64, hs *raftpb.HardState, s Storage) error {
+func assertStorageTermInvariant(id uint64, hs *raftpb.HardState, s raft.Storage) error {
 	last, err := s.LastIndex()
 	if err != nil {
 		return fmt.Errorf("node %d: read last index: %w", id, err)
@@ -326,7 +340,11 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		panic("db: no transport factory configured — wire one with WithTransportFactory")
 	}
 	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger}
-	t := n.transportFactory(id, ps, n.logger, r, n.tlsInfo, n.apiToken)
+	// The transport serves peers' catch-up fetches from this node's event
+	// log when the storage has one (wal.Storage); the in-memory doubles do
+	// not, and serve nothing.
+	events, _ := n.storage.(EventServer)
+	t := n.transportFactory(id, ps, n.logger, r, events, n.tlsInfo, n.apiToken)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
 		// wrapper returns a Transport that conforms to the same interface,
@@ -461,6 +479,10 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 				n.logger.Error("conf change: delete member version",
 					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
 			}
+			if err := n.storage.DeleteMemberZone(ch.GetNodeId()); err != nil {
+				n.logger.Error("conf change: delete member zone",
+					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
+			}
 		}
 	}
 }
@@ -477,6 +499,14 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 // Both maps are owned by the caller: Status() returns a Clone of the tracker
 // config, so Voters.IDs() and the Learners map are fresh per call. learners is
 // nil when there are none (a nil-map read is a safe miss).
+// raftAppliedCoversStorage reports whether raft's own applied index is at or
+// past the durable applied index — the Ready loop's ordering guarantee (see
+// the Advance placement): whenever a waiter wakes on "applied", raft agrees,
+// so a conf change it proposes next is never dropped as unapplied.
+func (n *Raft) raftAppliedCoversStorage() bool {
+	return n.node.Status().Applied >= n.storage.AppliedIndex()
+}
+
 func (n *Raft) memberStatus() (voters, learners map[uint64]struct{}, joint bool) {
 	cfg := n.node.Status().Config
 	return cfg.Voters.IDs(), cfg.Learners, len(cfg.Voters[1]) > 0
@@ -657,9 +687,32 @@ func (n *Raft) serveChannels() {
 			// channel (raft_test's direct-constructed Raft) doesn't deadlock
 			// the return path. Production callers (db.DB) drain ErrorC so
 			// the send always lands immediately.
+			// A snapshot past this node's event log cannot be saved (the
+			// event log would be left with a permanent gap): fill the log
+			// from a peer first — the automatic catch-up, catchup.go — and
+			// only then save and install. The loop stalls here for the
+			// duration; the node is not-ready meanwhile. A false return is
+			// a storage without an event log (the fail-fast path below says
+			// so) or the node closing.
+			releaseCatchUp := func() {}
+			if !raft.IsEmptySnap(rd.Snapshot) {
+				if needIndex, needGen, needed := n.snapshotNeedsCatchUp(rd.Snapshot); needed {
+					release, ok := n.catchUpEventLog(rd.Snapshot, needIndex, needGen)
+					releaseCatchUp = release
+					if !ok {
+						select {
+						case <-n.closeC:
+							release()
+							return
+						default:
+						}
+					}
+				}
+			}
 			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
 			if err != nil {
 				n.logger.Error("storage save", zap.Error(err))
+				releaseCatchUp()
 				select {
 				case n.raftErrorC <- err:
 				default:
@@ -670,6 +723,10 @@ func (n *Raft) serveChannels() {
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				n.processSnapshot(rd.Snapshot)
 			}
+			// The storage's own maintenance held off during a catch-up (a
+			// pending scrub) may run now, over the finished log and the
+			// installed metadata.
+			releaseCatchUp()
 			// Apply MUST complete before Advance() per the etcd raft
 			// contract. Apply errors are crash-fatal: continuing past a
 			// half-applied entry diverges the state machine, retrying
@@ -730,6 +787,26 @@ func (n *Raft) serveChannels() {
 				n.logger.Fatal("apply committed entries", zap.Int("count", len(rd.CommittedEntries)), zap.Error(err))
 			}
 			applyDur := time.Since(applyStart)
+			// Advance HERE — the entries are saved and applied, which is all
+			// raft asks — and before anything below observes "applied":
+			//
+			//   - raft's own applied index moves only at Advance. The applied
+			//     broadcast below wakes waiters that may propose next (a
+			//     membership change proposes the next conf change the moment
+			//     the previous one shows in the configuration), and raft
+			//     silently drops a conf change proposed while its applied
+			//     index has not passed the previous one. Firing the broadcast
+			//     before Advance let exactly that happen (a CI hang,
+			//     2026-09-05). After Advance, "applied" means raft agrees.
+			//   - raft's storage contract forbids compacting past raft's own
+			//     applied index; maybeCompact below compacts relative to the
+			//     durable applied index, which after a batch of more than the
+			//     safety buffer is ahead of raft's until Advance.
+			//
+			// Nothing between here and the old placement fed raft: the
+			// notifiers, metrics, the storage invariant, and compaction all
+			// read storage, which raft already reads concurrently.
+			n.node.Advance()
 			for _, entry := range rd.CommittedEntries {
 				if n.metrics != nil {
 					// Batch-amortized share: per-entry apply is no longer
@@ -770,14 +847,11 @@ func (n *Raft) serveChannels() {
 
 			// Storage invariant: P_local == R_local. See
 			// docs/event-log-architecture.md § "The central invariant"
-			// (Face 1 — the storage highwatermark).
-			// On violation the cluster has compacted past this node's
-			// recoverable window (almost always via an InstallSnapshot
-			// that advanced the raft side without backfilling the event
-			// log) and this node cannot safely keep serving reads or
-			// voting — it must exit and be rebuilt. v1 is fail-fast per
-			// the doc; v2 will enter a streaming catch-up mode in
-			// place of the Fatal.
+			// (Face 1 — the storage highwatermark). A snapshot that would
+			// advance the raft side past the event log is caught up from
+			// a peer before it is saved (above), so a violation here is a
+			// storage that cannot catch up or a bug — and this node cannot
+			// safely keep serving reads or voting on a log with a gap.
 			n.checkStorageInvariant()
 
 			// If configured, trim the raft log up to a safe point so we
@@ -786,8 +860,6 @@ func (n *Raft) serveChannels() {
 			// log only exists to move entries between peers and to
 			// satisfy the `appliedIndex` replay window.
 			n.maybeCompact()
-
-			n.node.Advance()
 		case <-n.raftStopC:
 			return
 		case <-n.closeC:
@@ -924,8 +996,9 @@ func (n *Raft) setCompactionPressure(on bool) {
 // the log, then sends it MsgTimeoutNow to start an immediate election; the
 // attempt silently expires after an election timeout if the target can't
 // catch up or is unreachable. Fire-and-forget by design — the caller
-// (db.maybeTransferLeadership, moving leadership off a disk-constrained
-// node) observes the outcome through the normal leader-change machinery and
+// (diskAdmission.maybeTransferLeadership, moving leadership off a
+// disk-constrained node) observes the outcome through the normal
+// leader-change machinery and
 // retries on a later cycle if leadership didn't move.
 func (n *Raft) transferLeadership(transferee uint64) {
 	if n.node == nil {
@@ -1041,12 +1114,12 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 // Under normal operation ApplyCommittedBatch appends the Ready's events
 // and persists appliedIndex within one iteration, so the two are equal
 // again by the time this check runs (transiently p > r inside the batch —
-// see below). The only
-// way they diverge is an InstallSnapshot that advanced appliedIndex
-// past the permanent event log highwatermark — i.e., the cluster's
-// raft log has been compacted past a gap this node can't fill. v1
-// handles this by fatal-exiting with a pointer to the rebuild
-// runbook; see docs/operations/rebuild.md.
+// see below). The only way they could diverge is an InstallSnapshot that
+// advanced appliedIndex past the permanent event log highwatermark — and
+// the Ready loop fills the event log from a peer before it saves such a
+// snapshot (catchup.go), so a violation means the storage could not catch
+// up. The node fatal-exits with a pointer to the rebuild runbook; see
+// docs/operations/rebuild.md.
 func (n *Raft) checkStorageInvariant() {
 	p := n.storage.EventIndex()
 	r := n.storage.AppliedIndex()
@@ -1062,7 +1135,8 @@ func (n *Raft) checkStorageInvariant() {
 	}
 	n.logger.Fatal(
 		"storage invariant violation: permanent event log is behind raft applied index. "+
-			"The cluster has compacted past this node's recovery point. "+
+			"The cluster compacted past this node's recovery point and the automatic catch-up from a peer "+
+			"did not fill the event log first (this storage cannot catch up, or it was interrupted). "+
 			"Run the rebuild procedure at docs/operations/rebuild.md.",
 		zap.Uint64("eventIndex", p),
 		zap.Uint64("appliedIndex", r),
@@ -1165,7 +1239,11 @@ func (n *Raft) maybeCompact() {
 		return
 	}
 	if err := n.storage.Compact(compactTo); err != nil {
-		n.logger.Warn("compact raft log", zap.Uint64("compactTo", compactTo), zap.Error(err))
+		if errors.Is(err, cluster.ErrCompactionDeferred) {
+			n.logger.Debug("raft log compaction deferred by a layout freeze; retrying next cycle", zap.Uint64("compactTo", compactTo))
+		} else {
+			n.logger.Warn("compact raft log", zap.Uint64("compactTo", compactTo), zap.Error(err))
+		}
 		return
 	}
 	n.lastCompactedIndex.Store(compactTo)

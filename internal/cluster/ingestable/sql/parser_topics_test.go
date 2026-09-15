@@ -38,8 +38,8 @@ type = "sql"
 dialect = "postgres"
 connectionString = "postgres://u:p@h:5432/db?sslmode=disable"
 
-[sql.postgres]
-slot_name = "s"
+[sql.options]
+slotName = "s"
 
 [[sql.topics]]
 topic = "orders"

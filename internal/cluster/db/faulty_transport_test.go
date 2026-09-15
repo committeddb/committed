@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"context"
 	"math/rand"
 	"sync"
 	"time"
@@ -100,6 +101,13 @@ type pendingMsg struct {
 }
 
 // --- db.Transport passthroughs ---
+
+// FetchEvents delegates to the inner transport, whose peer registry the
+// Partition/Heal primitives edit — so a partitioned node cannot fetch from
+// the far side either.
+func (t *FaultyTransport) FetchEvents(ctx context.Context, req db.EventFetchRequest, sink db.EventSink) (db.EventFetchResult, error) {
+	return t.inner.FetchEvents(ctx, req, sink)
+}
 
 func (t *FaultyTransport) Start(stopC <-chan struct{}) error { return t.inner.Start(stopC) }
 func (t *FaultyTransport) AddPeer(p raft.Peer) error         { return t.inner.AddPeer(p) }

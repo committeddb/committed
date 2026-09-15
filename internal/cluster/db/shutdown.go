@@ -64,9 +64,10 @@ func (db *DB) shutdownTransferTarget() uint64 {
 	return pickShutdownTransferTarget(db.ID(), members)
 }
 
-// isLeader is the default isLeaderFn: whether raft currently regards this node
-// as the leader.
-func (db *DB) isLeader() bool {
+// isRaftLeader is the default isLeaderFn: whether raft currently regards this
+// node as the leader — raft's own soft state, which leads the engine's
+// Ready-processed view (IsLeader) by up to one Ready iteration.
+func (db *DB) isRaftLeader() bool {
 	_, _, _, isLeader, _ := db.raft.membershipView()
 	return isLeader
 }

@@ -15,6 +15,11 @@ import (
 // SyncableParser parses sql syncable TOML. Metrics is optional (nil
 // skips instrumentation); when set, entity-kind-misuse parses are
 // counted on committed.entity_kind.misuse alongside the warning log.
+// syncableSQLKeys is the syncable [sql] vocabulary: what ParseConfig,
+// SchemaFromConfig, TopicsFromConfig, and DatabasesFromConfig read. Pinned
+// to those reads by the vocabulary conformance test.
+var syncableSQLKeys = []string{"db", "topic", "table", "keyColumn", "primaryKey", "mappings", "indexes"}
+
 type SyncableParser struct {
 	Metrics *metrics.Metrics
 }
@@ -87,6 +92,9 @@ func (p *SyncableParser) SchemaFromConfig(v *cluster.ParsedConfig, _ cluster.Dat
 }
 
 func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*Config, error) {
+	if err := v.RejectUnknownKeys("sql", syncableSQLKeys...); err != nil {
+		return nil, err
+	}
 	sqlDB := v.GetString("sql.db")
 	if sqlDB == "" {
 		return nil, &cluster.FieldError{Field: "sql.db", Issue: "required (name a [database] config)"}
@@ -196,6 +204,7 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 	}
 
 	p.warnKindMisuse(storage, topic, mappings)
+	p.warnUndeletable(topic, table, primaryKey, keyColumn)
 
 	var indexes []Index
 	if err := v.UnmarshalKey("sql.indexes", &indexes); err != nil {
@@ -268,6 +277,28 @@ func (p *SyncableParser) warnKindMisuse(storage cluster.DatabaseStorage, topic s
 	)
 	if p.Metrics != nil {
 		p.Metrics.EntityKindMisuse("sql", topic, t.EntityKind.String())
+	}
+}
+
+// warnUndeletable says at POST what a config with no delete key will do at its
+// first delete: dead-letter it (Config.DeleteKeyColumns — Init leaves the
+// delete statement unprepared, and Sync refuses rather than silently dropping
+// an erasure). Refusing loudly is the right runtime behaviour, but the
+// operator should not first learn it from a dead-letter months later, and the
+// remedy — keyColumn, naming the column that holds the entity key — is not
+// something they would guess. Warn, never refuse: an append/history table on a
+// topic that never receives a delete is a legitimate, documented shape, and
+// the erasure obligation only exists if deletes actually arrive.
+func (p *SyncableParser) warnUndeletable(topic, table string, primaryKey []string, keyColumn string) {
+	if len(primaryKey) > 0 || keyColumn != "" {
+		return
+	}
+	zap.L().Warn("[sql.syncable-parser] keyless syncable with no keyColumn: it cannot translate a delete, so every delete on this topic — including a right-to-be-forgotten erasure — will dead-letter. Set sql.keyColumn to the column holding the entity key to honor deletes, or erase this table yourself (see docs/read-models.md and docs/operations/rtbf.md)",
+		zap.String("topic", topic),
+		zap.String("table", table),
+	)
+	if p.Metrics != nil {
+		p.Metrics.SyncableUndeletable(topic, table)
 	}
 }
 

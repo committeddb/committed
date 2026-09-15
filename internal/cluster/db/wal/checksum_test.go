@@ -34,21 +34,22 @@ func TestFrame_HeaderLayout(t *testing.T) {
 	require.Equal(t, payload, framed[frameHeaderSize:], "payload")
 }
 
-func TestUnframe_LegacyPassthrough(t *testing.T) {
-	// No magic prefix: the bytes predate checksums and are returned
-	// unchanged with a nil error (trust-on-first-read). Covers both on-disk
-	// legacy shapes plus a couple too short to carry the 3-byte magic.
-	legacy := [][]byte{
-		{0x08, 0x00, 0x10, 0x01, 0x18, 0x01}, // marshaled raftpb.Entry
-		{0x24, 0x7f, 0x03, 0x01, 0x01, 0x05}, // gob-encoded State
+func TestUnframe_UnframedBytesRejected(t *testing.T) {
+	// No valid frame: every supported log is fully framed (framing shipped
+	// v0.5-beta; the data-dir floor is 0.7.3-beta), so bytes without the
+	// magic are corruption — or a below-floor relic — and must fail loudly,
+	// never be trusted unverified. Covers the shapes the removed
+	// trust-on-first-read passthrough used to admit.
+	unframed := [][]byte{
+		{0x08, 0x00, 0x10, 0x01, 0x18, 0x01}, // marshaled raftpb.Entry, bare
+		{0x24, 0x7f, 0x03, 0x01, 0x01, 0x05}, // gob-encoded State, bare
 		{},
 		{0xC0},      // too short for the magic
 		{0xC0, 'C'}, // ditto
 	}
-	for _, raw := range legacy {
-		got, err := unframe(raw)
-		require.NoError(t, err)
-		require.Equal(t, raw, got)
+	for _, raw := range unframed {
+		_, err := unframe(raw)
+		require.ErrorIs(t, err, ErrCorruptEntry)
 	}
 }
 
@@ -80,15 +81,13 @@ func TestUnframe_TruncatedFrame(t *testing.T) {
 	require.ErrorIs(t, err, ErrCorruptEntry)
 }
 
-func TestUnframe_MagicByteCorruption_TreatedAsLegacy(t *testing.T) {
-	// Documents the known limitation of magic-prefix discrimination:
-	// corruption landing in one of the 3 magic bytes downgrades the entry to
-	// "legacy" (returned unverified) instead of erroring. Never a false
-	// alarm, and a 3-byte target inside an entry that is otherwise
-	// hundreds-to-thousands of bytes.
+func TestUnframe_MagicByteCorruptionRejected(t *testing.T) {
+	// The old passthrough's documented limitation, now closed: corruption
+	// landing in the magic bytes used to downgrade the entry to "legacy"
+	// and skip verification entirely. With the passthrough removed it is
+	// what it always was — corruption — and fails loudly.
 	framed := frame([]byte("payload"))
 	framed[0] ^= 0xFF // destroy the magic discriminator
-	got, err := unframe(framed)
-	require.NoError(t, err)
-	require.Equal(t, framed, got)
+	_, err := unframe(framed)
+	require.ErrorIs(t, err, ErrCorruptEntry)
 }

@@ -125,6 +125,12 @@ type ProjectionElementField struct {
 	Lookup string `mapstructure:"lookup"`
 	On     string `mapstructure:"on"`
 	Select string `mapstructure:"select"`
+
+	// tracker classifies From-extraction failures for this field
+	// (entry-specific vs config-shaped — see cluster.AmbiguityTracker).
+	// Populated where the aggregate/lookup runtimes are built; nil
+	// classifies Permanent.
+	tracker *cluster.AmbiguityTracker
 }
 
 // enriched reports whether this field is resolved from a dimension (Lookup set)
@@ -271,6 +277,11 @@ type ProjectionConfig struct {
 	Columns    []ProjectionColumn
 	Sources    []ProjectionSource
 	Stages     []ProjectionStage
+	// Checkpoint is the per-syncable checkpoint cadence parsed from the common
+	// [syncable] section, exactly as the plain sql syncable carries it. A
+	// projection is a BatchSyncable, so Every is its batch size and MaxAge the
+	// batch-age flush; zero fields fall back to the worker's batch defaults.
+	Checkpoint cluster.CheckpointPolicy
 
 	// Single-source shorthand. The README single-topic form (and existing
 	// configs) set these top-level fields; applyDefaults folds them into one
@@ -662,6 +673,12 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 		}
 		if !stages.ValidNormalize(src.Normalize) {
 			return fmt.Errorf("%s: normalize %q is not supported (want %q)", where, src.Normalize, stages.NormalizeLower)
+		}
+		if src.Normalize != "" && src.Lookup != nil {
+			// A lookup source is keyed by the entity key it is looked up BY;
+			// there is no keyPath rendering for normalize to fold, and an
+			// accepted-but-inert knob is the silent kind of misconfiguration.
+			return fmt.Errorf("%s: normalize applies to a source's keyPath rendering, and a lookup source has none (its dimension is keyed by the entity key) — remove normalize here", where)
 		}
 		if src.RowOwner && (src.Aggregate != nil || src.Lookup != nil || src.ForEach != "") {
 			return fmt.Errorf("%s: rowOwner = true declares row admission; only a plain rules source (topic or stage-fed) can own rows", where)
@@ -1299,6 +1316,15 @@ func (c *ProjectionConfig) aggregateSpec(ag *ProjectionAggregate) AggregateSpec 
 			AggregateEnrichmentField{Output: f.Field, Source: f.Select})
 	}
 	return spec
+}
+
+// forEachSidecarSpec is the forEach reconciliation sidecar's shape: the
+// aggregate sidecar's, with the element columns unused. Beside aggregateSpec
+// and lookupSpec so the config alone says which tables a source keeps.
+func (c *ProjectionConfig) forEachSidecarSpec(src ProjectionSource) AggregateSpec {
+	return AggregateSpec{
+		Table: c.Table, PrimaryKey: c.PrimaryKey[0], Sidecar: ForEachSidecarName(c.Table, src.Topic),
+	}
 }
 
 // lookupSpec builds the dialect-facing spec for one lookup source.

@@ -5,12 +5,44 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/interpretation"
 )
 
-//counterfeiter:generate . Storage
+// Storage is the engine's durable-state contract, implemented by wal.Storage
+// in production and by hand-written in-memory doubles in tests (raft_test's
+// MemoryStorage over db/testing.StorageStubs, the faulty wrappers). It is
+// deliberately a composition of role interfaces, one per consuming
+// subsystem, so the seams stay legible: the raft Ready loop drives
+// ConsensusStorage, workers read EventLogStorage plus their own state role,
+// admission and the status surface read ConfigStorage, and so on.
+// Implementations satisfy the union structurally — the roles exist to name
+// the seams, and to let a consumer hold one role instead of the whole
+// contract (Raft holds raftStorage). There is deliberately no generated
+// fake: a double that needs only a role implements that role.
 type Storage interface {
-	raft.Storage
+	ConsensusStorage
+	EventLogStorage
+	ConfigStorage
+	SyncableStateStorage
+	IngestStateStorage
+	TypeStateStorage
+	InterpretationStorage
+	MembershipStorage
+
 	Close() error
+	// ParkedWorkers lists every worker with a terminal parked record (sync + ingest),
+	// replicated so any node answers identically. Powers the /node/status summary.
+	// A cross-role read over the syncable and ingestable state stores, so it sits
+	// on the union rather than in either role.
+	ParkedWorkers() ([]cluster.ParkedWorker, error)
+}
+
+// ConsensusStorage is the raft Ready loop's persistence surface (raft.go):
+// durable log/state writes, committed-entry apply, snapshot lifecycle, and
+// the compaction trigger's inputs. The two indexes anchor the storage
+// invariant P_local == R_local checked after every Ready iteration.
+type ConsensusStorage interface {
+	raft.Storage
 	// Save persists raft state and entries durably. It does NOT apply the
 	// entries to application state — that happens via ApplyCommitted, which
 	// the raft Ready loop calls separately on rd.CommittedEntries.
@@ -80,46 +112,72 @@ type Storage interface {
 	// crossed. Implementations are allowed to return rough estimates
 	// — the trigger treats this as a signal, not an assertion.
 	RaftLogApproxSize() (uint64, error)
-	// ResolveType returns the Type identified by ref. See
-	// cluster.Cluster.ResolveType for the version-0-means-latest
-	// semantic. Returns ErrTypeMissing if the ID has never existed;
-	// ErrVersionNotFound if the ID exists but the pinned version
-	// doesn't.
-	ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
+}
+
+// EventLogStorage reads committed Actuals back out of the permanent event
+// log: checkpoint-tracked worker reads, the dry-run's window sampler, and
+// replay's single-entry point read.
+type EventLogStorage interface {
 	Reader(id string) ActualReader
 	// ReaderAt reads committed Actuals from an arbitrary raft index —
 	// the dry-run's window sampler (checkpoint-tracked reads use Reader).
-	ReaderAt(index uint64) ActualReader  // Gets current index by id cache. If id is not known, index is 0
-	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
-	// IngestSourceSeqHighwater returns the highest source sequence
-	// (cluster.Proposal.SourceSeq) applied for the given ingestable id,
-	// or 0 if none. Advanced deterministically in ApplyCommitted from
-	// committed state; the ingest worker reads it before propose to skip
-	// re-emitted proposals (effectively-once ingest). 0 for an unknown id
-	// means "never ingested — dedup nothing".
-	IngestSourceSeqHighwater(id string) uint64
-	// TopicRefreshEpoch returns the highest refresh generation ever committed
-	// for a topic (type id), or 0 if none. Keyed by topic and NOT cleared by
-	// DeleteIngestable, so a same-topic recreate reads the generation still on the
-	// sink and resumes its epoch above it (see wal.Storage.TopicRefreshEpoch).
-	TopicRefreshEpoch(topic string) uint64
-	Node(id string) uint64 // Gets the node id that a worker is assigned to run on
+	ReaderAt(index uint64) ActualReader // Gets current index by id cache. If id is not known, index is 0
+	// ActualAt returns the committed Actual at a raft index, read from the
+	// permanent event log by binary search. Used by replay to re-drive a
+	// single dead-lettered Actual without disturbing any reader cursor.
+	ActualAt(index uint64) (*cluster.Actual, error)
+}
+
+// ConfigStorage reads the applied configuration documents — databases,
+// syncables, ingestables, types — with their version history, plus the
+// derivation graph over them. Serves admission reads and the HTTP config
+// surface.
+type ConfigStorage interface {
+	// ResolveType returns the Type identified by ref, with version 0
+	// meaning latest. Returns ErrTypeMissing if the ID has never existed;
+	// ErrVersionNotFound if the ID exists but the pinned version doesn't.
+	ResolveType(ref cluster.TypeRef) (*cluster.Type, error)
 	Database(id string) (cluster.Database, error)
 	Databases() ([]*cluster.Configuration, error)
 	Ingestables() ([]*cluster.Configuration, error)
 	Syncables() ([]*cluster.Configuration, error)
+	Types() ([]*cluster.Configuration, error)
+	// ProducerEdges enumerates the stored producer graph — deriving
+	// syncables and topic-producing ingestables, each with the raft index
+	// its current version applied at: the single edge source both admission
+	// (ReplayWithCandidate) and the build-time replay consume, so the two
+	// predicates cannot skew.
+	ProducerEdges() ([]DerivationEdge, error)
 	// SyncableExists / IngestableExists are the cheap existence point-reads
 	// behind the HTTP 404 gates (an absent id must never read as a healthy
 	// phantom).
 	SyncableExists(id string) (bool, error)
 	IngestableExists(id string) (bool, error)
-	Types() ([]*cluster.Configuration, error)
 	DatabaseVersions(id string) ([]cluster.VersionInfo, error)
 	DatabaseVersion(id string, version uint64) (*cluster.Configuration, error)
 	IngestableVersions(id string) ([]cluster.VersionInfo, error)
 	IngestableVersion(id string, version uint64) (*cluster.Configuration, error)
 	SyncableVersions(id string) ([]cluster.VersionInfo, error)
 	SyncableVersion(id string, version uint64) (*cluster.Configuration, error)
+	TypeVersions(id string) ([]cluster.VersionInfo, error)
+	TypeVersion(id string, version uint64) (*cluster.Configuration, error)
+}
+
+// SyncableStateStorage is the replicated per-syncable worker state: the
+// ownership pin, checkpoint/re-materialization records, the dead-letter
+// store, and the stuck/skip flow. Written from the apply path, so every
+// replica answers identically — that's what makes the status and manual
+// dead-letter flows node-agnostic.
+type SyncableStateStorage interface {
+	Node(id string) uint64 // Gets the node id that a worker is assigned to run on
+	// SyncableCheckpoint returns the syncable's full checkpoint record —
+	// including its interpretation pin — or (nil, false) when none exists.
+	SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool)
+	// SyncableRematerialization returns the syncable's in-progress
+	// re-materialization record, or (nil, false) when none exists. The owner
+	// worker observes it (begin marking, sweep at the target head); the
+	// status endpoint reports the progress.
+	SyncableRematerialization(id string) (*cluster.SyncableRematerialization, bool)
 	// SyncableDeadLetters returns the proposals a syncable permanently
 	// skipped, in ascending raft-index order. `since` is an exclusive
 	// raft-index cursor and `limit` bounds the page. Records are written
@@ -149,13 +207,45 @@ type Storage interface {
 	// what makes the manual dead-letter flow node-agnostic.
 	SyncableStuck(id string) (cluster.SyncableStuck, bool, error)
 	SyncableSkipRequest(id string) (cluster.SyncableSkipRequest, bool, error)
+}
+
+// IngestStateStorage is the replicated per-ingestable worker state: the
+// resume position, transaction-scoped dedup, the shape census, refresh
+// epochs, and the terminal parked record.
+type IngestStateStorage interface {
+	Position(id string) cluster.Position // Gets current index by id cache. If id is not known position is 0
+	// IngestSourceDedup returns the transaction-scoped ingest dedup record
+	// for id: the last applied source-transaction identity ("" = legacy
+	// scalar regime) and the SourceSeq highwater within it. The worker's
+	// pre-raft skip decision consults this, never the bare highwater —
+	// dedup comparisons are only meaningful within one source transaction.
+	IngestSourceDedup(id string) (txnID string, seq uint64)
+	// IngestableCensus returns the latest applied JSON shape census for the
+	// ingestable (published by its worker during the snapshot pass), or
+	// (nil, false) when none exists. Replicated state, so any node's status
+	// endpoint can serve it; also read by a resuming worker to seed its
+	// accumulator at the same refresh epoch.
+	IngestableCensus(id string) (*cluster.IngestableCensus, bool)
+	// TopicRefreshEpoch returns the highest refresh generation ever committed
+	// for a topic (type id), or 0 if none. Keyed by topic and NOT cleared by
+	// DeleteIngestable, so a same-topic recreate reads the generation still on the
+	// sink and resumes its epoch above it (see wal.Storage.TopicRefreshEpoch).
+	TopicRefreshEpoch(topic string) uint64
 	// IngestableStuck returns the ingestable's terminal parked record (ok=false if
 	// the worker is not parked). Replicated from the apply path, so any node answers
 	// identically — that's what makes the parked state visible cluster-wide.
 	IngestableStuck(id string) (cluster.IngestableStuck, bool, error)
-	// ParkedWorkers lists every worker with a terminal parked record (sync + ingest),
-	// replicated so any node answers identically. Powers the /node/status summary.
-	ParkedWorkers() ([]cluster.ParkedWorker, error)
+}
+
+// TypeStateStorage is the type-level runtime state: the validation
+// tripwire's announce dedupe and the migration dead-letter store.
+type TypeStateStorage interface {
+	// HasContractFingerprint reports whether the validation tripwire has
+	// already announced the divergent shape (typeID, version, fingerprint) —
+	// i.e. an applied LogContractFingerprint mark exists. Read pre-propose by
+	// the tripwire so each distinct shape announces once; replicated state,
+	// so the dedupe survives restarts and leadership moves.
+	HasContractFingerprint(typeID string, version int, fingerprint string) bool
 	// TypeMigrationDeadLetters returns the proposals whose entities failed
 	// the type's migration program at runtime, in ascending raft-index
 	// order — the type-keyed twin of SyncableDeadLetters with the same
@@ -165,12 +255,38 @@ type Storage interface {
 	// record exists for the proposal at raft index in type id. Migration
 	// retry consults it so a retry targets only a recorded failure.
 	HasTypeMigrationDeadLetter(typeID string, index uint64) (bool, error)
-	// ActualAt returns the committed Actual at a raft index, read from the
-	// permanent event log by binary search. Used by replay to re-drive a
-	// single dead-lettered Actual without disturbing any reader cursor.
-	ActualAt(index uint64) (*cluster.Actual, error)
-	TypeVersions(id string) ([]cluster.VersionInfo, error)
-	TypeVersion(id string, version uint64) (*cluster.Configuration, error)
+}
+
+// InterpretationStorage is the interpretation layer's read surface: the
+// compiled restatements snapshot, restatement admission reads, and the
+// in-place migration-edit coordinate that moves interpretation pins.
+type InterpretationStorage interface {
+	// InterpretationRegistry returns the current compiled restatements snapshot —
+	// immutable, swapped whole on each restatement apply, never nil. The read
+	// path resolves effective versions (stamp ⊕ restatement fold) through it.
+	InterpretationRegistry() *interpretation.Registry
+	// RestatementByID returns the applied restatement with the given id, its raft
+	// index, and whether it exists — the admission read behind the
+	// immutability rule (restatements are append-only, never edited).
+	RestatementByID(id string) (*cluster.Restatement, uint64, bool)
+	// AppliedRestatements returns every applied restatement with its raft index,
+	// unordered. Powers GET /v1/restatement.
+	AppliedRestatements() ([]cluster.AppliedRestatement, error)
+	// TypeMigrationEditedAt returns the raft index of the type's latest
+	// IN-PLACE migration edit (0 = never edited in place) — the
+	// interpretation coordinate such an edit moves. SyncableInterpretation
+	// compares it against always-current consumers' pins, and the fresh-pin
+	// capture folds it in, so a migration fix flips interpretationStale
+	// exactly like a restatement does. See wal/type_migration_edit.go.
+	TypeMigrationEditedAt(typeID string) uint64
+}
+
+// MembershipStorage is the replicated member registry: each node's
+// self-announced API URL, raft peer URL, feature level, and zone. Every
+// map is replicated, so any node answers identically — that's what lets a
+// follower resolve the leader's API address, the transport re-connect to
+// dynamically-added members, and version/zone gates resolve uniformly.
+type MembershipStorage interface {
 	// MemberAPIURL returns the advertised HTTP API base URL node id
 	// self-announced (and whether one is known); MemberAPIURLs returns the
 	// whole id → URL map. Both read the replicated memberAPIURLs bucket, so
@@ -201,6 +317,15 @@ type Storage interface {
 	MemberVersion(id uint64) (uint64, bool)
 	MemberVersions() map[uint64]uint64
 	DeleteMemberVersion(id uint64) error
+	// MemberZone / MemberZones / DeleteMemberZone persist each member's
+	// self-announced zone (COMMITTED_ZONE; entity-driven, applied via
+	// handleNodeZone). MemberZones feeds zone-pinned syncable ownership
+	// resolution — intersected with current membership and feature-gated so a
+	// mixed-version cluster resolves leader-owns everywhere. See node_zone.go
+	// and db/zone.go.
+	MemberZone(id uint64) (string, bool)
+	MemberZones() map[uint64]string
+	DeleteMemberZone(id uint64) error
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

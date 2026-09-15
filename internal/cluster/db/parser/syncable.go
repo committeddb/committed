@@ -1,13 +1,62 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
 
+// syncableEnvelopeKeys is the [syncable] vocabulary: what ParseSyncable,
+// SyncableMode, SyncableZone, and cluster.ParseCheckpointPolicy read. Pinned
+// to those reads by the vocabulary conformance test.
+var syncableEnvelopeKeys = []string{"name", "type", "mode", "zone", "checkpointEvery", "checkpointMaxAge"}
+
 func (p *Parser) AddSyncableParser(name string, sp cluster.SyncableParser) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.syncableParsers[name] = sp
+}
+
+// removedSyncableTypes is the ledger of syncable type spellings a release
+// removed, each with the message admission gives instead of a bare "cannot
+// parse syncable of type". Admission refuses the spelling (and a section
+// under it) as not-admissible, so a config stored under it parks on the
+// upgraded binary until re-POSTed under the current spelling — the declared
+// content is unchanged by the rename, so the syncable resumes with its
+// stores and checkpoint. The config-only extractors (topics, derived
+// topics, databases, schema) treat a removed spelling as contributing
+// nothing: a parked config must not wedge unrelated type, restatement, or
+// database writes that enumerate every stored syncable.
+var removedSyncableTypes = map[string]string{
+	"sql-projection": `syncable type "sql-projection" was removed in 0.8.0: rename the type to "projection", the [sql-projection] section to [projection], and its array tables to their plural names ([[projection.sources]], [[projection.stages]], [[...aggregate.fields]], [[...aggregate.scalars]], [[...lookup.fields]], [[...stages.joins]]), then re-POST the config (its declared content is unchanged, so the syncable resumes where it left off)`,
+}
+
+// removedSpelling reports the removal message when the document's type, or
+// one of its sections, uses a removed spelling.
+func removedSpelling(v *cluster.ParsedConfig, tipe string) (string, bool) {
+	if msg, ok := removedSyncableTypes[tipe]; ok {
+		return msg, true
+	}
+	for old, msg := range removedSyncableTypes {
+		if len(v.SectionKeys(old)) > 0 {
+			return msg, true
+		}
+	}
+	return "", false
+}
+
+// lookupSyncableParser resolves the type's parser. removed reports a spelling
+// on the removal ledger (never registered), which the config-only extractors
+// treat as "nothing to report" rather than an error.
+func (p *Parser) lookupSyncableParser(tipe string) (parser cluster.SyncableParser, removed, ok bool) {
+	if _, removed := removedSyncableTypes[tipe]; removed {
+		return nil, true, false
+	}
+	p.mu.RLock()
+	parser, ok = p.syncableParsers[tipe]
+	p.mu.RUnlock()
+	return parser, false, ok
 }
 
 // SyncableTopics reports which topics the syncable config consumes, read from
@@ -23,7 +72,10 @@ func (p *Parser) SyncableTopics(mimeType string, data []byte) ([]string, error) 
 	}
 
 	tipe := v.GetString("syncable.type")
-	parser, ok := p.syncableParsers[tipe]
+	parser, removed, ok := p.lookupSyncableParser(tipe)
+	if removed {
+		return nil, nil // a removed spelling is parked; it contributes nothing here
+	}
 	if !ok {
 		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
 	}
@@ -33,6 +85,58 @@ func (p *Parser) SyncableTopics(mimeType string, data []byte) ([]string, error) 
 		return nil, nil // this syncable kind can't report its topics — no dependents
 	}
 	return extractor.TopicsFromConfig(v), nil
+}
+
+// SyncableDerivedTopics reports which topics the syncable config PRODUCES
+// (its derivation targets), read from the config alone (no Init / no build).
+// It mirrors SyncableTopics: pick the type-specific parser, then delegate to
+// its cluster.SyncableDerivedTopicExtractor. Returns nil (not an error) when
+// the matched parser doesn't derive topics — every non-loopback kind — so the
+// derivation-graph guards are free for them. Errors only when the bytes don't
+// parse at all.
+func (p *Parser) SyncableDerivedTopics(mimeType string, data []byte) ([]string, error) {
+	v, err := parseBytes(mimeType, data)
+	if err != nil {
+		return nil, err
+	}
+
+	tipe := v.GetString("syncable.type")
+	parser, removed, ok := p.lookupSyncableParser(tipe)
+	if removed {
+		return nil, nil // a removed spelling is parked; it contributes nothing here
+	}
+	if !ok {
+		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
+	}
+
+	extractor, ok := parser.(cluster.SyncableDerivedTopicExtractor)
+	if !ok {
+		return nil, nil // this syncable kind derives no topics — no edges
+	}
+	return extractor.DerivedTopicsFromConfig(v), nil
+}
+
+// SyncableMode reports the syncable config's consumer stance, read from the
+// config alone (no Init / no destination pool) — the side-effect-free read
+// admission checks use to classify every stored syncable.
+func (p *Parser) SyncableMode(mimeType string, data []byte) (cluster.SyncableMode, error) {
+	v, err := parseBytes(mimeType, data)
+	if err != nil {
+		return 0, err
+	}
+	return cluster.ParseSyncableMode(v.GetString("syncable.mode"))
+}
+
+// SyncableZone reports the syncable config's pinned zone (the [syncable]
+// envelope's `zone` key), read from the config alone — no Init, no build.
+// "" means unpinned (today's leader-owned behavior). Envelope-level like
+// SyncableMode, so every syncable kind can pin without per-kind support.
+func (p *Parser) SyncableZone(mimeType string, data []byte) (string, error) {
+	v, err := parseBytes(mimeType, data)
+	if err != nil {
+		return "", err
+	}
+	return v.GetString("syncable.zone"), nil
 }
 
 // SyncableDatabases reports which destination databases the syncable config
@@ -49,7 +153,10 @@ func (p *Parser) SyncableDatabases(mimeType string, data []byte) ([]string, erro
 	}
 
 	tipe := v.GetString("syncable.type")
-	parser, ok := p.syncableParsers[tipe]
+	parser, removed, ok := p.lookupSyncableParser(tipe)
+	if removed {
+		return nil, nil // a removed spelling is parked; it contributes nothing here
+	}
 	if !ok {
 		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
 	}
@@ -94,7 +201,10 @@ func (p *Parser) syncableSchema(mimeType string, data []byte, s cluster.Database
 	}
 
 	tipe := v.GetString("syncable.type")
-	parser, ok := p.syncableParsers[tipe]
+	parser, removed, ok := p.lookupSyncableParser(tipe)
+	if removed {
+		return nil, nil // a removed spelling is parked; it contributes nothing here
+	}
 	if !ok {
 		return nil, fmt.Errorf("cannot parse syncable of type: %s", tipe)
 	}
@@ -117,8 +227,18 @@ func (p *Parser) ParseSyncable(mimeType string, data []byte, s cluster.DatabaseS
 
 	name := v.GetString("syncable.name")
 	tipe := v.GetString("syncable.type")
-	parser, ok := p.syncableParsers[tipe]
-
+	if msg, ok := removedSpelling(v, tipe); ok {
+		return "", nil, 0, cluster.NotAdmissible(errors.New(msg))
+	}
+	// The document's vocabulary is closed: the [syncable] header and the
+	// type's own section.
+	if err := v.RejectUnknownSections("syncable", tipe); err != nil {
+		return "", nil, 0, err
+	}
+	if err := v.RejectUnknownKeys("syncable", syncableEnvelopeKeys...); err != nil {
+		return "", nil, 0, err
+	}
+	parser, _, ok := p.lookupSyncableParser(tipe)
 	if !ok {
 		return "", nil, 0, cluster.NotAdmissible(fmt.Errorf("cannot parse syncable of type: %s", tipe))
 	}

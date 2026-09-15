@@ -11,7 +11,7 @@ import (
 )
 
 // These tests pin decode tolerances that deployed configs may depend on
-// (the golden corpus from .claude-scratch/tickets/viper-containment.md):
+// (the reference corpus from .claude-scratch/tickets/viper-containment.md):
 // the parser must keep accepting case-variant section and field names —
 // historical viper behavior, load-bearing because stored configs are
 // re-parsed from the log on every node restart. They are written against
@@ -80,22 +80,22 @@ func TestParseConfigJSONMimeType(t *testing.T) {
 // names around them.
 func TestParseProjectionToleratesCaseVariantKeys(t *testing.T) {
 	variant := `
-[SQL-PROJECTION]
+[PROJECTION]
 Topic      = "t"
 DB         = "testdb"
 Table      = "rows"
 PrimaryKey = "id"
 KeyPath    = "$.Meta.ID"
 
-[[SQL-PROJECTION.Columns]]
+[[PROJECTION.Columns]]
 Name = "id"
 Type = "TEXT"
 
-[[SQL-PROJECTION.Columns]]
+[[PROJECTION.Columns]]
 Name = "v"
 Type = "TEXT"
 
-[[SQL-PROJECTION.Rules]]
+[[PROJECTION.Rules]]
 When = [ { Path = "$.eventType", Equals = "x" } ]
 Set  = [ { Column = "v", From = "$.camelCase" } ]
 `
@@ -106,4 +106,20 @@ Set  = [ { Column = "v", From = "$.camelCase" } ]
 	require.Equal(t, []string{"$.Meta.ID"}, config.Sources[0].KeyPath, "user data in values must keep case")
 	require.Equal(t, []sql.WhenClause{{Path: "$.eventType", Equals: "x"}}, config.Sources[0].Rules[0].When)
 	require.Equal(t, "$.camelCase", config.Sources[0].Rules[0].Set[0].From)
+}
+
+func TestSyncableParseConfigRejectsUnknownKeys(t *testing.T) {
+	dbs := map[string]cluster.Database{"testdb": &TestDatabase{}}
+	v := readConfig(t, "toml", strings.NewReader(`
+[sql]
+topic      = "simple"
+db         = "testdb"
+table      = "foo"
+primaryKey = "pk"
+keyColum   = "pk"
+`))
+	_, err := (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: dbs})
+	require.Error(t, err)
+	require.Equal(t, "sql.keyColum", cluster.NewConfigError(err).Field)
+	require.Contains(t, err.Error(), `did you mean "keyColumn"?`)
 }

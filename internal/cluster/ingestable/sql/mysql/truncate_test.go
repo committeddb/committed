@@ -41,8 +41,8 @@ func TestTruncateTarget(t *testing.T) {
 	}
 }
 
-const truncateDivergenceMsg = "TRUNCATE on a watched table is not propagated to the sink; " +
-	"the sink now diverges from the source and must be re-snapshotted to reconcile"
+const truncateDivergenceMsg = "TRUNCATE on a watched table is not propagated to the destination; " +
+	"the destination now diverges from the source and must be re-snapshotted to reconcile"
 
 // TestHandleDDL_WatchedTruncateEmitsDivergenceWarn pins the MySQL half of the
 // TRUNCATE-divergence promise (cdc-setup.md): a TRUNCATE on a WATCHED table logs

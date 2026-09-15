@@ -47,7 +47,7 @@ func (i *SignalingIngestable) Close() error {
 // goroutines were the most likely caller because they wake up
 // asynchronously on inbound channel sends.
 //
-// The closed flag (set under workersMu after the drain) makes both
+// The closed flag (set under workers.mu after the drain) makes both
 // db.Ingest and db.Sync reject installs with ErrClosed once Close
 // has run. This test verifies both paths.
 func TestRegistry_AfterCloseRejects(t *testing.T) {

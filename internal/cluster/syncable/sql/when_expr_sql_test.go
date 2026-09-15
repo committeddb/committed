@@ -22,17 +22,17 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "quoted-open"
 from    = "quotes"
 keyPath = "$.wa"
 when    = [ { expr = "$.quoted - coalesce($.invoiced, 0) > 0 and $.pricing in (0, 2)" } ]
 emit    = [ { field = "remaining", expr = "$.quoted - coalesce($.invoiced, 0)" } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 
@@ -62,17 +62,17 @@ primaryKey = "id"
 name = "id"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "s"
 from    = "quotes"
 keyPath = "$.wa"
 when    = [ { expr = "$.quoted >" } ]
 emit    = [ { field = "id", from = "$.wa" } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "id", from = "$.id" } ]
 `)
 	v, err = cluster.ParseConfigBytes("toml", bad)

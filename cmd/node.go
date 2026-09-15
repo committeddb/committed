@@ -16,19 +16,24 @@ import (
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.uber.org/zap"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/http"
 	"github.com/committeddb/committed/internal/cluster/db/httptransport"
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
-	"github.com/committeddb/committed/internal/cluster/http"
 	ingestablesql "github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	ingestablemysql "github.com/committeddb/committed/internal/cluster/ingestable/sql/mysql"
 	ingestablepostgres "github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
 	ingestablesqlserver "github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	synchttp "github.com/committeddb/committed/internal/cluster/syncable/http"
+	synciceberg "github.com/committeddb/committed/internal/cluster/syncable/iceberg"
+	"github.com/committeddb/committed/internal/cluster/syncable/loopback"
 	syncsql "github.com/committeddb/committed/internal/cluster/syncable/sql"
 	syncdialects "github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
 	"github.com/committeddb/committed/internal/version"
@@ -103,8 +108,9 @@ image can be templated per-node by an orchestrator:
                        headroom), which every node enforces at its propose
                        gate. Requires COMMITTED_API_URL on every node and a
                        cluster-uniform COMMITTED_API_TOKEN; without them the
-                       gate falls back to the node-local decision. "0"
-                       disables cluster-aware admission entirely.
+                       gate falls back to the node-local decision. Any
+                       zero duration ("0", "0s") disables cluster-aware
+                       admission entirely.
 
   COMMITTED_SAFE_MODE  when truthy, boots the operator escape hatch: raft,
                        apply, and the HTTP API run normally, but sync and
@@ -139,7 +145,13 @@ image can be templated per-node by an orchestrator:
                        metrics, which are PUSHED via OTLP — committed serves
                        no /metrics scrape endpoint. Unset (default) disables
                        metrics with zero overhead. See
-                       docs/operations/metrics.md.`,
+                       docs/operations/metrics.md.
+
+The remaining COMMITTED_* settings — peer and API TLS, the bearer token,
+HTTP timeouts, the proposal-size cap, the shutdown deadline, the scrub
+interval, the event-log cache, the node's zone, and pprof — are documented
+in the README's Configuration section and the guides under
+docs/operations/ it points to.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		v := version.Get()
 		zap.L().Info("committed starting",
@@ -148,6 +160,14 @@ image can be templated per-node by an orchestrator:
 			zap.String("buildDate", v.BuildDate),
 			zap.String("goVersion", v.GoVersion),
 		)
+
+		// Refuse a deployment still setting a renamed variable, BEFORE any
+		// of it takes effect. Silently ignoring one would mean booting
+		// without the setting the operator asked for — and for peer TLS,
+		// which is all-or-nothing, that means plaintext.
+		if err := checkRemovedEnvVars(); err != nil {
+			zap.L().Fatal("environment", zap.Error(err))
+		}
 
 		// Node identity and addressing come from the environment so the
 		// same image can be templated per-node by an orchestrator (Docker,
@@ -194,7 +214,26 @@ image can be templated per-node by an orchestrator:
 			if err != nil {
 				log.Fatalf("otel exporter: %v", err)
 			}
+			// Identify the service on every exported metric. Without a
+			// resource the SDK falls back to resource.Default(), whose
+			// service.name is "unknown_service:<executable>" — the first
+			// label every dashboard and multi-cluster collector routes on,
+			// so it must say "committed". Merged over the default so the
+			// standard OTEL_* overrides (OTEL_SERVICE_NAME,
+			// OTEL_RESOURCE_ATTRIBUTES) still win.
+			res, rerr := resource.Merge(resource.Default(), resource.NewWithAttributes(
+				semconv.SchemaURL,
+				semconv.ServiceName("committed"),
+				semconv.ServiceVersion(v.Version),
+			))
+			if rerr != nil {
+				// A schema-URL conflict is the only failure here; keep the
+				// default identity rather than dropping metrics entirely.
+				zap.L().Warn("otel resource merge; falling back to the default service identity", zap.Error(rerr))
+				res = resource.Default()
+			}
 			meterProvider = sdkmetric.NewMeterProvider(
+				sdkmetric.WithResource(res),
 				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)),
 			)
 			defer func() { _ = meterProvider.Shutdown(context.Background()) }()
@@ -224,7 +263,7 @@ image can be templated per-node by an orchestrator:
 		// worker are held — the window to inspect and delete/fix a config
 		// whose worker would otherwise crashloop the node with no API up.
 		// Not persisted: the next boot without the flag resumes everything.
-		safeMode := boolEnv("COMMITTED_SAFE_MODE")
+		safeMode := boolEnvOrExit("COMMITTED_SAFE_MODE")
 		if safeMode {
 			walOpts = append(walOpts, wal.WithSafeMode())
 			zap.L().Warn("SAFE MODE (COMMITTED_SAFE_MODE): sync/ingest/scrub workers held; " +
@@ -250,6 +289,15 @@ image can be templated per-node by an orchestrator:
 		// only unit tests (which assert exact entry counts) leave it off.
 		dbOpts = append(dbOpts, db.WithVersionAnnounce())
 
+		// COMMITTED_ZONE names this node's zone (vendor-neutral — an AZ, a
+		// rack, a site). Announced into the cluster at startup; a syncable
+		// config carrying `zone = "..."` is then served by a node in that
+		// zone instead of the leader, so same-zone sync egress never pays a
+		// redundant cross-zone crossing. Unset = unpinned node.
+		if zone := os.Getenv("COMMITTED_ZONE"); zone != "" {
+			dbOpts = append(dbOpts, db.WithZone(zone))
+		}
+
 		// Wire the global zap logger into db so internal supervisor /
 		// raft / leader-transition logs are visible. Without this, the
 		// DB defaults to zap.NewNop and operators have no visibility
@@ -258,8 +306,8 @@ image can be templated per-node by an orchestrator:
 		dbOpts = append(dbOpts, db.WithLogger(zap.L()))
 
 		// mTLS for peer transport is configured via three env vars that
-		// must be set together: COMMITTED_TLS_CA_FILE,
-		// COMMITTED_TLS_CERT_FILE, COMMITTED_TLS_KEY_FILE. All three set
+		// must be set together: COMMITTED_PEER_TLS_CA_FILE,
+		// COMMITTED_PEER_TLS_CERT_FILE, COMMITTED_PEER_TLS_KEY_FILE. All three set
 		// enables mTLS; none set keeps plaintext peer transport. Any
 		// other combination is a hard startup error — silently running
 		// partial-TLS ("I thought we had TLS") is the failure mode this
@@ -274,11 +322,28 @@ image can be templated per-node by an orchestrator:
 		}
 
 		// COMMITTED_SCRUB_INTERVAL sets the automatic right-to-be-forgotten
-		// scrub cadence (Go duration, e.g. "30m"). 0 disables the scheduler;
-		// the manual POST /v1/scrub lever still works. Unset uses the default
-		// (db.DefaultScrubInterval).
-		if d, ok := parseDurationEnv("COMMITTED_SCRUB_INTERVAL"); ok {
+		// scrub cadence (Go duration, e.g. "30m"). Any zero duration ("0",
+		// "0s") disables the scheduler — the manual POST /v1/scrub lever still
+		// works — and unset uses the default (db.DefaultScrubInterval). The
+		// disable has to go through a parser that accepts zero: the shared one
+		// treats a non-positive value as invalid and keeps the default, which
+		// left three comments promising a disable that never happened, on the
+		// erasure path.
+		if d, ok := parseDisableableDurationEnv("COMMITTED_SCRUB_INTERVAL"); ok {
 			dbOpts = append(dbOpts, db.WithScrubInterval(d))
+		}
+
+		// COMMITTED_COMPACT_MAX_BYTES / COMMITTED_COMPACT_MAX_AGE override the
+		// raft-log compaction thresholds (db.DefaultCompactMaxSize, 10 GiB, and
+		// db.DefaultCompactMaxAge, one hour; whichever fires first compacts).
+		// Lower values trade raft-log disk for a shorter window in which a
+		// lagging member catches up by replication instead of by fetching
+		// the event log from a peer. See docs/operations/disk-limits.md.
+		if n, ok := parseInt64Env("COMMITTED_COMPACT_MAX_BYTES"); ok {
+			dbOpts = append(dbOpts, db.WithCompactMaxSize(uint64(n)))
+		}
+		if d, ok := parseDurationEnv("COMMITTED_COMPACT_MAX_AGE"); ok {
+			dbOpts = append(dbOpts, db.WithCompactMaxAge(d))
 		}
 
 		// The disk-usage watcher polls the data dir's filesystem and, as free
@@ -303,7 +368,7 @@ image can be templated per-node by an orchestrator:
 		// Without this flag a fresh node would StartNode the static peer set
 		// and split-brain against the cluster it meant to join. See
 		// docs/operations/membership.md.
-		if boolEnv("COMMITTED_JOIN") {
+		if boolEnvOrExit("COMMITTED_JOIN") {
 			dbOpts = append(dbOpts, db.WithJoin())
 			zap.L().Info("joining existing cluster (COMMITTED_JOIN set); membership will be learned from the leader")
 		}
@@ -323,17 +388,19 @@ image can be templated per-node by an orchestrator:
 		// TLS client (same peer-API trust) and the cluster's API bearer
 		// token (the report endpoint is authenticated like every write).
 		// Read here, before db.New, and reused for the HTTP options below.
-		apiToken := os.Getenv("COMMITTED_API_TOKEN")
+		apiToken := apiTokenEnv()
 		proxyClient, err := loadProxyClient()
 		if err != nil {
 			// G706 false positive: values come from operator-supplied env vars.
 			log.Fatalf("leader-read proxy client: %v", err) //nolint:gosec // G706
 		}
 		dbOpts = append(dbOpts, db.WithDiskReportHTTP(proxyClient, apiToken))
-		if raw := os.Getenv("COMMITTED_DISK_REPORT_INTERVAL"); raw == "0" {
-			dbOpts = append(dbOpts, db.WithDiskReportInterval(-1))
-			zap.L().Info("cluster disk admission disabled (COMMITTED_DISK_REPORT_INTERVAL=0); the propose gate is node-local only")
-		} else if d, ok := parseDurationEnv("COMMITTED_DISK_REPORT_INTERVAL"); ok {
+		// Any zero duration disables; WithDiskReportInterval owns that
+		// mapping (<= 0 → off), so the command does not restate it.
+		if d, ok := parseDisableableDurationEnv("COMMITTED_DISK_REPORT_INTERVAL"); ok {
+			if d == 0 {
+				zap.L().Info("cluster disk admission disabled (COMMITTED_DISK_REPORT_INTERVAL is zero); the propose gate is node-local only")
+			}
 			dbOpts = append(dbOpts, db.WithDiskReportInterval(d))
 		}
 
@@ -362,7 +429,7 @@ image can be templated per-node by an orchestrator:
 		}
 		// COMMITTED_PPROF mounts /debug/pprof/* for live CPU/heap profiling. Off by
 		// default; behind bearer auth when COMMITTED_API_TOKEN is set.
-		if boolEnv("COMMITTED_PPROF") {
+		if boolEnvOrExit("COMMITTED_PPROF") {
 			httpOpts = append(httpOpts, http.WithPprof())
 		}
 		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
@@ -411,24 +478,17 @@ image can be templated per-node by an orchestrator:
 		// NB: the database parser is registered earlier, before wal.Open (see
 		// above). These three need *d (the ingestable parser) or are simply
 		// fine to register here alongside it.
-		d.AddIngestableParser("sql", ingestableParser(d, d))
-		d.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
-		// One projection parser, two type spellings: "projection" is canonical,
-		// "sql-projection" is a deprecation alias (POST answers with a
-		// deprecation warning; the config section follows the type spelling).
-		projectionParser := &syncsql.ProjectionSyncableParser{
-			Metrics: m,
-			// Stage stores (internal-stage state) live beside the node's
-			// data: derived, node-local, rebuildable from the log.
-			StoreDir: filepath.Join(dataDir, "projections"),
-		}
-		d.AddSyncableParser("projection", projectionParser)
-		d.AddSyncableParser("sql-projection", projectionParser)
-		d.AddSyncableParser("http", &synchttp.SyncableParser{})
-		// Inject the entity-schema compiler so ProposeType rejects a broken schema
-		// at POST /type (the compilers live in the http layer, which db can't
-		// import — see cluster.TypeSchemaValidator).
-		d.SetTypeSchemaValidator(http.SchemaValidator{})
+		d.AddIngestableParser("sql", ingestableParser(d, d, d))
+		registerSyncableKinds(d, d, m, dataDir)
+		// Inject the entity-schema compilers so ProposeType rejects a broken
+		// schema at POST /type and Propose's validation tripwire can check
+		// announce-typed payloads (the compilers live in the http layer, which
+		// db can't import — see cluster.TypeSchemaValidator /
+		// cluster.EntitySchemaValidator). One instance: it caches compiled
+		// schemas by (typeID, version).
+		schemaValidator := &http.SchemaValidator{}
+		d.SetTypeSchemaValidator(schemaValidator)
+		d.SetEntityValidator(schemaValidator)
 
 		// Restore ingestable and syncable workers for configs applied in a
 		// previous run. These MUST run after the sub-parsers above are
@@ -595,11 +655,14 @@ func dbParser() *syncsql.DBParser {
 	return p
 }
 
-func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader) *ingestablesql.IngestableParser {
+func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader, features ingestablesqlserver.FeatureReader) *ingestablesql.IngestableParser {
 	p := ingestablesql.NewIngestableParser(t)
 	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
 	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{}
-	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{}
+	// The SQL Server dialect's uniqueidentifier rendering is gated on the
+	// cluster feature level (a mixed-version cluster must not spell one key
+	// two ways), so it reads the db's gate.
+	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{Features: features}
 	// Wire the delete-surviving per-topic refresh-epoch floor so a same-topic
 	// recreate resumes its generation above the rows still on the sink.
 	p.EpochFloor = epoch
@@ -608,4 +671,31 @@ func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReade
 
 func init() {
 	rootCmd.AddCommand(nodeCmd)
+}
+
+// syncableRegistry is the one method registerSyncableKinds needs from the
+// engine, so a test can hand it a recorder.
+type syncableRegistry interface {
+	AddSyncableParser(name string, p cluster.SyncableParser)
+}
+
+// syncableKinds is every syncable kind a node serves, in registration order.
+// Pinned by TestRegisterSyncableKinds: a kind added under
+// internal/cluster/syncable must be added here, or no config of it admits.
+var syncableKinds = []string{"sql", "projection", "http", "loopback", "iceberg"}
+
+// registerSyncableKinds wires the syncable kinds onto the engine. The
+// "sql-projection" spelling was removed in 0.8.0; db/parser's removal ledger
+// names the rename at POST.
+func registerSyncableKinds(reg syncableRegistry, proposer loopback.Proposer, m *metrics.Metrics, dataDir string) {
+	reg.AddSyncableParser("sql", &syncsql.SyncableParser{Metrics: m})
+	reg.AddSyncableParser("projection", &syncsql.ProjectionSyncableParser{
+		Metrics: m,
+		// Stage stores (internal-stage state) live beside the node's data:
+		// derived, node-local, rebuildable from the log.
+		StoreDir: filepath.Join(dataDir, "projections"),
+	})
+	reg.AddSyncableParser("http", &synchttp.SyncableParser{})
+	reg.AddSyncableParser("loopback", &loopback.SyncableParser{Proposer: proposer})
+	reg.AddSyncableParser("iceberg", &synciceberg.SyncableParser{})
 }

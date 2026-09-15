@@ -25,7 +25,7 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "groups"
 from    = "workareas"
 keyPath = "$.job"
@@ -37,10 +37,10 @@ emit    = [
   { field = "billedHours", sum = "$.hours", where = [ { expr = "$.billed = 'true' and $.hours > 0" } ] },
 ]
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))

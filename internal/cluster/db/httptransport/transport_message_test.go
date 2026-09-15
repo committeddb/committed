@@ -83,7 +83,7 @@ func (r *recordingRaft) snapStatus(id uint64) (raft.SnapshotStatus, bool) {
 // method, none of which had direct coverage before.
 func TestHandler_Guards(t *testing.T) {
 	rr := newRecordingRaft()
-	tr := New(1, nil, zap.NewExample(), rr, nil, "")
+	tr := New(1, nil, zap.NewExample(), rr, nil, nil, "")
 	srv := httptest.NewServer(tr.handler())
 	defer srv.Close()
 
@@ -113,6 +113,10 @@ func TestHandler_Guards(t *testing.T) {
 	require.Equal(t, httpgo.StatusPreconditionFailed,
 		post(httpgo.MethodPost, map[string]string{clusterIDHeader: clusterID, protocolHeader: "99"}, body))
 	require.Equal(t, httpgo.StatusMethodNotAllowed, post(httpgo.MethodGet, good, nil))
+	misaddressed, err := marshalMessage(&raftpb.Message{Type: raftpb.MsgHeartbeat.Enum(), From: proto.Uint64(2), To: proto.Uint64(3)})
+	require.NoError(t, err)
+	require.Equal(t, httpgo.StatusMisdirectedRequest, post(httpgo.MethodPost, good, misaddressed),
+		"a message for another node id — a replacement node at a retired node's URL — is refused, not stepped")
 	require.Equal(t, 1, rr.processedCount(), "rejected requests must not reach raft")
 
 	// A sender that has been removed from the cluster is forbidden — a removed
@@ -131,7 +135,7 @@ func TestHandler_Guards(t *testing.T) {
 // inside the constructor.
 func TestHandler_Token(t *testing.T) {
 	rr := newRecordingRaft()
-	tr := New(1, nil, zap.NewExample(), rr, nil, "s3cr3t")
+	tr := New(1, nil, zap.NewExample(), rr, nil, nil, "s3cr3t")
 	srv := httptest.NewServer(tr.handler())
 	defer srv.Close()
 
@@ -164,12 +168,12 @@ func TestHandler_Token(t *testing.T) {
 // and that a MsgSnap's delivery is reported back as SnapshotFinish.
 func TestSend_RoundTrip(t *testing.T) {
 	rrB := newRecordingRaft()
-	trB := New(2, nil, zap.NewExample(), rrB, nil, "")
+	trB := New(2, nil, zap.NewExample(), rrB, nil, nil, "")
 	srvB := httptest.NewServer(trB.handler())
 	defer srvB.Close()
 
 	rrA := newRecordingRaft()
-	trA := New(1, nil, zap.NewExample(), rrA, nil, "")
+	trA := New(1, nil, zap.NewExample(), rrA, nil, nil, "")
 	defer trA.Stop()
 	require.NoError(t, trA.AddPeer(raft.Peer{ID: 2, Context: []byte(srvB.URL)}))
 
@@ -192,7 +196,7 @@ func TestSend_DeadPeerReportsUnreachable(t *testing.T) {
 	dead.Close() // now refuses connections — a fast failure
 
 	rr := newRecordingRaft()
-	tr := New(1, nil, zap.NewExample(), rr, nil, "")
+	tr := New(1, nil, zap.NewExample(), rr, nil, nil, "")
 	defer tr.Stop()
 	require.NoError(t, tr.AddPeer(raft.Peer{ID: 9, Context: []byte(url)}))
 
@@ -208,7 +212,7 @@ func TestSend_NeverBlocks(t *testing.T) {
 	url := dead.URL
 	dead.Close()
 
-	tr := New(1, nil, zap.NewExample(), newRecordingRaft(), nil, "")
+	tr := New(1, nil, zap.NewExample(), newRecordingRaft(), nil, nil, "")
 	defer tr.Stop()
 	require.NoError(t, tr.AddPeer(raft.Peer{ID: 9, Context: []byte(url)}))
 

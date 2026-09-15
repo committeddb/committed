@@ -20,7 +20,7 @@ import (
 // InstallSnapshot for a lagging follower). Before snapMu was added,
 // the two paths touched s.snapshot from different goroutines without
 // synchronization — the race surfaced as
-// `--- FAIL: TestAdversarial_SevereLagFollowerRebuild` under -race
+// `--- FAIL: TestAdversarial_SevereLagFollowerCatchesUp` (then named ...Rebuild) under -race
 // because that scenario is the only one that combines wal.Storage,
 // aggressive compaction (writers fire often), and a lagging follower
 // (reader fires often).

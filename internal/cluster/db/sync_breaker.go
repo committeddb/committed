@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -38,20 +39,34 @@ type syncBreakerState struct {
 	lastIndex uint64
 }
 
-// recordSyncPermanent counts one permanent sync error for id and reports the run
+// syncBreaker is the circuit-breaker state machine: the per-syncable run of
+// consecutive permanent sync errors. Pure state — no engine views, no I/O —
+// so it is unit-testable directly. The trip's loud signals (tripSyncBreaker)
+// and the replicated parked record (publishSyncableParked) stay DB methods
+// below: they compose logging, metrics, and the propose path this state
+// machine advises.
+type syncBreaker struct {
+	// mu guards states. Deliberately separate from workers.mu so the
+	// breaker's bookkeeping stays off the hot worker-registry path.
+	mu     sync.Mutex
+	states map[string]*syncBreakerState
+}
+
+func newSyncBreaker() *syncBreaker {
+	return &syncBreaker{states: make(map[string]*syncBreakerState)}
+}
+
+// recordPermanent counts one permanent sync error for id and reports the run
 // length and whether it has crossed the breaker threshold. A gap longer than
 // syncBreakerHealthyWindow since the previous permanent starts a fresh run.
-func (db *DB) recordSyncPermanent(id string, index uint64) (consecutive int, tripped bool) {
-	db.syncBreakerMu.Lock()
-	defer db.syncBreakerMu.Unlock()
-	if db.syncBreakerStates == nil {
-		db.syncBreakerStates = make(map[string]*syncBreakerState)
-	}
+func (b *syncBreaker) recordPermanent(id string, index uint64) (consecutive int, tripped bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	now := time.Now()
-	st := db.syncBreakerStates[id]
+	st := b.states[id]
 	if st == nil || now.Sub(st.lastPermanentAt) > syncBreakerHealthyWindow {
 		st = &syncBreakerState{}
-		db.syncBreakerStates[id] = st
+		b.states[id] = st
 	}
 	// Count DISTINCT entries only: a retry of the same index (record-persist
 	// failure, not a new sink verdict) refreshes the window but not the run.
@@ -63,21 +78,21 @@ func (db *DB) recordSyncPermanent(id string, index uint64) (consecutive int, tri
 	return st.consecutive, st.consecutive >= syncBreakerMaxConsecutivePermanent
 }
 
-// resetSyncBreaker clears id's run — called when a worker (re)starts so a
-// replacement (e.g. after the operator fixes the config) begins fresh.
-func (db *DB) resetSyncBreaker(id string) {
-	db.syncBreakerMu.Lock()
-	defer db.syncBreakerMu.Unlock()
-	delete(db.syncBreakerStates, id)
+// reset clears id's run — called when a worker (re)starts so a replacement
+// (e.g. after the operator fixes the config) begins fresh.
+func (b *syncBreaker) reset(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.states, id)
 }
 
-// syncBreakerTripped reports whether id's run has already crossed the threshold,
-// without counting a new error — the batch worker checks it after its fallback
-// to decide whether to park.
-func (db *DB) syncBreakerTripped(id string) bool {
-	db.syncBreakerMu.Lock()
-	defer db.syncBreakerMu.Unlock()
-	st := db.syncBreakerStates[id]
+// tripped reports whether id's run has already crossed the threshold,
+// without counting a new error — the batch worker checks it after its
+// fallback to decide whether to park.
+func (b *syncBreaker) tripped(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	st := b.states[id]
 	return st != nil && st.consecutive >= syncBreakerMaxConsecutivePermanent
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	toml "github.com/pelletier/go-toml/v2"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/clusterpb"
@@ -42,12 +43,56 @@ type TypeResolver interface {
 	ResolveType(ref TypeRef) (*Type, error)
 }
 
+// ValidationStrategy is what a type with a schema does when a payload does
+// not match it. Stored as the number; spelled in config as the word
+// (validate = "none" | "schema" | "announce", see ParseValidationStrategy).
 type ValidationStrategy int
 
 const (
 	NoValidation   ValidationStrategy = 0
 	ValidateSchema ValidationStrategy = 1
+	// ValidateAnnounce is the tripwire, never a gate: a divergent payload
+	// still commits (a non-conformant CDC row is a true fact about the
+	// source), and the first occurrence of each distinct divergent shape
+	// emits a ContractExtension event to the Type's SchemaChangeTopic.
+	ValidateAnnounce ValidationStrategy = 2
 )
+
+// The config spellings, one per strategy.
+const (
+	ValidateWordNone     = "none"
+	ValidateWordSchema   = "schema"
+	ValidateWordAnnounce = "announce"
+)
+
+// String is the config spelling.
+func (s ValidationStrategy) String() string {
+	switch s {
+	case ValidateSchema:
+		return ValidateWordSchema
+	case ValidateAnnounce:
+		return ValidateWordAnnounce
+	default:
+		return ValidateWordNone
+	}
+}
+
+// ParseValidationStrategy reads the config spelling ("" = none, like the
+// other enums' absent value). The 0.7.x integers are refused naming the
+// word each became; any other spelling is refused naming the three.
+func ParseValidationStrategy(s string) (ValidationStrategy, error) {
+	switch s {
+	case "", ValidateWordNone:
+		return NoValidation, nil
+	case ValidateWordSchema:
+		return ValidateSchema, nil
+	case ValidateWordAnnounce:
+		return ValidateAnnounce, nil
+	case "0", "1", "2":
+		return NoValidation, fmt.Errorf("validate = %s was the 0.7.x integer spelling, removed in 0.8.0: write %q (was 0), %q (was 1), or %q (was 2)", s, ValidateWordNone, ValidateWordSchema, ValidateWordAnnounce)
+	}
+	return NoValidation, fmt.Errorf("validate = %q is not a known validation strategy: %q, %q (gate: a proposal whose payload violates the schema is rejected), or %q (tripwire: it commits, and the first of each divergent shape is announced)", s, ValidateWordNone, ValidateWordSchema, ValidateWordAnnounce)
+}
 
 // EntityKind declares what the entities written under a type are,
 // ordered by how much interpretation a consumer needs to apply one. It
@@ -160,12 +205,158 @@ type Type struct {
 	// EntityKindEvent; projection-style syncables can default their
 	// match rules to it.
 	Discriminator string
+	// SchemaChangeTopic is the Type ID of the topic that receives
+	// ContractExtension events when data claiming this type diverges from
+	// its schema under ValidateAnnounce. Type-level so both arrival paths
+	// (CDC ingest, direct proposals) announce through one knob. Empty for
+	// non-announce types.
+	SchemaChangeTopic string
+	// NonConvertible declares the third migration intent: this version
+	// requires information the previous version's actuals never contained,
+	// so no program can upgrade old data. Always-current syncables are
+	// refused across the break; the migration chain dead-letters old-stamped
+	// entities at it instead of silently delivering unconverted data.
+	NonConvertible bool
+	// Document is the configuration exactly as the operator submitted it,
+	// in the format DocumentMimeType names (set by ParseType, persisted
+	// with the type). The fields above are what the engine acts on; the
+	// document is what the operator wrote, and what Configuration reads
+	// back. Empty on a type written before the document was retained.
+	Document         []byte
+	DocumentMimeType string
 	// MigrationExplicit is transient (not persisted). Set by ParseType
 	// when the operator provided a [migration] section (either
 	// transform or none=true). Used by ProposeType to enforce the
 	// requirement that every version after v1 declares its migration
 	// intent explicitly.
 	MigrationExplicit bool
+}
+
+// Configuration is the type's read-back: the document the operator
+// submitted when the type carries one, else — for a type written before
+// the document was retained — a document synthesized from the stored
+// fields in the current vocabulary, which ParseType reads back to the
+// same fields (the schema included; the operator's comments and
+// formatting are gone with the original).
+func (t *Type) Configuration() (*Configuration, error) {
+	cfg := &Configuration{ID: t.ID, Name: t.Name, MimeType: t.DocumentMimeType, Data: t.Document}
+	if len(t.Document) > 0 {
+		if cfg.MimeType == "" {
+			cfg.MimeType = "text/toml" // how ParseConfigBytes read an unnamed format
+		}
+		return cfg, nil
+	}
+	doc, err := t.synthesizeDocument()
+	if err != nil {
+		return nil, err
+	}
+	cfg.MimeType = "text/toml"
+	cfg.Data = doc
+	return cfg, nil
+}
+
+// typeDocument is the TOML shape of a type configuration, key for key
+// what ParseType reads (its typeKeys / migrationKeys). Encoded rather than
+// printed so a schema or program containing quotes stays valid TOML.
+type typeDocument struct {
+	Type      typeTable           `toml:"type"`
+	Migration *typeMigrationTable `toml:"migration,omitempty"`
+}
+
+type typeTable struct {
+	Name              string `toml:"name"`
+	SchemaType        string `toml:"schemaType,omitempty"`
+	Schema            string `toml:"schema,multiline,omitempty"`
+	Validate          string `toml:"validate,omitempty"`
+	SchemaChangeTopic string `toml:"schemaChangeTopic,omitempty"`
+	EntityKind        string `toml:"entityKind,omitempty"`
+	Discriminator     string `toml:"discriminator,omitempty"`
+}
+
+type typeMigrationTable struct {
+	Transform      string `toml:"transform,multiline,omitempty"`
+	None           bool   `toml:"none,omitempty"`
+	NonConvertible bool   `toml:"nonConvertible,omitempty"`
+}
+
+// synthesizeDocument renders the stored fields as the document that
+// declares them. A version after the first declared exactly one migration
+// intent to get there: the transform when there is one, nonConvertible
+// when declared, else none.
+func (t *Type) synthesizeDocument() ([]byte, error) {
+	doc := typeDocument{Type: typeTable{
+		Name:              t.Name,
+		SchemaType:        t.SchemaType,
+		Schema:            string(t.Schema),
+		SchemaChangeTopic: t.SchemaChangeTopic,
+		Discriminator:     t.Discriminator,
+	}}
+	if t.Validate != NoValidation {
+		doc.Type.Validate = t.Validate.String()
+	}
+	if t.EntityKind != EntityKindUnspecified {
+		doc.Type.EntityKind = t.EntityKind.String()
+	}
+	if len(t.Migration) > 0 || t.NonConvertible || t.Version > 1 {
+		doc.Migration = &typeMigrationTable{}
+		switch {
+		case len(t.Migration) > 0:
+			doc.Migration.Transform = string(t.Migration)
+		case t.NonConvertible:
+			doc.Migration.NonConvertible = true
+		default:
+			doc.Migration.None = true
+		}
+	}
+	return toml.Marshal(doc)
+}
+
+// ProposeTypeOption adjusts type admission (see Cluster.ProposeType).
+type ProposeTypeOption func(*ProposeTypeOptions)
+
+// ProposeTypeOptions is the resolved option set. Callers use the With-style
+// constructors; implementations fold the options with ResolveProposeTypeOptions.
+type ProposeTypeOptions struct {
+	// AcknowledgeStranded admits a nonConvertible version bump although it
+	// strands always-current syncables — the operator's deliberate
+	// acknowledgment that those consumers' promise is being broken.
+	AcknowledgeStranded bool
+}
+
+// AcknowledgeStrandedSyncables acknowledges that a nonConvertible bump
+// strands the named always-current syncables and admits it anyway. The HTTP
+// layer passes it for POST /v1/type/{id}?force=true.
+func AcknowledgeStrandedSyncables() ProposeTypeOption {
+	return func(o *ProposeTypeOptions) { o.AcknowledgeStranded = true }
+}
+
+// ResolveProposeTypeOptions folds an option list into its resolved set.
+func ResolveProposeTypeOptions(opts []ProposeTypeOption) ProposeTypeOptions {
+	var o ProposeTypeOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// StrandedSyncablesError refuses a nonConvertible version bump that would
+// strand always-current syncables: their promise — every entity delivered at
+// the current version — becomes unkeepable for data below the break. The
+// operator either re-declares those syncables under a stance that survives a
+// break (version-pinned / version-aware) or re-POSTs with force to
+// acknowledge the stranding deliberately. The HTTP layer renders it 409.
+type StrandedSyncablesError struct {
+	// TypeID and Version identify the refused nonConvertible bump.
+	TypeID  string
+	Version int
+	// Syncables are the always-current syncables consuming this type's topic.
+	Syncables []string
+}
+
+func (e *StrandedSyncablesError) Error() string {
+	return fmt.Sprintf(
+		"type %q version %d is nonConvertible and would strand always-current syncable(s) %v — their data below the break can never reach the current version. Re-declare them version-pinned or version-aware, or re-POST with ?force=true to acknowledge the stranding",
+		e.TypeID, e.Version, e.Syncables)
 }
 
 // TypeSchemaValidator validates that a Type's entity schema is structurally
@@ -180,10 +371,12 @@ type Type struct {
 // the http layer, which db must not import — the same dependency inversion as the
 // SyncableParser / IngestableParser / DatabaseParser seams.
 type TypeSchemaValidator interface {
-	// ValidateTypeSchema returns nil for a valid schema, a non-validating type,
-	// or an UNKNOWN SchemaType (fail-open, so a schema type a newer producer
-	// understands is not rejected here); it returns an error only when a KNOWN
-	// SchemaType's schema will not compile.
+	// ValidateTypeSchema returns nil for a valid schema or a non-validating
+	// type; it errors when a validating type names a schema language this
+	// binary cannot compile (admitting it would validate nothing, silently)
+	// or when a known language's schema will not compile. A language added
+	// in a later release is feature-gated at admission, like every other
+	// cross-version change, so an older node is never handed one.
 	ValidateTypeSchema(t *Type) error
 }
 
@@ -209,10 +402,12 @@ func MigrationEditAdvisory(before, after *Type) string {
 		return ""
 	}
 	return "the [migration] transform was updated in place at the same version, so it " +
-		"applies only to Actuals synced from now on; rows already synced through the " +
-		"previous migration are unchanged on every projection that consumes this type's " +
-		"topic. Rebuild those projections to re-materialize already-synced history — see " +
-		"docs/read-models.md, \"Changing the rules after a projection is live\"."
+		"applies only to Actuals synced from now on; already-synced rows keep the " +
+		"previous migration's output on every always-current consumer of this " +
+		"type's topic (migrationEditDependents names them). Re-materialize each " +
+		"(POST /v1/syncable/{id}/rematerialize — keyed syncables converge in place) or " +
+		"rebuild blue-green — see docs/read-models.md, \"Changing the rules after a " +
+		"projection is live\"."
 }
 
 type TimePoint struct {
@@ -263,17 +458,21 @@ func (t *Type) Marshal() ([]byte, error) {
 		Name: t.Name,
 		// Version, Validate, and EntityKind are bounded by the domain:
 		// Version is monotonically assigned starting at 1 (will never
-		// exceed int32), Validate has only two defined values
-		// (NoValidation=0, ValidateSchema=1), and EntityKind only the
-		// defined EntityKind constants (ParseEntityKind rejects anything
-		// else).
-		Version:       int32(t.Version), //nolint:gosec // G115: bounded by domain
-		SchemaType:    t.SchemaType,
-		Schema:        t.Schema,
-		Validate:      clusterpb.LogValidationStrategy(t.Validate), //nolint:gosec // G115: bounded by domain
-		Migration:     t.Migration,
-		EntityKind:    clusterpb.LogEntityKind(t.EntityKind), //nolint:gosec // G115: bounded by domain
-		Discriminator: t.Discriminator,
+		// exceed int32), Validate has only the defined ValidationStrategy
+		// constants (ParseType rejects anything else), and EntityKind only
+		// the defined EntityKind constants (ParseEntityKind rejects
+		// anything else).
+		Version:           int32(t.Version), //nolint:gosec // G115: bounded by domain
+		SchemaType:        t.SchemaType,
+		Schema:            t.Schema,
+		Validate:          clusterpb.LogValidationStrategy(t.Validate), //nolint:gosec // G115: bounded by domain
+		Migration:         t.Migration,
+		EntityKind:        clusterpb.LogEntityKind(t.EntityKind), //nolint:gosec // G115: bounded by domain
+		Discriminator:     t.Discriminator,
+		SchemaChangeTopic: t.SchemaChangeTopic,
+		NonConvertible:    t.NonConvertible,
+		Document:          t.Document,
+		DocumentMimeType:  t.DocumentMimeType,
 	}
 
 	return proto.Marshal(lt)
@@ -295,6 +494,10 @@ func (t *Type) Unmarshal(bs []byte) error {
 	t.Migration = lt.Migration
 	t.EntityKind = EntityKind(lt.EntityKind)
 	t.Discriminator = lt.Discriminator
+	t.SchemaChangeTopic = lt.SchemaChangeTopic
+	t.NonConvertible = lt.NonConvertible
+	t.Document = lt.Document
+	t.DocumentMimeType = lt.DocumentMimeType
 
 	return nil
 }

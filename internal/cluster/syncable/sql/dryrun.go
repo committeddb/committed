@@ -97,7 +97,10 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 			// field's generic mid-size-run failures).
 			deadLetters++
 			if len(deadLetterSamples) < 3 {
-				deadLetterSamples = append(deadLetterSamples, foldErr.Error())
+				// The report is an HTTP body: replicate what the live
+				// dead-letter would record, never the raw fold error.
+				msg, _ := cluster.RedactedMessage(foldErr)
+				deadLetterSamples = append(deadLetterSamples, msg)
 			}
 			return nil
 		default:
@@ -112,7 +115,7 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 	if errors.Is(err, cluster.ErrDryRunTruncated) {
 		reason := "deadline reached"
 		if err.Error() != cluster.ErrDryRunTruncated.Error() {
-			reason = err.Error() // e.g. a log read failure — carry its words
+			reason, _ = cluster.RedactedMessage(err) // e.g. a log read failure — carry its words
 		}
 		truncated = fmt.Sprintf("%s — after %s and %d entries; the report covers what was folded (raise ?timeoutSeconds or lower ?maxEntries)", reason, time.Since(start).Round(time.Millisecond), entries)
 		err = nil

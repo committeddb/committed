@@ -2,7 +2,6 @@ package wal
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +9,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
+	twal "github.com/tidwall/wal"
+
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
 )
 
@@ -52,7 +55,26 @@ type Diagnosis struct {
 
 	truncateSeg string // torn-tail: segment file to truncate or remove
 	truncateOff int64  // torn-tail: byte offset to truncate to (0 => remove file)
+
+	// Corruption location for the backup splice (see splice.go). Set only when
+	// Status is LogCorrupt for a shape the splice can repair.
+	segs           []segFile   // the log's segment listing at scan time
+	corruptSeg     int         // index into segs of the corrupt segment
+	corruptShape   corruptKind // record (plain segment) or segment (compressed)
+	corruptOff     int         // record: byte offset of the record's size prefix
+	corruptPrefix  int         // record: size-prefix length in bytes
+	corruptLen     int         // record: framed record length (after the prefix)
+	corruptOrdinal int         // record: ordinal within its segment (0-based)
 }
+
+// corruptKind is the shape of a LogCorrupt diagnosis the splice can act on.
+type corruptKind int
+
+const (
+	corruptNone    corruptKind = iota // not splice-able (markers, incomplete prefix, …)
+	corruptRecord                     // a complete record in a PLAIN segment fails its frame
+	corruptSegment                    // a COMPRESSED segment fails its zstd frame checksum
+)
 
 type segFile struct {
 	index uint64
@@ -87,9 +109,15 @@ func listSegments(dir string) ([]segFile, bool, error) {
 		if err != nil || idx == 0 {
 			continue
 		}
+		if strings.HasSuffix(name, ".zst.SEAL") {
+			// An interrupted compression temp: the plain segment is intact and
+			// Open heals the leftover. Not part of the log's readable set.
+			continue
+		}
 		isStart := len(name) == 26 && strings.HasSuffix(name, ".START")
 		isEnd := len(name) == 24 && strings.HasSuffix(name, ".END")
-		if len(name) != 20 && !isStart && !isEnd {
+		isZst := len(name) == 24 && strings.HasSuffix(name, ".zst")
+		if len(name) != 20 && !isStart && !isEnd && !isZst {
 			continue
 		}
 		if isStart || isEnd {
@@ -127,53 +155,110 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 	}
 
 	total := 0
+	d.segs = segs
 	for si, seg := range segs {
 		data, err := os.ReadFile(seg.path)
 		if err != nil {
 			return nil, err
 		}
-		off := 0
-		for off < len(data) {
-			size, n := binary.Uvarint(data[off:])
-			// When n > 0, binary.Uvarint consumed n <= len(data)-off bytes, so
-			// remaining is non-negative; the n <= 0 branch short-circuits first.
-			remaining := len(data) - off - n
-			if n <= 0 || uint64(remaining) < size { //nolint:gosec // G115: remaining >= 0 when n > 0
-				// A structurally incomplete record — the write did not finish.
-				if si != len(segs)-1 {
-					// Incomplete record before the final segment is real
-					// corruption, not a tail. Refuse.
-					d.Status = LogCorrupt
-					d.Detail = fmt.Sprintf("incomplete record at offset %d of non-final segment %s", off, seg.name)
-					return d, nil
-				}
-				d.Status = LogTornTail
-				d.Records = total
-				d.truncateSeg = seg.path
-				d.truncateOff = int64(off)
-				d.Detail = fmt.Sprintf("incomplete trailing record at offset %d of last segment %s (%d valid records precede it)", off, seg.name, total)
-				return d, nil
-			}
-			// size <= len(data)-off-n (checked just above), so it fits in int.
-			recLen := int(size) //nolint:gosec // G115: bounded by the remaining buffer length
-			rec := data[off+n : off+n+recLen]
-			if _, uerr := unframe(rec); errors.Is(uerr, ErrCorruptEntry) {
-				// A structurally complete record that fails its checksum: a
-				// bit-flip in committed data, not an unacknowledged torn write.
-				// Never truncate it — the operator rebuilds from a healthy replica.
+		// A compressed sealed segment decodes before the framing scan. Its
+		// zstd frame checksum makes a torn or bit-flipped file fail HERE —
+		// and a compressed segment is never a torn tail (only complete
+		// segments compress; the appendable tail is always plain), so any
+		// failure inside one is mid-log corruption: rebuild, never truncate.
+		compressed := strings.HasSuffix(seg.name, ".zst")
+		if compressed {
+			data, err = decodeZstd(data)
+			if err != nil {
 				d.Status = LogCorrupt
 				d.Records = total
-				d.Detail = fmt.Sprintf("checksum mismatch on complete record %d (segment %s, offset %d) — data corruption, not a torn tail", total, seg.name, off)
+				d.corruptSeg, d.corruptShape = si, corruptSegment
+				d.Detail = fmt.Sprintf("compressed segment %s fails its zstd frame checksum — data corruption, not a torn tail (repairable from a backup: wal repair --from)", seg.name)
 				return d, nil
 			}
-			off += n + recLen
-			total++
+		}
+		var corrupt bool
+		records, incompleteAt := walkSegmentRecords(data, func(ordinal, off, n int, rec []byte) bool {
+			if _, uerr := unframe(rec); uerr == nil {
+				return true
+			}
+			// A structurally complete record that fails its checksum: a
+			// bit-flip in committed data, not an unacknowledged torn write.
+			// Never truncate it — the operator rebuilds from a healthy replica.
+			corrupt = true
+			d.Status = LogCorrupt
+			d.Records = total + ordinal
+			if !compressed {
+				d.corruptSeg, d.corruptShape = si, corruptRecord
+				d.corruptOff, d.corruptPrefix, d.corruptLen, d.corruptOrdinal = off, n, len(rec), ordinal
+			}
+			d.Detail = fmt.Sprintf("checksum mismatch on complete record %d (segment %s, offset %d) — data corruption, not a torn tail (repairable from a backup: wal repair --from)", total+ordinal, seg.name, off)
+			return false
+		})
+		if corrupt {
+			return d, nil
+		}
+		total += records
+		if incompleteAt >= 0 {
+			// A structurally incomplete record — the write did not finish.
+			off := incompleteAt
+			if compressed {
+				// Inside a decoded compressed segment: the seal captured a
+				// complete segment, so this predates compression — real
+				// corruption regardless of position.
+				d.Status = LogCorrupt
+				d.Detail = fmt.Sprintf("incomplete record at offset %d inside compressed segment %s", off, seg.name)
+				return d, nil
+			}
+			if si != len(segs)-1 {
+				// Incomplete record before the final segment is real
+				// corruption, not a tail. Refuse.
+				d.Status = LogCorrupt
+				d.Detail = fmt.Sprintf("incomplete record at offset %d of non-final segment %s", off, seg.name)
+				return d, nil
+			}
+			d.Status = LogTornTail
+			d.Records = total
+			d.truncateSeg = seg.path
+			d.truncateOff = int64(off)
+			d.Detail = fmt.Sprintf("incomplete trailing record at offset %d of last segment %s (%d valid records precede it)", off, seg.name, total)
+			return d, nil
 		}
 	}
 	d.Status = LogClean
 	d.Records = total
 	d.Detail = fmt.Sprintf("%d records, all valid", total)
 	return d, nil
+}
+
+// walkSegmentRecords steps through a segment's size-prefixed records — the
+// one place that knows the on-disk record layout — calling visit for each
+// complete one with its ordinal in the segment, its offset, its size-prefix
+// width, and the framed record; visit returns false to stop early. It
+// returns the number of records visited and, when the data ends inside a
+// record (the write did not finish), the offset where that record starts,
+// else -1. What an incomplete or unframeable record MEANS is the caller's
+// call: a torn tail forgiven on the last plain segment (DiagnoseLog), or a
+// fetched file refused outright (AdoptEventSegments).
+func walkSegmentRecords(data []byte, visit func(ordinal, off, prefix int, rec []byte) bool) (records, incompleteAt int) {
+	off := 0
+	for off < len(data) {
+		size, n := binary.Uvarint(data[off:])
+		// When n > 0, binary.Uvarint consumed n <= len(data)-off bytes, so
+		// remaining is non-negative; the n <= 0 branch short-circuits first.
+		remaining := len(data) - off - n
+		if n <= 0 || uint64(remaining) < size { //nolint:gosec // G115: remaining >= 0 when n > 0
+			return records, off
+		}
+		// size <= len(data)-off-n (checked just above), so it fits in int.
+		recLen := int(size) //nolint:gosec // G115: bounded by the remaining buffer length
+		if !visit(records, off, n, data[off+n:off+n+recLen]) {
+			return records, -1
+		}
+		off += n + recLen
+		records++
+	}
+	return records, -1
 }
 
 // RepairLog diagnoses one log dir and, when commit is true and the diagnosis is
@@ -215,7 +300,20 @@ func RepairLog(dir string, commit bool) (*Diagnosis, error) {
 // RepairNode scans (and, when commit, repairs a torn tail in) each of a node's
 // three WAL logs under baseDir, returning one Diagnosis per log in fixed order:
 // entry log, state log, event log.
+//
+// It refuses a baseDir whose node is running, holding the exclusive
+// stopped-node lock (see datadir.LockStoppedNodeExclusive) for the whole
+// scan: against a live node, DiagnoseLog races the sealer's segment swaps
+// (misreporting a healthy log), and a --commit repair can truncate a file
+// the running process is mid-append on — silent corruption, not maintenance.
 func RepairNode(baseDir string, commit bool) ([]*Diagnosis, error) {
+	lock, err := datadir.LockStoppedNodeExclusive(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	if lock != nil {
+		defer func() { _ = lock.Close() }()
+	}
 	out := make([]*Diagnosis, 0, len(walLogSubdirs))
 	for _, parts := range walLogSubdirs {
 		dir := filepath.Join(append([]string{baseDir}, parts...)...)
@@ -226,4 +324,43 @@ func RepairNode(baseDir string, commit bool) ([]*Diagnosis, error) {
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// DecompressNode rewrites every compressed sealed segment under a STOPPED
+// node's data dir back to the plain pre-0.8.0 format — the offline downgrade
+// door: older binaries do not recognize ".zst" segments and would silently
+// open a partial log. Returns the number of segments rewritten per log dir,
+// in walLogSubdirs order. Only the event log compresses today, but every log
+// dir is swept for robustness. Refuses a baseDir whose node is running,
+// holding the exclusive stopped-node lock for the whole rewrite — the same
+// contract as RepairNode, with the same stake: decompressing files a live
+// process is appending to corrupts them.
+func DecompressNode(baseDir string) (map[string]int, error) {
+	lock, err := datadir.LockStoppedNodeExclusive(baseDir)
+	if err != nil {
+		return nil, err
+	}
+	if lock != nil {
+		defer func() { _ = lock.Close() }()
+	}
+	out := map[string]int{}
+	for _, parts := range walLogSubdirs {
+		dir := filepath.Join(append([]string{baseDir}, parts...)...)
+		n, err := twal.DecompressDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return out, fmt.Errorf("%s: %w", dir, err)
+		}
+		out[dir] = n
+	}
+	return out, nil
+}
+
+// zstdRepairDec decodes compressed sealed segments for the offline scan.
+var zstdRepairDec, _ = zstd.NewReader(nil)
+
+func decodeZstd(raw []byte) ([]byte, error) {
+	return zstdRepairDec.DecodeAll(raw, nil)
 }

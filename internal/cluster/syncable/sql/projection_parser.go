@@ -11,9 +11,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
-// ProjectionSyncableParser parses projection syncable TOML. The canonical
-// type is "projection"; "sql-projection" is accepted as a deprecation
-// alias (both registered in cmd/node.go). Metrics is optional (nil skips
+// ProjectionSyncableParser parses projection syncable TOML (type
+// "projection", registered in cmd/node.go). Metrics is optional (nil skips
 // instrumentation); when set it counts entity-kind misuse at parse time
 // and is handed to the Projection for unmatched-rule ticks at sync time.
 type ProjectionSyncableParser struct {
@@ -25,33 +24,11 @@ type ProjectionSyncableParser struct {
 	StoreDir string
 }
 
-const (
-	canonicalProjectionType  = "projection"
-	deprecatedProjectionType = "sql-projection"
-)
-
-// projectionSection resolves which TOML table this config's projection
-// vocabulary lives in. The section name follows the syncable type string
-// (the {type}.topic convention the pipeline linkage relies on): canonical
-// `type = "projection"` reads [projection]; the deprecated
-// `type = "sql-projection"` keeps reading [sql-projection] for the
-// deprecation period. When no type is in scope (direct parser callers
-// hand in bare documents), whichever section spelling is present wins,
-// canonical by default. A half-renamed config (type of one spelling,
-// section of the other) is caught by parseProjectionConfigFields with a
-// targeted error rather than a cascade of missing-field failures.
-func projectionSection(v *cluster.ParsedConfig) string {
-	switch v.GetString("syncable.type") {
-	case deprecatedProjectionType:
-		return deprecatedProjectionType
-	case canonicalProjectionType:
-		return canonicalProjectionType
-	}
-	if len(v.SectionKeys(canonicalProjectionType)) == 0 && len(v.SectionKeys(deprecatedProjectionType)) > 0 {
-		return deprecatedProjectionType
-	}
-	return canonicalProjectionType
-}
+// projectionSection is the TOML table the projection vocabulary lives in. It
+// follows the syncable type string (the {type}.topic convention the pipeline
+// linkage relies on). The former "sql-projection" spelling was removed in
+// 0.8.0; db/parser's removal ledger refuses it with the rename named.
+const projectionSection = "projection"
 
 func (p *ProjectionSyncableParser) Parse(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (cluster.Syncable, error) {
 	config, err := p.ParseConfig(v, storage)
@@ -81,7 +58,7 @@ type rawProjectionRule struct {
 	Set  []ProjectionSet `mapstructure:"set"`
 }
 
-// rawProjectionSource is the TOML decode shape of one [[projection.source]]
+// rawProjectionSource is the TOML decode shape of one [[projection.sources]]
 // block: a topic (the discriminator), its correlation keyPath, its onDelete
 // behavior, an optional source-level when filter, and either nested rules (a
 // scalar fold) or an aggregate (a collection fold). when decodes as any so it
@@ -102,7 +79,7 @@ type rawProjectionSource struct {
 }
 
 // rawProjectionAggregate is the TOML decode shape of a source's
-// [projection.source.aggregate] block. Element is an array-of-tables (each
+// [projection.sources.aggregate] block. Its [[fields]] are an array-of-tables (each
 // a plain { field, from } or an enriched { field, lookup, on, select }) rather
 // than an inline map so its output field names survive viper's map-key
 // lowercasing byte-exact.
@@ -110,16 +87,16 @@ type rawProjectionAggregate struct {
 	Column         string                   `mapstructure:"column"`
 	ElementKey     string                   `mapstructure:"elementKey"`
 	ElementKeyType string                   `mapstructure:"elementKeyType"`
-	Element        []ProjectionElementField `mapstructure:"element"`
-	Scalar         []ProjectionScalar       `mapstructure:"scalar"`
+	Element        []ProjectionElementField `mapstructure:"fields"`
+	Scalar         []ProjectionScalar       `mapstructure:"scalars"`
 }
 
 // rawProjectionLookup is the TOML decode shape of a source's
-// [projection.source.lookup] block: the dimension's id (referenced by
+// [projection.sources.lookup] block: the dimension's id (referenced by
 // element enrichments) and its stored fields.
 type rawProjectionLookup struct {
 	Name   string                   `mapstructure:"name"`
-	Fields []ProjectionElementField `mapstructure:"field"`
+	Fields []ProjectionElementField `mapstructure:"fields"`
 }
 
 // TopicsFromConfig implements cluster.SyncableTopicExtractor: a projection
@@ -138,9 +115,9 @@ func (p *ProjectionSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []s
 		}
 	}
 
-	section := projectionSection(v)
+	section := projectionSection
 	var rawSources []rawProjectionSource
-	if err := v.UnmarshalKeyLenient(section+".source", &rawSources); err == nil { // topic peek — admission strictness lives in parseProjectionSources
+	if err := v.UnmarshalKeyLenient(section+".sources", &rawSources); err == nil { // topic peek — admission strictness lives in parseProjectionSources
 		for _, rs := range rawSources {
 			add(rs.Topic)
 		}
@@ -156,7 +133,7 @@ func (p *ProjectionSyncableParser) TopicsFromConfig(v *cluster.ParsedConfig) []s
 // straight from the config so a database connection change can enumerate the
 // syncables that captured its pool.
 func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) []string {
-	db := v.GetString(projectionSection(v) + ".db")
+	db := v.GetString(projectionSection + ".db")
 	if db == "" {
 		return nil
 	}
@@ -169,21 +146,44 @@ func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) 
 // unresolvable on this node. storage is used only for type resolution (a `when`
 // discriminator shorthand), never for storage.Database. Database is left nil;
 // ParseConfig resolves and sets it.
-// projectionSectionKeys is the complete vocabulary of the flat projection
-// table — [projection], or [sql-projection] under the deprecated spelling
-// (lowercased; key matching is case-insensitive).
+// projectionSectionKeys is the complete vocabulary of the flat [projection]
+// table (lowercased; key matching is case-insensitive).
 // The struct-decoded subtrees (columns/rules/source) enforce their own
 // vocabularies via the strict UnmarshalKey; this set covers the keys the
 // parser reads flatly — a key outside it is rejected loudly rather than
 // silently ignored (the field incident: `where` and `emitTopic` returned
 // 200 and were inert). GROW THIS SET when adding a config key.
-var projectionSectionKeys = map[string]bool{
-	"db": true, "table": true, "primarykey": true, "topic": true,
-	"keypath": true, "rules": true, "columns": true, "source": true,
-	"stage": true,
+// removedProjectionKeys are the 0.7.10 spellings 0.8.0 renamed when the
+// vocabulary settled on plural nouns for arrays of tables. A stored config
+// under an old spelling PARKS on the upgraded binary, so the refusal must
+// name the replacement rather than read as a typo — that is what
+// api-compatibility.md promises ("a spelling the vocabulary refuses on
+// purpose is refused naming its replacement"). The type-level ledger in
+// db/parser only covers documents that still say type = "sql-projection";
+// a 0.7.10 config that already said type = "projection" reaches here
+// instead, which is the common case.
+var removedProjectionKeys = map[string]string{
+	"source": "sources",
+	"stage":  "stages",
 }
 
-// rawProjectionStage is the TOML decode shape of one [[projection.stage]]
+// removedProjectionNestedKeys are the same rename one level down, inside a
+// source or stage. They are reported from the enclosing decode failure,
+// which otherwise names the key without saying what it became.
+var removedProjectionNestedKeys = map[string]string{
+	"element": "fields",
+	"scalar":  "scalars",
+	"field":   "fields",
+	"join":    "joins",
+}
+
+var projectionSectionKeys = map[string]bool{
+	"db": true, "table": true, "primarykey": true, "topic": true,
+	"keypath": true, "rules": true, "columns": true, "sources": true,
+	"stages": true,
+}
+
+// rawProjectionStage is the TOML decode shape of one [[projection.stages]]
 // block. keyPath and when decode as any for the same scalar-or-list /
 // shorthand-or-clauses reasons the source shapes do.
 type rawProjectionStage struct {
@@ -197,7 +197,7 @@ type rawProjectionStage struct {
 	OrderByType string         `mapstructure:"orderByType"`
 	TieBy       string         `mapstructure:"tieBy"`
 	TieByType   string         `mapstructure:"tieByType"`
-	Join        []rawStageJoin `mapstructure:"join"`
+	Join        []rawStageJoin `mapstructure:"joins"`
 	Normalize   string         `mapstructure:"normalize"`
 	KeyType     any            `mapstructure:"keyType"`
 	Merge       any            `mapstructure:"merge"`
@@ -207,7 +207,7 @@ type rawProjectionStage struct {
 	ElementKey  string         `mapstructure:"elementKey"`
 }
 
-// rawStageJoin is the TOML decode shape of one [[{section}.stage.join]]
+// rawStageJoin is the TOML decode shape of one [[{section}.stages.joins]]
 // block: on decodes as any so a single path stays a scalar and a
 // composite key is a list — the keyPath idiom.
 type rawStageJoin struct {
@@ -223,11 +223,11 @@ type rawStageJoin struct {
 	Field     string       `mapstructure:"field"`
 }
 
-// parseProjectionStages decodes the [[{section}.stage]] blocks.
+// parseProjectionStages decodes the [[{section}.stages]] blocks.
 func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStorage, section string) ([]ProjectionStage, error) {
 	var raw []rawProjectionStage
-	if err := v.UnmarshalKey(section+".stage", &raw); err != nil {
-		return nil, fmt.Errorf("parse %s.stage: %w", section, err)
+	if err := v.UnmarshalKey(section+".stages", &raw); err != nil {
+		return nil, fmt.Errorf("parse %s.stages: %w", section, annotateRemovedNested(err))
 	}
 	if len(raw) == 0 {
 		return nil, nil
@@ -271,32 +271,16 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 }
 
 func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.DatabaseStorage) (*ProjectionConfig, error) {
-	section := projectionSection(v)
-
-	// One config uses one spelling — both sections at once is never right.
-	if len(v.SectionKeys(canonicalProjectionType)) > 0 && len(v.SectionKeys(deprecatedProjectionType)) > 0 {
-		return nil, &cluster.FieldError{
-			Field: deprecatedProjectionType,
-			Issue: "both [projection] and [sql-projection] sections are present — a config uses one spelling; delete the deprecated [sql-projection] section",
-		}
-	}
-
-	// A half-renamed config — type of one spelling, section of the other —
-	// would otherwise read an absent table and die on missing required
-	// fields; name the actual mistake instead.
-	other := canonicalProjectionType
-	if section == canonicalProjectionType {
-		other = deprecatedProjectionType
-	}
-	if len(v.SectionKeys(section)) == 0 && len(v.SectionKeys(other)) > 0 {
-		return nil, &cluster.FieldError{
-			Field: other,
-			Issue: fmt.Sprintf("section spelling does not match syncable type %q — rename the section to [%s] (type and section always use the same spelling)", v.GetString("syncable.type"), section),
-		}
-	}
-
+	section := projectionSection
 	for _, k := range v.SectionKeys(section) {
 		if !projectionSectionKeys[k] {
+			if plural, renamed := removedProjectionKeys[k]; renamed {
+				return nil, &cluster.FieldError{
+					Field: section + "." + k,
+					Issue: fmt.Sprintf("was renamed to %q in 0.8.0 (arrays of tables take a plural noun): write [[%s.%s]] and re-POST — the declared content is unchanged, so the syncable resumes where it left off",
+						plural, section, plural),
+				}
+			}
 			return nil, &cluster.FieldError{
 				Field: section + "." + k,
 				Issue: "unknown key — not part of the projection vocabulary (check the spelling against the docs; unknown keys are rejected rather than silently ignored)",
@@ -330,6 +314,16 @@ func parseProjectionConfigFields(v *cluster.ParsedConfig, storage cluster.Databa
 		Sources:    sources,
 		Stages:     stages,
 	}
+	// The [syncable] envelope's checkpoint cadence applies to a projection
+	// exactly as it does to the plain sql syncable — both are BatchSyncables,
+	// and README/read-models tell operators to raise it on a projection. It
+	// was accepted and inert here before, which is the class the closed
+	// vocabulary exists to kill.
+	policy, perr := cluster.ParseCheckpointPolicy(v)
+	if perr != nil {
+		return nil, fmt.Errorf("[projection.parser] %w", perr)
+	}
+	config.Checkpoint = policy
 	config.applyDefaults()
 	return config, nil
 }
@@ -373,16 +367,37 @@ func (p *ProjectionSyncableParser) ParseConfig(v *cluster.ParsedConfig, storage 
 	return config, nil
 }
 
+// annotateRemovedNested adds the 0.8.0 rename to a strict-decode failure that
+// names a 0.7.10 nested spelling. mapstructure reports the offending key but
+// not what it became, and these are exactly the keys an upgrading operator
+// hits after renaming the enclosing table.
+func annotateRemovedNested(err error) error {
+	if err == nil {
+		return nil
+	}
+	// The strict decoder reports the offending path as one quoted string —
+	// `unknown key(s) "[0].aggregate.element" under "projection.sources"` —
+	// so the renamed key is the LAST segment, ending the quote. Matching
+	// `.element"` (not `element`) also keeps `fields` from matching `field`.
+	msg := err.Error()
+	for old, plural := range removedProjectionNestedKeys {
+		if strings.Contains(msg, "."+old+`"`) {
+			return fmt.Errorf("%w (0.8.0 renamed %q to %q: arrays of tables take a plural noun)", err, old, plural)
+		}
+	}
+	return err
+}
+
 // parseProjectionSources reads either the multi-source
-// `[[projection.source]]` blocks or — for back-compat — the single-source
+// `[[projection.sources]]` blocks or — for back-compat — the single-source
 // top-level `topic` / `keyPath` / `rules`. Exactly one shape is allowed:
 // mixing them is a loud config error, not a silent precedence — the field
 // incident's three keyPath probes died with 99 dead letters each because a
 // top-level keyPath was silently ignored once source blocks were present.
 func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseStorage, section string) ([]ProjectionSource, error) {
 	var rawSources []rawProjectionSource
-	if err := v.UnmarshalKey(section+".source", &rawSources); err != nil {
-		return nil, fmt.Errorf("parse %s.source: %w", section, err)
+	if err := v.UnmarshalKey(section+".sources", &rawSources); err != nil {
+		return nil, fmt.Errorf("parse %s.sources: %w", section, annotateRemovedNested(err))
 	}
 
 	if len(rawSources) > 0 {
@@ -390,7 +405,7 @@ func parseProjectionSources(v *cluster.ParsedConfig, storage cluster.DatabaseSto
 			if v.Get(section+"."+shorthand) != nil {
 				return nil, &cluster.FieldError{
 					Field: section + "." + shorthand,
-					Issue: fmt.Sprintf("cannot be combined with [[%s.source]] blocks — the single-source shorthand and the multi-source form are mutually exclusive; move this into a source block", section),
+					Issue: fmt.Sprintf("cannot be combined with [[%s.sources]] blocks — the single-source shorthand and the multi-source form are mutually exclusive; move this into a sources block", section),
 				}
 			}
 		}

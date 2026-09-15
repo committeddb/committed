@@ -223,8 +223,11 @@ func TestParseDiskState_RoundTrips(t *testing.T) {
 // typed error (the HTTP layer maps it to 503 leader_unavailable) so the
 // reporter re-resolves the leader instead of poisoning a follower's map.
 func TestReportDisk_NotLeader(t *testing.T) {
-	d := &DB{raft: &Raft{}, leaderState: NewLeaderState(false)}
-	_, err := d.ReportDisk(2, "ok")
+	a := &diskAdmission{diskAdmissionDeps: diskAdmissionDeps{
+		isLeader: func() bool { return false },
+		leaderID: func() uint64 { return 0 },
+	}}
+	_, err := a.report(2, "ok")
 	require.ErrorIs(t, err, cluster.ErrNotLeader)
 }
 
@@ -235,30 +238,33 @@ func TestMaybeTransferLeadership(t *testing.T) {
 	now := time.Now()
 	var transferred []uint64
 	target := uint64(2)
-	d := &DB{logger: zap.NewNop(), diskTransferCooldown: time.Minute}
-	d.pickTransferTargetFn = func(time.Time) uint64 { return target }
-	d.transferLeadershipFn = func(id uint64) { transferred = append(transferred, id) }
+	a := &diskAdmission{diskAdmissionDeps: diskAdmissionDeps{
+		logger:             zap.NewNop(),
+		transferCooldown:   time.Minute,
+		transferLeadership: func(id uint64) { transferred = append(transferred, id) },
+	}}
+	a.pickTransferTargetFn = func(time.Time) uint64 { return target }
 
 	// Healthy local disk: never transfers, even with a target available.
-	d.diskState.Store(int32(diskOK))
-	d.maybeTransferLeadership(now, nil)
+	a.local.Store(int32(diskOK))
+	a.maybeTransferLeadership(now, nil)
 	require.Empty(t, transferred)
 
 	// Critical local disk + healthy target: transfers.
-	d.diskState.Store(int32(diskCritical))
-	d.maybeTransferLeadership(now, nil)
+	a.local.Store(int32(diskCritical))
+	a.maybeTransferLeadership(now, nil)
 	require.Equal(t, []uint64{2}, transferred)
 
 	// Within the cooldown: rate-limited, no second transfer.
-	d.maybeTransferLeadership(now.Add(30*time.Second), nil)
+	a.maybeTransferLeadership(now.Add(30*time.Second), nil)
 	require.Len(t, transferred, 1)
 
 	// After the cooldown (still constrained): transfers again.
-	d.maybeTransferLeadership(now.Add(2*time.Minute), nil)
+	a.maybeTransferLeadership(now.Add(2*time.Minute), nil)
 	require.Len(t, transferred, 2)
 
 	// No healthy target: keeps leadership rather than gambling.
 	target = 0
-	d.maybeTransferLeadership(now.Add(10*time.Minute), nil)
+	a.maybeTransferLeadership(now.Add(10*time.Minute), nil)
 	require.Len(t, transferred, 2)
 }

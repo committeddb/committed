@@ -10,6 +10,6 @@ primaryKey = "movie_id"
 tables = ["ingress.rating"]
 mapAllColumns = true
 
-[sql.postgres]
-slot_name = "committed_rating_slot"
+[sql.options]
+slotName = "committed_rating_slot"
 publication = "committed_rating_pub"

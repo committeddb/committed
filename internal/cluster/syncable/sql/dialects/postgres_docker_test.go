@@ -678,3 +678,93 @@ func TestPostgreSQLIntegration_RefreshBoundarySweepsGapDeletedRows(t *testing.T)
 	require.Nil(t, db.DB.QueryRow("SELECT "+sql.GenerationColumn+" FROM "+table+" WHERE k = $1", "u").Scan(&uGen))
 	require.Equal(t, int64(0), uGen, "the user row is never stamped with a refresh epoch")
 }
+
+// TestPostgreSQLIntegration_RematerializationCycle drives the whole
+// re-materialization contract through the REAL syncable against a real
+// PostgreSQL, because its failure mode is row loss on an operator's live
+// table and every other test of it runs against fakes. The cycle: begin (an
+// ALTER on a table that already holds rows, idempotent so a restart can
+// re-begin), replay some rows through the marking path, then complete. Rows
+// the replay re-emitted survive with their replayed values; rows it did not
+// are swept.
+func TestPostgreSQLIntegration_RematerializationCycle(t *testing.T) {
+	d := &dialects.PostgreSQLDialect{}
+	db, err := sql.NewDB(d, pgConnString)
+	require.NoError(t, err)
+	defer db.Close()
+
+	table := uniqueTable(t)
+	defer dropTable(t, table)
+
+	cfg := &sql.Config{
+		Topic: eventType.ID,
+		Table: table,
+		Mappings: []sql.Mapping{
+			{JsonPath: "$.pk", Column: "pk", SQLType: "VARCHAR(128)"},
+			{JsonPath: "$.value", Column: "value", SQLType: "TEXT"},
+		},
+		PrimaryKey: []string{"pk"},
+	}
+	syncable := sql.New(db, cfg)
+	require.NoError(t, syncable.Init())
+	defer syncable.Close()
+
+	up := func(pk, value string) *cluster.Actual {
+		return &cluster.Actual{Entities: []*cluster.Entity{
+			cluster.NewUpsertEntity(eventType, []byte(pk), []byte(fmt.Sprintf(`{"pk":%q,"value":%q}`, pk, value))),
+		}}
+	}
+
+	// Ordinary syncing first: the table holds rows before any re-materialization.
+	for _, a := range []*cluster.Actual{up("keep", "old"), up("stale", "old")} {
+		_, serr := syncable.Sync(context.Background(), a)
+		require.NoError(t, serr)
+	}
+
+	require.True(t, syncable.CanRematerialize(), "a keyed sql syncable is rematerializable")
+
+	// Begin: the ALTER lands on a table WITH data, and re-begins cleanly (the
+	// restart-mid-rematerialization path).
+	const epoch = uint64(4242)
+	require.NoError(t, syncable.BeginRematerialization(context.Background(), epoch))
+	require.NoError(t, syncable.BeginRematerialization(context.Background(), epoch),
+		"a restart must be able to re-begin under the same epoch")
+
+	// Replay: only "keep" is re-emitted, with a new value.
+	_, err = syncable.Sync(context.Background(), up("keep", "new"))
+	require.NoError(t, err)
+
+	// A LIVE write that arrives during the replay — a key the replay never
+	// touches. Every keyed apply must take the marking path while a
+	// re-materialization is active; if a live write took the plain upsert it
+	// would sit below the epoch and the sweep would delete brand-new data.
+	_, err = syncable.Sync(context.Background(), up("fresh", "live"))
+	require.NoError(t, err)
+
+	// Before completion both rows are present — the sweep is what removes the
+	// row the replay did not reproduce.
+	var before int
+	require.NoError(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&before))
+	require.Equal(t, 3, before)
+
+	require.NoError(t, syncable.CompleteRematerialization(context.Background()))
+
+	var survivors []string
+	rows, err := db.DB.Query("SELECT pk, value FROM " + table + " ORDER BY pk")
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var pk, value string
+		require.NoError(t, rows.Scan(&pk, &value))
+		survivors = append(survivors, pk+"="+value)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []string{"fresh=live", "keep=new"}, survivors,
+		"the re-emitted row and the live write both survive; only the stale row is swept")
+
+	// Completing twice is a no-op, not a second sweep.
+	require.NoError(t, syncable.CompleteRematerialization(context.Background()))
+	var after int
+	require.NoError(t, db.DB.QueryRow("SELECT COUNT(*) FROM "+table).Scan(&after))
+	require.Equal(t, 2, after)
+}

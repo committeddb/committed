@@ -1,0 +1,42 @@
+== T_hist (actor, action, amount)
+"ada"	"login"	"2.50"
+"bea"	"pay"	"10.00"
+== T_hist__committed_applied (committed_index, committed_seq)
+1	0
+2	0
+== T_items (item_id, amount, txn_id)
+"j1-a"	"3.00"	"x1"
+== T_items__foreach_txn (child_key, parent_key, element_key, element)
+"j1-a"	"x1"	""	"{}"
+== T_jobs (job_id, tenant_id, tenant_name, total, n)
+"j1"	7	"Acme"	NULL	2
+== T_jobs__lookup_tenants (lookup_key, lookup_fields)
+"7"	"{\"name\": \"Acme\"}"
+== T_keyed (id, owner, balance, tags, committed_generation)
+"k1"	"ada"	"5.25"	"[\"a\"]"	0
+== T_movies (tconst, primary_title, top_cast, n_cast, max_order, actors, unnamed)
+"tt1"	"The Engine"	"[{\"name\": \"Ada Lovelace\", \"nick\": null, \"nconst\": \"nm1\", \"category\": \"actor\", \"ordering\": 1}, {\"name\": \"Bea Arthur\", \"nick\": \"B\", \"nconst\": \"nm2\", \"category\": \"actor\", \"ordering\": 2}]"	2	2	2	1
+== T_movies__lookup_names (lookup_key, lookup_fields)
+"nm1"	"{\"primary_name\": \"Ada Lovelace\"}"
+"nm2"	"{\"primary_name\": \"Bea Arthur\"}"
+== T_movies__top_cast (child_key, parent_key, element_key, element)
+"p1"	"tt1"	"2"	"{\"nick\": \"B\", \"nconst\": \"nm2\", \"category\": \"actor\", \"ordering\": 2}"
+"p2"	"tt1"	"1"	"{\"nick\": null, \"nconst\": \"nm1\", \"category\": \"actor\", \"ordering\": 1}"
+== T_single (tenant_id, tier, state, seats, allocs)
+"t1"	"dev"	"active"	6	"{\"cpu\": 4, \"gpu\": null}"
+"t2"	"prod"	"gone"	20	NULL
+== T_values (id, txt, i, d, f, b, j, committed_generation)
+"r1"	"héllo \"q\" \\ 😀"	42	"5.0000"	1000	true	"{\"a\": [1, \"b\", null], \"z\": \"é\"}"	0
+"r2"	""	-7	"5.2500"	-0.5	false	"[]"	0
+"r3"	NULL	9007199254740993	"0.1000"	0.0025	NULL	NULL	0
+"r4"	"x"	0	"0.0000"	0	true	"{\"n\": 7.5, \"s\": \"str\", \"t\": true}"	0
+"r5"	"y"	NULL	"1.0000"	1	false	"[\"str\", 7.5, true, null]"	0
+"r6"	"z"	2	"2.5000"	NULL	true	"{}"	0
+== committed__destinations (table_name, rendering_version, owned)
+T_hist	1	true
+T_items	1	true
+T_jobs	1	true
+T_keyed	1	true
+T_movies	1	true
+T_single	1	true
+T_values	1	true

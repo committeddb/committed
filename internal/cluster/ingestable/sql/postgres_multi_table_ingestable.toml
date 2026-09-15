@@ -9,8 +9,8 @@ connectionString="postgres://user:pass@localhost:5432/db?sslmode=disable"
 primaryKey = "pk"
 tables = ["public.orders", "public.customers", "public.items"]
 
-[sql.postgres]
-slot_name = "multi_slot"
+[sql.options]
+slotName = "multi_slot"
 publication = "multi_pub"
 
 [[sql.mappings]]

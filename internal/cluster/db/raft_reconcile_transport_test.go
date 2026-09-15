@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,9 @@ func (r *recordingTransport) AddPeer(p raft.Peer) error {
 func (r *recordingTransport) RemovePeer(id uint64)        {}
 func (r *recordingTransport) Send(msgs []*raftpb.Message) {}
 func (r *recordingTransport) Stop()                       {}
+func (r *recordingTransport) FetchEvents(context.Context, db.EventFetchRequest, db.EventSink) (db.EventFetchResult, error) {
+	return db.EventFetchResult{}, db.ErrNoPeerToFetchFrom
+}
 
 func (r *recordingTransport) addedPeers() []raft.Peer {
 	r.mu.Lock()
@@ -63,7 +67,7 @@ func TestReconcileTransport_ConnectsDurablePeerMissingFromSeed(t *testing.T) {
 	ps := []raft.Peer{{ID: 1, Context: []byte("http://n1:2380")}}
 	_, r := db.NewRaft(1, ps, s, proposeC, confChangeC,
 		db.WithTickInterval(50*time.Millisecond),
-		db.WithTransportFactory(func(_ uint64, _ []raft.Peer, _ *zap.Logger, _ db.TransportRaft, _ *tlstransport.TLSInfo, _ string) db.Transport {
+		db.WithTransportFactory(func(_ uint64, _ []raft.Peer, _ *zap.Logger, _ db.TransportRaft, _ db.EventServer, _ *tlstransport.TLSInfo, _ string) db.Transport {
 			return spy
 		}),
 	)
@@ -88,7 +92,7 @@ func TestReconcileTransport_SkipsSelf(t *testing.T) {
 	ps := []raft.Peer{{ID: 1, Context: []byte("http://n1:2380")}}
 	_, r := db.NewRaft(1, ps, s, proposeC, confChangeC,
 		db.WithTickInterval(50*time.Millisecond),
-		db.WithTransportFactory(func(_ uint64, _ []raft.Peer, _ *zap.Logger, _ db.TransportRaft, _ *tlstransport.TLSInfo, _ string) db.Transport {
+		db.WithTransportFactory(func(_ uint64, _ []raft.Peer, _ *zap.Logger, _ db.TransportRaft, _ db.EventServer, _ *tlstransport.TLSInfo, _ string) db.Transport {
 			return spy
 		}),
 	)

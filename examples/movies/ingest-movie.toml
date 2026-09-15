@@ -11,6 +11,6 @@ tables = ["ingress.movie"]
 # Mirror every column 1:1 (jsonName = column) — no per-column mappings needed.
 mapAllColumns = true
 
-[sql.postgres]
-slot_name = "committed_movie_slot"
+[sql.options]
+slotName = "committed_movie_slot"
 publication = "committed_movie_pub"

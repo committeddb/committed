@@ -1,0 +1,82 @@
+package http_test
+
+import (
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/committeddb/committed/internal/cluster/db/http"
+)
+
+// R3-HTTP-1: the router's own 404/405 paths must honor the JSON error-envelope
+// contract, not chi's raw text/plain 404 / empty-body 405.
+func TestRouterErrorEnvelope(t *testing.T) {
+	h := newEngineHTTP(t).h
+
+	// Unmatched route → 404 JSON envelope.
+	req := httptest.NewRequest("GET", "http://localhost/does-not-exist", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 404, w.Code)
+	require.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	require.Contains(t, w.Body.String(), `"code":"not_found"`)
+
+	// Wrong method on an existing route (GET-only /v1/database) → 405 JSON.
+	req = httptest.NewRequest("DELETE", "http://localhost/v1/database", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 405, w.Code)
+	require.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	require.Contains(t, w.Body.String(), `"code":"method_not_allowed"`)
+}
+
+// R3-HTTP-2: an unmatched /v1 path is answered from INSIDE the auth group — a
+// probe without a token gets 401 (don't leak route existence unauthenticated),
+// and with a token gets the 404 JSON envelope.
+func TestUnmatchedV1RequiresAuth(t *testing.T) {
+	h := newEngineHTTP(t, http.WithBearerToken("secret")).h
+
+	// No token → 401 even though the path doesn't exist.
+	req := httptest.NewRequest("GET", "http://localhost/v1/nonexistent", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 401, w.Code, "unmatched /v1 must require auth, not answer 404 unauthenticated")
+
+	// Correct token → 404 JSON envelope (authenticated, then not found).
+	req = httptest.NewRequest("GET", "http://localhost/v1/nonexistent", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 404, w.Code)
+	require.Contains(t, w.Body.String(), `"code":"not_found"`)
+
+	// A non-/v1 unmatched path stays a plain (auth-exempt) 404 envelope.
+	req = httptest.NewRequest("GET", "http://localhost/nope", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	require.Equal(t, 404, w.Code)
+	require.Contains(t, w.Body.String(), `"code":"not_found"`)
+}
+
+// R3-HTTP-3 (rollback linearizes before reading the target version) is now
+// exercised against the real engine: every migrated rollback route
+// (database/ingestable/syncable) goes through the shared rollback() ->
+// linearize barrier, and the consistency contract itself is pinned in
+// consistency_test.go on the type surface.
+
+// R3-HTTP-6: an empty-entities proposal is a client error, not a committed no-op
+// raft entry — reject it with 400 rather than proposing nothing.
+func TestAddProposal_EmptyRejected(t *testing.T) {
+	h := newEngineHTTP(t).h
+
+	// The 400 fires before any engine access — an entity-less proposal is a
+	// client error and never becomes a raft entry.
+	req := httptest.NewRequest("POST", "http://localhost/v1/proposal", strings.NewReader(`{"entities":[]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	require.Equal(t, 400, w.Code)
+	require.Contains(t, w.Body.String(), `"code":"empty_proposal"`)
+}

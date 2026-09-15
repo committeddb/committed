@@ -1,4 +1,4 @@
-//go:build docker
+//go:build docker || integration
 
 package sqlserver_test
 
@@ -41,9 +41,9 @@ func TestSQLServerMidSnapshotResume(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_midsnap"},
-		// batch_size 3 → several batches; the hook kills run 1 after batch 2
+		// batchSize 3 → several batches; the hook kills run 1 after batch 2
 		// (~6 rows handed off), leaving a genuine mid-table cursor.
-		Options: map[string]string{"poll_interval": "300ms", "batch_size": "3"},
+		Options: sql.Options{PollInterval: 300 * time.Millisecond, BatchSize: 3},
 	}
 
 	// Run 1: abort after the second batch, capture the durable cursor.

@@ -254,6 +254,13 @@ func TestIngestSupervisor_ProgressResetsCounter(t *testing.T) {
 // findSupervisorGaugeForID looks up a gauge metric by name and returns
 // the data point whose "id" attribute matches id. Returns math.NaN-
 // like sentinel (-1) when not found so the caller's Eventually loop
+// isWorkerIDAttr matches the attribute keys that carry a worker's config id.
+// Single-kind metrics name their resource (ingestable_id / syncable_id); the
+// deliberately cross-kind committed.worker.* family pairs kind with a bare id.
+func isWorkerIDAttr(key string) bool {
+	return key == "ingestable_id" || key == "syncable_id" || key == "id"
+}
+
 // treats "not yet recorded" as "keep polling".
 func findSupervisorGaugeForID(rm metricdata.ResourceMetrics, name, id string) float64 {
 	met := findMetric(rm, name)
@@ -266,7 +273,7 @@ func findSupervisorGaugeForID(rm metricdata.ResourceMetrics, name, id string) fl
 	}
 	for _, dp := range g.DataPoints {
 		for _, a := range dp.Attributes.ToSlice() {
-			if string(a.Key) == "id" && a.Value.AsString() == id {
+			if isWorkerIDAttr(string(a.Key)) && a.Value.AsString() == id {
 				return dp.Value
 			}
 		}
@@ -289,7 +296,7 @@ func findSupervisorCounterForID(rm metricdata.ResourceMetrics, name, id string) 
 	}
 	for _, dp := range sum.DataPoints {
 		for _, a := range dp.Attributes.ToSlice() {
-			if string(a.Key) == "id" && a.Value.AsString() == id {
+			if isWorkerIDAttr(string(a.Key)) && a.Value.AsString() == id {
 				return dp.Value
 			}
 		}

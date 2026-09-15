@@ -48,22 +48,38 @@ func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
 			if err := prev.Unmarshal(existing); err == nil && prev.Version == t.Version {
 				// Same (typeID, version). Schema is immutable but the
 				// migration, entity-kind (unspecified→declared adoption
-				// only; ProposeType rejects every other change), and
-				// discriminator fields are mutable in place — operators
-				// may need to retroactively fix a forgotten or buggy
-				// migration, or declare an entity kind on a
-				// grandfathered type. If only those fields differ,
-				// overwrite the current version entry in place. If
-				// everything is byte-identical (Raft replay), skip
-				// silently.
+				// only; ProposeType rejects every other change),
+				// discriminator, and schema-change-topic fields are mutable
+				// in place — operators may need to retroactively fix a
+				// forgotten or buggy migration, declare an entity kind on a
+				// grandfathered type, or re-point where divergences
+				// announce — and a type stored without its document adopts
+				// the first one submitted for it. If only those differ,
+				// overwrite the current version entry in place (the
+				// retained document comes along). If everything is
+				// byte-identical (Raft replay), skip silently.
 				if bytes.Equal(prev.Schema, t.Schema) &&
 					prev.SchemaType == t.SchemaType &&
 					prev.Validate == t.Validate &&
 					prev.Name == t.Name {
-					changed := !bytes.Equal(prev.Migration, t.Migration) ||
+					migrationEdited := !bytes.Equal(prev.Migration, t.Migration)
+					changed := migrationEdited ||
 						prev.EntityKind != t.EntityKind ||
-						prev.Discriminator != t.Discriminator
+						prev.Discriminator != t.Discriminator ||
+						prev.SchemaChangeTopic != t.SchemaChangeTopic ||
+						(len(prev.Document) == 0 && len(t.Document) > 0)
 					if changed {
+						// An in-place MIGRATION edit moves the interpretation
+						// coordinate: record its apply index (same atomic tx)
+						// so always-current consumers pinned below it read
+						// interpretationStale until re-materialized. Kind
+						// adoption, discriminator, and destination edits are
+						// inert over history and record nothing.
+						if migrationEdited {
+							if err := putTypeMigrationEditTx(tx, t.ID, raftIndex); err != nil {
+								return err
+							}
+						}
 						s.logger.Info("updating mutable fields for existing type version",
 							zap.String("id", t.ID), zap.Int("version", t.Version))
 						return overwriteCurrentVersion(b, []byte(t.ID), t)
@@ -74,6 +90,11 @@ func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
 			}
 		}
 
+		// NOTE: this re-marshals from THIS binary's struct, so a field the
+		// binary does not know is dropped rather than carried through — which
+		// is why every field added to this record from 0.8.0 on is gated on
+		// the cluster feature level (see db.featureLevelTypeRecord). Add a
+		// field here and you must add its gate.
 		bs, err := t.Marshal()
 		if err != nil {
 			return err
@@ -220,29 +241,10 @@ func (s *Storage) Types() ([]*cluster.Configuration, error) {
 		}
 
 		return forEachCurrent(b, func(id, data []byte) error {
-			tipe := &cluster.Type{}
-			if err := tipe.Unmarshal(data); err != nil {
+			cfg, err := typeConfiguration(data)
+			if err != nil {
 				return err
 			}
-
-			// The synthesized TOML mirrors what the operator declared.
-			// entityKind/discriminator are only rendered when set so
-			// unspecified (grandfathered) types list exactly as before.
-			toml := fmt.Sprintf("[type]\nname = \"%s\"", tipe.Name)
-			if tipe.EntityKind != cluster.EntityKindUnspecified {
-				toml += fmt.Sprintf("\nentityKind = \"%s\"", tipe.EntityKind)
-			}
-			if tipe.Discriminator != "" {
-				toml += fmt.Sprintf("\ndiscriminator = \"%s\"", tipe.Discriminator)
-			}
-
-			cfg := &cluster.Configuration{
-				ID:       tipe.ID,
-				Name:     tipe.Name,
-				MimeType: "text/toml",
-				Data:     []byte(toml),
-			}
-
 			cfgs = append(cfgs, cfg)
 			return nil
 		})
@@ -269,7 +271,7 @@ func (s *Storage) TypeVersions(id string) ([]cluster.VersionInfo, error) {
 }
 
 func (s *Storage) TypeVersion(id string, version uint64) (*cluster.Configuration, error) {
-	cfg := &cluster.Configuration{}
+	var cfg *cluster.Configuration
 	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(typeBucket)
 		if b == nil {
@@ -279,20 +281,23 @@ func (s *Storage) TypeVersion(id string, version uint64) (*cluster.Configuration
 		if err != nil {
 			return err
 		}
-		// Unmarshal as Type to get the ID/Name, then wrap as Configuration
-		// matching the same format used by Types().
-		tipe := &cluster.Type{}
-		if err := tipe.Unmarshal(data); err != nil {
-			return err
-		}
-		cfg.ID = tipe.ID
-		cfg.Name = tipe.Name
-		cfg.MimeType = "text/toml"
-		cfg.Data = []byte(fmt.Sprintf("[type]\nname = \"%s\"", tipe.Name))
-		return nil
+		cfg, err = typeConfiguration(data)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// typeConfiguration is one stored type's read-back (see
+// cluster.Type.Configuration): the document the operator submitted, or
+// one synthesized from the stored fields for a type written before the
+// document was retained.
+func typeConfiguration(data []byte) (*cluster.Configuration, error) {
+	tipe := &cluster.Type{}
+	if err := tipe.Unmarshal(data); err != nil {
+		return nil, err
+	}
+	return tipe.Configuration()
 }

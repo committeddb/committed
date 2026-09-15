@@ -194,26 +194,26 @@ type cadenceSyncable struct {
 func (c *cadenceSyncable) CheckpointPolicy() cluster.CheckpointPolicy { return c.policy }
 
 // TestWrap_ForwardsCheckpointPolicy guards the layering trap: the worker only
-// sees the migration wrapper, so if the wrapper didn't forward
-// CheckpointConfigurable a ModeAlwaysCurrent syncable would silently lose its
-// configured cadence. A wrapped configurable syncable must expose the same
-// policy; a wrapped non-configurable one exposes the zero policy (which the
-// worker resolves to its default).
+// sees the migration wrapper, so a ModeAlwaysCurrent syncable must not lose
+// its configured cadence behind it. The worker resolves the capability
+// through the Unwrap chain (cluster.SyncableAs), so the wrapped policy is
+// reachable exactly as the sink declared it, and a sink that declares none
+// resolves to nothing — the wrapper claims no capability of its own
+// (TestWrapExposesNoCapabilities).
 func TestWrap_ForwardsCheckpointPolicy(t *testing.T) {
 	r := &stubResolver{types: map[string]*cluster.Type{}}
 
 	want := cluster.CheckpointPolicy{Every: 25, MaxAge: 500_000_000} // 500ms
 	wrapped := migration.Wrap(&cadenceSyncable{policy: want}, r, nil)
-	cc, ok := wrapped.(cluster.CheckpointConfigurable)
-	require.True(t, ok, "wrapper must implement CheckpointConfigurable")
-	require.Equal(t, want, cc.CheckpointPolicy(), "wrapper must forward the wrapped policy")
+	cc, ok := cluster.SyncableAs[cluster.CheckpointConfigurable](wrapped)
+	require.True(t, ok, "the configured cadence must resolve through the wrapper")
+	require.Equal(t, want, cc.CheckpointPolicy(), "the wrapped policy reaches the worker unchanged")
 
-	// A wrapped syncable that doesn't configure cadence yields the zero
-	// policy, not a panic.
+	// A wrapped syncable that doesn't configure cadence resolves to no
+	// policy; the worker then applies its default.
 	plain := migration.Wrap(&recordingSyncable{}, r, nil)
-	pc, ok := plain.(cluster.CheckpointConfigurable)
-	require.True(t, ok)
-	require.Equal(t, cluster.CheckpointPolicy{}, pc.CheckpointPolicy())
+	_, ok = cluster.SyncableAs[cluster.CheckpointConfigurable](plain)
+	require.False(t, ok)
 }
 
 // Ensure fmt stays imported for future debug use; tests above don't

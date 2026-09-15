@@ -25,7 +25,7 @@ func entityKindTOML(name, schema, kindSection, migrationSection string) []byte {
 // propose → stored type resolves with the declared kind and
 // discriminator.
 func TestProposeType_EntityKindRoundTrips(t *testing.T) {
-	d, s := newWalDB(t)
+	d, s := newWalDBAtFeatureLevel(t)
 
 	cfg := &cluster.Configuration{
 		ID:       "tenant-events",
@@ -40,8 +40,8 @@ func TestProposeType_EntityKindRoundTrips(t *testing.T) {
 	require.Equal(t, "$.event_type", got.Discriminator)
 	require.Equal(t, 1, got.Version)
 
-	// The entity kind also appears in the GET /type listing's
-	// synthesized TOML.
+	// The entity kind also appears in the GET /type listing — the
+	// document as submitted.
 	cfgs, err := s.Types()
 	require.NoError(t, err)
 	require.Len(t, cfgs, 1)
@@ -51,10 +51,10 @@ func TestProposeType_EntityKindRoundTrips(t *testing.T) {
 
 // A type that declares no entity kind stores and resolves as
 // unspecified — the grandfathered default that behaves exactly like
-// today — and its GET /type listing is byte-identical to the pre-kind
-// output.
+// today — and its GET /type listing is the document as submitted, with no
+// kind invented for it.
 func TestProposeType_EntityKindDefaultsToUnspecified(t *testing.T) {
-	d, s := newWalDB(t)
+	d, s := newWalDBAtFeatureLevel(t)
 
 	proposeTypeTOML(t, d, "person", "Person", `{"type":"object"}`, "")
 
@@ -66,7 +66,7 @@ func TestProposeType_EntityKindDefaultsToUnspecified(t *testing.T) {
 	cfgs, err := s.Types()
 	require.NoError(t, err)
 	require.Len(t, cfgs, 1)
-	require.Equal(t, "[type]\nname = \"Person\"", string(cfgs[0].Data))
+	require.Equal(t, "[type]\nname = \"Person\"\nschemaType = \"JSONSchema\"\nschema = '{\"type\":\"object\"}'", string(cfgs[0].Data))
 }
 
 // entityKind = "delta" is rejected at type creation with a

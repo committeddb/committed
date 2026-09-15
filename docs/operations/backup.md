@@ -1,45 +1,58 @@
 # Backup and restore
 
-This runbook covers `committed backup` and `committed restore` — the offline
-primitive for archiving a node's state to a portable tarball and reconstituting
-it into a fresh data directory.
+This runbook covers `committed backup` and `committed restore` — archiving a
+node's state to a portable tarball and reconstituting it into a fresh data
+directory. A backup is taken either from a **stopped** node's data directory
+or, with `--live`, from a **running** node over its API; the archive is the
+same and restores the same way.
 
-It complements [rebuild.md](rebuild.md). Rebuild recovers a *single* dead node
-by rsyncing from a *healthy peer* — it needs a surviving peer and only ever
-restores in place. Backup/restore covers what rebuild can't:
+It complements [rebuild.md](rebuild.md). A node that fell behind, or a fresh
+node replacing a dead one, takes the cluster's history from a *healthy peer*
+by itself — that needs a surviving peer. Backup/restore covers what a peer
+can't:
 
 - **Point-in-time archival** — keep a snapshot of the cluster's state.
 - **A known-good export before a risky change** — a type migration, a metadata
   scrub, a bulk delete — so you can roll back the *data*, not just the binary.
 - **Off-box disaster recovery** — ship the tarball to object storage.
 - **Total-loss recovery** — rebuild a cluster where *every* node lost its local
-  state at once (no healthy peer to rsync from). On ephemeral/instance-store
+  state at once (no healthy peer to fetch from). On ephemeral/instance-store
   disks this is a routine risk — a fleet recycle or AZ event can take out a
   quorum of disks together, which raft replication alone cannot survive.
 
-## Why it's offline
+## Offline or live
 
 A running node holds an **exclusive lock** on its BoltDB metadata for its whole
 life, so a second process can't read the directory consistently — and a naive
-copy of a live directory would be torn. `committed backup` therefore operates
-on a **stopped** node's data directory, which is quiescent and trivially
-consistent. It takes a **shared lock** on the BoltDB file and **holds it for the
-whole archive**: a live node is refused (its exclusive lock blocks the shared
-one), and a node that tries to start part-way through the copy is blocked (its
-exclusive open fails) so it can't write into the directory mid-walk.
+copy of a live directory would be torn. There are two ways to a consistent
+archive:
 
-> The shared lock guards BoltDB, which is the only lock in the data dir. It
-> closes the dominant race (an orchestrator restarting the stopped node while the
-> backup runs). It does not make the copy a true point-in-time image: a node
-> racing to start still runs the WAL-recovery steps of its open before it fails
-> on the locked BoltDB, a small residual window. For a fully atomic image, snapshot
-> the filesystem (LVM/ZFS/reflink) and back up the snapshot. Simplest of all:
-> keep the node stopped for the backup, as intended.
+- **Offline** — `committed backup --data <dir>` archives a **stopped** node's
+  data directory, which is quiescent and trivially consistent. It takes a
+  **shared lock** on the BoltDB file and **holds it for the whole archive**: a
+  live node is refused (its exclusive lock blocks the shared one), and a node
+  that tries to start part-way through the copy is blocked (its exclusive
+  open fails) so it can't write into the directory mid-walk.
+- **Live** — `committed backup --live --target <node>` asks a **running** node
+  to stream its own archive (`GET /v1/node/backup`). The node reads its four
+  stores in an order a restart tolerates — metadata, then the raft state log,
+  then the permanent event log, then the raft entry log, so the raft log
+  always covers every event the archive holds — and holds each log's
+  maintenance still only while that log streams: segment compression and a
+  scrub's swap during the event log, raft-log compaction during the entry log.
+  The cluster keeps serving throughout. See *Taking a backup live* below.
 
-This is a deliberate, in-lane primitive: it does not run against a live
-database, and there is no backup *endpoint*. Automation (periodic backups,
-shipping to S3, retention) is the operator's to build on top — see *Shared
-responsibility* below.
+> The shared lock guards BoltDB, which is the only lock in the data dir, and a
+> starting node acquires it as its FIRST act — before any of its WAL-recovery
+> steps touch the directory — so a node racing to start while the backup runs
+> fails immediately, having mutated nothing. The same stopped-node lock gates
+> `committed wal repair` and `committed wal decompress` (exclusively — a
+> rewrite must not run under a concurrent backup either). For belt-and-braces
+> atomicity, snapshot the filesystem (LVM/ZFS/reflink) and back up the
+> snapshot. Simplest of all: keep the node stopped for the backup, as intended.
+
+Automation (periodic backups, shipping to S3, retention) is the operator's to
+build on top of either — see *Shared responsibility* below.
 
 ## Taking a backup
 
@@ -59,19 +72,47 @@ The archive is written atomically — a failed backup leaves nothing at `--to`.
 It contains a `MANIFEST.json` plus the node's raft logs, permanent event log,
 and BoltDB metadata.
 
-### Backing up a live cluster without downtime
+### Taking a backup live
 
-You don't have to take the whole cluster down. Back up **one follower** at a
-time, exactly like a rolling upgrade ([upgrade.md](upgrade.md)):
+A running node streams its own archive; nothing stops:
 
-1. `GET /v1/membership` to find a follower (not the leader).
-2. `SIGTERM` it and wait for it to exit (quorum holds on the remaining nodes —
-   the cluster keeps serving).
-3. `committed backup --data <its dir> --to <tar>`.
-4. Start it again; it rejoins and catches up.
+```bash
+committed backup --live --target http://n2:8080 --to /backups/committed-2026-09-11.tar.gz
+```
 
-A follower's backup is a complete, restorable snapshot of the cluster's
+- `--target` is a node's API base URL (default: this host's
+  `COMMITTED_API_ADDR`). Target a node **directly**, not a load balancer —
+  the archive is that node's state — and prefer a follower: the node's raft
+  loop keeps running, but the stream is disk and network work on that node.
+- `--token` (default `COMMITTED_API_TOKEN`) authenticates; `--insecure` skips
+  TLS verification for an https target.
+- A live archive does **not** carry projection stage stores (`projections/`
+  under the data dir); an offline archive does. After restoring a live
+  archive, `POST /v1/syncable/{id}/rebuild` every projection that declares
+  stages — a staged projection resumed from its checkpoint over a fresh store
+  derives from no inputs, and the node only logs a warning.
+- The download is **verified as it arrives**: every entry is hashed and
+  checked against the trailing manifest before the file is published, so a
+  file at `--to` is a restorable archive. A node that is catching up from
+  a peer refuses the backup before streaming anything (`503 catching_up`,
+  which the command reports; take it once `catchingUp` clears on
+  `GET /v1/node/status`). A backup the node abandons mid-stream — its own
+  maintenance overtook the read (a snapshot install, a raft-log
+  truncation), or a catch-up began while it streamed — ends with the
+  node's reason, which the command reports; a stream cut by the connection
+  or a stall ends without one. Either way nothing is left at `--to`; take
+  it again.
+- One live backup streams per node at a time (a second is refused with 409).
+
+The manifest records `live: true`, the `appliedIndex` the archive restores to,
+and the event log's `eventLogGeneration` (see *Shared responsibility* below).
+Any member's backup is a complete, restorable snapshot of the cluster's
 committed state — every node holds the full event log.
+
+The offline alternative for a live cluster is still the rolling one: back up
+**one follower** at a time, exactly like a rolling upgrade
+([upgrade.md](upgrade.md)) — `SIGTERM` it, `committed backup --data <its dir>`,
+start it again; it rejoins and catches up by itself.
 
 `--data` must point at the node's **real** directory. Backup fails closed on a
 symlinked data root or a symlinked store under it (and on a directory with no
@@ -93,7 +134,9 @@ COMMITTED_NODE_ID=1 COMMITTED_PEERS='1=http://...' COMMITTED_DATA_DIR=/var/lib/c
 The restored directory **is** a node's directory — the node recovers from it
 exactly as it would after a normal restart. Start it with the **same**
 `COMMITTED_NODE_ID` and `COMMITTED_PEERS` the source node used. Restore drops a
-`RESTORED.json` marker recording where the backup came from.
+`RESTORED.json` marker recording where the backup came from. If the archive
+was taken live, rebuild every staged projection once the node is up (see
+[Taking a backup live](#taking-a-backup-live)).
 
 Restore validates the manifest, refuses an archive that isn't a committed
 backup or declares an incompatible format version, and rejects any archive
@@ -134,21 +177,44 @@ this one is an ETL job, not a restore.
 > with that member cleanly stopped first. The restored log is REWOUND to the
 > backup point, but the surviving leader both remembers a higher matchIndex for
 > that node id and has usually compacted its raft log past the backup point; on
-> first contact the restored node fatals with a raft invariant panic
-> (`tocommit(...) out of range [lastIndex(...)]`). This is raft protecting the
-> cluster from a member whose log went backwards, not a recoverable hiccup.
-> Recovering one member of a live cluster is the **rebuild** flow — rsync
-> current state from a healthy peer ([rebuild.md](rebuild.md)) — not a restore.
+> the leader's first heartbeat the restored node fatal-exits with
+> `raft state rewound: the leader's heartbeat commits beyond this node's log`
+> (committed's own guard, which fires before raft's own
+> `tocommit(...) out of range` panic would). This is protecting the cluster
+> from a member whose log went backwards, not a recoverable hiccup.
+> Recovering one member of a live cluster is the **rebuild** flow — a fresh
+> node that fetches current state from a healthy peer ([rebuild.md](rebuild.md))
+> — not a restore.
 
 ### Version compatibility
 
-Restore validates the archive's **format version** (it refuses a non-committed or
-future-format archive), but it does **not** check the binary version — a restore
-across binary versions that share the archive format is *allowed but unvalidated*.
-Recommendation: back up and restore with the **same binary version**, then
-upgrade (see [upgrade.md](upgrade.md)); a cross-version restore is yours to reason
-about against the on-disk compatibility contract in
-[api-compatibility.md](../api-compatibility.md).
+Restore validates two things about the archive and refuses on either.
+
+The **archive format version**, which must match exactly. A future-format
+archive is refused, and so is an older **v1** archive — its manifest carried
+only file paths, with no per-file integrity, and current binaries no longer
+decode it. Releases from 0.7.4 on write the current format, so this gate bites
+only on an archive taken with 0.7.3 or earlier; re-take those from the running
+cluster rather than trying to restore them.
+
+The **feature level of the binary that wrote it**, recorded in the manifest: a
+build refuses an archive stamped above its own, naming the level you need. This
+gate is one-directional — an archive from an older binary restores onto a newer
+one, never the reverse. It is deliberately coarse, because an archive can be
+unreadable by an older build for a reason no per-entry check would find: from
+0.8.0 sealed **event-log** segments are compressed at rest, and a pre-0.8.0
+binary does not fail on them — it silently opens a **partial log**.
+
+> **Moving 0.8.0 data onto a pre-0.8.0 binary.** Restore the archive with a
+> 0.8.0 build, stop it, run `committed wal decompress --data <datadir>`, then
+> start the older binary on that directory. Check the rest of the one-way
+> transitions in [api-compatibility.md](../api-compatibility.md#one-way-transitions-no-rollback-past-these)
+> first — a log carrying a committed restatement, for example, cannot go back
+> at all.
+
+Within a single release series, back up and restore with the same binary
+version where you can; a cross-version restore that the gate allows is still
+yours to reason about against the on-disk compatibility contract.
 
 ## Off-box shipping
 
@@ -177,13 +243,18 @@ not committed:
   obligations and expire/destroy old backups accordingly.
 - **On restore:** restoring a backup **resurrects** the PII of every subject
   deleted-and-scrubbed *after* that backup was taken — those deletes happened
-  later and aren't in the archive. committed keeps **no ledger of erased
+  later and aren't in the archive. (The manifest's `eventLogGeneration` is the
+  scrub bound the archived event log reflects. A node restored from it that
+  then joins peers whose logs are at a newer generation discards that log and
+  fetches theirs whole — see [rebuild.md](rebuild.md) — so within a live
+  cluster the resurrection does not survive the rejoin; it does survive a
+  whole-cluster restore.) committed keeps **no ledger of erased
   subjects** — a right-to-be-forgotten delete physically removes the data from
   the log, leaving nothing to enumerate. You must therefore record RTBF requests
   in your own compliance system and **re-issue any that post-date the backup**
-  after a restore. The restored node's `appliedIndex` (from `GET /v1/membership`)
-  marks how far the backup covered, so you know which of your tracked requests to
-  re-apply.
+  after a restore. The restored node's `appliedIndex` (from `GET /v1/node/status`;
+  a live archive's manifest also records it) marks how far the backup covered,
+  so you know which of your tracked requests to re-apply.
 
 committed gives you the primitive and the frozen manifest; because erasure is
 physical (committed retains no record of what was deleted), managing backup

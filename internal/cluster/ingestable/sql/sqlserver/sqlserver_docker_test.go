@@ -1,4 +1,4 @@
-//go:build docker
+//go:build docker || integration
 
 package sqlserver_test
 
@@ -14,9 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 	tcmssql "github.com/testcontainers/testcontainers-go/modules/mssql"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/ingesttest"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
+	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlserver"
 )
 
@@ -90,6 +93,31 @@ func createDB(t *testing.T) *gosql.DB {
 	return db
 }
 
+// awaitStreaming drives ingesttest.Await with the SQL Server streaming-
+// checkpoint predicate: a position carrying no snapshot progress — the shape
+// of the snapshot's completion checkpoint and of every poll-window
+// checkpoint. The snapshot core ALSO checkpoints table-complete PROGRESS on
+// the position channel, so "the first position after the rows" is a
+// mid-snapshot resume point (run 2 would re-enter the snapshot, skip the
+// completed table, and re-emit a marker), not a streaming one; a test that
+// resumes streaming must wait for this shape.
+func awaitStreaming(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position,
+	timeout time.Duration, keys ...string,
+) ingesttest.Result {
+	t.Helper()
+	return ingesttest.Await(t, pr, po, timeout, isStreamingPosition, keys...)
+}
+
+// isStreamingPosition reports whether pos decodes as a checkpoint with no
+// snapshot progress (streaming, or a completed snapshot about to stream).
+func isStreamingPosition(pos cluster.Position) bool {
+	if len(pos) == 0 {
+		return false
+	}
+	pp := &dialectpb.SQLServerPosition{}
+	return proto.Unmarshal(pos, pp) == nil && pp.SnapshotProgress == nil
+}
+
 // drainEntities collects user entities from pr (skipping refresh-boundary
 // markers) until want entities arrived or the deadline passes.
 func drainEntities(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position, want int, deadline time.Duration) []*cluster.Entity {
@@ -142,7 +170,7 @@ func TestSQLServerChangeTrackingEndToEnd(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_e2e"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -237,7 +265,7 @@ func TestSQLServerEnablementOwnership(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"ct_owned", "ct_preexisting"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

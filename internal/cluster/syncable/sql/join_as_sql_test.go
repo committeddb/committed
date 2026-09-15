@@ -25,7 +25,7 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "alive"
 from    = "workareas"
 keyPath = "$.id"
@@ -34,22 +34,22 @@ emit    = [
   { field = "hasCustomer", expr = "$.cust is not null" },
 ]
 
-[[projection.stage.join]]
+[[projection.stages.joins]]
 topic = "projects"
 on    = "$.projectId"
 as    = "project"
 where = [ { path = "$.sold", equals = "true" } ]
 
-[[projection.stage.join]]
+[[projection.stages.joins]]
 topic    = "customers"
 on       = "$.custId"
 as       = "cust"
 optional = true
 
-[[projection.source]]
+[[projection.sources]]
 topic   = "x"
 keyPath = "$.id"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))

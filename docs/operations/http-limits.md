@@ -71,12 +71,13 @@ can't pin a connection. Defaults:
 |---|---|---|
 | `COMMITTED_HTTP_READ_HEADER_TIMEOUT` | `10s` | Defeats Slowloris on the request line + headers. |
 | `COMMITTED_HTTP_READ_TIMEOUT` | `30s` | Full request read, including body. |
-| `COMMITTED_HTTP_WRITE_TIMEOUT` | `30s` | Full response write. |
+| `COMMITTED_HTTP_WRITE_TIMEOUT` | `120s` | Full response write. Sized above the longest bounded work a handler can do — a config POST that waits on a locked destination table died at the old 30s. |
 | `COMMITTED_HTTP_IDLE_TIMEOUT` | `120s` | Keepalive idle cap. |
 
-Values use Go duration syntax (`500ms`, `45s`, `2m`). An unset or
-unparseable value logs a warning and keeps the default — a misspelled
-knob should be visible, not silently reverted.
+Values use Go duration syntax (`500ms`, `45s`, `2m`). An unset knob is
+simply the default and says nothing; an unparseable one logs a warning and
+keeps the default — a misspelled knob should be visible, not silently
+reverted.
 
 Raise `READ_TIMEOUT` / `WRITE_TIMEOUT` if you post very large configs
 over slow links and see truncated requests; lower them if you front

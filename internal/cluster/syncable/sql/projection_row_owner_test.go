@@ -141,22 +141,22 @@ type = "VARCHAR(64)"
 name = "v"
 type = "VARCHAR(64)"
 
-[[projection.stage]]
+[[projection.stages]]
 name    = "st"
 from    = "tp"
 keyPath = "$.id"
 emit    = [ { field = "v", from = "$.v" } ]
 
-[[projection.source]]
+[[projection.sources]]
 topic    = "x"
 keyPath  = "$.id"
 rowOwner = true
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "w", from = "$.w" } ]
 
-[[projection.source]]
+[[projection.sources]]
 from = "st"
-[[projection.source.rules]]
+[[projection.sources.rules]]
 set = [ { column = "v", from = "$.v" } ]
 `
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))

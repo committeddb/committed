@@ -99,6 +99,13 @@ func TestScrubManualRemovesPII(t *testing.T) {
 	// Unrelated data is untouched.
 	bobUp, _ := keyState(t, s, "bob")
 	require.True(t, bobUp, "bob's data must survive the scrub")
+
+	// The /node/status scrub block (the runbook's verification loop) reads
+	// completion: the completed bound caught the pending bound.
+	require.Eventually(t, func() bool {
+		st := d.ScrubStatus()
+		return st.PendingBound > 0 && st.CompletedBound >= st.PendingBound
+	}, 5*time.Second, 10*time.Millisecond, "ScrubStatus must report the completed rewrite")
 }
 
 // TestScrubAutomaticRemovesPII verifies the automatic scheduler: with a short

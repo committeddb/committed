@@ -106,7 +106,7 @@ const sourceChangeCode = "ingestable_source_change_requires_recreate"
 // snapshot.
 //
 // Deliberately NOT flagged: a credential-only connectionString change (same host
-// + database — a routine password rotation); a slot_name change (a recreated
+// + database — a routine password rotation); a slotName change (a recreated
 // Postgres slot self-heals via the re-snapshot branch — the orphaned slot is a
 // resource concern, not data loss); and a tables ADD (additive — the
 // publication / added-table backfill reconciles it in place). A tables REMOVAL
@@ -165,7 +165,7 @@ type TableRemovalError struct {
 
 func (e *TableRemovalError) Error() string {
 	return fmt.Sprintf(
-		"ingestable table removal (%s) will not be applied in place: a later full refresh would silently sweep the removed tables' rows from keyed sinks (a refresh re-stamps only configured tables, and the closing marker deletes everything it did not re-stamp), while a syncable replay would resurrect them. To drop the tables AND their sink rows, delete and recreate this ingestable (DELETE then POST /v1/ingestable/{id}); to keep the rows, keep the tables listed.",
+		"ingestable table removal (%s) will not be applied in place: a later full refresh would silently sweep the removed tables' rows from keyed destinations (a refresh re-stamps only configured tables, and the closing marker deletes everything it did not re-stamp), while a syncable replay would resurrect them. To drop the tables AND their destination rows, delete and recreate this ingestable (DELETE then POST /v1/ingestable/{id}); to keep the rows, keep the tables listed.",
 		strings.Join(e.RemovedTables, ", "))
 }
 

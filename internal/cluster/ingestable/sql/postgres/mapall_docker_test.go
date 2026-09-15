@@ -54,8 +54,8 @@ tables = ["ingress.mapall_movie"]
 mapAllColumns = true
 excludeColumns = ["internal_notes"]
 
-[sql.postgres]
-slot_name = "slot_mapall"
+[sql.options]
+slotName = "slot_mapall"
 publication = "pub_mapall"
 `, connString)
 

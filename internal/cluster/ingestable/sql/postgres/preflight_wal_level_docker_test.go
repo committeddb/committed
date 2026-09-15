@@ -34,7 +34,7 @@ func TestPostgresPreflightWalLevel(t *testing.T) {
 			PrimaryKey:       []string{"pk"},
 			ConnectionString: cs,
 			Tables:           []string{table},
-			Options:          map[string]string{"slot_name": "slot_pfwal", "publication": "pub_pfwal"},
+			Options:          sql.Options{SlotName: "slot_pfwal", Publication: "pub_pfwal"},
 		}
 	}
 

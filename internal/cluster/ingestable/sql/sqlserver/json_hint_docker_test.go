@@ -1,4 +1,4 @@
-//go:build docker
+//go:build docker || integration
 
 package sqlserver_test
 
@@ -45,7 +45,7 @@ func TestSQLServerJSONColumnHint(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: ingestURL,
 		Tables:           []string{"json_hint"},
-		Options:          map[string]string{"poll_interval": "300ms"},
+		Options:          sql.Options{PollInterval: 300 * time.Millisecond},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -124,7 +124,9 @@ tables           = ["json_hint_parser"]
 primaryKey       = "pk"
 mapAllColumns    = true
 jsonColumns      = ["EventData"]
-poll_interval    = "300ms"
+
+[sql.options]
+pollInterval    = "300ms"
 `, ingestURL)
 	v, err := cluster.ParseConfigBytes("toml", []byte(toml))
 	require.NoError(t, err)
@@ -138,11 +140,20 @@ poll_interval    = "300ms"
 	pr1 := make(chan *cluster.Proposal, 64)
 	po1 := make(chan cluster.Position, 64)
 	go func() { _ = ing.Ingest(ctx1, nil, pr1, po1) }()
-	run1, checkpoint := drainUntilPosition(t, pr1, po1, 1, 2*time.Minute)
-	require.Len(t, run1, 1)
+	res := awaitStreaming(t, pr1, po1, 2*time.Minute, "1")
+	checkpoint := res.Position
 	cancel1()
+	var snapRow *cluster.Entity
+	for _, p := range res.Proposals {
+		for _, e := range p.Entities {
+			if string(e.Key) == "1" {
+				snapRow = e
+			}
+		}
+	}
+	require.NotNil(t, snapRow, "run 1 snapshots the pre-existing row")
 	var snapPayload map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(run1[0].Data, &snapPayload))
+	require.NoError(t, json.Unmarshal(snapRow.Data, &snapPayload))
 	require.True(t, len(snapPayload["EventData"]) > 0 && snapPayload["EventData"][0] == '{',
 		"snapshot: hinted column decodes to an object; got %s", snapPayload["EventData"])
 

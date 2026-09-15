@@ -15,15 +15,18 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
-// teardownRecorder counts Teardown() calls across every syncable a parser
-// builds (the pointer is shared across incarnations), can be primed to fail
-// the drop, and records the payloads Sync observed (so a rebuild's
-// replay-from-0 is provable: the same payloads are delivered again).
+// teardownRecorder counts Teardown calls across every syncable a parser
+// builds (the pointer is shared across incarnations) — drops and keep-mode
+// handovers separately — can be primed to fail the drop, and records the
+// payloads Sync observed (so a rebuild's replay-from-0 is provable: the
+// same payloads are delivered again).
 type teardownRecorder struct {
 	mu        sync.Mutex
-	teardowns int
+	teardowns int // Teardown(false): drop what committed owns
+	handovers int // Teardown(true): keepData — disown, remove nothing
 	closes    int
 	failWith  error
+	notOwned  bool // the destination is one committed did not create
 	synced    []string
 }
 
@@ -31,6 +34,12 @@ func (r *teardownRecorder) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.teardowns
+}
+
+func (r *teardownRecorder) handoverCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.handovers
 }
 
 // closeCount reports how many times a syncable's Close (prepared-statement
@@ -71,11 +80,21 @@ func (s *teardownSyncable) Close() error {
 	return nil
 }
 
-func (s *teardownSyncable) Teardown() error {
+func (s *teardownSyncable) OwnsDestination(context.Context) (bool, error) {
 	s.rec.mu.Lock()
 	defer s.rec.mu.Unlock()
+	return !s.rec.notOwned, nil
+}
+
+func (s *teardownSyncable) Teardown(keep bool) (bool, error) {
+	s.rec.mu.Lock()
+	defer s.rec.mu.Unlock()
+	if keep {
+		s.rec.handovers++
+		return false, nil
+	}
 	s.rec.teardowns++
-	return s.rec.failWith
+	return s.rec.failWith == nil, s.rec.failWith
 }
 
 type teardownParser struct{ rec *teardownRecorder }
@@ -158,9 +177,12 @@ func TestDeleteSyncable_RemovesConfigAndIndex_AndTearsDownOnOwner(t *testing.T) 
 		10*time.Second, 10*time.Millisecond, "validation-parse close + worker close, exactly")
 }
 
-// keepData preserves the destination: the logical delete still happens, but
-// the owner does not tear the destination down.
-func TestDeleteSyncable_KeepData_SkipsTeardown(t *testing.T) {
+// keepData hands the destination over: the logical delete still happens,
+// and the owner runs the teardown in keep mode — ownership relinquished so
+// no later delete drops the destination either, nothing removed — rather
+// than dropping (or skipping the sink entirely, which would leave the
+// destination marked as committed's).
+func TestDeleteSyncable_KeepData_HandsOver(t *testing.T) {
 	dir := t.TempDir()
 	const id = "del-keep"
 	rec := &teardownRecorder{}
@@ -172,8 +194,9 @@ func TestDeleteSyncable_KeepData_SkipsTeardown(t *testing.T) {
 	require.NoError(t, d.DeleteSyncable(testCtx(t), id, true))
 	require.False(t, hasSyncable(t, s, id), "config must still be removed")
 
-	require.Never(t, func() bool { return rec.count() > 0 },
-		500*time.Millisecond, 20*time.Millisecond, "keepData must skip the teardown")
+	require.Eventually(t, func() bool { return rec.handoverCount() == 1 },
+		10*time.Second, 10*time.Millisecond, "keepData must run the teardown in keep mode")
+	require.Zero(t, rec.count(), "keepData must not drop")
 }
 
 // A failed table drop must not fail the delete: the logical deletion already

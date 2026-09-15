@@ -24,12 +24,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/ingestable/ingesttest"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/dialectpb"
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/postgres"
 )
 
-// rowCount for chunking tests; sized to comfortably exceed batch_size=10.
+// rowCount for chunking tests; sized to comfortably exceed batchSize=10.
 const chunkTestRowCount = 25
 
 var connString string
@@ -55,6 +56,13 @@ func TestMain(m *testing.M) {
 					"-c", "wal_level=logical",
 					"-c", "max_replication_slots=16",
 					"-c", "max_wal_senders=16",
+					// Idle keepalives every ~timeout/2. The default (60s →
+					// ~30s) outlasts test windows that wait for the quiet-
+					// source keepalive path (confirmed_flush advancing over
+					// data-free WAL — the CaughtUp signal). A busy stream
+					// never trips the timeout, so this only speeds idle
+					// cadence.
+					"-c", "wal_sender_timeout=5s",
 				},
 			},
 		}),
@@ -106,6 +114,17 @@ func positionLSN(pos cluster.Position) uint64 {
 	return pp.Lsn
 }
 
+// awaitCommit drives an Ingestable's output channels via ingesttest.Await
+// with this dialect's commit-checkpoint predicate: the wait ends when every
+// key has been seen on a proposal AND a per-commit checkpoint has arrived —
+// bundled on a proposal or on the position channel, per the
+// cluster.Ingestable contract.
+func awaitCommit(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position, timeout time.Duration, keys ...string) ingesttest.Result {
+	t.Helper()
+	return ingesttest.Await(t, pr, po, timeout,
+		func(pos cluster.Position) bool { return isCommitPosition(t, pos) }, keys...)
+}
+
 // cleanReplication drops the named replication slot and publication if
 // they survive from an earlier run against the same server (-count>1,
 // or a crashed run). Leftovers don't fail loudly — they stream silence:
@@ -114,7 +133,25 @@ func positionLSN(pos cluster.Position) uint64 {
 // while a leftover slot suppresses the initial snapshot. The slot drop
 // retries because the previous run's walsender dies asynchronously
 // after ctx cancel and an active slot cannot be dropped.
+//
+// It ALSO registers the same drop as a t.Cleanup, so the slot is released
+// when the test ends — after its deferred cancels have stopped the worker.
+// The container caps max_replication_slots at 16 and a full local run
+// creates more slots than that; tests that cleaned only BEFORE running
+// leaked their slot for the rest of the run, and once sixteen had
+// accumulated every later CreateReplicationSlot failed, its worker retried
+// under backoff, and the tail of the suite timed out waiting for rows
+// (the six "local-only" failures — CI ran fewer files and stayed under the
+// cap). Releasing at the seam every test already uses closes the leak for
+// all of them; a test that also cleans in its own defer just drops twice
+// (dropping an absent slot is a no-op).
 func cleanReplication(t *testing.T, slotName, pubName string) {
+	t.Helper()
+	dropReplication(t, slotName, pubName)
+	t.Cleanup(func() { dropReplication(t, slotName, pubName) })
+}
+
+func dropReplication(t *testing.T, slotName, pubName string) {
 	t.Helper()
 	db := createDB(t)
 	defer db.Close()
@@ -222,9 +259,9 @@ func TestPostgresDialect(t *testing.T) {
 			cfg := *tt.config
 			cfg.ConnectionString = connString
 			cfg.Tables = []string{tt.table}
-			cfg.Options = map[string]string{
-				"slot_name":   slotName,
-				"publication": pubName,
+			cfg.Options = sql.Options{
+				SlotName:    slotName,
+				Publication: pubName,
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -333,7 +370,7 @@ func TestPostgresPKChangingUpdateTombstonesOldKey(t *testing.T) {
 	dialect := &postgres.PostgreSQLDialect{}
 	config.ConnectionString = connString
 	config.Tables = []string{table}
-	config.Options = map[string]string{"slot_name": slotName, "publication": pubName}
+	config.Options = sql.Options{SlotName: slotName, Publication: pubName}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -410,7 +447,7 @@ func TestPostgresTruncateNotSilentlyDropped(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": "slot_trunc", "publication": "pub_trunc"},
+		Options:          sql.Options{SlotName: "slot_trunc", Publication: "pub_trunc"},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -476,7 +513,7 @@ func TestPostgresTypedPayload(t *testing.T) {
 			{JsonName: "b", SQLColumn: "b"},
 			{JsonName: "j", SQLColumn: "j"},
 		},
-		Options: map[string]string{"slot_name": "slot_typed", "publication": "pub_typed"},
+		Options: sql.Options{SlotName: "slot_typed", Publication: "pub_typed"},
 	}
 
 	db := createDB(t)
@@ -582,7 +619,7 @@ func TestPostgresPrimaryKeyDrift_ParksInsteadOfCollapsing(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "val", SQLColumn: "val"},
 		},
-		Options: map[string]string{"slot_name": "slot_pkdrift", "publication": "pub_pkdrift"},
+		Options: sql.Options{SlotName: "slot_pkdrift", Publication: "pub_pkdrift"},
 	}
 
 	db := createDB(t)
@@ -653,7 +690,7 @@ func TestPostgresMappedColumnDrift_DivergesButKeepsGoing(t *testing.T) {
 			{JsonName: "val", SQLColumn: "val"},
 			{JsonName: "extra", SQLColumn: "extra"},
 		},
-		Options: map[string]string{"slot_name": "slot_mapdrift", "publication": "pub_mapdrift"},
+		Options: sql.Options{SlotName: "slot_mapdrift", Publication: "pub_mapdrift"},
 	}
 
 	db := createDB(t)
@@ -753,7 +790,7 @@ func TestPostgresSnapshotStreamByteIdentity(t *testing.T) {
 			{JsonName: "by", SQLColumn: "by"},
 			{JsonName: "num", SQLColumn: "num"},
 		},
-		Options: map[string]string{"slot_name": "slot_byteident", "publication": "pub_byteident"},
+		Options: sql.Options{SlotName: "slot_byteident", Publication: "pub_byteident"},
 	}
 
 	db := createDB(t)
@@ -861,7 +898,7 @@ func TestPostgresSnapshotStreamDomainByteIdentity(t *testing.T) {
 			{JsonName: "amt", SQLColumn: "amt"},
 			{JsonName: "flag", SQLColumn: "flag"},
 		},
-		Options: map[string]string{"slot_name": "slot_domainident", "publication": "pub_domainident"},
+		Options: sql.Options{SlotName: "slot_domainident", Publication: "pub_domainident"},
 	}
 
 	db := createDB(t)
@@ -970,7 +1007,7 @@ func TestPostgresTeardownSourceDropsSlot(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": "slot_teardown", "publication": "pub_teardown"},
+		Options:          sql.Options{SlotName: "slot_teardown", Publication: "pub_teardown"},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1043,7 +1080,7 @@ func TestPostgresTeardownSourceDropsActiveSlot(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": slot, "publication": pub},
+		Options:          sql.Options{SlotName: slot, Publication: pub},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1116,7 +1153,7 @@ func TestPostgresMixedCaseColumn(t *testing.T) {
 			{JsonName: "pk", SQLColumn: "pk"},
 			{JsonName: "createdAt", SQLColumn: "CreatedAt"}, // quoted CamelCase source column
 		},
-		Options: map[string]string{"slot_name": "slot_mixedcase", "publication": "pub_mixedcase"},
+		Options: sql.Options{SlotName: "slot_mixedcase", Publication: "pub_mixedcase"},
 	}
 
 	db := createDB(t)
@@ -1253,7 +1290,7 @@ func TestPostgresUnchangedToastReselect(t *testing.T) {
 			{JsonName: "n", SQLColumn: "n"},
 			{JsonName: "big", SQLColumn: "big"},
 		},
-		Options: map[string]string{"slot_name": "slot_toast", "publication": "pub_toast"},
+		Options: sql.Options{SlotName: "slot_toast", Publication: "pub_toast"},
 	}
 
 	db := createDB(t)
@@ -1344,9 +1381,9 @@ func TestPostgresPositionResume(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_resume",
-			"publication": "pub_resume",
+		Options: sql.Options{
+			SlotName:    "slot_resume",
+			Publication: "pub_resume",
 		},
 	}
 
@@ -1375,23 +1412,7 @@ func TestPostgresPositionResume(t *testing.T) {
 	// from the slot's restart_lsn (the entire failure mode this test
 	// is supposed to guard against). Filter explicitly: a usable
 	// resume position is one whose decoded Lsn > 0.
-	deadline := time.After(15 * time.Second)
-	seen := make(map[string]bool)
-	var lastPos cluster.Position
-	for !seen["before"] || lastPos == nil {
-		select {
-		case p := <-proposalChan1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-positionChan1:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("timed out waiting for initial proposal and commit position")
-		}
-	}
+	lastPos := awaitCommit(t, proposalChan1, positionChan1, 15*time.Second, "before").Position
 
 	// Stop the first dialect.
 	cancel1()
@@ -1418,7 +1439,7 @@ func TestPostgresPositionResume(t *testing.T) {
 	db.Close()
 
 	// Collect: "after" should appear, "before" should NOT re-appear.
-	deadline = time.After(15 * time.Second)
+	deadline := time.After(15 * time.Second)
 	seen2 := make(map[string]bool)
 	for !seen2["after"] {
 		select {
@@ -1469,9 +1490,9 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_txgroup",
-			"publication": "pub_txgroup",
+		Options: sql.Options{
+			SlotName:    "slot_txgroup",
+			Publication: "pub_txgroup",
 		},
 	}
 
@@ -1528,31 +1549,16 @@ func TestPostgresTransactionGrouping(t *testing.T) {
 	db.Close()
 
 	// All 10 rows must arrive as a single proposal, and the commit must
-	// checkpoint a position past preCommitLSN. One loop waits for both:
-	// select picks randomly among ready channels, so the earlier shape —
-	// drain-and-discard positions while waiting for the proposal, then
-	// wait for the position afterward — could discard the commit's
-	// checkpoint (the last position the dialect ever emits here) in the
-	// drain and time out on a channel nothing would ever send to again.
-	deadline = time.After(15 * time.Second)
-	var txProposal *cluster.Proposal
-	postCommitSeen := false
-	for txProposal == nil || !postCommitSeen {
-		select {
-		case p := <-proposalChan:
-			txProposal = p
-		case pos := <-positionChan:
-			if positionLSN(pos) > uint64(preCommitLSN) {
-				postCommitSeen = true
-			}
-		case <-deadline:
-			if txProposal == nil {
-				t.Fatal("timed out waiting for transaction proposal")
-			}
-			t.Fatal("timed out waiting for post-commit position")
-		}
+	// checkpoint a position past preCommitLSN.
+	txKeys := make([]string, 10)
+	for i := range txKeys {
+		txKeys[i] = fmt.Sprintf("tx%d", i)
 	}
-
+	res := ingesttest.Await(t, proposalChan, positionChan, 15*time.Second,
+		func(pos cluster.Position) bool { return positionLSN(pos) > uint64(preCommitLSN) }, txKeys...)
+	require.Len(t, res.Proposals, 1,
+		"expected all 10 rows from one transaction in a single proposal")
+	txProposal := res.Proposals[0]
 	require.Len(t, txProposal.Entities, 10,
 		"expected all 10 rows from one transaction in a single proposal")
 
@@ -1600,9 +1606,9 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_snap",
-			"publication": "pub_snap",
+		Options: sql.Options{
+			SlotName:    "slot_snap",
+			Publication: "pub_snap",
 		},
 	}
 
@@ -1670,7 +1676,7 @@ func TestPostgresSnapshotOnNewSlot(t *testing.T) {
 }
 
 // TestPostgresSnapshotChunking verifies keyset-paginated snapshots
-// deliver all rows across multiple proposals when batch_size is smaller
+// deliver all rows across multiple proposals when batchSize is smaller
 // than the row count.
 func TestPostgresSnapshotChunking(t *testing.T) {
 	// Capture logs to assert the snapshot never logs the primary-key value
@@ -1707,10 +1713,10 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_chunk",
-			"publication": "pub_chunk",
-			"batch_size":  "10",
+		Options: sql.Options{
+			SlotName:    "slot_chunk",
+			Publication: "pub_chunk",
+			BatchSize:   10,
 		},
 	}
 
@@ -1734,7 +1740,7 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 		case p := <-proposalChan:
 			snapshotProposals++
 			require.LessOrEqual(t, len(p.Entities), 10,
-				"each snapshot proposal must not exceed batch_size")
+				"each snapshot proposal must not exceed batchSize")
 			for _, e := range p.Entities {
 				seen[string(e.Key)] = true
 			}
@@ -1745,7 +1751,7 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 	}
 
 	require.GreaterOrEqual(t, snapshotProposals, 3,
-		"25 rows at batch_size=10 should produce ≥3 proposals")
+		"25 rows at batchSize=10 should produce ≥3 proposals")
 
 	for i := 0; i < chunkTestRowCount; i++ {
 		require.Truef(t, seen[fmt.Sprintf("%03d", i)], "missing row %03d", i)
@@ -1767,7 +1773,7 @@ func TestPostgresSnapshotChunking(t *testing.T) {
 // column they collided and all but the last were dropped. With the composite key
 // every row gets a distinct entity key, and keyset pagination uses row-value
 // comparison so a batch boundary inside a shared tconst doesn't skip its
-// siblings — batch_size=2 forces exactly that boundary.
+// siblings — batchSize=2 forces exactly that boundary.
 func TestPostgresSnapshotCompositePrimaryKey(t *testing.T) {
 	table := "pg_composite_pk"
 
@@ -1803,10 +1809,10 @@ func TestPostgresSnapshotCompositePrimaryKey(t *testing.T) {
 		PrimaryKey:       []string{"tconst", "ordering"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options: map[string]string{
-			"slot_name":   "slot_composite",
-			"publication": "pub_composite",
-			"batch_size":  "2", // forces a batch boundary inside tt1's principals
+		Options: sql.Options{
+			SlotName:    "slot_composite",
+			Publication: "pub_composite",
+			BatchSize:   2, // forces a batch boundary inside tt1's principals
 		},
 	}
 
@@ -1888,7 +1894,7 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 		PrimaryKey:       []string{"pk"},
 		ConnectionString: connString,
 		Tables:           []string{table},
-		Options:          map[string]string{"slot_name": "slot_recreate", "publication": "pub_recreate"},
+		Options:          sql.Options{SlotName: "slot_recreate", Publication: "pub_recreate"},
 	}
 
 	// Phase 1: ingest, stream 'before', capture the commit position that will
@@ -1904,23 +1910,7 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	require.NoError(t, err)
 	db.Close()
 
-	deadline := time.After(15 * time.Second)
-	seen := map[string]bool{}
-	var lastPos cluster.Position
-	for !seen["before"] || lastPos == nil {
-		select {
-		case p := <-proposalChan1:
-			for _, e := range p.Entities {
-				seen[string(e.Key)] = true
-			}
-		case pos := <-positionChan1:
-			if isCommitPosition(t, pos) {
-				lastPos = pos
-			}
-		case <-deadline:
-			t.Fatal("phase 1: timed out waiting for 'before' + a commit position")
-		}
-	}
+	lastPos := awaitCommit(t, proposalChan1, positionChan1, 15*time.Second, "before").Position
 	cancel1()
 	require.NotEmpty(t, lastPos, "should have a checkpointed commit position")
 
@@ -1945,31 +1935,10 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	}()
 	waitForSlot(t, "slot_recreate")
 
-	deadline = time.After(20 * time.Second)
-	genByKey := map[string]uint64{}
-	var sawMarker bool
-	var markerEpoch uint64
-	for {
-		if _, haveGap := genByKey["gap"]; haveGap && sawMarker {
-			break
-		}
-		select {
-		case p := <-proposalChan2:
-			for _, e := range p.Entities {
-				// The re-snapshot closes with a refresh-boundary marker at the
-				// bumped epoch; a keyed sink sweeps rows left at an older one.
-				if e.IsRefreshBoundary() {
-					sawMarker = true
-					markerEpoch = e.Generation
-					continue
-				}
-				genByKey[string(e.Key)] = e.Generation
-			}
-		case <-positionChan2:
-		case <-deadline:
-			t.Fatal("phase 2: 'gap' + a refresh-boundary marker never arrived — a slot-recreate must re-snapshot and close with a reconciling marker")
-		}
-	}
+	// The gap re-snapshot re-emits every row and closes with its marker (a
+	// refresh-boundary entity at the bumped epoch; a keyed sink sweeps rows
+	// left at an older one).
+	res := ingesttest.AwaitRefresh(t, proposalChan2, positionChan2, 20*time.Second, nil, "before", "gap")
 	cancel2()
 
 	// The gap-recovery re-snapshot bumped the epoch to 2 (phase 1 was the
@@ -1978,9 +1947,9 @@ func TestPostgresSlotRecreatedResnapshots(t *testing.T) {
 	// still at epoch 1 (a row deleted at the source in the lost window, which the
 	// upsert-only re-snapshot cannot signal). The row-level sweep itself is
 	// covered by the syncable dialect docker test.
-	require.Equal(t, uint64(2), markerEpoch, "gap-recovery re-snapshot must emit a refresh-boundary marker at the bumped epoch")
-	require.Equal(t, uint64(2), genByKey["gap"], "a re-snapshotted row carries the bumped epoch")
-	require.Equal(t, uint64(2), genByKey["before"], "a re-snapshotted row carries the bumped epoch")
+	require.Equal(t, uint64(2), res.MarkerEpoch, "gap-recovery re-snapshot must emit a refresh-boundary marker at the bumped epoch")
+	require.Equal(t, uint64(2), res.Entity("gap").Generation, "a re-snapshotted row carries the bumped epoch")
+	require.Equal(t, uint64(2), res.Entity("before").Generation, "a re-snapshotted row carries the bumped epoch")
 
 	select {
 	case err := <-ingestErr:

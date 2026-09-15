@@ -43,6 +43,11 @@ func (s *Storage) saveSyncableIndex(t *cluster.SyncableIndex) error {
 			return b.Delete([]byte(t.ID))
 		}
 
+		// NOTE: this re-marshals from THIS binary's struct, so a field the
+		// binary does not know is dropped rather than carried through — which
+		// is why every field added to this record from 0.8.0 on is gated on
+		// the cluster feature level (see db.featureLevelTypeRecord). Add a
+		// field here and you must add its gate.
 		bs, err := t.Marshal()
 		if err != nil {
 			return fmt.Errorf("[wal.syncable-index] marshal: %w", err)
@@ -79,6 +84,29 @@ func (s *Storage) deleteSyncableIndex(id []byte) error {
 // race with in-flight INSERTs.
 func (s *Storage) GetSyncableIndex(id string) (uint64, error) {
 	return s.getSyncableIndex(id)
+}
+
+// SyncableCheckpoint returns the syncable's full checkpoint record — index
+// AND interpretation pin — or (nil, false) when none exists. The pin loader
+// for a worker gaining leadership (GetSyncableIndex serves index-only reads).
+func (s *Storage) SyncableCheckpoint(id string) (*cluster.SyncableIndex, bool) {
+	var raw []byte
+	_ = s.view(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(syncableIndexBucket); b != nil {
+			if v := b.Get([]byte(id)); v != nil {
+				raw = append([]byte{}, v...)
+			}
+		}
+		return nil
+	})
+	if raw == nil {
+		return nil, false
+	}
+	ck := &cluster.SyncableIndex{}
+	if err := ck.Unmarshal(raw); err != nil {
+		return nil, false
+	}
+	return ck, true
 }
 
 func (s *Storage) getSyncableIndex(id string) (uint64, error) {
