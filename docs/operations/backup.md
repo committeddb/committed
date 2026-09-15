@@ -86,6 +86,11 @@ committed backup --live --target http://n2:8080 --to /backups/committed-2026-09-
   loop keeps running, but the stream is disk and network work on that node.
 - `--token` (default `COMMITTED_API_TOKEN`) authenticates; `--insecure` skips
   TLS verification for an https target.
+- A live archive does **not** carry projection stage stores (`projections/`
+  under the data dir); an offline archive does. After restoring a live
+  archive, `POST /v1/syncable/{id}/rebuild` every projection that declares
+  stages — a staged projection resumed from its checkpoint over a fresh store
+  derives from no inputs, and the node only logs a warning.
 - The download is **verified as it arrives**: every entry is hashed and
   checked against the trailing manifest before the file is published, so a
   file at `--to` is a restorable archive. A node that is catching up from
@@ -129,7 +134,9 @@ COMMITTED_NODE_ID=1 COMMITTED_PEERS='1=http://...' COMMITTED_DATA_DIR=/var/lib/c
 The restored directory **is** a node's directory — the node recovers from it
 exactly as it would after a normal restart. Start it with the **same**
 `COMMITTED_NODE_ID` and `COMMITTED_PEERS` the source node used. Restore drops a
-`RESTORED.json` marker recording where the backup came from.
+`RESTORED.json` marker recording where the backup came from. If the archive
+was taken live, rebuild every staged projection once the node is up (see
+[Taking a backup live](#taking-a-backup-live)).
 
 Restore validates the manifest, refuses an archive that isn't a committed
 backup or declares an incompatible format version, and rejects any archive
