@@ -97,7 +97,9 @@ Concurrent rewriting, retirement for pinned views, background sealing,
 bounded-metadata startup, and production Committed integration remain subsequent slices.
 A [package-private raw-entry adapter experiment](../internal/cluster/db/wal/segment_eventlog_experiment.md)
 now checks Raft-index identity and compares protobuf/scrub output with tidwall.
-It does not replace Storage or implement the application reader and recovery protocols.
+An experimental Actual reader now matches existing visibility, filtering, and
+sparse-resume behavior in focused tests. It does not replace Storage or implement
+production recovery and protected multi-call read protocols.
 
 ### Committed record identity
 

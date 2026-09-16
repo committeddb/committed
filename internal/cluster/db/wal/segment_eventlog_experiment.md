@@ -36,13 +36,38 @@ partial removal, supplied metadata-supersession selections, delete-key erasure,
 retained request metadata, and idempotent repeated scrubs. Negative tests cover
 invalid batches, mismatched source IDs, and attempted replacement-ID changes.
 
-This is a raw-storage equivalence experiment, not an ActualReader implementation
-or a completed production scrub. The selections supplied to the filter must
+This remains an isolated adapter experiment, not a completed production scrub. The selections supplied to the filter must
 already be bounded and authorized. The adapter does not compute selections,
 check consumer progress, update BoltDB, or declare erasure complete.
 
-Next integration work must preserve the current reader's applied-index visibility
-watermark, type resolution, metadata filtering, and protected read lifetime.
+## Experimental Actual reader
+
+`readerAt` now returns an implementation of `db.ActualReader` that resumes strictly
+after a Raft-index checkpoint. It skips control/no-op entries and filters internal
+entities using the existing `userTopicEntities` helper. Proposal decoding uses the
+supplied TypeResolver and preserves existing unknown-system-type compatibility
+behavior. Errors do not advance the failing record's cursor or reported position.
+
+The applied watermark is supplied explicitly. Durable but unapplied entries return
+EOF without type resolution or cursor advancement; a later Read can deliver them.
+EOF is temporary, so a reader also observes later appends. The cursor contains no
+physical sequence number and resumes correctly after its checkpoint is erased.
+
+A complete Read holds the adapter's read lock through scanning and decoding.
+Adapter appends and rewrites hold the write lock. Do not copy the adapter after
+use or mutate its underlying Log directly while readers are live. Returned data
+is independent of file lifetime; no view is held between Read calls. Type
+resolution and watermark callbacks must not reenter the adapter. Reads currently
+block appends during decoding, and repeated Seek calls rescan the tail; performance
+optimization is still pending.
+
+Tests compare Actuals, positions, sparse checkpoints, metadata filtering, and
+visibility pauses against the existing tidwall-backed Reader. They also cover
+type-resolution retry, unknown system types, corruption, rewrite between reads,
+append after EOF, and publication exclusion during decoding.
+
+Production integration still needs the protected lifetime for multi-call reads,
+checkpoint loading, exact ActualAt lookup, and storage/application coordination.
 Recovery needs original append progress even when the last record was erased.
 Backup/restore, peer transfer, format gates, offline conversion, and workload
 benchmarks remain separate prerequisites for activation.
@@ -50,5 +75,5 @@ benchmarks remain separate prerequisites for activation.
 Run the focused checks with:
 
 ```sh
-go test -race ./internal/cluster/db/wal -run '^TestSegmentEvents'
+go test -race ./internal/cluster/db/wal -run '^TestSegment(Events|Reader)'
 ```

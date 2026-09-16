@@ -14,7 +14,7 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func newSegmentEventExperiment(t *testing.T) (segmentEventLog, string) {
+func newSegmentEventExperiment(t *testing.T) (*segmentEventLog, string) {
 	t.Helper()
 	path := t.TempDir()
 	log, err := segmentlog.CreateLog(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}})
@@ -22,7 +22,7 @@ func newSegmentEventExperiment(t *testing.T) (segmentEventLog, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	return segmentEventLog{log}, path
+	return &segmentEventLog{log: log}, path
 }
 
 func experimentEntry(t *testing.T, index uint64, kind pb.EntryType, entities ...*clusterpb.LogEntity) []byte {
@@ -131,7 +131,7 @@ func TestSegmentEventsScrubMatchesLegacyBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	adapter = segmentEventLog{reopened}
+	adapter = &segmentEventLog{log: reopened}
 	if len(expected) != 5 {
 		t.Fatal("unexpected scrub survivors", len(expected))
 	}
@@ -234,7 +234,7 @@ func TestSegmentEventsRejectReplacementIdentityChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	got, err := (segmentEventLog{log}).readRaw(10)
+	got, err := (&segmentEventLog{log: log}).readRaw(10)
 	if err != nil || !bytes.Equal(got, original) {
 		t.Fatal("published changed identity", err)
 	}

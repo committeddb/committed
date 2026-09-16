@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
@@ -12,17 +13,24 @@ import (
 )
 
 // segmentEventLog is an experimental raw-entry adapter. It is intentionally not
-// wired into Storage: visibility, metadata recovery, backup, and peer protocols
+// wired into Storage: reader visibility is experimental; metadata recovery, backup, and peer protocols
 // still require integration. The caller owns the supplied log and its Close.
 // Payloads are unframed raftpb.Entry bytes; segmentlog supplies integrity framing.
 // IDs are the entries' Raft indexes, never tidwall sequence numbers.
-type segmentEventLog struct{ log *segmentlog.Log }
+// The adapter must not be copied after use. Mutations must go through it while
+// readers are live; its lock protects each complete Read from rewrite publication.
+type segmentEventLog struct {
+	mu  sync.RWMutex
+	log *segmentlog.Log
+}
 
 // appendRaw validates the entire batch before appending and preserves the exact
 // input bytes, including protobuf unknown fields. Append failure can leave a
 // durable prefix; callers must reopen and reconcile before retrying. This method
 // does not implement Storage's applied-index or replay-deduplication protocol.
-func (l segmentEventLog) appendRaw(payloads [][]byte) error {
+func (l *segmentEventLog) appendRaw(payloads [][]byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	records := make([]segmentlog.Record, 0, len(payloads))
 	for _, raw := range payloads {
 		entry := new(pb.Entry)
@@ -36,12 +44,20 @@ func (l segmentEventLog) appendRaw(payloads [][]byte) error {
 
 // readRaw and seekRaw retain ErrNotFound for absent/erased indexes. Corruption
 // must never be interpreted as a gap or EOF. Returned payloads belong to the caller.
-func (l segmentEventLog) readRaw(index uint64) ([]byte, error) {
+func (l *segmentEventLog) readRaw(index uint64) ([]byte, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	r, err := l.log.Read(index)
 	return checkedSegmentEntry(r, err)
 }
 
-func (l segmentEventLog) seekRaw(index uint64) (uint64, []byte, error) {
+func (l *segmentEventLog) seekRaw(index uint64) (uint64, []byte, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.seekRawLocked(index)
+}
+
+func (l *segmentEventLog) seekRawLocked(index uint64) (uint64, []byte, error) {
 	r, err := l.log.Seek(index)
 	raw, err := checkedSegmentEntry(r, err)
 	if err != nil {
@@ -72,7 +88,9 @@ func checkedSegmentEntry(r segmentlog.Record, err error) ([]byte, error) {
 // It does not authorize a scrub, update BoltDB, or declare physical erasure done.
 // Even removal validates the original entry's identity before invoking transform;
 // surviving replacements must retain it. Callbacks may not reenter the log.
-func (l segmentEventLog) rewriteRaw(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (segmentlog.RewriteResult, error) {
+func (l *segmentEventLog) rewriteRaw(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (segmentlog.RewriteResult, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if transform == nil {
 		return segmentlog.RewriteResult{}, segmentlog.ErrInvalid
 	}
