@@ -15,12 +15,19 @@ import (
 // this call alone does not retain protection across a later rewrite. RTBF
 // tombstone selections and delete-key erasure gates remain application-owned.
 func (l *segmentEventLog) metadataSupersessions(ctx context.Context, bound uint64) (map[string]uint64, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.metadataSupersessionsLocked(ctx, bound)
+}
+
+// metadataSupersessionsLocked requires the adapter read or write lock.
+func (l *segmentEventLog) metadataSupersessionsLocked(ctx context.Context, bound uint64) (map[string]uint64, error) {
 	selection := newMetadataSelection()
 	end := bound
 	if end < ^uint64(0) {
 		end++
 	}
-	err := l.scanRaw(ctx, segmentlog.Coverage{Start: 1, End: end}, func(_ uint64, raw []byte) error {
+	err := l.scanRawLocked(ctx, segmentlog.Coverage{Start: 1, End: end}, func(_ uint64, raw []byte) error {
 		entry := new(pb.Entry)
 		if err := proto.Unmarshal(raw, entry); err != nil {
 			return err

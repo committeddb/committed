@@ -110,7 +110,9 @@ appends, with automatic release and observable blocker counts. Production
 from-zero reader wiring and backup file captures remain pending. Snapshot
 supersession selection now scans the experimental log using the same accumulator
 as legacy Storage; authoritative RTBF tombstone state and erasure gates remain
-application-owned.
+application-owned. An experimental metadata-only rewrite now coordinates
+watermark validation, selection, and publication under one adapter lock, with
+protected-reader deferral; production scrub orchestration remains unchanged.
 
 ### Committed record identity
 

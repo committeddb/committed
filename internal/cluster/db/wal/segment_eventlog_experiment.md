@@ -199,3 +199,26 @@ Tests compare both backends against explicit expected maps at multiple bounds,
 including registration changes, user revisions, internal snapshots, deletes,
 sparse indexes, repeated selection after compaction, malformed registrations,
 and canceled scans. The existing scrub tests also exercise the shared helper.
+
+## Coordinated experimental metadata rewrite
+
+`rewriteMetadata` holds the adapter write lock across watermark capture, snapshot
+selection, and whole-log publication. It validates `bound <= applied <= durable
+append progress`; the applied callback must be concurrency-safe and must not
+reenter the adapter. Concurrent appends, rewrites, and protected-read acquisition
+cannot intervene between selection and publication. The caller still supplies
+an authorized bound; this is not an authorization mechanism.
+
+Protected readers return a retryable deferral before scanning. Snapshot selection
+uses the shared legacy rules, then `scrubFilterEntry` applies only those selections.
+RTBF selections are absent and delete-key erasure is disabled. Entries above the
+bound remain byte-identical, including durable but unapplied entries. Partial
+records preserve their other entities. Reclaim remains explicit, and the operation
+does not update BoltDB or report application-level scrub completion.
+
+Validation and selection failures perform no publication. Preparation/publication
+failures retain the managed engine's poison/reopen protocol. An unchanged result
+can still publish a newer generation. Tests cover bound rejection, partial-record
+preservation, post-bound bytes, reopen/reclaim/idempotence, protected-reader deferral,
+and append exclusion across the transaction. This remains a synchronous experiment;
+background preparation and full application recovery coordination are pending.

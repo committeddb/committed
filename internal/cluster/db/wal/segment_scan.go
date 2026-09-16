@@ -18,6 +18,11 @@ func (l *segmentEventLog) scanRaw(ctx context.Context, bounds segmentlog.Coverag
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	return l.scanRawLocked(ctx, bounds, visit)
+}
+
+// scanRawLocked requires the adapter read or write lock.
+func (l *segmentEventLog) scanRawLocked(ctx context.Context, bounds segmentlog.Coverage, visit func(uint64, []byte) error) error {
 	err := l.log.Scan(ctx, bounds, func(r segmentlog.Record) error {
 		raw, err := checkedSegmentEntry(r, nil)
 		if err != nil {

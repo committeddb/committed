@@ -153,6 +153,11 @@ func checkedSegmentEntry(r segmentlog.Record, err error) ([]byte, error) {
 func (l *segmentEventLog) rewriteRaw(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (segmentlog.RewriteResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.rewriteRawLocked(ctx, generation, transform)
+}
+
+// rewriteRawLocked requires the adapter write lock throughout preparation and publication.
+func (l *segmentEventLog) rewriteRawLocked(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (segmentlog.RewriteResult, error) {
 	if ctx == nil || transform == nil {
 		return segmentlog.RewriteResult{}, segmentlog.ErrInvalid
 	}
