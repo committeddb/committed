@@ -275,6 +275,10 @@ func (s *Segment) readBlock(b block) ([]Record, error) {
 	if _, err := s.r.ReadAt(data, int64(b.offset)); err != nil {
 		return nil, err
 	}
+	return decodeBlock(b, data)
+}
+
+func decodeBlock(b block, data []byte) ([]Record, error) {
 	if format.CRC(data) != b.crc {
 		return nil, ErrCorrupt
 	}

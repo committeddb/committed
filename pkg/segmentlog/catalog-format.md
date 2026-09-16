@@ -104,9 +104,10 @@ individual write/link/rename/sync boundaries.
 
 ## Current limitations
 
-- Startup and publication currently read full referenced segment contents, once
-  for the digest and again for frame verification. This favors initial integrity
-  validation; startup work grows with stored payload bytes.
+- Startup and publication read full referenced segment contents. SHA-256 and
+  block/frame verification share one read of each stored payload block. Header,
+  index, and footer metadata are read for structural validation and again for
+  the whole-file digest. Startup work still grows with stored payload bytes.
 - Catalog publication itself retains old catalogs and payload revisions. The
   managed Log now provides explicit [reclamation](reclamation.md) of recognized
   obsolete files under exclusive ownership, with reopen/retry after failure.

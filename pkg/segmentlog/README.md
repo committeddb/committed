@@ -175,9 +175,9 @@ even when no records survive. See [whole-log rewriting](whole-log-rewriting.md).
 `CatalogStore` now validates and atomically publishes a complete file layout via
 CURRENT. It represents empty ranges without files, separates physical revision
 from logical scrub generation, and stops publication after I/O failure. Recovery
-selects only CURRENT and rejects missing/corrupt references. It currently scans
-full file contents, retains old revisions, and requires exclusive caller-managed
-directory ownership. See [the catalog format and publication contract](catalog-format.md).
+selects only CURRENT and rejects missing/corrupt references. It scans full file
+contents, sharing each stored payload block between digest and frame verification.
+It retains old revisions and requires exclusive caller-managed directory ownership. See [the catalog format and publication contract](catalog-format.md).
 
 ## Reclamation
 

@@ -428,21 +428,7 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 				return err
 			}
 			defer func() { err = errors.Join(err, f.Close()) }()
-			segment, err := OpenSegment(f, info.Size())
-			if err != nil {
-				return err
-			}
-			if segment.Coverage() != ref.Coverage || segment.Count() != ref.Count {
-				return ErrCorrupt
-			}
-			hash := sha256.New()
-			if _, err = io.Copy(hash, f); err != nil {
-				return err
-			}
-			if !bytes.Equal(hash.Sum(nil), ref.SHA256[:]) {
-				return ErrCorrupt
-			}
-			if err = segment.Verify(); err != nil {
+			if err := verifySegmentDigest(f, info.Size(), ref); err != nil {
 				return err
 			}
 			return f.Sync()

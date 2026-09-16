@@ -1,7 +1,7 @@
 # Event-log history benchmarks
 
 Local exploratory run: macOS arm64, Apple M4 Max, Go 1.26.6. Three timed
-iterations per case. These are small synthetic, warm-filesystem measurements;
+iterations per case, recorded before the combined payload-verification pass. These are small synthetic, warm-filesystem measurements;
 there is no cold-cache eviction, latency distribution, or production throughput
 claim. Timing includes the local filesystem's behavior, not a power-loss proof.
 
@@ -64,7 +64,9 @@ Allocation measurements expose work that timing alone can obscure:
 
 In the segmented implementation, `CatalogStore.publish` calls
 `verifyCatalogFiles` on the complete referenced layout. Each sealed file is
-hashed, its frames verified, and the file synced. Reopen also verifies all
+hashed, its frames verified, and the file synced. The current verifier shares one
+read of each stored payload block between hashing and frame validation; the
+recorded baseline used separate payload passes. Reopen also verifies all
 referenced history. This work grows with stored history even when rotation adds
 only one segment. The current catalog also represents the complete layout.
 
@@ -72,6 +74,20 @@ Sparse segment reads use block indexes and do not perform full-history catalog
 verification on each seek. The benchmark's seek allocation results cover one
 repeated middle lookup, not all access patterns. Neither this run nor the unit
 tests establish behavior at hundreds of TB or a PB.
+
+## Combined verification check
+
+After combining digest and frame verification, a counting-reader test checks that
+each stored payload byte is requested exactly once, while all file bytes remain
+covered by verification. This removes one payload pass; it does not remove
+full-history verification, metadata rereads, or file syncs.
+
+A separate three-iteration local rerun of segmented reopen/append cases completed
+without concurrent test processes. Append samples were about 40.9 ms (124/plain),
+274.0 ms (992/plain), 45.5 ms (124/zstd), and 46.2 ms (992/zstd). The large plain
+sample and the small sample count do not establish a consistent latency improvement
+against the baseline. The established benefit is reduced payload read requests,
+not a demonstrated throughput gain or reduction in physical disk traffic.
 
 ## Reproduce
 
