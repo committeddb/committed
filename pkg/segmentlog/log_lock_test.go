@@ -79,7 +79,7 @@ func TestFailedLogOpenAndCreateReleaseLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(current, []byte("damaged"), 0600); err != nil {
+	if err := os.WriteFile(current, []byte("damaged"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := OpenLog(dir, Options{}); !errors.Is(err, ErrCorrupt) {
@@ -90,7 +90,7 @@ func TestFailedLogOpenAndCreateReleaseLock(t *testing.T) {
 		t.Fatal("failed recovery leaked ownership", err)
 	}
 	_ = owner.Close()
-	if err := os.WriteFile(current, old, 0600); err != nil {
+	if err := os.WriteFile(current, old, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	next, err := OpenLog(dir, Options{})

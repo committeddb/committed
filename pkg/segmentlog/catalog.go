@@ -134,6 +134,7 @@ func decodeCatalog(b []byte) (c Catalog, err error) {
 func catalogName(revision uint64, hash [32]byte) string {
 	return fmt.Sprintf("catalog-%020d-%x.manifest", revision, hash)
 }
+
 func pointer(c Catalog, b []byte) []byte {
 	p := make([]byte, 48, 52)
 	copy(p, "SLCUR000")
@@ -142,7 +143,8 @@ func pointer(c Catalog, b []byte) []byte {
 	copy(p[16:], hash[:])
 	return format.LE.AppendUint32(p, format.CRC(p))
 }
-func readBounded(path string, limit int64) ([]byte, error) {
+
+func readBounded(path string, limit int64) (data []byte, err error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -154,7 +156,7 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { err = errors.Join(err, f.Close()) }()
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err
@@ -386,12 +388,12 @@ func syncRegular(path string) error {
 	return errors.Join(f.Sync(), f.Close())
 }
 
-func verifyCatalogFiles(dir string, c Catalog) error {
+func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 	for _, ref := range c.Segments {
 		if ref.Count == 0 {
 			continue
 		}
-		err := func() error {
+		err := func() (err error) {
 			path := filepath.Join(dir, ref.File)
 			info, err := os.Lstat(path)
 			if err != nil {
@@ -404,7 +406,7 @@ func verifyCatalogFiles(dir string, c Catalog) error {
 			if err != nil {
 				return err
 			}
-			defer f.Close()
+			defer func() { err = errors.Join(err, f.Close()) }()
 			segment, err := OpenSegment(f, info.Size())
 			if err != nil {
 				return err
@@ -441,7 +443,7 @@ func verifyCatalogFiles(dir string, c Catalog) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { retErr = errors.Join(retErr, f.Close()) }()
 		state, err := ScanTail(f, info.Size(), nil)
 		if err != nil {
 			return err

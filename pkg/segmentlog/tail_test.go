@@ -14,7 +14,7 @@ import (
 
 func tailFile(t testing.TB, start uint64) *os.File {
 	t.Helper()
-	f, err := os.OpenFile(filepath.Join(t.TempDir(), "tail.active"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	f, err := os.OpenFile(filepath.Join(t.TempDir(), "tail.active"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,6 +24,7 @@ func tailFile(t testing.TB, start uint64) *os.File {
 	}
 	return f
 }
+
 func tailBytes(t testing.TB, f *os.File) []byte {
 	t.Helper()
 	b, err := os.ReadFile(f.Name())
@@ -39,8 +40,8 @@ func TestTailAppendReopenAndSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := []Record{{0, []byte("zero")}, {10, []byte("ten")}}
-	second := []Record{{100, []byte("hundred")}}
+	expected := []Record{{0, []byte("zero")}, {10, []byte("ten")}, {100, []byte("hundred")}}
+	first, second := expected[:2], expected[2:]
 	if err := tail.Append(first); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestTailAppendReopenAndSeal(t *testing.T) {
 	var records []Record
 	data := tailBytes(t, f)
 	state, err := ScanTail(bytes.NewReader(data), int64(len(data)), func(r Record) error { records = append(records, r); return nil })
-	if err != nil || state != after || !reflect.DeepEqual(records, append(first, second...)) {
+	if err != nil || state != after || !reflect.DeepEqual(records, expected) {
 		t.Fatal(state, records, err)
 	}
 	var sealed bytes.Buffer
@@ -168,6 +169,7 @@ func (f *faultyTail) Sync() error {
 	}
 	return f.File.Sync()
 }
+
 func (f *faultyTail) WriteAt(b []byte, offset int64) (int, error) {
 	f.writes++
 	if f.short {

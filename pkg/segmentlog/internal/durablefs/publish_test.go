@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-var injected = errors.New("injected failure")
+var errInjected = errors.New("injected failure")
 
 type faultOps struct {
 	local
@@ -24,14 +24,15 @@ func (o *faultOps) hit(name string) error {
 	o.calls = append(o.calls, name)
 	if o.failures[name] {
 		delete(o.failures, name)
-		return injected
+		return errInjected
 	}
 	if o.fail == name {
 		o.fail = ""
-		return injected
+		return errInjected
 	}
 	return nil
 }
+
 func (o *faultOps) createTemp(dir string) (file, error) {
 	if err := o.hit("create"); err != nil {
 		return nil, err
@@ -42,24 +43,28 @@ func (o *faultOps) createTemp(dir string) (file, error) {
 	}
 	return &faultFile{f, o}, nil
 }
+
 func (o *faultOps) link(a, b string) error {
 	if err := o.hit("link"); err != nil {
 		return err
 	}
 	return o.local.link(a, b)
 }
+
 func (o *faultOps) rename(a, b string) error {
 	if err := o.hit("rename"); err != nil {
 		return err
 	}
 	return o.local.rename(a, b)
 }
+
 func (o *faultOps) remove(a string) error {
 	if err := o.hit("remove"); err != nil {
 		return err
 	}
 	return o.local.remove(a)
 }
+
 func (o *faultOps) syncDir(a string) error {
 	if err := o.hit("dirsync"); err != nil {
 		return err
@@ -81,6 +86,7 @@ func (f *faultFile) Write(b []byte) (int, error) {
 	}
 	return f.file.Write(b)
 }
+
 func (f *faultFile) Sync() error {
 	if err := f.ops.hit("filesync"); err != nil {
 		return err
@@ -102,9 +108,11 @@ func directory(t *testing.T) (*Dir, *faultOps) {
 	d.ops = ops
 	return d, ops
 }
+
 func content(value string) func(io.Writer) error {
 	return func(w io.Writer) error { _, err := io.WriteString(w, value); return err }
 }
+
 func read(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -113,13 +121,14 @@ func read(t *testing.T, path string) string {
 	}
 	return string(b)
 }
+
 func entries(t *testing.T, dir string) []string {
 	t.Helper()
 	items, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var names []string
+	names := make([]string, 0, len(items))
 	for _, item := range items {
 		names = append(names, item.Name())
 	}
@@ -133,7 +142,7 @@ func TestPublicationOrder(t *testing.T) {
 			var result Result
 			var err error
 			if replace {
-				if err := os.WriteFile(filepath.Join(d.path, "CURRENT"), []byte("old"), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(d.path, "CURRENT"), []byte("old"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				result, err = d.Replace("CURRENT", content("new"))
@@ -171,7 +180,7 @@ func TestFailureBoundaries(t *testing.T) {
 				d, ops := directory(t)
 				path := filepath.Join(d.path, "final")
 				if replace {
-					if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+					if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -183,7 +192,7 @@ func TestFailureBoundaries(t *testing.T) {
 				} else {
 					result, err = d.Install("final", content("new"))
 				}
-				if !errors.Is(err, injected) {
+				if !errors.Is(err, errInjected) {
 					t.Fatal("lost original error", err)
 				}
 				installed := stage == "dirsync" || stage == "remove"
@@ -256,9 +265,9 @@ func TestPartialWriteAndCallbackFailure(t *testing.T) {
 			if _, err := w.Write([]byte("sensitive partial contents")); err != nil {
 				return err
 			}
-			return injected
+			return errInjected
 		})
-		want := injected
+		want := errInjected
 		if short {
 			want = io.ErrShortWrite
 		}
@@ -281,7 +290,7 @@ func TestCleanupFailurePreservesBothErrors(t *testing.T) {
 	ops.fail = "remove"
 	original := errors.New("callback failed")
 	result, err := d.Install("final", func(w io.Writer) error { _, _ = w.Write([]byte("partial")); return original })
-	if !errors.Is(err, original) || !errors.Is(err, injected) || result.Installed || result.Durable || result.Temp == "" {
+	if !errors.Is(err, original) || !errors.Is(err, errInjected) || result.Installed || result.Durable || result.Temp == "" {
 		t.Fatal(result, err)
 	}
 	if read(t, result.Temp) != "partial" {
@@ -294,7 +303,7 @@ func TestCleanupSyncFailure(t *testing.T) {
 	ops.fail = "dirsync"
 	original := errors.New("callback failed")
 	result, err := d.Replace("CURRENT", func(w io.Writer) error { return original })
-	if !errors.Is(err, original) || !errors.Is(err, injected) || result != (Result{}) {
+	if !errors.Is(err, original) || !errors.Is(err, errInjected) || result != (Result{}) {
 		t.Fatal(result, err)
 	}
 	// Cleanup uncertainty is not a published-pointer uncertainty; the original
@@ -308,7 +317,7 @@ func TestInstalledAliasAndSyncFailure(t *testing.T) {
 	d, ops := directory(t)
 	ops.failures = map[string]bool{"remove": true, "dirsync": true}
 	result, err := d.Install("final", content("complete"))
-	if !result.Installed || result.Durable || result.Temp == "" || !errors.Is(err, ErrUncertain) || !errors.Is(err, injected) {
+	if !result.Installed || result.Durable || result.Temp == "" || !errors.Is(err, ErrUncertain) || !errors.Is(err, errInjected) {
 		t.Fatal(result, err)
 	}
 	if read(t, filepath.Join(d.path, "final")) != "complete" || read(t, result.Temp) != "complete" {
@@ -345,7 +354,7 @@ func TestDurableRemoval(t *testing.T) {
 	for _, stage := range []string{"", "remove", "dirsync"} {
 		d, ops := directory(t)
 		path := filepath.Join(d.path, "obsolete")
-		if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		ops.fail = stage
@@ -358,7 +367,7 @@ func TestDurableRemoval(t *testing.T) {
 				t.Fatal("missing removal not idempotent", removed, err)
 			}
 		} else {
-			if !errors.Is(err, injected) || removed != (stage == "dirsync") || errors.Is(err, ErrUncertain) != (stage == "dirsync") {
+			if !errors.Is(err, errInjected) || removed != (stage == "dirsync") || errors.Is(err, ErrUncertain) != (stage == "dirsync") {
 				t.Fatal(removed, err)
 			}
 		}

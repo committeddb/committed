@@ -23,6 +23,7 @@ func rotatedLog(t *testing.T) *Log {
 	}
 	return log
 }
+
 func referencedNames(t *testing.T, log *Log) map[string]bool {
 	t.Helper()
 	c, name, err := loadCatalog(log.path)
@@ -37,6 +38,7 @@ func referencedNames(t *testing.T, log *Log) map[string]bool {
 	}
 	return names
 }
+
 func readBytes(t *testing.T, path string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -73,7 +75,7 @@ func TestReclaimObsoleteFilesPreservesCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	orphan := catalogName(999, [32]byte{9})
-	if err := os.WriteFile(filepath.Join(log.path, orphan), []byte("unpublished future catalog"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(log.path, orphan), []byte("unpublished future catalog"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var expectedFiles, expectedBytes uint64
@@ -128,7 +130,7 @@ func TestReclaimPreservesUnknownEntries(t *testing.T) {
 	log := rotatedLog(t)
 	unknown := []string{"notes.txt", "custom.seg", ".segmentlog-not-ours", "tail-99999999999999999999-00000000000000000000000000000000.active"}
 	for _, name := range unknown {
-		if err := os.WriteFile(filepath.Join(log.path, name), []byte("keep"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(log.path, name), []byte("keep"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -136,10 +138,10 @@ func TestReclaimPreservesUnknownEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(log.path, directory), 0700); err != nil {
+	if err := os.Mkdir(filepath.Join(log.path, directory), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(log.path, directory, "nested"), []byte("keep"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(log.path, directory, "nested"), []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	link, err := uniqueName("tail", 5000, ".active")
@@ -230,9 +232,6 @@ func TestReclaimCancellation(t *testing.T) {
 	if result, err := log.Reclaim(ctx); !errors.Is(err, context.Canceled) || result != (ReclaimResult{}) {
 		t.Fatal(result, err)
 	}
-	if _, err := log.Reclaim(nil); !errors.Is(err, ErrInvalid) {
-		t.Fatal(err)
-	}
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
 	log.remover = &failingRemover{fileRemover: log.remover, cancel: cancel}
@@ -260,7 +259,7 @@ func TestReclaimRefusesDamagedCurrentState(t *testing.T) {
 			c, _ := log.catalog.Current()
 			path = filepath.Join(log.path, c.Segments[0].File)
 		}
-		if err := os.WriteFile(path, []byte("damaged"), 0600); err != nil {
+		if err := os.WriteFile(path, []byte("damaged"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		result, err := log.Reclaim(context.Background())

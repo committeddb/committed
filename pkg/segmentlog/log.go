@@ -212,6 +212,7 @@ func uniqueName(prefix string, start uint64, suffix string) (string, error) {
 	}
 	return fmt.Sprintf("%s-%020d-%x%s", prefix, start, id, suffix), nil
 }
+
 func (l *Log) usable() error {
 	if l.closed {
 		return ErrClosed

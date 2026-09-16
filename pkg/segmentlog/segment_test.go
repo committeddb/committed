@@ -247,7 +247,7 @@ func TestRewritePreservesUnchangedFiles(t *testing.T) {
 	for i := range 3 {
 		path := filepath.Join(dir, fmt.Sprintf("%d.seg", i))
 		data := encode(t, Record{uint64(i*10 + 1), []byte("keep")}, Record{uint64(i*10 + 2), []byte("erase")})
-		if err := os.WriteFile(path, data, 0600); err != nil {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		before, err := os.Stat(path)
@@ -265,7 +265,7 @@ func TestRewritePreservesUnchangedFiles(t *testing.T) {
 		var output *os.File
 		changed, err := s.Rewrite(context.Background(), func() (io.Writer, error) {
 			var err error
-			output, err = os.OpenFile(path+".replacement", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			output, err = os.OpenFile(path+".replacement", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 			return output, err
 		}, func(r Record) ([]byte, bool, error) { return r.Payload, r.ID != 12, nil }, Options{})
 		if closeErr := f.Close(); closeErr != nil {

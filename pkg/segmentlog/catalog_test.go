@@ -22,7 +22,7 @@ func catalogFixture(t testing.TB) (string, Catalog) {
 	}
 	dir := t.TempDir()
 	data := encode(t, Record{1, []byte("payload")}, Record{999, []byte("last")})
-	if err := os.WriteFile(filepath.Join(dir, "one.seg"), data, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "one.seg"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return dir, Catalog{History: [16]byte{1}, Revision: 1, Segments: []SegmentRef{{Coverage: Coverage{0, 1000}, File: "one.seg", SHA256: sha256.Sum256(data), Count: 2}}}
@@ -56,7 +56,7 @@ func TestCatalogPublicationAndEmptyRanges(t *testing.T) {
 	if err := WriteTailHeader(&h, 2000); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "tail.active"), h.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "tail.active"), h.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	next.Active = &TailRef{File: "tail.active", Start: 2000}
@@ -153,7 +153,7 @@ func TestCatalogReferencesFailClosed(t *testing.T) {
 				var h bytes.Buffer
 				_ = WriteTailHeader(&h, 1000)
 				h.WriteByte(1)
-				if err := os.WriteFile(filepath.Join(dir, "tail.active"), h.Bytes(), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, "tail.active"), h.Bytes(), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				c.Active = &TailRef{"tail.active", 1000}
@@ -182,6 +182,7 @@ func (p *failingPublisher) Install(n string, w func(io.Writer) error) (durablefs
 	}
 	return p.catalogPublisher.Install(n, w)
 }
+
 func (p *failingPublisher) Replace(n string, w func(io.Writer) error) (durablefs.Result, error) {
 	p.calls = append(p.calls, "replace")
 	if p.at == "replace-before" {
@@ -196,6 +197,7 @@ func (p *failingPublisher) Replace(n string, w func(io.Writer) error) (durablefs
 	}
 	return r, nil
 }
+
 func (p *failingPublisher) Sync() error {
 	p.calls = append(p.calls, "sync")
 	if p.at == "sync" {
@@ -273,13 +275,13 @@ func TestCatalogNeverFallsBack(t *testing.T) {
 			case "missing-current":
 				err = os.Remove(path)
 			case "corrupt-current":
-				err = os.WriteFile(path, []byte("bad"), 0600)
+				err = os.WriteFile(path, []byte("bad"), 0o600)
 			case "missing-catalog":
 				err = os.Remove(filepath.Join(dir, name))
 			case "corrupt-catalog":
-				err = os.WriteFile(filepath.Join(dir, name), []byte("bad"), 0600)
+				err = os.WriteFile(filepath.Join(dir, name), []byte("bad"), 0o600)
 			case "corrupt-segment":
-				err = os.WriteFile(filepath.Join(dir, "one.seg"), []byte("bad"), 0600)
+				err = os.WriteFile(filepath.Join(dir, "one.seg"), []byte("bad"), 0o600)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -307,7 +309,7 @@ func TestUnpublishedCatalogIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := catalogName(next.Revision, sha256.Sum256(b))
-	if err := os.WriteFile(filepath.Join(dir, name), b, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := OpenCatalogStore(dir)

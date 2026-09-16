@@ -8,8 +8,10 @@ import (
 	"hash/crc32"
 )
 
-var ErrCorrupt = errors.New("segmentlog: corrupt segment")
-var ErrUnsupported = errors.New("segmentlog: unsupported format")
+var (
+	ErrCorrupt     = errors.New("segmentlog: corrupt segment")
+	ErrUnsupported = errors.New("segmentlog: unsupported format")
+)
 
 const (
 	HeaderSize     = 32
@@ -21,8 +23,10 @@ const (
 	MaxBlocks      = 1 << 16
 )
 
-var LE = binary.LittleEndian
-var table = crc32.MakeTable(crc32.Castagnoli)
+var (
+	LE    = binary.LittleEndian
+	table = crc32.MakeTable(crc32.Castagnoli)
+)
 
 func CRC(b []byte) uint32 { return crc32.Checksum(b, table) }
 

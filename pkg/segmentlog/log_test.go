@@ -26,6 +26,7 @@ func newLog(t *testing.T, target int) *Log {
 	t.Cleanup(func() { _ = log.Close() })
 	return log
 }
+
 func reopenLog(t *testing.T, log *Log) *Log {
 	t.Helper()
 	if err := log.Close(); err != nil {
@@ -51,7 +52,7 @@ func layout(t *testing.T, log *Log) []rangeDigest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result []rangeDigest
+	result := make([]rangeDigest, 0, len(c.Segments))
 	for _, s := range c.Segments {
 		result = append(result, rangeDigest{s.Coverage, s.SHA256, s.Count})
 	}
