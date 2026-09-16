@@ -212,7 +212,8 @@ engine, application boundary, and experimental limitations.
 ```sh
 go test -race ./pkg/segmentlog/...
 go test ./pkg/segmentlog -run '^$' -fuzz FuzzSegment -fuzztime 10s
-go test ./pkg/segmentlog -run '^$' -fuzz FuzzTail -fuzztime 10s
+go test ./pkg/segmentlog -run '^$' -fuzz '^FuzzTail$' -fuzztime 10s
+go test ./pkg/segmentlog -run '^$' -fuzz '^FuzzTailGroupValidation$' -fuzztime 20s
 go test ./pkg/segmentlog -run '^$' -fuzz FuzzCatalog -fuzztime 10s
 go test ./pkg/segmentlog/internal/format -run '^$' -fuzz FuzzDecode -fuzztime 10s
 go test ./pkg/segmentlog -run '^$' -bench BenchmarkCompression -benchtime 100ms
@@ -222,6 +223,11 @@ Tests cover sparse reads, empty and oversized blocks, invalid ordering, every
 single-byte corruption and truncation of a sample segment, malformed index bounds,
 selective/all/no-op/in-place transformations, callback counts, file identity and
 hash preservation, cancellation, output failures, and concurrent reads.
+
+The structured tail-group fuzzer generates valid outer checksums while varying
+record IDs, declared counts, and the declared last ID. It compares verification
+and delivery against the input's expected validity and checks that rejected
+groups deliver nothing and leave the validated prefix unchanged.
 
 Compression tests also cover mixed codecs, deterministic output, sparse block-local
 seeks, compressed partial rewrites, maximum-size records, decoded-size mismatches,
