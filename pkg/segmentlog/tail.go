@@ -136,8 +136,12 @@ func scanTail(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, visit func(
 		}
 		data := body[:length]
 		var records []Record
+		var decoded uint32
 		previous, has := state.Last, state.HasRecords
 		for len(data) > 0 {
+			if decoded == count {
+				return state, ErrCorrupt
+			}
 			id, payload, rest, e := format.Frame(data)
 			if e != nil {
 				return state, e
@@ -145,10 +149,18 @@ func scanTail(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, visit func(
 			if id < state.Start || id == ^uint64(0) || (has && id <= previous) {
 				return state, ErrCorrupt
 			}
-			records = append(records, Record{id, payload})
+			if visit != nil {
+				// The header bounds count by the group size. Allocate once, after
+				// the first frame validates; verification needs no record list.
+				if records == nil {
+					records = make([]Record, 0, int(count))
+				}
+				records = append(records, Record{id, payload})
+			}
+			decoded++
 			previous, has, data = id, true, rest
 		}
-		if len(records) != int(count) || previous != last {
+		if decoded != count || previous != last {
 			return state, ErrCorrupt
 		}
 		if state.Framed > ^uint64(0)-uint64(length) || state.OriginalCount > ^uint64(0)-uint64(count) {

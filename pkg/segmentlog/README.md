@@ -135,6 +135,10 @@ handles after I/O failure. Reopening recovers and syncs complete groups. The
 scanner reports incomplete suffixes without truncating; it cannot prove that
 discarding them is safe. See [the tail format and recovery contract](tail-format.md).
 
+Verification-only tail scans validate frames without collecting record lists.
+Scans with visitors allocate one list per group and validate the complete group
+before delivery. See [tail allocation measurements](tail-benchmarks.md).
+
 ## Managed log
 
 `CreateLog` and `OpenLog` connect the tail, segments, and catalog. `Append`
