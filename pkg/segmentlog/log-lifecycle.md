@@ -85,8 +85,9 @@ on demand, and scan the active tail. Returned payloads are private to the read.
 There are no long-lived iterators, reader pins, or block caches at this layer yet.
 
 Sealing and catalog validation run synchronously while reads/appends are blocked.
-Catalog publication currently revalidates full referenced files, making repeated
-rotation increasingly expensive as history grows.
+Catalog publication verifies new or changed sealed references and the active tail.
+Unchanged immutable files reuse their confirmed verification and durability.
+Complete catalog metadata is still validated and serialized on each rotation.
 
 Old tails, catalogs, sealed revisions, and crash orphans remain until explicit
 `Reclaim(ctx)` validates the live set and removes recognized obsolete files.

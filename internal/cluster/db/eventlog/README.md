@@ -117,8 +117,9 @@ go test -race ./internal/cluster/db/wal -run '^(TestEventLogAdapter|TestEventLog
 [Recorded history benchmarks](history-benchmarks.md) compare append, reopen, and
 middle-seek costs at two logical history sizes for both backends in plain/zstd
 modes. They report local timings and allocations with explicit fixture and cache
-limitations. Segmented rotation and reopen currently verify the full referenced
-history; these measurements do not establish production throughput.
+limitations. The recorded baseline reverified full history during rotation.
+Publication now reuses verification of unchanged immutable references; reopen
+still verifies full history. These measurements do not establish production throughput.
 
 The [on-disk lifecycle baseline](scale-benchmarks.md) measures larger histories
 through recovery, a boundary append, one-record erasure, reclamation, and a full

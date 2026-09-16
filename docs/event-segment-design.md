@@ -81,8 +81,9 @@ unknown files. Old payload files can remain until reclamation succeeds.
 
 The segmented managed log serializes reads, append, sealing, rewrite, and
 reclamation. Sealing is synchronous. It has no background preparation, pinned
-backup views, or decoded-block cache. Startup and catalog publication verify full
-referenced payloads; they are not bounded to metadata-only reads. Catalogs contain
+backup views, or decoded-block cache. Startup verifies all referenced payloads.
+Publication verifies new or changed sealed references and the active tail, reusing
+prior verification for exact unchanged immutable references. Catalogs contain
 complete layouts. The tests do not establish TB- or PB-scale operation.
 
 Incomplete tail suffixes are reported without automatic truncation. Storage alone

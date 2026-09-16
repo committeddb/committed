@@ -331,6 +331,8 @@ func (s *CatalogStore) Current() (Catalog, error) {
 // responsible for semantic equivalence of rewritten ranges and for fencing tail
 // appends/rotation during preparation. Any publication I/O error poisons the
 // instance; reopen to recover. Input/revision errors do not poison it.
+// Exact unchanged sealed references retain their prior verification and durability;
+// callers must never mutate or replace those files. Active tails are reverified.
 func (s *CatalogStore) Publish(expected uint64, next Catalog) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -352,7 +354,7 @@ func (s *CatalogStore) publish(next Catalog, initial bool) error {
 		return err
 	}
 	fail := func(err error) error { s.poison = errors.Join(ErrCatalogPoisoned, err); return s.poison }
-	if err = verifyCatalogFiles(s.path, next); err != nil {
+	if err = verifyCatalogFiles(s.path, publicationFiles(s.current, next)); err != nil {
 		return fail(err)
 	}
 	// Sync directory entries for caller-prepared reference files before the catalog.
@@ -392,6 +394,25 @@ func (s *CatalogStore) publish(next Catalog, initial bool) error {
 	}
 	s.current = cloneCatalog(next)
 	return nil
+}
+
+// publicationFiles reuses verification only for exact immutable references in
+// the last confirmed catalog. Creation/recovery verify all references first;
+// failed publications never advance current. Active tails are always checked.
+func publicationFiles(current, next Catalog) Catalog {
+	pending := next
+	pending.Segments = nil
+	previous := 0
+	for _, ref := range next.Segments {
+		// Both catalogs have validated, ordered, nonoverlapping coverage.
+		for previous < len(current.Segments) && current.Segments[previous].Coverage.Start < ref.Coverage.Start {
+			previous++
+		}
+		if previous == len(current.Segments) || current.Segments[previous] != ref {
+			pending.Segments = append(pending.Segments, ref)
+		}
+	}
+	return pending
 }
 
 func syncRegular(path string) error {

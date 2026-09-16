@@ -188,6 +188,8 @@ from logical scrub generation, and stops publication after I/O failure. Recovery
 selects only CURRENT and rejects missing/corrupt references. It scans full file
 contents, sharing each stored payload block between digest and frame verification.
 Verification validates frames without collecting per-record result slices.
+Publication reuses prior verification for exact unchanged immutable references;
+new or changed sealed references and active tails are verified and synced.
 It retains old revisions and requires exclusive caller-managed directory ownership. See [the catalog format and publication contract](catalog-format.md).
 
 ## Reclamation

@@ -62,12 +62,13 @@ Allocation measurements expose work that timing alone can obscure:
 | tidwall | zstd | 124 | 573,816 | 2,352 |
 | tidwall | zstd | 992 | 4,817,773 | 3,536 |
 
-In the segmented implementation, `CatalogStore.publish` calls
-`verifyCatalogFiles` on the complete referenced layout. Each sealed file is
+In the recorded baseline, `CatalogStore.publish` called
+`verifyCatalogFiles` on the complete referenced layout. Publication now reuses
+verification of exact unchanged immutable references. Each sealed file is
 hashed, its frames verified, and the file synced. The current verifier shares one
 read of each stored payload block between hashing and frame validation; the
 recorded baseline used separate payload passes. Reopen also verifies all
-referenced history. This work grows with stored history even when rotation adds
+referenced history. That baseline work grew with stored history even when rotation added
 only one segment. The current catalog also represents the complete layout.
 
 Sparse segment reads use block indexes and do not perform full-history catalog
@@ -79,8 +80,8 @@ tests establish behavior at hundreds of TB or a PB.
 
 After combining digest and frame verification, a counting-reader test checks that
 each stored payload byte is requested exactly once, while all file bytes remain
-covered by verification. This removes one payload pass; it does not remove
-full-history verification, metadata rereads, or file syncs.
+covered by verification. That change removed one payload pass; it did not remove full-history
+verification, metadata rereads, or file syncs.
 
 A separate three-iteration local rerun of segmented reopen/append cases completed
 without concurrent test processes. Append samples were about 40.9 ms (124/plain),

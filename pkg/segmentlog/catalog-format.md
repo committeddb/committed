@@ -80,9 +80,11 @@ is stable or adopted as a production storage contract yet.
 ## Publication protocol
 
 1. Validate the candidate layout and expected revision.
-2. Check each referenced segment's coverage/count, whole-file SHA-256, and decoded
-   record integrity; scan any active tail. Sync referenced files, then directory
-   entries. Caller-prepared data files must remain immutable during this step.
+2. Check new or changed segment references for coverage/count, whole-file SHA-256,
+   and decoded record integrity, then sync those files. Exact unchanged references
+   reuse verification and durability from the last confirmed catalog. Always scan
+   and sync the active tail, then sync directory entries. Published sealed files
+   must remain immutable for their entire lifetime under exclusive ownership.
 3. Install and sync the immutable catalog. A failed prior attempt's identical
    content-addressed catalog may be verified and reused.
 4. Replace CURRENT atomically and sync its directory. Initialization installs it
@@ -102,9 +104,17 @@ and after replacement becomes visible. These check the state machine; they do
 not simulate every possible filesystem power-loss result. Lower-level tests cover
 individual write/link/rename/sync boundaries.
 
+Publication reuse compares the complete SegmentRef, including coverage, filename,
+count, and digest. It never trusts a filename alone or a failed candidate. Initial
+creation verifies every reference, and reopening rebuilds trust by verifying the
+whole layout. Publication no longer detects newly occurring damage in an unchanged
+sealed file; reads, full recovery, rewrite preflight, and reclamation retain their
+integrity checks. The catalog itself is still validated and serialized in full.
+
 ## Current limitations
 
-- Startup and publication read full referenced segment contents. SHA-256 and
+- Startup reads all referenced segment contents; publication reads only new or
+  changed sealed references and the active tail. SHA-256 and
   block/frame verification share one read of each stored payload block. Header,
   index, and footer metadata are read for structural validation and again for
   the whole-file digest. Startup work still grows with stored payload bytes.

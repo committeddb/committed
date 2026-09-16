@@ -60,8 +60,8 @@ resident memory or simultaneous retained data.
 
 The selective rewrite reduced scrub time and obsolete-file volume in this run.
 The segmented boundary append was substantially slower than tidwall's append.
-Segmented catalog publication verifies the complete referenced history, so
-rotation work grows with history even though it adds one segment. Recovery and
+The recorded baseline verified the complete referenced history on publication,
+so rotation work grew with history even though it added one segment. Recovery and
 reclamation also verify history. This experiment does not isolate verification,
 codec, allocation, or sync costs from one another.
 
@@ -77,3 +77,25 @@ go test ./internal/cluster/db/eventlog -run '^$' -bench '^BenchmarkEventLogScale
 
 Use a fixed iteration count: every iteration creates and validates an independent
 on-disk history, so wall time exceeds the reported timed lifecycle.
+
+## Incremental publication follow-up
+
+After publication began reusing verification of exact unchanged immutable
+references, a separate single-iteration run measured these boundary appends:
+
+| Encoding | Batches | Baseline append (ms) | Follow-up append (ms) |
+| --- | ---: | ---: | ---: |
+| Plain | 8 | 55.77 | 41.18 |
+| Plain | 64 | 96.77 | 42.07 |
+| Zstd | 8 | 58.51 | 43.21 |
+| Zstd | 64 | 87.00 | 46.00 |
+
+The established structural improvement is that unchanged sealed payloads are no
+longer read or synced during publication. Complete catalog metadata work remains.
+Recovery, rewrite preflight, and reclamation still verify the complete live layout.
+
+The remaining boundary cost includes four synchronous durable publications:
+sealed segment, new active tail, catalog, and CURRENT, followed by the new append.
+A separate local timing trace measured roughly 10 ms per publication. Sealing and
+these durability steps still block the caller. The follow-up does not establish
+acceptable production append latency or solve the remaining synchronous stall.
