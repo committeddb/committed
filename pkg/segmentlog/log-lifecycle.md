@@ -12,10 +12,19 @@ empty active tail, and publishes the initial catalog. Failed initialization can
 leave files for investigation. OpenLog follows CURRENT and validates referenced
 history. Incomplete tails remain errors and are never truncated automatically.
 
-The caller must enforce exclusive ownership across processes and instances.
-Methods serialize within a Log instance, but no process lock is implemented.
-Do not separately mutate its CatalogStore, tails, or files while the Log is open.
-Close releases the active file and does not force a new segment boundary.
+CreateLog and OpenLog acquire a nonblocking advisory lock on the directory inode
+before reading recovery state or publishing files. A competing process or instance
+receives ErrLocked. The lock covers path aliases of the same directory, creates
+no lock file, and is released by process termination. Failed creation/open releases
+it; a poisoned Log retains it until Close. Close releases the active file before
+ownership and does not force a new segment boundary.
+
+Methods also serialize within a Log instance. All other maintenance/writers must
+cooperate with this ownership protocol: the lock does not prevent direct writes
+by a non-cooperating process. Do not replace/rename away the managed directory or
+separately mutate its CatalogStore, tails, or files while the Log is open. Raw
+catalog/tail/file primitives do not acquire the lock themselves; a future offline
+maintenance API must acquire the same ownership before using them.
 
 ## Deterministic rotation
 
@@ -81,7 +90,7 @@ claims or production adoption; it is an integrity-first lifecycle prototype.
 
 Old tails, catalogs, sealed revisions, and crash orphans are retained. Rotation
 therefore temporarily increases disk usage. This implementation does not claim
-backup savings or physical erasure completion yet. Retirement, directory locking,
+backup savings or physical erasure completion yet. Retirement,
 background sealing, scrub coordination, backup capture, and database integration
 remain subsequent work.
 
@@ -94,3 +103,8 @@ recover acknowledged and unacknowledged durable prefixes; preserve incomplete
 tails; change encoding without touching existing files; and run concurrent reads
 with appends under the race detector. Fault injection tests protocol behavior,
 not every possible filesystem power-loss outcome.
+
+Ownership tests cover same-process and cross-process contention, symlink aliases,
+independent directories, failed opens, poisoned handles, idempotent close, and lock
+release after forced process termination. Directory locking is supported on local
+Linux/macOS filesystems; unsupported platforms fail explicitly.

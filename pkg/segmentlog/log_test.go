@@ -269,7 +269,7 @@ func TestLogEncodingChangePreservesExistingFiles(t *testing.T) {
 
 func TestLogCreationAndClose(t *testing.T) {
 	log := newLog(t, 40)
-	if _, err := CreateLog(log.path, 0, LogOptions{}); !errors.Is(err, ErrCatalogConflict) {
+	if _, err := CreateLog(log.path, 0, LogOptions{}); !errors.Is(err, ErrLocked) {
 		t.Fatal("reinitialized existing directory", err)
 	}
 	if _, err := log.Read(0); !errors.Is(err, ErrNotFound) {

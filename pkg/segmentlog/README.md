@@ -6,8 +6,8 @@ are sparse `uint64` values; payloads are opaque bytes.
 
 **Current scope: an experimental synchronous append/read/rotate lifecycle,
 immutable segments, selective replacement preparation, and atomic local catalogs.**
-Background sealing, integrated scrubbing, and physical retirement remain pending. Neither the API nor the file format
-is stable. This package is not connected to the running database.
+Background sealing, integrated scrubbing, and physical retirement remain pending.
+Neither the API nor the file format is stable. This package is not connected to the running database.
 
 ## Boundaries
 
@@ -131,7 +131,9 @@ discarding them is safe. See [the tail format and recovery contract](tail-format
 `CreateLog` and `OpenLog` connect the tail, segments, and catalog. `Append` syncs
 before success and rotates by a persisted original-frame byte target; `Read` and
 `Seek` span sealed ranges and the active tail. Batch boundaries and restarts do
-not alter sealed ranges. Sealing currently blocks other operations and old files
+not alter sealed ranges. A nonblocking directory lock enforces exclusive managed
+log ownership until Close, including across processes. Sealing currently blocks
+other operations and old files
 remain on disk. See [the lifecycle contract and limitations](log-lifecycle.md).
 
 ## Local catalogs
@@ -149,7 +151,7 @@ directory ownership. See [the catalog format and publication contract](catalog-f
    against the tidwall baseline before selecting production policy.
 2. Recovery coordination: directory orphans, external durability bounds, and the
    proof required before discarding any incomplete suffix.
-3. Add directory ownership enforcement, concurrent rewriting, captured views, and
+3. Add concurrent rewriting, captured views, and
    resumable retirement; move sealing off the append path and bound verification work.
 4. Committed adapter and offline opt-in conversion, then compatibility, peer,
    backup, and baseline performance experiments.

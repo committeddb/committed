@@ -67,3 +67,18 @@ directory sync; they check ordering, no-clobber behavior, partial cleanup, combi
 failures, and uncertainty after publication. An integration test installs and
 reads a real encoded segment. These are protocol and local-filesystem tests, not
 power-loss proof. Filesystem crash testing remains an adoption requirement.
+
+## Directory ownership
+
+`Lock(path)` takes a nonblocking advisory exclusive lock on the directory inode
+using flock on Linux/macOS. It creates no lock file and returns ErrLocked on
+contention. `DirectoryLock.Close` releases it, is idempotent, and does not retry a
+failed descriptor close. The descriptor is close-on-exec; process termination also
+releases ownership. Path aliases of the same inode share the lock.
+
+The managed Log acquires ownership before recovery/publication and holds it until
+Close, even when poisoned. Failed create/open releases ownership. Dir publication
+primitives do not automatically acquire it, allowing a single owner to coordinate
+multiple operations. Raw catalog/tail users and maintenance tools must cooperate
+with the same lock. Directory replacement and non-cooperating filesystem mutation
+remain outside this advisory protocol. Unsupported platforms reject acquisition.

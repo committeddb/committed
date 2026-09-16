@@ -17,6 +17,7 @@ import (
 )
 
 var (
+	ErrLocked      = durablefs.ErrLocked
 	ErrLogPoisoned = errors.New("segmentlog: log requires recovery after I/O failure")
 	ErrClosed      = errors.New("segmentlog: log is closed")
 )
@@ -35,9 +36,10 @@ type fileInstaller interface {
 }
 
 // Log integrates a catalog, one active tail, and synchronous segment sealing.
-// The caller must exclusively own a durably created directory across processes
-// and instances. Methods serialize; this prototype blocks reads/appends while
-// sealing. It has no process lock, scrub coordinator, or physical retirement yet.
+// It holds an advisory directory lock across processes and instances until Close.
+// Methods serialize; this prototype blocks reads/appends while sealing. The caller
+// must not replace the directory or bypass ownership with lower-level writers.
+// A scrub coordinator and physical retirement remain pending.
 type Log struct {
 	mu       sync.Mutex
 	path     string
@@ -49,6 +51,7 @@ type Log struct {
 	encoding Options
 	poison   error
 	closed   bool
+	lock     *durablefs.DirectoryLock
 }
 
 func checkLogEncoding(target uint64, encoding Options) error {
@@ -70,7 +73,7 @@ func checkLogEncoding(target uint64, encoding Options) error {
 // CreateLog initializes an empty, existing directory. The directory and its
 // parents must already be durable. Failed initialization can leave artifacts;
 // it never deletes existing files or silently reinitializes them.
-func CreateLog(path string, start uint64, opts LogOptions) (*Log, error) {
+func CreateLog(path string, start uint64, opts LogOptions) (result *Log, retErr error) {
 	target := opts.SegmentBytes
 	if target == 0 {
 		target = 20 << 20
@@ -85,6 +88,15 @@ func CreateLog(path string, start uint64, opts LogOptions) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
+	lock, err := durablefs.Lock(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if result == nil {
+			retErr = errors.Join(retErr, lock.Close())
+		}
+	}()
 	dir, err := durablefs.Open(path)
 	if err != nil {
 		return nil, err
@@ -112,18 +124,31 @@ func CreateLog(path string, start uint64, opts LogOptions) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	return attachLog(path, dir, store, opts.Encoding)
+	result, retErr = attachLog(path, dir, store, opts.Encoding)
+	if result != nil {
+		result.lock = lock
+	}
+	return result, retErr
 }
 
 // OpenLog follows CURRENT and verifies all referenced history. It refuses
 // incomplete tails without truncation. It ignores unreferenced artifacts and
 // leaves them for future retirement/recovery policy. Encoding affects future
 // sealing only. Catalogs without a managed rotation target are not adopted.
-func OpenLog(path string, encoding Options) (*Log, error) {
+func OpenLog(path string, encoding Options) (result *Log, retErr error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
+	lock, err := durablefs.Lock(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if result == nil {
+			retErr = errors.Join(retErr, lock.Close())
+		}
+	}()
 	dir, err := durablefs.Open(path)
 	if err != nil {
 		return nil, err
@@ -132,7 +157,11 @@ func OpenLog(path string, encoding Options) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	return attachLog(path, dir, store, encoding)
+	result, retErr = attachLog(path, dir, store, encoding)
+	if result != nil {
+		result.lock = lock
+	}
+	return result, retErr
 }
 
 func attachLog(path string, dir *durablefs.Dir, store *CatalogStore, encoding Options) (*Log, error) {
@@ -392,7 +421,8 @@ func (l *Log) Read(id uint64) (Record, error) {
 	return r, err
 }
 
-// Close releases the active file without forcing a new sealed boundary. Every
+// Close releases the active file and then directory ownership without forcing
+// a new sealed boundary. Every
 // successfully appended group was already synced. Close is idempotent.
 func (l *Log) Close() error {
 	l.mu.Lock()
@@ -401,5 +431,5 @@ func (l *Log) Close() error {
 		return nil
 	}
 	l.closed = true
-	return l.file.Close()
+	return errors.Join(l.file.Close(), l.lock.Close())
 }
