@@ -148,6 +148,11 @@ ownership until Close, including across processes. Sealing currently blocks
 other operations; old files remain until explicit reclamation. See [the
 lifecycle contract and limitations](log-lifecycle.md).
 
+Managed sealed-file reads check coverage and record count against the catalog
+before looking up or delivering records. A mismatch returns `ErrCorrupt`, including
+an unexpectedly empty file. These metadata checks complement selected-block
+validation; individual reads do not recompute the whole-file digest.
+
 ## Streaming scans
 
 `Log.Scan(ctx, bounds, visit)` reads surviving records in a half-open ID interval

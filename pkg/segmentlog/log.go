@@ -384,6 +384,9 @@ func (l *Log) Seek(id uint64) (Record, error) {
 			if err != nil {
 				return Record{}, err
 			}
+			if s.Coverage() != ref.Coverage || s.Count() != ref.Count {
+				return Record{}, ErrCorrupt
+			}
 			return s.Seek(id)
 		}()
 		closeErr := f.Close()
