@@ -84,9 +84,10 @@ installation and atomic pointer replacement, including explicit uncertainty afte
 a failed publication sync. A single-file active-tail appender and non-mutating
 scanner now validate bounded groups and poison handles after I/O failures.
 Incomplete suffixes are reported but never automatically discarded. Atomic local catalogs now validate references and publish through CURRENT; their
-initial verifier scans full payloads and retains old revisions. Lifecycle/recovery
-coordination, bounded-metadata startup, rotation, complete log durability, and
-Committed integration remain subsequent slices.
+initial verifier scans full payloads and retains old revisions. A synchronous
+managed log now connects append, sparse reads, deterministic rotation, and catalog
+publication. Directory locking, recovery/retirement coordination, background
+sealing, bounded-metadata startup, and Committed integration remain subsequent slices.
 
 ### Committed record identity
 

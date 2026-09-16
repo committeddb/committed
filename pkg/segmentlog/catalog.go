@@ -46,9 +46,11 @@ type Catalog struct {
 	History    [16]byte
 	Revision   uint64
 	Generation uint64
-	Start      uint64
-	Segments   []SegmentRef
-	Active     *TailRef
+	// SegmentBytes persists the managed log rotation target; zero denotes a standalone catalog.
+	SegmentBytes uint64 `json:",omitempty"`
+	Start        uint64
+	Segments     []SegmentRef
+	Active       *TailRef
 }
 
 func validDataName(name, suffix string) bool {
@@ -56,7 +58,7 @@ func validDataName(name, suffix string) bool {
 }
 
 func validateCatalog(c Catalog) error {
-	if c.History == ([16]byte{}) || c.Revision == 0 || c.Start == ^uint64(0) || len(c.Segments) > format.MaxBlocks {
+	if c.History == ([16]byte{}) || c.Revision == 0 || c.Start == ^uint64(0) || len(c.Segments) > format.MaxBlocks || c.SegmentBytes > maxGroupBytes || (c.SegmentBytes > 0 && c.SegmentBytes < format.FrameOverhead) {
 		return ErrInvalid
 	}
 	next := c.Start
@@ -313,7 +315,7 @@ func (s *CatalogStore) Publish(expected uint64, next Catalog) error {
 	if expected != s.current.Revision {
 		return ErrCatalogConflict
 	}
-	if expected == ^uint64(0) || next.Revision != expected+1 || next.History != s.current.History || next.Start != s.current.Start || next.Generation < s.current.Generation || catalogEnd(next) < catalogEnd(s.current) {
+	if expected == ^uint64(0) || next.Revision != expected+1 || next.History != s.current.History || next.Start != s.current.Start || next.SegmentBytes != s.current.SegmentBytes || next.Generation < s.current.Generation || catalogEnd(next) < catalogEnd(s.current) {
 		return ErrInvalid
 	}
 	return s.publish(next, false)

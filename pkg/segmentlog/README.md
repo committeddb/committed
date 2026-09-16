@@ -4,9 +4,9 @@ An ordered segmented log being developed within the Committed repository and Go
 module. It has no dependencies on Committed's application packages. Record IDs
 are sparse `uint64` values; payloads are opaque bytes.
 
-**Current scope: immutable segments, selective replacement preparation, and a
-synchronized single-file active tail, and atomic local catalogs.** There is no
-complete integrated log lifecycle yet. Neither the API nor the file format
+**Current scope: an experimental synchronous append/read/rotate lifecycle,
+immutable segments, selective replacement preparation, and atomic local catalogs.**
+Background sealing, integrated scrubbing, and physical retirement remain pending. Neither the API nor the file format
 is stable. This package is not connected to the running database.
 
 ## Boundaries
@@ -14,7 +14,7 @@ is stable. This package is not connected to the running database.
 | Layer | Responsibility | Status |
 | --- | --- | --- |
 | Committed adapter (`internal/cluster/db/`) | Raft entry serialization, visibility, scrub policy, metadata reconciliation, backup/peer protocols | Future integration |
-| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Catalog publication implemented; lifecycle integration pending |
+| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Synchronous append/read/rotation implemented; scrub and retirement pending |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement, active append groups | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
 | Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
@@ -126,6 +126,14 @@ handles after I/O failure. Reopening recovers and syncs complete groups. The
 scanner reports incomplete suffixes without truncating; it cannot prove that
 discarding them is safe. See [the tail format and recovery contract](tail-format.md).
 
+## Managed log
+
+`CreateLog` and `OpenLog` connect the tail, segments, and catalog. `Append` syncs
+before success and rotates by a persisted original-frame byte target; `Read` and
+`Seek` span sealed ranges and the active tail. Batch boundaries and restarts do
+not alter sealed ranges. Sealing currently blocks other operations and old files
+remain on disk. See [the lifecycle contract and limitations](log-lifecycle.md).
+
 ## Local catalogs
 
 `CatalogStore` now validates and atomically publishes a complete file layout via
@@ -141,8 +149,8 @@ directory ownership. See [the catalog format and publication contract](catalog-f
    against the tidwall baseline before selecting production policy.
 2. Recovery coordination: directory orphans, external durability bounds, and the
    proof required before discarding any incomplete suffix.
-3. Integrate catalogs with rotation, concurrent rewriting, captured views, and
-   resumable physical retirement; optimize normal-open verification work.
+3. Add directory ownership enforcement, concurrent rewriting, captured views, and
+   resumable retirement; move sealing off the append path and bound verification work.
 4. Committed adapter and offline opt-in conversion, then compatibility, peer,
    backup, and baseline performance experiments.
 

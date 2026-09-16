@@ -9,7 +9,9 @@ yet coordinate readers, rotation, scrub policy, or physical file retirement.
 
 `Catalog` records a caller-provided nonzero 16-byte History identity, local
 Revision, logical Generation, starting record ID, ordered SegmentRefs, and an
-optional TailRef. Revision begins at 1. Publication requires an expected revision
+optional TailRef. An optional SegmentBytes field persists the managed log rotation
+target; zero omits it for standalone catalogs. Once published, it cannot change.
+Revision begins at 1. Publication requires an expected revision
 and exactly its successor; History and Start cannot change, Generation cannot
 regress, and sealed coverage cannot shrink. A physical seal can advance Revision
 without changing Generation; a logical scrub advances Generation separately.
