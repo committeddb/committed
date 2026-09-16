@@ -101,6 +101,10 @@ tail. A later group containing an ID at or below the original Last is
 corrupt even if its checksums and physical record ordering are valid. Reads can
 stop after finding their result; they do not verify unvisited later groups.
 
+Managed reads and catalog verification compare the tail header's starting ID
+with the catalog before reading any groups. A mismatch is corruption, including
+for an empty tail. Standalone tail scans have no catalog ownership to check.
+
 `TailState.Count` counts survivors; `OriginalCount` and `Framed` count original
 input. On managed handles, Last and HasRecords retain append progress even when
 Count is zero. Standalone `ScanTail`/`OpenTail` do not read catalog metadata and

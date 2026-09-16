@@ -451,12 +451,9 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 			return err
 		}
 		defer func() { retErr = errors.Join(retErr, f.Close()) }()
-		state, err := scanTail(f, info.Size(), c.Active.Checkpoint, nil)
+		_, err = scanManagedTail(f, info.Size(), *c.Active, nil)
 		if err != nil {
 			return err
-		}
-		if state.Start != c.Active.Start {
-			return ErrCorrupt
 		}
 		return f.Sync()
 	}

@@ -70,7 +70,7 @@ func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) erro
 		return err
 	}
 	reachedEnd := false
-	_, err = scanTail(l.file, state.End, c.Active.Checkpoint, func(r Record) error {
+	_, err = scanManagedTail(l.file, state.End, *c.Active, func(r Record) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

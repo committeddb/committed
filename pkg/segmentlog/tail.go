@@ -61,7 +61,16 @@ func ScanTail(r io.ReaderAt, size int64, visit func(Record) error) (state TailSt
 	return scanTail(r, size, nil, visit)
 }
 
-func scanTail(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, visit func(Record) error) (state TailState, err error) {
+func scanTail(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, visit func(Record) error) (TailState, error) {
+	return scanTailChecked(r, size, checkpoint, nil, visit)
+}
+
+// scanManagedTail checks catalog ownership before any group can be delivered.
+func scanManagedTail(r io.ReaderAt, size int64, ref TailRef, visit func(Record) error) (TailState, error) {
+	return scanTailChecked(r, size, ref.Checkpoint, &ref.Start, visit)
+}
+
+func scanTailChecked(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start *uint64, visit func(Record) error) (state TailState, err error) {
 	if size < tailHeaderSize {
 		return state, ErrCorrupt
 	}
@@ -77,7 +86,7 @@ func scanTail(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, visit func(
 	}
 	state.Start = format.LE.Uint64(h[12:])
 	state.End = tailHeaderSize
-	if state.Start == ^uint64(0) {
+	if state.Start == ^uint64(0) || (start != nil && state.Start != *start) {
 		return state, ErrCorrupt
 	}
 	if checkpoint != nil && (!checkpoint.valid(state.Start) || checkpoint.End > size) {
