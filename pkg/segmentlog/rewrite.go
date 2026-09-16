@@ -21,12 +21,28 @@ type Transform func(Record) (payload []byte, keep bool, err error)
 // changed reports that a semantic change was found, even if output fails. On any
 // error the caller must discard partial output. The caller owns the output's
 // close, sync, validation, publication, and eventual retirement of the source.
-// Rewrite never changes or deletes the source. A fully erased segment currently
-// produces an empty segment; the future catalog can instead store an empty range.
+// Rewrite never changes or deletes the source. A fully erased segment
+// produces an empty segment; Log.RewriteSealed instead stores an empty range.
 func (s *Segment) Rewrite(ctx context.Context, create func() (io.Writer, error), transform Transform, opts Options) (changed bool, err error) {
 	if ctx == nil || create == nil || transform == nil {
 		return false, ErrInvalid
 	}
+	return s.prepareRewrite(ctx, transform, func(records iter.Seq2[Record, error]) error {
+		w, err := create()
+		if err != nil {
+			return err
+		}
+		if w == nil {
+			return ErrInvalid
+		}
+		return WriteSegment(w, s.coverage, records, opts)
+	})
+}
+
+// prepareRewrite invokes emit only after a change is found. Keeping output
+// creation behind this boundary lets a managed transaction durably install a
+// replacement without buffering or copying an entire segment through a spool.
+func (s *Segment) prepareRewrite(ctx context.Context, transform Transform, emit func(iter.Seq2[Record, error]) error) (bool, error) {
 	next, stop := iter.Pull2(s.Records())
 	defer stop()
 	apply := func(rec Record) (Record, bool, bool, error) {
@@ -61,13 +77,6 @@ func (s *Segment) Rewrite(ctx context.Context, create func() (io.Writer, error),
 		}
 		if !differs {
 			continue
-		}
-		w, err := create()
-		if err != nil {
-			return true, err
-		}
-		if w == nil {
-			return true, ErrInvalid
 		}
 		records := func(yield func(Record, error) bool) {
 			for prefix, err := range s.Records() {
@@ -112,6 +121,6 @@ func (s *Segment) Rewrite(ctx context.Context, create func() (io.Writer, error),
 				}
 			}
 		}
-		return true, WriteSegment(w, s.coverage, records, opts)
+		return true, emit(records)
 	}
 }

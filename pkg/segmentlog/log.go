@@ -39,7 +39,8 @@ type fileInstaller interface {
 // It holds an advisory directory lock across processes and instances until Close.
 // Methods serialize; this prototype blocks reads/appends while sealing. The caller
 // must not replace the directory or bypass ownership with lower-level writers.
-// Reclaim explicitly cleans obsolete managed files. A scrub coordinator and
+// RewriteSealed publishes sealed-only transformations; Reclaim cleans obsolete
+// managed files. Active-tail scrubbing and
 // retirement for future pinned views remain pending.
 type Log struct {
 	mu       sync.Mutex

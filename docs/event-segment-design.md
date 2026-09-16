@@ -77,7 +77,7 @@ retirement are distinct outcomes. Consistent captured views support backup and
 transfer without making either protocol part of the engine.
 
 The [initial package implementation](../pkg/segmentlog/README.md) covers sealed
-segments and replacement preparation only. Its experimental format 1 supports plain and zstd
+segments and managed sealed-range rewriting. Its experimental format 1 supports plain and zstd
 blocks, with backward reads of format 0. It is not the complete proposed format
 below. Internal file-publication primitives now implement synced immutable
 installation and atomic pointer replacement, including explicit uncertainty after
@@ -89,7 +89,9 @@ managed log now connects append, sparse reads, deterministic rotation, and catal
 publication. Managed logs now acquire an advisory directory lock before recovery
 and retain it through Close. Explicit reclamation verifies the confirmed live set
 and durably removes recognized obsolete artifacts, with reopen/retry after
-failures. Integrated scrubbing, retirement for pinned views, background sealing,
+failures. Sealed-range transformations now publish together in one catalog update,
+preserving unaffected files and representing erased ranges without payload files.
+Active-tail scrubbing, retirement for pinned views, background sealing,
 bounded-metadata startup, and Committed integration remain subsequent slices.
 
 ### Committed record identity
