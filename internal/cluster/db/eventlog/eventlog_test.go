@@ -20,6 +20,10 @@ type backend struct {
 }
 
 func backends() []backend {
+	return backendsWithSegmentBytes(128)
+}
+
+func backendsWithSegmentBytes(segmentBytes int) []backend {
 	result := make([]backend, 0, 4)
 	for _, compressed := range []bool{false, true} {
 		name := "plain"
@@ -29,11 +33,11 @@ func backends() []backend {
 			codec = segmentlog.ZstdDefault
 		}
 		result = append(result, backend{"segmented/" + name, func(path string) (eventlog.EventLog, error) {
-			return segmented.Create(path, 0, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: codec}})
+			return segmented.Create(path, 0, segmentlog.LogOptions{SegmentBytes: segmentBytes, Encoding: segmentlog.Options{Compression: codec}})
 		}, func(path string) (eventlog.EventLog, error) {
 			return segmented.Open(path, segmentlog.Options{Compression: codec})
 		}}, backend{"tidwall/" + name, func(path string) (eventlog.EventLog, error) {
-			return tidwall.Create(path, 0, tidwall.Options{SegmentBytes: 128, Compress: compressed})
+			return tidwall.Create(path, 0, tidwall.Options{SegmentBytes: segmentBytes, Compress: compressed})
 		}, func(path string) (eventlog.EventLog, error) { return tidwall.Open(path) }})
 	}
 	return result

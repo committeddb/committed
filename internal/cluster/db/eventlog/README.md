@@ -111,3 +111,11 @@ These are small correctness workloads, not throughput or backup-size benchmarks.
 go test -race ./internal/cluster/db/eventlog/... ./internal/durablefs/... ./pkg/segmentlog/...
 go test -race ./internal/cluster/db/wal -run '^(TestEventLogAdapter|TestEventLogCopy|TestSegment|TestScrub_)'
 ```
+
+## History benchmarks
+
+[Recorded history benchmarks](history-benchmarks.md) compare append, reopen, and
+middle-seek costs at two logical history sizes for both backends in plain/zstd
+modes. They report local timings and allocations with explicit fixture and cache
+limitations. Segmented rotation and reopen currently verify the full referenced
+history; these measurements do not establish production throughput.
