@@ -96,6 +96,11 @@ then reads later groups. Later IDs must exceed the original Last, including IDs
 of erased records. Later groups add their own counts and framed bytes. Truncation
 before the checkpoint or a checkpoint inside a group is corruption.
 
+Managed `Seek`, `Read`, and `Scan` also apply this checkpoint when reading the
+tail. A later group containing an ID at or below the original Last is
+corrupt even if its checksums and physical record ordering are valid. Reads can
+stop after finding their result; they do not verify unvisited later groups.
+
 `TailState.Count` counts survivors; `OriginalCount` and `Framed` count original
 input. On managed handles, Last and HasRecords retain append progress even when
 Count is zero. Standalone `ScanTail`/`OpenTail` do not read catalog metadata and

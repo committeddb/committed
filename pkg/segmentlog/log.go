@@ -403,7 +403,7 @@ func (l *Log) Seek(id uint64) (Record, error) {
 		return Record{}, err
 	}
 	var result Record
-	_, err = ScanTail(l.file, state.End, func(r Record) error {
+	_, err = scanTail(l.file, state.End, c.Active.Checkpoint, func(r Record) error {
 		if r.ID >= id {
 			result = r
 			return errStopScan
