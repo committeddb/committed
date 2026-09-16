@@ -66,6 +66,33 @@ Wiring that lifecycle to this boundary and implementing explicit legacy conversi
 are subsequent work. This refactor does not enable a backend setting or activate
 an experimental format at startup. Raft's own logs are outside this contract.
 
+### Legacy copy experiment
+
+`wal.Storage.copyEventLog` provides the first conversion primitive: copy an opened
+production-layout permanent log into a privately owned, fresh EventLog. The
+application layer verifies legacy checksums, protobuf indexes, strict ordering,
+and agreement with the source's original append frontier. It preserves exact
+protobuf bytes (including unknown fields) while the selected backend supplies its
+own framing. Physical tidwall sequences never become destination record IDs.
+
+The copy takes the source's exclusive event lock for its entire duration; appends
+and directory swaps wait. Callers must exclude Storage.Close. Memory retained in
+the copy batches is bounded to 256 records / 1 MiB of payload, with a larger
+individual record sent alone; backend read/decompression caches are additional.
+Cancellation is observed between operations, not during lock waits or fsync.
+
+Any error invalidates the entire destination, even if some batches are durable.
+The helper rejects destinations with previous append history, including completely
+erased logs, and does not resume partial copies. Only a successful return signals
+completion to the caller; reopening a destination alone is not a completion
+certificate. Tests cover both source compression modes and both destination
+backends/codecs, reopen and committed replay, corrupt history, head mismatches,
+batch limits, cancellation, and append failure after a durable prefix.
+
+This internal experiment has no CLI or startup activation. An actual migration
+still needs a durable completion/publication protocol, data-directory version
+gates, and coordination with BoltDB, Raft state, backup, and peer recovery.
+
 ## Validation
 
 Shared conformance tests cover both backends in plain/zstd modes: strict batches,
@@ -78,5 +105,5 @@ application's incomplete-tail recovery proof remain adoption requirements.
 
 ```sh
 go test -race ./internal/cluster/db/eventlog/... ./internal/durablefs/... ./pkg/segmentlog/...
-go test -race ./internal/cluster/db/wal -run '^(TestEventLogAdapter|TestSegment|TestScrub_)'
+go test -race ./internal/cluster/db/wal -run '^(TestEventLogAdapter|TestEventLogCopy|TestSegment|TestScrub_)'
 ```

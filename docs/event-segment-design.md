@@ -472,3 +472,10 @@ production directories. Production Storage and its backup/peer/migration protoco
 remain on the existing path. The generic durable filesystem primitives moved to
 `internal/durablefs` so both engines share their tested publication/ownership
 implementation without importing one another's internals.
+
+The internal `Storage.copyEventLog` experiment now copies a stable legacy event
+log into either backend in bounded batches, validating checksums, stable indexes,
+and the source append frontier while preserving original protobuf bytes. Shared
+tests reopen the destination and continue committed replay. This is the data-copy
+primitive only: failed destinations must be discarded, and durable conversion
+completion, activation/version gates, and cross-store recovery remain pending.
