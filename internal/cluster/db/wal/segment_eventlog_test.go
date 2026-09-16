@@ -25,7 +25,7 @@ func newSegmentEventExperiment(t *testing.T) (*segmentEventLog, string) {
 	return &segmentEventLog{log: log}, path
 }
 
-func experimentEntry(t *testing.T, index uint64, kind pb.EntryType, entities ...*clusterpb.LogEntity) []byte {
+func experimentEntry(t testing.TB, index uint64, kind pb.EntryType, entities ...*clusterpb.LogEntity) []byte {
 	t.Helper()
 	var data []byte
 	if len(entities) > 0 {

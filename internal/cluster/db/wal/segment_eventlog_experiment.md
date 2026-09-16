@@ -156,3 +156,11 @@ Run the focused checks with:
 ```sh
 go test -race ./internal/cluster/db/wal -run '^TestSegment'
 ```
+
+## Rewrite churn measurements
+
+The [initial filesystem experiment](segment_churn_experiment.md) compares
+completed payload sizes, retained files, and new content hashes for identical
+no-op, isolated, and scattered scrubs in plain and zstd storage. Survivor bytes
+are verified against the tidwall rewrite. These are synthetic size/churn results,
+not production performance or backup-cost projections.

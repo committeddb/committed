@@ -170,6 +170,13 @@ files, and durably removes recognized obsolete artifacts. It preserves unknown
 files, directories, and symlinks. Errors can report partial progress; filesystem
 failures require reopening before retry. See [the cleanup contract](reclamation.md).
 
+## Rewrite churn experiment
+
+A [Committed-record comparison](../../internal/cluster/db/wal/segment_churn_experiment.md)
+now measures completed-file churn and checks scrub equivalence against tidwall.
+It separates local file replacement from new content hashes and compares plain
+and zstd workloads. The synthetic results do not establish production backup costs.
+
 ## Next slices
 
 1. Extend compression experiments with representative event payloads and compare
