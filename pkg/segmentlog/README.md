@@ -177,6 +177,7 @@ CURRENT. It represents empty ranges without files, separates physical revision
 from logical scrub generation, and stops publication after I/O failure. Recovery
 selects only CURRENT and rejects missing/corrupt references. It scans full file
 contents, sharing each stored payload block between digest and frame verification.
+Verification validates frames without collecting per-record result slices.
 It retains old revisions and requires exclusive caller-managed directory ownership. See [the catalog format and publication contract](catalog-format.md).
 
 ## Reclamation
@@ -215,3 +216,9 @@ hash preservation, cancellation, output failures, and concurrent reads.
 Compression tests also cover mixed codecs, deterministic output, sparse block-local
 seeks, compressed partial rewrites, maximum-size records, decoded-size mismatches,
 malformed streams, concatenated-frame output bounds, and format-0 compatibility.
+
+## Verification allocations
+
+[Verification measurements](verification-benchmarks.md) isolate sealed-file
+verification from filesystem sync and catalog publication. The verifier and read
+path share block/frame validation; only reads collect records for their callers.

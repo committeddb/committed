@@ -71,7 +71,7 @@ func (s *Segment) Count() uint64      { return s.count }
 
 // WriteSegment writes a complete experimental segment. It never syncs, closes,
 // or publishes w. On error, discard the incomplete output. Empty segments are
-// supported here; a future log catalog will represent empty ranges without files.
+// supported here; managed catalogs represent empty ranges without files.
 func WriteSegment(w io.Writer, coverage Coverage, records iter.Seq2[Record, error], opts Options) error {
 	if coverage.Start >= coverage.End || records == nil {
 		return ErrInvalid
@@ -279,30 +279,45 @@ func (s *Segment) readBlock(b block) ([]Record, error) {
 }
 
 func decodeBlock(b block, data []byte) ([]Record, error) {
-	if format.CRC(data) != b.crc {
-		return nil, ErrCorrupt
-	}
-	data, err := format.Decode(b.codec, data, b.decoded)
+	var records []Record
+	err := walkBlock(b, data, func(r Record) { records = append(records, r) })
 	if err != nil {
 		return nil, err
 	}
-	var records []Record
+	return records, nil
+}
+
+// walkBlock validates the same stored bytes, decoded frames, and index bounds
+// for reads and verification. A nil visitor avoids retaining record descriptors.
+// Visitors are internal: no records escape a public read until validation passes.
+func walkBlock(b block, data []byte, visit func(Record)) error {
+	if format.CRC(data) != b.crc {
+		return ErrCorrupt
+	}
+	data, err := format.Decode(b.codec, data, b.decoded)
+	if err != nil {
+		return err
+	}
+	var count uint32
 	var previous uint64
 	for len(data) > 0 {
 		id, payload, rest, err := format.Frame(data)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if id < b.first || id > b.last || (len(records) > 0 && id <= previous) {
-			return nil, ErrCorrupt
+		if count >= b.count || id < b.first || id > b.last || (count == 0 && id != b.first) || (count > 0 && id <= previous) {
+			return ErrCorrupt
 		}
-		records = append(records, Record{id, payload})
+		if visit != nil {
+			visit(Record{id, payload})
+		}
+		count++
 		previous, data = id, rest
 	}
-	if len(records) != int(b.count) || records[0].ID != b.first || records[len(records)-1].ID != b.last {
-		return nil, ErrCorrupt
+	if count != b.count || count == 0 || previous != b.last {
+		return ErrCorrupt
 	}
-	return records, nil
+	return nil
 }
 
 // Seek returns the first surviving record with ID >= id, or ErrNotFound.
@@ -365,8 +380,12 @@ func (s *Segment) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 
 // Verify validates every frame, including data outside a particular seek.
 func (s *Segment) Verify() error {
-	for _, err := range s.Records() {
-		if err != nil {
+	for _, b := range s.blocks {
+		stored := make([]byte, int(b.size))
+		if _, err := s.r.ReadAt(stored, int64(b.offset)); err != nil {
+			return err
+		}
+		if err := walkBlock(b, stored, nil); err != nil {
 			return err
 		}
 	}

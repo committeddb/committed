@@ -33,7 +33,7 @@ func verifySegmentDigest(r io.ReaderAt, size int64, ref SegmentRef) error {
 			return err
 		}
 		_, _ = digest.Write(stored)
-		if _, err := decodeBlock(block, stored); err != nil {
+		if err := walkBlock(block, stored, nil); err != nil {
 			return err
 		}
 		offset += int64(block.size)
