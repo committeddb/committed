@@ -23,7 +23,7 @@ type DirectoryLock struct {
 // stale PID file or explicit force-unlock operation is needed. This is advisory:
 // it does not prevent direct filesystem access by a non-cooperating writer.
 func Lock(path string) (*DirectoryLock, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 G703 -- Caller selects the storage directory; locking accepts arbitrary directory paths.
 	if err != nil {
 		return nil, err
 	}

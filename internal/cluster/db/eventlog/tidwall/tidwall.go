@@ -174,7 +174,7 @@ func readManifest(path string) (manifest, error) {
 	if !info.Mode().IsRegular() {
 		return m, eventlog.ErrCorrupt
 	}
-	f, e := os.Open(filepath.Join(path, "CURRENT"))
+	f, e := os.Open(filepath.Join(path, "CURRENT")) // #nosec G304 -- Fixed manifest name in the caller-selected, exclusively managed log directory.
 	if e != nil {
 		return m, e
 	}
@@ -258,7 +258,7 @@ func Open(path string) (result *Log, err error) {
 	if e = l.syncData(l.data, m.Directory); e != nil {
 		return nil, e
 	}
-	f, e := os.Open(filepath.Join(path, "CURRENT"))
+	f, e := os.Open(filepath.Join(path, "CURRENT")) // #nosec G304 -- Fixed manifest name in the caller-selected, exclusively managed log directory.
 	if e != nil {
 		return nil, e
 	}
@@ -347,7 +347,7 @@ func (l *Log) syncData(log *wal.Log, name string) error {
 		return e
 	}
 	for _, entry := range entries {
-		f, e := os.Open(filepath.Join(path, entry.Name()))
+		f, e := os.Open(filepath.Join(path, entry.Name())) // #nosec G304 -- Entry names come from ReadDir of the exclusively managed generation directory.
 		if e != nil {
 			return e
 		}

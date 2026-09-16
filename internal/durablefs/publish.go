@@ -52,7 +52,7 @@ func (local) link(a, b string) error              { return os.Link(a, b) }
 func (local) rename(a, b string) error            { return os.Rename(a, b) }
 func (local) remove(path string) error            { return os.Remove(path) }
 func (local) syncDir(path string) error {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- Syncs the caller-selected storage directory validated by Open.
 	if err != nil {
 		return err
 	}

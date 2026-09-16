@@ -75,10 +75,14 @@ func (l *Log) Reclaim(ctx context.Context) (result eventlog.ReclaimResult, err e
 			if e != nil {
 				return result, l.fail(e)
 			}
+			size := info.Size()
+			if size < 0 {
+				return result, l.fail(eventlog.ErrCorrupt)
+			}
 			removed, e := l.dir.Remove(name)
 			if removed {
 				result.RemovedFiles++
-				result.RemovedBytes += uint64(info.Size())
+				result.RemovedBytes += uint64(size)
 			}
 			if e != nil {
 				return result, l.fail(e)
@@ -110,10 +114,14 @@ func (l *Log) Reclaim(ctx context.Context) (result eventlog.ReclaimResult, err e
 			if e != nil {
 				return result, l.fail(e)
 			}
+			size := info.Size()
+			if size < 0 {
+				return result, l.fail(eventlog.ErrCorrupt)
+			}
 			removed, e := dir.Remove(f.Name())
 			if removed {
 				result.RemovedFiles++
-				result.RemovedBytes += uint64(info.Size())
+				result.RemovedBytes += uint64(size)
 			}
 			if e != nil {
 				return result, l.fail(e)
