@@ -229,3 +229,10 @@ path share block/frame validation; only reads collect records for their callers.
 [Lookup measurements](seek-benchmarks.md) compare allocations for an in-memory
 sparse lookup before and after eliminating the temporary per-block record slice.
 The lookup still decodes and validates the entire selected block before returning.
+
+## Scan allocations
+
+[Scan measurements](scan-benchmarks.md) compare allocations before and after
+preallocating the record-descriptor slice using a bounded block record count.
+Scans retain all descriptors for the selected block and validate the whole block
+before delivering records.

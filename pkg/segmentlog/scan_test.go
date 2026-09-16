@@ -84,3 +84,36 @@ func TestSegmentRangeScanSkipsUnselectedBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A requested prefix must not expose records before the rest of its block has
+// been checked, including corrupt frames outside the requested ID interval.
+func TestSegmentScanValidatesBeforeDelivery(t *testing.T) {
+	for _, codec := range []Compression{NoCompression, ZstdDefault} {
+		segment := seekValidationBlock(t, codec, true)
+		delivered, failures := 0, 0
+		for _, err := range segment.recordsIn(Coverage{0, 1}) {
+			if err == nil {
+				delivered++
+			} else {
+				if !errors.Is(err, ErrCorrupt) {
+					t.Fatal(err)
+				}
+				failures++
+			}
+		}
+		if delivered != 0 || failures != 1 {
+			t.Fatal("scan exposed an unverified prefix", delivered, failures)
+		}
+		segment = seekValidationBlock(t, codec, false)
+		for record, err := range segment.recordsIn(Coverage{0, 3}) {
+			if err != nil || record.ID != 0 {
+				t.Fatal(record, err)
+			}
+			delivered++
+			break
+		}
+		if delivered != 1 {
+			t.Fatal("scan did not stop after consumer exit")
+		}
+	}
+}

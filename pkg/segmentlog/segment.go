@@ -279,8 +279,19 @@ func (s *Segment) readBlock(b block) ([]Record, error) {
 }
 
 func decodeBlock(b block, data []byte) ([]Record, error) {
+	// Bound the descriptor allocation independently of caller-supplied metadata.
+	if b.decoded > format.MaxBlock || b.count == 0 || b.count > b.decoded/format.FrameOverhead {
+		return nil, ErrCorrupt
+	}
 	var records []Record
-	err := walkBlock(b, data, func(r Record) { records = append(records, r) })
+	err := walkBlock(b, data, func(r Record) {
+		// Allocate only after decoding and the first frame check succeed. Reads
+		// still expose nothing until the entire block passes validation.
+		if records == nil {
+			records = make([]Record, 0, int(b.count))
+		}
+		records = append(records, r)
+	})
 	if err != nil {
 		return nil, err
 	}
