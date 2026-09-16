@@ -102,7 +102,9 @@ sparse-resume behavior in focused tests. It does not replace Storage or implemen
 production recovery and protected multi-call read protocols. The adapter now
 exposes recovered original append progress and validates/deduplicates replay of
 already-committed raw batches, including after complete erasure; application
-metadata replay and AppliedIndex coordination remain pending.
+metadata replay and AppliedIndex coordination remain pending. Experimental exact
+Actual lookup now preserves metadata and error behavior, with an explicit applied
+watermark guard; production lookup remains unchanged.
 
 ### Committed record identity
 

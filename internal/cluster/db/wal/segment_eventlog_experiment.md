@@ -94,8 +94,29 @@ visibility pauses against the existing tidwall-backed Reader. They also cover
 type-resolution retry, unknown system types, corruption, rewrite between reads,
 append after EOF, and publication exclusion during decoding.
 
+## Exact Actual lookup
+
+`actualAt` performs an exact Raft-index lookup without changing any streaming
+reader's cursor. Like production `Storage.ActualAt`, it returns every proposal
+entity, including metadata, and propagates unknown-type errors rather than using
+the streaming reader's skip behavior. Missing or erased indexes and control/no-op
+entries return `ErrActualNotFound`; a gap never returns the next surviving Actual.
+Corruption and type-resolution failures remain errors.
+
+The experimental method additionally requires an applied watermark. Durable but
+unapplied entries return `ErrActualNotFound` before type resolution; callers can
+retry after application advances. This is an explicit guard in the experiment,
+not a change to production `Storage.ActualAt`. The adapter read lock covers raw
+lookup and decoding, excluding rewrite publication throughout the operation.
+
+Tests compare exact results and errors against tidwall-backed `Storage.ActualAt`
+for applied entries, including metadata-only/mixed proposals, gaps, control
+entries, and maximum indexes. They also verify erased-index behavior, streaming
+cursor independence, visibility gating, retry after resolution failure, corrupt
+identities, and both skippable and must-understand unknown system types.
+
 Production integration still needs the protected lifetime for multi-call reads,
-checkpoint loading, exact ActualAt lookup, and storage/application coordination.
+checkpoint loading, and storage/application coordination.
 Recovered append progress and raw committed replay are implemented experimentally;
 BoltDB/Raft recovery coordination and applied-index invariants remain pending.
 Backup/restore, peer transfer, format gates, offline conversion, and workload
@@ -104,5 +125,5 @@ benchmarks remain separate prerequisites for activation.
 Run the focused checks with:
 
 ```sh
-go test -race ./internal/cluster/db/wal -run '^TestSegment(Events|Reader|Replay)'
+go test -race ./internal/cluster/db/wal -run '^TestSegment'
 ```
