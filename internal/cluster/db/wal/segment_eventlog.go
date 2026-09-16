@@ -31,15 +31,75 @@ type segmentEventLog struct {
 func (l *segmentEventLog) appendRaw(payloads [][]byte) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	records := make([]segmentlog.Record, 0, len(payloads))
-	for _, raw := range payloads {
-		entry := new(pb.Entry)
-		if err := proto.Unmarshal(raw, entry); err != nil || entry.GetIndex() == 0 || entry.GetIndex() == ^uint64(0) {
-			return fmt.Errorf("invalid event entry: %w", segmentlog.ErrInvalid)
-		}
-		records = append(records, segmentlog.Record{ID: entry.GetIndex(), Payload: raw})
+	records, err := segmentEntryRecords(payloads)
+	if err != nil {
+		return err
 	}
 	return l.log.Append(records)
+}
+
+func segmentEntryRecords(payloads [][]byte) ([]segmentlog.Record, error) {
+	records := make([]segmentlog.Record, 0, len(payloads))
+	var previous uint64
+	for _, raw := range payloads {
+		entry := new(pb.Entry)
+		if err := proto.Unmarshal(raw, entry); err != nil || entry.GetIndex() == 0 || entry.GetIndex() == ^uint64(0) || entry.GetIndex() <= previous {
+			return nil, fmt.Errorf("invalid event entry batch: %w", segmentlog.ErrInvalid)
+		}
+		previous = entry.GetIndex()
+		records = append(records, segmentlog.Record{ID: previous, Payload: raw})
+	}
+	return records, nil
+}
+
+// eventIndex reports original durable append progress, including erased entries.
+// It returns zero for a fresh log. A poisoned handle must be reopened first.
+func (l *segmentEventLog) eventIndex() (uint64, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.eventIndexLocked()
+}
+
+func (l *segmentEventLog) eventIndexLocked() (uint64, error) {
+	index, ok, err := l.log.LastAppended()
+	if err != nil {
+		return 0, err
+	}
+	if ok && index == 0 {
+		return 0, ErrCorruptEntry
+	}
+	return index, nil
+}
+
+// appendCommittedRaw appends only the portion of a validated committed batch
+// above recovered append progress. It is for replay of the SAME committed
+// history, not conflict detection: erased entries cannot be compared with their
+// original payloads. Skipped input is still decoded and checked for ordering.
+// Empty/all-replayed batches make no writes and return the existing frontier.
+// On error the returned index is unusable; reopen after storage failure before
+// retrying. Success does not apply entries to BoltDB or advance AppliedIndex.
+func (l *segmentEventLog) appendCommittedRaw(payloads [][]byte) (uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	records, err := segmentEntryRecords(payloads)
+	if err != nil {
+		return 0, err
+	}
+	index, err := l.eventIndexLocked()
+	if err != nil {
+		return 0, err
+	}
+	first := 0
+	for first < len(records) && records[first].ID <= index {
+		first++
+	}
+	if first == len(records) {
+		return index, nil
+	}
+	if err := l.log.Append(records[first:]); err != nil {
+		return 0, err
+	}
+	return records[len(records)-1].ID, nil
 }
 
 // readRaw and seekRaw retain ErrNotFound for absent/erased indexes. Corruption

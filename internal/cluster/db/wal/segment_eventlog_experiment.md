@@ -24,7 +24,7 @@ or automatic format activation.
 
 The caller owns the underlying Log and Close. Storage errors retain the engine's
 poison/reopen rules. A failed append can leave a durable prefix; this adapter does
-not yet implement replay deduplication or expose recovered append progress.
+not apply entries to BoltDB or update application visibility.
 
 ## Evidence and limits
 
@@ -39,6 +39,34 @@ invalid batches, mismatched source IDs, and attempted replacement-ID changes.
 This remains an isolated adapter experiment, not a completed production scrub. The selections supplied to the filter must
 already be bounded and authorized. The adapter does not compute selections,
 check consumer progress, update BoltDB, or declare erasure complete.
+
+## Recovered append progress and committed replay
+
+`eventIndex` reports the original durable append frontier, including erased
+records, and returns zero for a fresh log. It uses `Log.LastAppended`, which
+recovers the frontier from tail accounting or the last sealed range boundary.
+It cannot be derived from the last surviving protobuf entry.
+
+`appendCommittedRaw` validates an entire strictly increasing batch, including
+entries it will skip. It appends only indexes above recovered progress and returns
+the resulting frontier. Empty or fully replayed batches make no writes. Replay
+and frontier selection share the adapter's mutation lock, so concurrent calls
+cannot append the same suffix twice. The strict `appendRaw` operation remains
+available and still rejects duplicates.
+
+This method is only for replay of the same already-committed history. It does not
+compare skipped payloads (some have been erased), detect divergent histories, or
+provide a migration/import conflict check. It does not advance AppliedIndex or
+skip the application's necessary metadata replay. An error provides no usable
+returned frontier; storage failure requires close/reopen before retry, which can
+recover complete groups from an unacknowledged call. Incomplete suffixes continue
+to fail without truncation.
+
+Tests erase every record, reclaim and reopen, then prove replay cannot restore
+those records. They check byte-identical no-op replay, malformed/reordered skipped
+prefixes, concurrent identical batches, and replay refusal on a closed handle.
+Engine tests cover ID zero, nonzero empty starting bounds, erased sealed ranges
+with an empty tail, and progress recovered after a failed sync.
 
 ## Experimental Actual reader
 
@@ -68,12 +96,13 @@ append after EOF, and publication exclusion during decoding.
 
 Production integration still needs the protected lifetime for multi-call reads,
 checkpoint loading, exact ActualAt lookup, and storage/application coordination.
-Recovery needs original append progress even when the last record was erased.
+Recovered append progress and raw committed replay are implemented experimentally;
+BoltDB/Raft recovery coordination and applied-index invariants remain pending.
 Backup/restore, peer transfer, format gates, offline conversion, and workload
 benchmarks remain separate prerequisites for activation.
 
 Run the focused checks with:
 
 ```sh
-go test -race ./internal/cluster/db/wal -run '^TestSegment(Events|Reader)'
+go test -race ./internal/cluster/db/wal -run '^TestSegment(Events|Reader|Replay)'
 ```

@@ -135,7 +135,10 @@ discarding them is safe. See [the tail format and recovery contract](tail-format
 `CreateLog` and `OpenLog` connect the tail, segments, and catalog. `Append` syncs
 before success and rotates by a persisted original-frame byte target; `Read` and
 `Seek` span sealed ranges and the active tail. Batch boundaries and restarts do
-not alter sealed ranges. A nonblocking directory lock enforces exclusive managed
+not alter sealed ranges. `LastAppended` reports original append progress even
+when the highest record or every record has been erased. It distinguishes an
+empty log from an appended ID zero and refuses poisoned handles until recovery.
+A nonblocking directory lock enforces exclusive managed
 log ownership until Close, including across processes. Sealing currently blocks
 other operations; old files remain until explicit reclamation. See [the lifecycle contract and limitations](log-lifecycle.md).
 

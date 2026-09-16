@@ -99,7 +99,10 @@ A [package-private raw-entry adapter experiment](../internal/cluster/db/wal/segm
 now checks Raft-index identity and compares protobuf/scrub output with tidwall.
 An experimental Actual reader now matches existing visibility, filtering, and
 sparse-resume behavior in focused tests. It does not replace Storage or implement
-production recovery and protected multi-call read protocols.
+production recovery and protected multi-call read protocols. The adapter now
+exposes recovered original append progress and validates/deduplicates replay of
+already-committed raw batches, including after complete erasure; application
+metadata replay and AppliedIndex coordination remain pending.
 
 ### Committed record identity
 
