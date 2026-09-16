@@ -94,7 +94,10 @@ preserving unaffected files and representing erased ranges without payload files
 Whole-log rewriting now includes the active tail in the same publication, with
 a catalog checkpoint preserving original accounting and append progress.
 Concurrent rewriting, retirement for pinned views, background sealing,
-bounded-metadata startup, and Committed integration remain subsequent slices.
+bounded-metadata startup, and production Committed integration remain subsequent slices.
+A [package-private raw-entry adapter experiment](../internal/cluster/db/wal/segment_eventlog_experiment.md)
+now checks Raft-index identity and compares protobuf/scrub output with tidwall.
+It does not replace Storage or implement the application reader and recovery protocols.
 
 ### Committed record identity
 
