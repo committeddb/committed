@@ -66,7 +66,7 @@ Final zstd payload footprints were similar: isolated tidwall 368,432 bytes versu
 segmentlog 367,937 bytes; scattered 348,998 versus 348,585. The main isolated-edit
 benefit here is stable historical files, not a smaller complete snapshot.
 
-## What this establishes—and what remains
+## Evidence and limits
 
 This fixture confirms byte-equivalent scrub output and demonstrates that isolated
 changes preserve unrelated files. It also shows why reduced local rewriting and
@@ -75,12 +75,9 @@ do not imply the existing backup implementation automatically reuses those files
 Complete independent backups still store complete snapshots; hosted reuse remains
 outside the storage engine's responsibility.
 
-Remaining experiments need production-shaped payload distributions, larger ranges
-and histories, whole-record and whole-range deletion, metadata-heavy churn, active-
-tail edits, repeated generations, CPU/memory/latency measurements, and complete
-backup/restore and peer-transfer integration. Small synthetic segment targets and
-one local run cannot predict TB-scale costs or justify a production compression
-policy.
+The fixture uses small synthetic segments and does not measure CPU, memory,
+latency, or complete backup/restore and peer-transfer behavior. One local run
+cannot predict TB-scale costs or justify a production compression policy.
 
 Reproduce the inventory and correctness checks:
 

@@ -39,14 +39,12 @@ ratio from 0.2831% to 0.2462%. A seek decoded a larger block: about 219 microsec
 and 1.22 MB allocated versus 67 microseconds and 0.42 MB at 256 KiB. Reads create a
 fresh decoder per block, which is included in these numbers.
 
-## Reproduce and extend
+## Reproduce
 
 ```sh
 go test ./pkg/segmentlog -run '^$' -bench BenchmarkCompression -benchtime 100ms -count 1
 ```
 
 Policy numbers in benchmark names: 0=plain, 1=fast, 2=default, 3=better, 4=best.
-Before choosing defaults, use representative serialized events, repeated samples,
-full segment sizes, measured peak memory, and the current tidwall implementation
-under identical durability and cache settings. Encoder reuse and allocation
-reductions are possible follow-ups, not changes hidden in this baseline.
+These benchmarks use synthetic payloads and do not measure production workloads,
+peak memory, or a tidwall baseline under matching durability/cache settings.

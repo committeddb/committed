@@ -17,8 +17,9 @@ It never auto-detects or converts an existing production event log.
   16 MiB. Physical sequences start at 1 and remain dense; stable IDs may have gaps.
 
 This envelope intentionally differs from production's protobuf checksum envelope.
-A future explicit conversion must validate and transfer legacy records; neither
-backend may silently reinterpret a production directory as this container.
+This container does not open production directories. The application's
+`Storage.copyEventLog` helper validates and copies legacy records into a fresh
+backend in isolated tests.
 
 ## Publication and recovery
 
@@ -37,7 +38,6 @@ scrub path. It retains old generations until Reclaim verifies the selected state
 and deletes recognized regular files with directory syncs. Unknown names and
 symlinks are retained. Cleanup errors can leave partial progress and require reopen.
 
-The wrapper uses the tidwall fork's native append/recovery behavior. External
-Raft/BoltDB durability-bound reconciliation is still required for production
-activation, just as it is for the segmented experiment. Neither unit fault
-injection nor successful local fsync calls substitute for power-loss testing.
+The wrapper uses the tidwall fork's native append/recovery behavior. It is not
+integrated with application Raft/BoltDB recovery. Neither unit fault injection
+nor successful local fsync calls substitute for power-loss testing.

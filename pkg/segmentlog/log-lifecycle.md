@@ -23,8 +23,8 @@ Methods also serialize within a Log instance. All other maintenance/writers must
 cooperate with this ownership protocol: the lock does not prevent direct writes
 by a non-cooperating process. Do not replace/rename away the managed directory or
 separately mutate its CatalogStore, tails, or files while the Log is open. Raw
-catalog/tail/file primitives do not acquire the lock themselves; a future offline
-maintenance API must acquire the same ownership before using them.
+catalog/tail/file primitives do not acquire the lock themselves; callers must
+acquire the same ownership before using them.
 
 ## Deterministic rotation
 
@@ -43,13 +43,14 @@ at the target is also sealed on the next record. No empty segment is produced.
 Each sealed range retains its tail's original Start and ends at its last record
 ID plus one. The new active tail starts at that exclusive end. Sparse IDs do not
 shift these boundaries. Close/reopen reconstructs the current framed-byte count
-from validated records. Identical records, target, and encoding produce the same
+from validated records and any persisted rewrite checkpoint. Identical records,
+target, and encoding produce the same
 sealed ranges and bytes regardless of append batch boundaries or intervening
 reopens. Append-group bytes in the active tail can differ between batch schedules.
 
-This accounting currently assumes the active tail has not been scrubbed. Before
-adding active-tail rewriting, persist original input accounting independently of
-surviving payload size. The Log does not yet expose a scrub operation.
+Whole-log rewriting persists original input accounting in a catalog checkpoint,
+independently of surviving payload size. Erasing tail records does not free their
+original rotation budget or reduce the recovered append frontier.
 
 ## Rotation ordering
 
@@ -85,16 +86,15 @@ There are no long-lived iterators, reader pins, or block caches at this layer ye
 
 Sealing and catalog validation run synchronously while reads/appends are blocked.
 Catalog publication currently revalidates full referenced files, making repeated
-rotation increasingly expensive as history grows. Optimize this before throughput
-claims or production adoption; it is an integrity-first lifecycle prototype.
+rotation increasingly expensive as history grows.
 
 Old tails, catalogs, sealed revisions, and crash orphans remain until explicit
 `Reclaim(ctx)` validates the live set and removes recognized obsolete files.
 Rotation temporarily increases disk usage until that call. See the
 [reclamation contract](reclamation.md). Whole-log transformations now publish
-through `Rewrite`; see [its contract](whole-log-rewriting.md). Retirement for
-pinned views, background sealing, backup capture, and database integration remain
-subsequent work. This prototype does not establish application erasure completion.
+through `Rewrite`; see [its contract](whole-log-rewriting.md). The managed log has
+no pinned views, background sealing, backup capture, or production database
+integration. It does not establish application erasure completion.
 
 ## Evidence
 

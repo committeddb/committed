@@ -73,9 +73,8 @@ retain the decoded group buffer; clone them for long-lived retention.
 
 **ErrIncompleteTail is a description, not truncation authorization.** A truncated
 previously acknowledged file can look exactly like an interrupted unacknowledged
-append. This layer cannot distinguish them. The future recovery coordinator must
-check durable metadata/Raft bounds and prove discarding bytes cannot lose history.
-Until then, the appender refuses to open such files. There is no API that silently
+append. This layer cannot distinguish them and does not consult external
+metadata/Raft bounds. The appender refuses to open such files. There is no API that silently
 repairs, skips, or truncates them.
 
 The scanner bounds group allocation before reading payloads. It retains one group

@@ -31,7 +31,7 @@ catalogs containing the new field. No production format activation is implied.
 The tail reuses the segment transformation machinery: scan until the first change,
 then reread the unchanged prefix without invoking callbacks twice. Output streams
 into a newly installed tail, currently one append group per survivor. This can
-increase group overhead; batching is a future optimization. Payloads remain bounded
+increase group overhead. Payloads remain bounded
 by the existing per-record limit, and a streaming trial encoding verifies that
 the result can be sealed within the segment format's block/index limits. A
 conservative byte bound also reserves index capacity for later appends up to

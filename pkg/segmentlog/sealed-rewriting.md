@@ -23,7 +23,7 @@ A changed range is never merged with a neighbor.
 The caller supplies a strictly newer generation. Even a no-op publishes that
 generation in a new catalog revision, without creating payload files. This is a
 scoped storage transaction, not evidence of a completed Committed scrub generation.
-The future adapter must coordinate full scope and application metadata.
+This operation does not update application metadata.
 
 ## Transaction and recovery
 
@@ -38,8 +38,7 @@ The future adapter must coordinate full scope and application metadata.
 Managed reads, appends, rotations, reclamation, and other rewrites are blocked
 throughout. Callbacks must not reenter this Log. Cancellation is checked between
 records and ranges; a callback or a full-file verification must return before
-cancellation can be observed. Verification still scans full history; bounded
-startup and publication work remain future requirements.
+cancellation can be observed. Verification still scans full history.
 
 Invalid arguments and cancellation before work starts leave the handle usable.
 Once preparation starts, errors conservatively poison it, including callback
@@ -55,8 +54,8 @@ stayed unchanged: reopening resolves publication uncertainty.
 
 Publication is logical replacement, not physical erasure. Call `Reclaim` to remove
 obsolete segments, old tails, and catalogs. Until then those files can retain the
-original payloads. Future captured readers and backups will require retirement
-blockers; the current managed API serializes operations and exposes no pinned views.
+original payloads. The current managed API serializes operations and exposes no
+pinned views.
 
 ## Validation
 

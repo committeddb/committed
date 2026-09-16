@@ -62,9 +62,8 @@ still use the segmented factory where they measure its particular file layout.
 
 Production `wal.Storage` has not switched to this interface. Its legacy directory
 swap, Raft/BoltDB recovery, backups, catch-up, and format gates remain unchanged.
-Wiring that lifecycle to this boundary and implementing explicit legacy conversion
-are subsequent work. This refactor does not enable a backend setting or activate
-an experimental format at startup. Raft's own logs are outside this contract.
+There is no backend setting or automatic experimental format activation at
+startup. Raft's own logs are outside this contract.
 
 ### Legacy copy experiment
 
@@ -81,17 +80,13 @@ the copy batches is bounded to 256 records / 1 MiB of payload, with a larger
 individual record sent alone; backend read/decompression caches are additional.
 Cancellation is observed between operations, not during lock waits or fsync.
 
-Any error invalidates the entire destination, even if some batches are durable.
+Any copy error invalidates the entire destination, even if some batches are durable.
 The helper rejects destinations with previous append history, including completely
 erased logs, and does not resume partial copies. Only a successful return signals
 completion to the caller; reopening a destination alone is not a completion
 certificate. Tests cover both source compression modes and both destination
 backends/codecs, reopen and committed replay, corrupt history, head mismatches,
 batch limits, cancellation, and append failure after a durable prefix.
-
-This internal experiment has no CLI or startup activation. An actual migration
-still needs a durable completion/publication protocol, data-directory version
-gates, and coordination with BoltDB, Raft state, backup, and peer recovery.
 
 ## Validation
 
@@ -100,8 +95,8 @@ sparse reads, ownership, byte ownership, callback counts, partial/all/no-op rewr
 erased append progress, reopen/reclaim, and callback-failure recovery. Tidwall
 fault tests inject CURRENT failures before/after publication and check recovery
 selects a complete old/new generation. The existing segmentlog and moved durablefs
-suites retain their deeper fault tests. Filesystem power-loss testing and the
-application's incomplete-tail recovery proof remain adoption requirements.
+suites retain their deeper fault tests. These tests do not establish filesystem
+power-loss behavior or prove that an incomplete tail is safe to discard.
 
 ```sh
 go test -race ./internal/cluster/db/eventlog/... ./internal/durablefs/... ./pkg/segmentlog/...

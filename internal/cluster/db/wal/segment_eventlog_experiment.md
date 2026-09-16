@@ -39,9 +39,11 @@ partial removal, supplied metadata-supersession selections, delete-key erasure,
 retained request metadata, and idempotent repeated scrubs. Negative tests cover
 invalid batches, mismatched source IDs, and attempted replacement-ID changes.
 
-This remains an isolated adapter experiment, not a completed production scrub. The selections supplied to the filter must
-already be bounded and authorized. The adapter does not compute selections,
-check consumer progress, update BoltDB, or declare erasure complete.
+This remains an isolated adapter experiment, not a completed production scrub.
+The selections supplied to the filter must already be bounded and authorized.
+The raw rewrite requires caller-supplied selections. It does not check consumer
+progress, update BoltDB, or declare erasure complete. The metadata selection
+helper is described below.
 
 ## Recovered append progress and committed replay
 
@@ -89,8 +91,7 @@ Adapter appends and rewrites hold the write lock. Do not copy the adapter after
 use or mutate its underlying Log directly while readers are live. Returned data
 is independent of file lifetime; no view is held between Read calls. Type
 resolution and watermark callbacks must not reenter the adapter. Reads currently
-block appends during decoding, and repeated Seek calls rescan the tail; performance
-optimization is still pending.
+block appends during decoding, and repeated Seek calls rescan the tail.
 
 Tests compare Actuals, positions, sparse checkpoints, metadata filtering, and
 visibility pauses against the existing tidwall-backed Reader. They also cover
@@ -131,10 +132,10 @@ its cursor or return an Actual if cancellation occurred during decoding.
 Acquisition and rewrite exclusion share the adapter lock, so a read registers
 either before or after a complete rewrite. While any protected reader remains,
 `rewriteRaw` returns retryable `errEventRewriteDeferred` before invoking a
-transform or creating files. This does not poison the log or consume a generation;
-the future coordinator must retain pending work and retry. Appends and rotation
-remain available between Read calls. This protects logical record history, not
-a fixed tail limit or a set of backup files.
+transform or creating files. This does not poison the log or consume a
+generation. Appends and rotation remain available between Read calls. This
+protects logical record history, not a fixed tail limit or a set of backup
+files.
 
 Cancellation cannot interrupt a type resolver or filesystem call. Protection
 remains until an in-flight Read releases the adapter lock, and
@@ -144,15 +145,8 @@ Always close a protected reader when finished rather than waiting for its deadli
 
 Tests exercise overlapping holds, appends during a hold, retry of the same rewrite
 generation, automatic expiry, concurrent close/cancel, and cancellation during
-decoding. Production from-zero replay is not wired to this API yet; backup capture
-and file pins remain separate work.
-
-Production integration still needs checkpoint loading, protected-reader wiring,
-and storage/application coordination.
-Recovered append progress and raw committed replay are implemented experimentally;
-BoltDB/Raft recovery coordination and applied-index invariants remain pending.
-Backup/restore, peer transfer, format gates, offline conversion, and workload
-benchmarks remain separate prerequisites for activation.
+decoding. Production from-zero replay is not wired to this API. The adapter has
+no backup file capture, peer transfer, or BoltDB/Raft recovery integration.
 
 Run the focused checks with:
 
@@ -178,8 +172,7 @@ appropriate bound. Callbacks may not reenter the adapter or underlying engine.
 The adapter and engine locks hold one view for the full scan, so writes wait.
 
 The rewrite-churn experiment now compares survivors through this scan instead
-of issuing one seek per record. Streaming ActualReader calls still use individual
-seeks; improving those calls requires a separate reader lifetime/cache design.
+of issuing one seek per record. Streaming ActualReader calls still use individual seeks.
 
 ## Log-derived snapshot selections
 
@@ -224,7 +217,7 @@ failures retain the managed engine's poison/reopen protocol. An unchanged result
 can still publish a newer generation. Tests cover bound rejection, partial-record
 preservation, post-bound bytes, reopen/reclaim/idempotence, protected-reader deferral,
 and append exclusion across the transaction. This remains a synchronous experiment;
-background preparation and full application recovery coordination are pending.
+it has no background preparation or full application recovery coordination.
 
 ## Backend separation
 
@@ -236,9 +229,9 @@ exposing segmentlog's sealed-file/tail statistics. Physical churn still comes
 from engine-specific tests and filesystem inventories.
 
 `TestEventLogAdapterBackends` exercises the same adapter code with both concrete
-backends. `eventlog` also has a shared storage conformance suite, including reopen,
-complete erasure, replay frontier, failure recovery, and ownership. The original
-production Storage still owns its legacy layout and protocols; the new tidwall
-wrapper has an explicit experimental CURRENT/generation layout, not automatic
-compatibility with production directories. See the contract README for the
-remaining production migration work.
+backends. `eventlog` also has a shared storage conformance suite, including
+reopen, complete erasure, replay frontier, failure recovery, and ownership. The
+original production Storage still owns its legacy layout and protocols; the new
+tidwall wrapper has an explicit experimental CURRENT/generation layout, not
+automatic compatibility with production directories. See the contract README for
+the current integration status.

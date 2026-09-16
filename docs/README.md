@@ -27,11 +27,10 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   plus BoltDB, why raft persistence is two logs (not one), and the crash-recovery
   invariants that hold them together.
 
-## Design proposals
+## Experimental storage
 
-- [Owned event storage and segment format](event-segment-design.md) — draft
-  requirements for stable segments, selective scrubbing, durability, and migration;
-  proposed behavior, not the shipped format.
+- [Experimental event storage](event-segment-design.md) — implemented backends,
+  selective rewriting, format references, test evidence, and current limitations.
 
 ## Operations
 

@@ -5,29 +5,31 @@ module. It has no dependencies on Committed's application packages. Record IDs
 are sparse `uint64` values; payloads are opaque bytes.
 
 **Current scope: an experimental synchronous append/read/rotate lifecycle,
-immutable segments, transactional whole-log rewriting, and atomic local catalogs.**
-Explicit reclamation of obsolete managed files is implemented. Background sealing,
-concurrent rewriting, and retirement of pinned views remain pending.
-Neither the API nor the file format is stable. This package is not connected to the running database.
-The shared [EventLog contract](../../internal/cluster/db/eventlog/README.md) now has
-separate tidwall and segmented implementations. A [raw-entry adapter experiment](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
-compares Committed protobuf records and existing scrub transformations with tidwall.
+immutable segments, transactional whole-log rewriting, and atomic local
+catalogs.** Explicit reclamation of obsolete managed files is implemented.
+Background sealing, concurrent rewriting, and pinned views are not implemented.
+Neither the API nor the file format is stable. This package is not connected to
+the running database. The shared [EventLog
+contract](../../internal/cluster/db/eventlog/README.md) now has separate tidwall
+and segmented implementations. A [raw-entry adapter
+experiment](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
+compares Committed protobuf records and existing scrub transformations with
+tidwall.
 
 ## Boundaries
 
 | Layer | Responsibility | Status |
 | --- | --- | --- |
-| Committed adapter (`internal/cluster/db/`) | Raft entry serialization, visibility, scrub policy, metadata reconciliation, backup/peer protocols | Future integration |
-| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Synchronous append/read/rotation with whole-log rewriting and explicit reclamation implemented; pins pending |
+| Experimental adapter (`internal/cluster/db/wal/`) | Raft entry serialization, visibility, replay, selection, protected readers | Implemented in isolated tests; production Storage uses legacy tidwall |
+| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, rewriting, reclamation | Synchronous operations; no pinned views |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement, active append groups | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
 | Durable filesystem (`internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
 
-Keep segment lifecycle, catalog publication, and rewriting in one package until
-separating them makes their durability rules easier to enforce. Add no separate
-`go.mod`. The adapter may import this package; this package must never import the
-adapter, Raft, protobuf, or bbolt. In particular, the adapter must check that an
-outer record ID matches the ID inside its serialized Raft entry.
+Segment lifecycle, catalog publication, and rewriting share one package in the
+repository's Go module. The package does not import the application adapter,
+Raft, protobuf, or bbolt. The adapter checks that an outer record ID matches the
+ID inside its serialized Raft entry.
 
 ## Implemented contract
 
@@ -62,16 +64,17 @@ no-clobber immutable installation and atomic pointer replacement, with explicit
 results for uncertain durability and cleanup failures. The catalog layer
 now uses these primitives; the public segment encoding APIs remain I/O-based.
 
-Memory scales with block data and the block index rather than the entire log.
-Opening reads at most 3 MiB of encoded index metadata; decoded descriptors and
+For a single segment, memory scales with block data and its block index.
+Opening a segment reads at most 3 MiB of encoded index metadata; decoded descriptors and
 record slices add bounded overhead. Rewriting can hold several block-sized
 buffers while copying the prefix and encoding output. No cache is implemented.
 
 ## Experimental format 1
 
 All integers are unsigned little-endian. CRC is CRC32C (Castagnoli). Checksums
-detect corruption, not malicious modification. Each block is either plain or an independent zstd frame. File-level identity
-and publication belong to the catalog layer.
+detect corruption, not malicious modification. Each block is either plain or an
+independent zstd frame. File-level identity and publication belong to the
+catalog layer.
 
 | Region | Byte layout |
 | --- | --- |
@@ -133,15 +136,16 @@ discarding them is safe. See [the tail format and recovery contract](tail-format
 
 ## Managed log
 
-`CreateLog` and `OpenLog` connect the tail, segments, and catalog. `Append` syncs
-before success and rotates by a persisted original-frame byte target; `Read` and
-`Seek` span sealed ranges and the active tail. Batch boundaries and restarts do
-not alter sealed ranges. `LastAppended` reports original append progress even
-when the highest record or every record has been erased. It distinguishes an
-empty log from an appended ID zero and refuses poisoned handles until recovery.
-A nonblocking directory lock enforces exclusive managed
-log ownership until Close, including across processes. Sealing currently blocks
-other operations; old files remain until explicit reclamation. See [the lifecycle contract and limitations](log-lifecycle.md).
+`CreateLog` and `OpenLog` connect the tail, segments, and catalog. `Append`
+syncs before success and rotates by a persisted original-frame byte target;
+`Read` and `Seek` span sealed ranges and the active tail. Batch boundaries and
+restarts do not alter sealed ranges. `LastAppended` reports original append
+progress even when the highest record or every record has been erased. It
+distinguishes an empty log from an appended ID zero and refuses poisoned handles
+until recovery. A nonblocking directory lock enforces exclusive managed log
+ownership until Close, including across processes. Sealing currently blocks
+other operations; old files remain until explicit reclamation. See [the
+lifecycle contract and limitations](log-lifecycle.md).
 
 ## Streaming scans
 
@@ -159,8 +163,8 @@ delivery, but unrelated payloads are not verified by a bounded scan.
 `Log.RewriteSealed(ctx, generation, transform)` prepares only changed sealed
 ranges, then publishes their replacements together in one catalog update.
 Unchanged files retain their names, bytes, and coverage. Fully erased ranges
-retain coverage without payload files. The active tail is excluded; this does
-not yet implement whole-log scrubbing. See [the transaction contract](sealed-rewriting.md).
+retain coverage without payload files. This operation excludes the active tail.
+See [the transaction contract](sealed-rewriting.md).
 
 `Log.Rewrite` includes the active tail in the same transaction. A catalog
 checkpoint preserves its highest appended ID and original rotation accounting,
@@ -189,18 +193,8 @@ now measures completed-file churn and checks scrub equivalence against tidwall.
 It separates local file replacement from new content hashes and compares plain
 and zstd workloads. The synthetic results do not establish production backup costs.
 
-## Next slices
-
-1. Extend compression experiments with representative event payloads and compare
-   against the tidwall baseline before selecting production policy.
-2. Recovery coordination: directory orphans, external durability bounds, and the
-   proof required before discarding any incomplete suffix.
-3. Add concurrent rewriting, captured views, and
-   retirement for pinned views; move sealing off the append path and bound verification work.
-4. Committed adapter and offline opt-in conversion, then compatibility, peer,
-   backup, and baseline performance experiments.
-
-The full requirements remain in [the design draft](../../docs/event-segment-design.md).
+The [storage overview](../../docs/event-segment-design.md) describes the current
+engine, application boundary, and experimental limitations.
 
 ## Validation
 
