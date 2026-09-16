@@ -38,7 +38,8 @@ ID inside its serialized Raft entry.
   out-of-range, or oversized records.
 - `OpenSegment` reads only header/footer/index metadata. `Read` performs exact
   lookup; `Seek` finds the first survivor at or after an ID; `Records` scans.
-  `Verify` checks every payload. Missing IDs return `ErrNotFound`; malformed
+  A lookup validates its complete selected block while retaining only the matching
+  record descriptor. `Verify` checks every payload. Missing IDs return `ErrNotFound`; malformed
   content and underlying I/O failures return errors.
 - `Rewrite` invokes an application-supplied transformation once per examined
   record. It supports whole-record removal and partial payload replacement while
@@ -222,3 +223,9 @@ malformed streams, concatenated-frame output bounds, and format-0 compatibility.
 [Verification measurements](verification-benchmarks.md) isolate sealed-file
 verification from filesystem sync and catalog publication. The verifier and read
 path share block/frame validation; only reads collect records for their callers.
+
+## Sparse lookup allocations
+
+[Lookup measurements](seek-benchmarks.md) compare allocations for an in-memory
+sparse lookup before and after eliminating the temporary per-block record slice.
+The lookup still decodes and validates the entire selected block before returning.

@@ -327,12 +327,26 @@ func (s *Segment) Seek(id uint64) (Record, error) {
 	if i == len(s.blocks) {
 		return Record{}, ErrNotFound
 	}
-	records, err := s.readBlock(s.blocks[i])
+	b := s.blocks[i]
+	stored := make([]byte, int(b.size))
+	if _, err := s.r.ReadAt(stored, int64(b.offset)); err != nil {
+		return Record{}, err
+	}
+	var result Record
+	found := false
+	err := walkBlock(b, stored, func(r Record) {
+		if !found && r.ID >= id {
+			result, found = r, true
+		}
+	})
+	// A matching prefix cannot hide corruption later in the selected block.
 	if err != nil {
 		return Record{}, err
 	}
-	j := sort.Search(len(records), func(j int) bool { return records[j].ID >= id })
-	return records[j], nil
+	if !found {
+		return Record{}, ErrCorrupt // The validated block's last ID is >= id.
+	}
+	return result, nil
 }
 
 func (s *Segment) Read(id uint64) (Record, error) {
