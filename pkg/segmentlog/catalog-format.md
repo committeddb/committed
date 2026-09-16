@@ -102,9 +102,11 @@ individual write/link/rename/sync boundaries.
   validation and does **not** meet the design's bounded-metadata restart target.
   Separate normal-open metadata validation from explicit whole-file verification
   before adopting this at large scale.
-- Old catalogs, old payload revisions, and unrelated crash orphans remain on disk.
-  Publishing an erased range is not physical erasure completion. Reader pins,
-  resumable retirement records, cleanup ordering, and orphan recovery are pending.
+- Catalog publication itself retains old catalogs and payload revisions. The
+  managed Log now provides explicit [reclamation](reclamation.md) of recognized
+  obsolete files under exclusive ownership, with reopen/retry after failure.
+  Publishing an erased range alone is not physical erasure completion. Reader
+  pins and retirement coordination for future captured views remain pending.
 - This layer verifies file/layout integrity, not semantic equivalence of a scrub.
   The future ordered-log layer must prove transformed history preserves the right
   records and that rotation never drops acknowledged appends.

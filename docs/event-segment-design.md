@@ -87,8 +87,10 @@ Incomplete suffixes are reported but never automatically discarded. Atomic local
 initial verifier scans full payloads and retains old revisions. A synchronous
 managed log now connects append, sparse reads, deterministic rotation, and catalog
 publication. Managed logs now acquire an advisory directory lock before recovery
-and retain it through Close. Recovery/retirement coordination, background
-sealing, bounded-metadata startup, and Committed integration remain subsequent slices.
+and retain it through Close. Explicit reclamation verifies the confirmed live set
+and durably removes recognized obsolete artifacts, with reopen/retry after
+failures. Integrated scrubbing, retirement for pinned views, background sealing,
+bounded-metadata startup, and Committed integration remain subsequent slices.
 
 ### Committed record identity
 

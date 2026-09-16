@@ -340,3 +340,47 @@ func TestIgnoredWriteFailureCannotPublish(t *testing.T) {
 		t.Fatal("continued after failed write", ops.calls)
 	}
 }
+
+func TestDurableRemoval(t *testing.T) {
+	for _, stage := range []string{"", "remove", "dirsync"} {
+		d, ops := directory(t)
+		path := filepath.Join(d.path, "obsolete")
+		if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		ops.fail = stage
+		removed, err := d.Remove("obsolete")
+		if stage == "" {
+			if err != nil || !removed || !reflect.DeepEqual(ops.calls, []string{"remove", "dirsync"}) {
+				t.Fatal(removed, err, ops.calls)
+			}
+			if removed, err := d.Remove("obsolete"); removed || err != nil {
+				t.Fatal("missing removal not idempotent", removed, err)
+			}
+		} else {
+			if !errors.Is(err, injected) || removed != (stage == "dirsync") || errors.Is(err, ErrUncertain) != (stage == "dirsync") {
+				t.Fatal(removed, err)
+			}
+		}
+		_, statErr := os.Stat(path)
+		if stage == "remove" {
+			if statErr != nil {
+				t.Fatal("removed despite failed unlink", statErr)
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatal(statErr)
+		}
+	}
+}
+
+func TestRemovalRejectsPaths(t *testing.T) {
+	d, ops := directory(t)
+	for _, name := range []string{"", ".", "..", "../outside", "nested/file"} {
+		if _, err := d.Remove(name); !errors.Is(err, ErrInvalid) {
+			t.Fatal(name, err)
+		}
+	}
+	if len(ops.calls) != 0 {
+		t.Fatal("invalid removal performed I/O")
+	}
+}

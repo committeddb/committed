@@ -200,8 +200,8 @@ func loadCatalog(dir string) (Catalog, string, error) {
 
 // CatalogStore coordinates one directory's catalog publications. The caller must
 // exclusively own the directory across processes and instances. Methods serialize
-// within this instance only. Old catalogs/files are retained until a future
-// pin-aware retirement layer; publication is not physical erasure completion.
+// within this instance only. Publication retains old catalogs/files; the managed
+// Log can reclaim obsolete artifacts separately. Publication is not erasure completion.
 type CatalogStore struct {
 	mu      sync.Mutex
 	path    string
@@ -287,7 +287,9 @@ func catalogEnd(c Catalog) uint64 {
 }
 
 func cloneCatalog(c Catalog) Catalog {
-	c.Segments = append([]SegmentRef(nil), c.Segments...)
+	if c.Segments != nil {
+		c.Segments = append([]SegmentRef{}, c.Segments...)
+	}
 	if c.Active != nil {
 		tail := *c.Active
 		c.Active = &tail

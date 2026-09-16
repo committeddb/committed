@@ -82,3 +82,11 @@ primitives do not automatically acquire it, allowing a single owner to coordinat
 multiple operations. Raw catalog/tail users and maintenance tools must cooperate
 with the same lock. Directory replacement and non-cooperating filesystem mutation
 remain outside this advisory protocol. Unsupported platforms reject acquisition.
+
+## Durable removal
+
+`Remove(name)` removes one caller-selected entry and syncs the directory. It does
+not recurse. A missing name is idempotent but still directory-synced. The returned
+boolean reports observed removal, and an error after unlink carries ErrUncertain.
+Selection of safe-to-remove files belongs to the owning log, which must protect
+current references and exclude active readers before calling this primitive.

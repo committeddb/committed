@@ -39,11 +39,13 @@ type fileInstaller interface {
 // It holds an advisory directory lock across processes and instances until Close.
 // Methods serialize; this prototype blocks reads/appends while sealing. The caller
 // must not replace the directory or bypass ownership with lower-level writers.
-// A scrub coordinator and physical retirement remain pending.
+// Reclaim explicitly cleans obsolete managed files. A scrub coordinator and
+// retirement for future pinned views remain pending.
 type Log struct {
 	mu       sync.Mutex
 	path     string
 	dir      fileInstaller
+	remover  fileRemover
 	catalog  *CatalogStore
 	file     *os.File
 	tail     *Tail
@@ -200,7 +202,7 @@ func attachLog(path string, dir *durablefs.Dir, store *CatalogStore, encoding Op
 		_ = file.Close()
 		return nil, ErrCorrupt
 	}
-	return &Log{path: path, dir: dir, catalog: store, file: file, tail: tail, framed: framed, encoding: encoding}, nil
+	return &Log{path: path, dir: dir, remover: dir, catalog: store, file: file, tail: tail, framed: framed, encoding: encoding}, nil
 }
 
 func uniqueName(prefix string, start uint64, suffix string) (string, error) {

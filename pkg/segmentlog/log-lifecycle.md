@@ -88,11 +88,12 @@ Catalog publication currently revalidates full referenced files, making repeated
 rotation increasingly expensive as history grows. Optimize this before throughput
 claims or production adoption; it is an integrity-first lifecycle prototype.
 
-Old tails, catalogs, sealed revisions, and crash orphans are retained. Rotation
-therefore temporarily increases disk usage. This implementation does not claim
-backup savings or physical erasure completion yet. Retirement,
-background sealing, scrub coordination, backup capture, and database integration
-remain subsequent work.
+Old tails, catalogs, sealed revisions, and crash orphans remain until explicit
+`Reclaim(ctx)` validates the live set and removes recognized obsolete files.
+Rotation temporarily increases disk usage until that call. See the
+[reclamation contract](reclamation.md). Integrated scrubbing, retirement for
+pinned views, background sealing, backup capture, and database integration remain
+subsequent work. This prototype does not establish application erasure completion.
 
 ## Evidence
 

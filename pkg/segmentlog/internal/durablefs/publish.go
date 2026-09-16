@@ -196,3 +196,22 @@ func (w *strictWriter) Write(b []byte) (int, error) {
 // Sync confirms existing directory entries after their files have been synced.
 // It does not create the directory or sync its parent.
 func (d *Dir) Sync() error { return d.ops.syncDir(d.path) }
+
+// Remove deletes one caller-selected entry and syncs its directory. It never
+// recursively removes a tree. removed describes observed unlink success; an
+// error after unlink includes ErrUncertain and must not be treated as rollback.
+// A missing entry is idempotent, but its absence is still directory-synced.
+func (d *Dir) Remove(name string) (removed bool, err error) {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return false, ErrInvalid
+	}
+	err = d.ops.remove(filepath.Join(d.path, name))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	removed = err == nil
+	if err = d.ops.syncDir(d.path); err != nil {
+		return removed, errors.Join(ErrUncertain, err)
+	}
+	return removed, nil
+}

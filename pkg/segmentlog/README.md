@@ -6,7 +6,8 @@ are sparse `uint64` values; payloads are opaque bytes.
 
 **Current scope: an experimental synchronous append/read/rotate lifecycle,
 immutable segments, selective replacement preparation, and atomic local catalogs.**
-Background sealing, integrated scrubbing, and physical retirement remain pending.
+Explicit reclamation of obsolete managed files is implemented. Background sealing,
+integrated scrubbing, and retirement of pinned views remain pending.
 Neither the API nor the file format is stable. This package is not connected to the running database.
 
 ## Boundaries
@@ -14,7 +15,7 @@ Neither the API nor the file format is stable. This package is not connected to 
 | Layer | Responsibility | Status |
 | --- | --- | --- |
 | Committed adapter (`internal/cluster/db/`) | Raft entry serialization, visibility, scrub policy, metadata reconciliation, backup/peer protocols | Future integration |
-| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Synchronous append/read/rotation implemented; scrub and retirement pending |
+| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Synchronous append/read/rotation and explicit reclamation implemented; scrub/pins pending |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement, active append groups | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
 | Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
@@ -133,8 +134,7 @@ before success and rotates by a persisted original-frame byte target; `Read` and
 `Seek` span sealed ranges and the active tail. Batch boundaries and restarts do
 not alter sealed ranges. A nonblocking directory lock enforces exclusive managed
 log ownership until Close, including across processes. Sealing currently blocks
-other operations and old files
-remain on disk. See [the lifecycle contract and limitations](log-lifecycle.md).
+other operations; old files remain until explicit reclamation. See [the lifecycle contract and limitations](log-lifecycle.md).
 
 ## Local catalogs
 
@@ -145,6 +145,13 @@ selects only CURRENT and rejects missing/corrupt references. It currently scans
 full file contents, retains old revisions, and requires exclusive caller-managed
 directory ownership. See [the catalog format and publication contract](catalog-format.md).
 
+## Reclamation
+
+`Log.Reclaim(ctx)` verifies the confirmed live layout, preserves all referenced
+files, and durably removes recognized obsolete artifacts. It preserves unknown
+files, directories, and symlinks. Errors can report partial progress; filesystem
+failures require reopening before retry. See [the cleanup contract](reclamation.md).
+
 ## Next slices
 
 1. Extend compression experiments with representative event payloads and compare
@@ -152,7 +159,7 @@ directory ownership. See [the catalog format and publication contract](catalog-f
 2. Recovery coordination: directory orphans, external durability bounds, and the
    proof required before discarding any incomplete suffix.
 3. Add concurrent rewriting, captured views, and
-   resumable retirement; move sealing off the append path and bound verification work.
+   retirement for pinned views; move sealing off the append path and bound verification work.
 4. Committed adapter and offline opt-in conversion, then compatibility, peer,
    backup, and baseline performance experiments.
 
