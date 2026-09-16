@@ -79,8 +79,10 @@ transfer without making either protocol part of the engine.
 The [initial package implementation](../pkg/segmentlog/README.md) covers sealed
 segments and replacement preparation only. Its experimental format 1 supports plain and zstd
 blocks, with backward reads of format 0. It is not the complete proposed format
-below. Active tails, catalogs, durability, and Committed integration remain
-subsequent slices.
+below. Internal file-publication primitives now implement synced immutable
+installation and atomic pointer replacement, including explicit uncertainty after
+a failed publication sync. Active tails, catalog/recovery coordination, complete
+log durability, and Committed integration remain subsequent slices.
 
 ### Committed record identity
 

@@ -16,7 +16,7 @@ is stable. This package is not connected to the running database.
 | Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Planned |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
-| Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Planned; no empty placeholder package |
+| Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
 
 Keep segment lifecycle, catalog publication, and rewriting in one package until
 separating them makes their durability rules easier to enforce. Add no separate
@@ -45,11 +45,16 @@ outer record ID matches the ID inside its serialized Raft entry.
   private to that read, with capacity limited to their length. Retaining a small
   payload can retain its decoded block; clone it for long-lived use.
 
-The I/O boundary deliberately does **not** promise durability or publication.
+The public I/O boundary deliberately does **not** promise durability or publication.
 Writing/replacing one segment is preparation only. A caller must discard partial
 output on error and supply its close/sync, coherent catalog publication, and
 retirement protocol. Fully erased ranges currently encode as empty segments;
 the catalog layer will represent them without a payload file.
+
+The internal [durable filesystem layer](internal/durablefs/README.md) now supplies
+no-clobber immutable installation and atomic pointer replacement, with explicit
+results for uncertain durability and cleanup failures. The future ordered-log
+layer will coordinate these primitives; the public segment APIs remain I/O-based.
 
 Memory scales with block data and the block index rather than the entire log.
 Opening reads at most 3 MiB of encoded index metadata; decoded descriptors and
@@ -116,8 +121,8 @@ and allocation tradeoffs; these are not production storage or durability results
 
 1. Extend compression experiments with representative event payloads and compare
    against the tidwall baseline before selecting production policy.
-2. Durable filesystem operations and recoverable active append groups, including
-   injected short-write/sync failures and crash recovery bounds.
+2. Recoverable active append groups and directory recovery, using the publication
+   primitives and extending fault tests to append/recovery boundaries.
 3. Catalog publication, rotation, concurrent rewriting, captured views, and
    resumable physical retirement. Publish a whole rewrite transaction atomically.
 4. Committed adapter and offline opt-in conversion, then compatibility, peer,
