@@ -81,7 +81,26 @@ repairs, skips, or truncates them.
 The scanner bounds group allocation before reading payloads. It retains one group
 plus record descriptors at a time; callers retaining records can retain additional
 groups. Append assembles one bounded group in memory. No tail index/cache is
-implemented. Rotation and original-input accounting across scrubs remain pending.
+implemented. Managed rotation and original-input accounting across rewrites
+are supplied by Log and its catalog checkpoint.
+
+## Managed rewrite checkpoints
+
+The group format is unchanged. A rewritten tail has an optional `TailCheckpoint`
+in its catalog reference: a complete-group byte boundary `End`, highest original
+appended ID `Last`, original input `Count`, and original framed bytes `Framed`.
+An entirely erased prefix ends immediately after the tail header.
+
+Managed recovery verifies that boundary, requires the surviving prefix's count
+and last ID not to exceed the original values, restores original accounting,
+then reads later groups. Later IDs must exceed the original Last, including IDs
+of erased records. Later groups add their own counts and framed bytes. Truncation
+before the checkpoint or a checkpoint inside a group is corruption.
+
+`TailState.Count` counts survivors; `OriginalCount` and `Framed` count original
+input. On managed handles, Last and HasRecords retain append progress even when
+Count is zero. Standalone `ScanTail`/`OpenTail` do not read catalog metadata and
+must not be used to recover a managed log's erased append progress. Use `OpenLog`.
 
 ## Validation
 

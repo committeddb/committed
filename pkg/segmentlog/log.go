@@ -39,9 +39,9 @@ type fileInstaller interface {
 // It holds an advisory directory lock across processes and instances until Close.
 // Methods serialize; this prototype blocks reads/appends while sealing. The caller
 // must not replace the directory or bypass ownership with lower-level writers.
-// RewriteSealed publishes sealed-only transformations; Reclaim cleans obsolete
-// managed files. Active-tail scrubbing and
-// retirement for future pinned views remain pending.
+// Rewrite publishes whole-log transformations; RewriteSealed limits their scope.
+// Reclaim cleans obsolete managed files. Retirement for future pinned views
+// remains pending.
 type Log struct {
 	mu       sync.Mutex
 	path     string
@@ -182,7 +182,7 @@ func attachLog(path string, dir *durablefs.Dir, store *CatalogStore, encoding Op
 	if err != nil {
 		return nil, err
 	}
-	tail, err := OpenTail(file)
+	tail, err := openTail(file, c.Active.Checkpoint)
 	if err != nil {
 		_ = file.Close()
 		return nil, err
@@ -192,14 +192,10 @@ func attachLog(path string, dir *durablefs.Dir, store *CatalogStore, encoding Op
 		_ = file.Close()
 		return nil, err
 	}
-	var framed uint64
-	_, err = ScanTail(file, state.End, func(r Record) error { framed += uint64(len(r.Payload) + format.FrameOverhead); return nil })
-	if err != nil {
-		_ = file.Close()
-		return nil, err
-	}
+	framed := state.Framed
+
 	// A managed tail can exceed the target only with one oversized record.
-	if framed > c.SegmentBytes && state.Count != 1 {
+	if framed > c.SegmentBytes && (state.OriginalCount != 1 || framed > format.MaxPayload+format.FrameOverhead) {
 		_ = file.Close()
 		return nil, ErrCorrupt
 	}
@@ -316,18 +312,21 @@ func (l *Log) rotate() error {
 		return ErrInvalid
 	}
 	coverage := Coverage{Start: state.Start, End: state.Last + 1}
-	name, err := uniqueName("segment", coverage.Start, ".seg")
-	if err != nil {
-		return err
+	ref := SegmentRef{Coverage: coverage}
+	if state.Count > 0 {
+		name, err := uniqueName("segment", coverage.Start, ".seg")
+		if err != nil {
+			return err
+		}
+		hash := sha256.New()
+		if _, err = l.dir.Install(name, func(w io.Writer) error {
+			return WriteSegment(io.MultiWriter(w, hash), coverage, tailRecords(l.file, state.End), l.encoding)
+		}); err != nil {
+			return err
+		}
+		ref.File, ref.Count = name, state.Count
+		copy(ref.SHA256[:], hash.Sum(nil))
 	}
-	hash := sha256.New()
-	if _, err = l.dir.Install(name, func(w io.Writer) error {
-		return WriteSegment(io.MultiWriter(w, hash), coverage, tailRecords(l.file, state.End), l.encoding)
-	}); err != nil {
-		return err
-	}
-	var digest [32]byte
-	copy(digest[:], hash.Sum(nil))
 	newName, err := uniqueName("tail", coverage.End, ".active")
 	if err != nil {
 		return err
@@ -344,7 +343,7 @@ func (l *Log) rotate() error {
 		return errors.Join(err, newFile.Close())
 	}
 	c.Revision++
-	c.Segments = append(c.Segments, SegmentRef{Coverage: coverage, File: name, SHA256: digest, Count: state.Count})
+	c.Segments = append(c.Segments, ref)
 	c.Active = &TailRef{File: newName, Start: coverage.End}
 	if err = l.catalog.Publish(c.Revision-1, c); err != nil {
 		return errors.Join(err, newFile.Close())

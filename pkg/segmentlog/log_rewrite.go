@@ -8,6 +8,8 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+
+	"github.com/committeddb/committed/pkg/segmentlog/internal/format"
 )
 
 // SealedRewriteResult describes a sealed-only transaction. SealedEnd is the
@@ -39,6 +41,29 @@ type SealedRewriteResult struct {
 // the handle conservatively (including callback failure/cancellation); Close and
 // reopen before retrying or reclaiming unpublished replacements.
 func (l *Log) RewriteSealed(ctx context.Context, generation uint64, transform Transform) (result SealedRewriteResult, err error) {
+	resultAll, err := l.rewrite(ctx, generation, transform, false)
+	return resultAll.SealedRewriteResult, err
+}
+
+// RewriteResult describes a whole-log transaction. TailChanged reports completed
+// tail preparation, including on failure. Published has the same uncertainty
+// semantics as SealedRewriteResult.Published.
+type RewriteResult struct {
+	SealedRewriteResult
+	TailChanged bool
+}
+
+// Rewrite atomically transforms every surviving record in the captured log,
+// including the active tail. It preserves original append progress and rotation
+// accounting. All operations are serialized until publication finishes; callbacks
+// must not reenter this Log. Old payload files remain until explicit Reclaim.
+// Invalid input leaves the handle usable; preparation/publication failures require
+// Close and reopen. This storage transaction does not update application metadata.
+func (l *Log) Rewrite(ctx context.Context, generation uint64, transform Transform) (RewriteResult, error) {
+	return l.rewrite(ctx, generation, transform, true)
+}
+
+func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transform, includeTail bool) (result RewriteResult, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err = l.usable(); err != nil {
@@ -80,6 +105,36 @@ func (l *Log) RewriteSealed(ctx context.Context, generation uint64, transform Tr
 			c.Segments[i] = replacement
 		}
 	}
+	var newFile *os.File
+	var newTail *Tail
+	if includeTail {
+		ref, changed, e := l.prepareTail(ctx, *c.Active, c.SegmentBytes, transform)
+		if e != nil {
+			return result, l.fail(e)
+		}
+		result.TailChanged = changed
+		if changed {
+			newFile, e = os.OpenFile(filepath.Join(l.path, ref.File), os.O_RDWR, 0)
+			if e != nil {
+				return result, l.fail(e)
+			}
+			defer func() {
+				if newFile != nil {
+					err = errors.Join(err, newFile.Close())
+				}
+			}()
+			newTail, e = openTail(newFile, ref.Checkpoint)
+			if e != nil {
+				return result, l.fail(e)
+			}
+			// Reject a transformed tail that could not be sealed with the current
+			// block/index limits. Verification streams; payload growth is not buffered.
+			if e = WriteSegment(io.Discard, Coverage{ref.Start, ref.Checkpoint.Last + 1}, tailRecords(newFile, ref.Checkpoint.End), l.encoding); e != nil {
+				return result, l.fail(e)
+			}
+			c.Active = &ref
+		}
+	}
 	if err = ctx.Err(); err != nil {
 		return result, l.fail(err)
 	}
@@ -89,6 +144,14 @@ func (l *Log) RewriteSealed(ctx context.Context, generation uint64, transform Tr
 		return result, l.fail(err)
 	}
 	result.Published = true
+	if newFile != nil {
+		old := l.file
+		l.file, l.tail = newFile, newTail
+		newFile = nil
+		if e := old.Close(); e != nil {
+			return result, l.fail(e)
+		}
+	}
 	return result, nil
 }
 
@@ -157,6 +220,62 @@ func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Trans
 		var digest [32]byte
 		copy(digest[:], hash.Sum(nil))
 		replacement = SegmentRef{Coverage: ref.Coverage, File: name, SHA256: digest, Count: count}
+		return nil
+	})
+	return replacement, changed, err
+}
+
+func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, transform Transform) (replacement TailRef, changed bool, err error) {
+	state, err := l.tail.State()
+	if err != nil {
+		return ref, false, err
+	}
+	replacement = ref
+	changed, err = prepareRewrite(ctx, tailRecords(l.file, state.End), transform, func(records iter.Seq2[Record, error]) error {
+		name, e := uniqueName("tail", ref.Start, ".active")
+		if e != nil {
+			return e
+		}
+		// Reserve enough index capacity for future appends up to the original
+		// rotation target, even if replacement payloads grew substantially.
+		blockSize := l.encoding.BlockSize
+		if blockSize == 0 {
+			blockSize = 256 << 10
+		}
+		limit := uint64(blockSize/2) * uint64(format.MaxBlocks-1)
+		remaining := target - min(target, state.Framed)
+		var physical uint64
+		end := int64(tailHeaderSize)
+		if _, e = l.dir.Install(name, func(w io.Writer) error {
+			if e := WriteTailHeader(w, ref.Start); e != nil {
+				return e
+			}
+			for r, e := range records {
+				if e != nil {
+					return e
+				}
+				if len(r.Payload) > format.MaxPayload {
+					return ErrInvalid
+				}
+				n := uint64(len(r.Payload) + format.FrameOverhead)
+				if n > limit-remaining-physical {
+					return ErrInvalid
+				}
+				physical += n
+				group := encodeTailGroup([]Record{r}, int(n))
+				if end > int64(^uint64(0)>>1)-int64(len(group)) {
+					return ErrInvalid
+				}
+				if e := writeFull(w, group); e != nil {
+					return e
+				}
+				end += int64(len(group))
+			}
+			return nil
+		}); e != nil {
+			return e
+		}
+		replacement = TailRef{File: name, Start: ref.Start, Checkpoint: &TailCheckpoint{End: end, Last: state.Last, Count: state.OriginalCount, Framed: state.Framed}}
 		return nil
 	})
 	return replacement, changed, err

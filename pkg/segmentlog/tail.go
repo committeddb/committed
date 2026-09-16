@@ -24,12 +24,14 @@ var (
 )
 
 // TailState describes a validated prefix. End is the next byte offset; Count and
-// Last describe records, not range coverage. HasRecords distinguishes ID zero
-// from an empty tail. Start is the original lower ID bound.
+// Last describe surviving records for standalone tails. Managed rewritten tails
+// retain the original Last and HasRecords append frontier, even if Count is zero.
+// OriginalCount and Framed retain pre-erasure rotation accounting.
 type TailState struct {
-	Start, Last, Count uint64
-	End                int64
-	HasRecords         bool
+	Start, Last, Count    uint64
+	OriginalCount, Framed uint64
+	End                   int64
+	HasRecords            bool
 }
 
 // WriteTailHeader prepares a new empty tail. The caller must durably install it
@@ -53,7 +55,13 @@ func WriteTailHeader(w io.Writer, start uint64) error {
 // header, checksum failure, or invalid record ordering is ErrCorrupt. Neither
 // classification alone proves a suffix is safe to discard. The input must remain
 // immutable within size while scanning. A nil visitor verifies without delivery.
+// This standalone scanner reports physical records; managed recovery also applies
+// the catalog checkpoint to restore pre-erasure append accounting.
 func ScanTail(r io.ReaderAt, size int64, visit func(Record) error) (state TailState, err error) {
+	return scanTail(r, size, nil, visit)
+}
+
+func scanTail(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, visit func(Record) error) (state TailState, err error) {
 	if size < tailHeaderSize {
 		return state, ErrCorrupt
 	}
@@ -72,7 +80,27 @@ func ScanTail(r io.ReaderAt, size int64, visit func(Record) error) (state TailSt
 	if state.Start == ^uint64(0) {
 		return state, ErrCorrupt
 	}
-	for state.End < size {
+	if checkpoint != nil && (!checkpoint.valid(state.Start) || checkpoint.End > size) {
+		return state, ErrCorrupt
+	}
+	for {
+		if checkpoint != nil {
+			if state.End > checkpoint.End {
+				return state, ErrCorrupt
+			}
+			if state.End == checkpoint.End {
+				if state.Count > checkpoint.Count || (state.HasRecords && state.Last > checkpoint.Last) {
+					return state, ErrCorrupt
+				}
+				state.Last, state.HasRecords = checkpoint.Last, true
+				state.OriginalCount, state.Framed = checkpoint.Count, checkpoint.Framed
+				checkpoint = nil
+			}
+		}
+		if state.End == size {
+			break
+		}
+
 		if size-state.End < groupHeaderSize {
 			return state, ErrIncompleteTail
 		}
@@ -92,6 +120,9 @@ func ScanTail(r io.ReaderAt, size int64, visit func(Record) error) (state TailSt
 			return state, ErrCorrupt
 		}
 		total := int64(groupHeaderSize) + int64(length) + groupTrailerSize
+		if checkpoint != nil && total > checkpoint.End-state.End {
+			return state, ErrCorrupt
+		}
 		if total > size-state.End {
 			return state, ErrIncompleteTail
 		}
@@ -120,6 +151,9 @@ func ScanTail(r io.ReaderAt, size int64, visit func(Record) error) (state TailSt
 		if len(records) != int(count) || previous != last {
 			return state, ErrCorrupt
 		}
+		if state.Framed > ^uint64(0)-uint64(length) || state.OriginalCount > ^uint64(0)-uint64(count) {
+			return state, ErrCorrupt
+		}
 		if visit != nil {
 			for _, record := range records {
 				if err = visit(record); err != nil {
@@ -129,6 +163,8 @@ func ScanTail(r io.ReaderAt, size int64, visit func(Record) error) (state TailSt
 		}
 		state.End += total
 		state.Count += uint64(count)
+		state.Framed += uint64(length)
+		state.OriginalCount += uint64(count)
 		state.Last = last
 		state.HasRecords = true
 	}
@@ -159,6 +195,10 @@ type Tail struct {
 // returning an append handle. It refuses incomplete suffixes without modifying
 // the file. A complete marker alone never counts as proof of a previous sync.
 func OpenTail(f TailFile) (*Tail, error) {
+	return openTail(f, nil)
+}
+
+func openTail(f TailFile, checkpoint *TailCheckpoint) (*Tail, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -166,7 +206,7 @@ func OpenTail(f TailFile) (*Tail, error) {
 	if !info.Mode().IsRegular() {
 		return nil, ErrInvalid
 	}
-	state, err := ScanTail(f, info.Size(), nil)
+	state, err := scanTail(f, info.Size(), checkpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -204,18 +244,10 @@ func (t *Tail) Append(records []Record) error {
 		size += len(r.Payload) + format.FrameOverhead
 		previous, has = r.ID, true
 	}
-	group := make([]byte, groupHeaderSize, groupHeaderSize+size+groupTrailerSize)
-	copy(group, "SLGROUP0")
-	format.LE.PutUint32(group[8:], uint32(size))
-	format.LE.PutUint32(group[12:], uint32(len(records)))
-	format.LE.PutUint64(group[16:], previous)
-	format.LE.PutUint32(group[28:], format.CRC(group[:28]))
-	for _, r := range records {
-		group = format.AppendFrame(group, r.ID, r.Payload)
+	if t.state.Framed > ^uint64(0)-uint64(size) || t.state.OriginalCount > ^uint64(0)-uint64(len(records)) {
+		return ErrInvalid
 	}
-	group = append(group, []byte("SLEND000")...)
-	group = format.LE.AppendUint32(group, uint32(size))
-	group = format.LE.AppendUint32(group, format.CRC(group))
+	group := encodeTailGroup(records, size)
 	if t.state.End > int64(^uint64(0)>>1)-int64(len(group)) {
 		return ErrInvalid
 	}
@@ -233,6 +265,26 @@ func (t *Tail) Append(records []Record) error {
 	t.state.End += int64(len(group))
 	t.state.Last = previous
 	t.state.Count += uint64(len(records))
+	t.state.OriginalCount += uint64(len(records))
+	t.state.Framed += uint64(size)
 	t.state.HasRecords = true
 	return nil
+}
+
+// encodeTailGroup requires a nonempty, validated batch and its framed byte size.
+func encodeTailGroup(records []Record, size int) []byte {
+	group := make([]byte, groupHeaderSize, groupHeaderSize+size+groupTrailerSize)
+	copy(group, "SLGROUP0")
+	format.LE.PutUint32(group[8:], uint32(size))
+	format.LE.PutUint32(group[12:], uint32(len(records)))
+	format.LE.PutUint64(group[16:], records[len(records)-1].ID)
+	format.LE.PutUint32(group[28:], format.CRC(group[:28]))
+	for _, r := range records {
+		group = format.AppendFrame(group, r.ID, r.Payload)
+	}
+	group = append(group, []byte("SLEND000")...)
+	group = format.LE.AppendUint32(group, uint32(size))
+	group = format.LE.AppendUint32(group, format.CRC(group))
+
+	return group
 }

@@ -91,7 +91,8 @@ claims or production adoption; it is an integrity-first lifecycle prototype.
 Old tails, catalogs, sealed revisions, and crash orphans remain until explicit
 `Reclaim(ctx)` validates the live set and removes recognized obsolete files.
 Rotation temporarily increases disk usage until that call. See the
-[reclamation contract](reclamation.md). Integrated scrubbing, retirement for
+[reclamation contract](reclamation.md). Whole-log transformations now publish
+through `Rewrite`; see [its contract](whole-log-rewriting.md). Retirement for
 pinned views, background sealing, backup capture, and database integration remain
 subsequent work. This prototype does not establish application erasure completion.
 

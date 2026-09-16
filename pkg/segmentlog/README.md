@@ -5,9 +5,9 @@ module. It has no dependencies on Committed's application packages. Record IDs
 are sparse `uint64` values; payloads are opaque bytes.
 
 **Current scope: an experimental synchronous append/read/rotate lifecycle,
-immutable segments, transactional sealed-range rewriting, and atomic local catalogs.**
+immutable segments, transactional whole-log rewriting, and atomic local catalogs.**
 Explicit reclamation of obsolete managed files is implemented. Background sealing,
-active-tail scrubbing, and retirement of pinned views remain pending.
+concurrent rewriting, and retirement of pinned views remain pending.
 Neither the API nor the file format is stable. This package is not connected to the running database.
 
 ## Boundaries
@@ -15,7 +15,7 @@ Neither the API nor the file format is stable. This package is not connected to 
 | Layer | Responsibility | Status |
 | --- | --- | --- |
 | Committed adapter (`internal/cluster/db/`) | Raft entry serialization, visibility, scrub policy, metadata reconciliation, backup/peer protocols | Future integration |
-| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Synchronous append/read/rotation and explicit reclamation and sealed rewriting implemented; active scrub/pins pending |
+| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Synchronous append/read/rotation with whole-log rewriting and explicit reclamation implemented; pins pending |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement, active append groups | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
 | Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
@@ -50,7 +50,7 @@ outer record ID matches the ID inside its serialized Raft entry.
 The public I/O boundary deliberately does **not** promise durability or publication.
 Writing/replacing one segment is preparation only. A caller must discard partial
 output on error and supply its close/sync, coherent catalog publication, and
-retirement protocol. The managed `RewriteSealed` operation supplies these steps
+retirement protocol. The managed `Rewrite` operation supplies these steps
 through publication and represents fully erased ranges without a payload file;
 physical retirement remains an explicit `Reclaim` operation.
 
@@ -145,6 +145,10 @@ Unchanged files retain their names, bytes, and coverage. Fully erased ranges
 retain coverage without payload files. The active tail is excluded; this does
 not yet implement whole-log scrubbing. See [the transaction contract](sealed-rewriting.md).
 
+`Log.Rewrite` includes the active tail in the same transaction. A catalog
+checkpoint preserves its highest appended ID and original rotation accounting,
+even when no records survive. See [whole-log rewriting](whole-log-rewriting.md).
+
 ## Local catalogs
 
 `CatalogStore` now validates and atomically publishes a complete file layout via
@@ -167,8 +171,7 @@ failures require reopening before retry. See [the cleanup contract](reclamation.
    against the tidwall baseline before selecting production policy.
 2. Recovery coordination: directory orphans, external durability bounds, and the
    proof required before discarding any incomplete suffix.
-3. Add active-tail rewriting with preserved original rotation accounting,
-   then concurrent rewriting, captured views, and
+3. Add concurrent rewriting, captured views, and
    retirement for pinned views; move sealing off the append path and bound verification work.
 4. Committed adapter and offline opt-in conversion, then compatibility, peer,
    backup, and baseline performance experiments.

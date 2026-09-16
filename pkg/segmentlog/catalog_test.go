@@ -156,7 +156,7 @@ func TestCatalogReferencesFailClosed(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "tail.active"), h.Bytes(), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				c.Active = &TailRef{"tail.active", 1000}
+				c.Active = &TailRef{File: "tail.active", Start: 1000}
 			}
 			if _, err := CreateCatalogStore(dir, c); err == nil {
 				t.Fatal("accepted invalid reference")

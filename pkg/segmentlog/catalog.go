@@ -34,8 +34,22 @@ type SegmentRef struct {
 
 // TailRef names the single active tail, whose end is recovered from its groups.
 type TailRef struct {
-	File  string
-	Start uint64
+	File       string
+	Start      uint64
+	Checkpoint *TailCheckpoint `json:",omitempty"`
+}
+
+// TailCheckpoint restores append progress at the end of a rewritten prefix.
+// End is a complete-group byte boundary (or the header for an erased prefix).
+// Count and Framed describe original appended input, not surviving payloads.
+// Appends beyond End contribute their own original accounting during recovery.
+type TailCheckpoint struct {
+	End                 int64
+	Last, Count, Framed uint64
+}
+
+func (c TailCheckpoint) valid(start uint64) bool {
+	return c.End >= tailHeaderSize && c.Last >= start && c.Last != ^uint64(0) && c.Count > 0 && c.Count <= c.Last-start+1 && c.Count <= ^uint64(0)/format.FrameOverhead && c.Framed >= c.Count*format.FrameOverhead
 }
 
 // Catalog is an experimental complete local layout. Revision tracks physical
@@ -80,6 +94,9 @@ func validateCatalog(c Catalog) error {
 		seen[s.File] = true
 	}
 	if c.Active != nil && (c.Active.Start != next || next == ^uint64(0) || !validDataName(c.Active.File, ".active") || seen[c.Active.File]) {
+		return ErrInvalid
+	}
+	if c.Active != nil && c.Active.Checkpoint != nil && !c.Active.Checkpoint.valid(c.Active.Start) {
 		return ErrInvalid
 	}
 	return nil
@@ -294,6 +311,10 @@ func cloneCatalog(c Catalog) Catalog {
 	}
 	if c.Active != nil {
 		tail := *c.Active
+		if tail.Checkpoint != nil {
+			checkpoint := *tail.Checkpoint
+			tail.Checkpoint = &checkpoint
+		}
 		c.Active = &tail
 	}
 	return c
@@ -444,7 +465,7 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 			return err
 		}
 		defer func() { retErr = errors.Join(retErr, f.Close()) }()
-		state, err := ScanTail(f, info.Size(), nil)
+		state, err := scanTail(f, info.Size(), c.Active.Checkpoint, nil)
 		if err != nil {
 			return err
 		}

@@ -91,7 +91,9 @@ and retain it through Close. Explicit reclamation verifies the confirmed live se
 and durably removes recognized obsolete artifacts, with reopen/retry after
 failures. Sealed-range transformations now publish together in one catalog update,
 preserving unaffected files and representing erased ranges without payload files.
-Active-tail scrubbing, retirement for pinned views, background sealing,
+Whole-log rewriting now includes the active tail in the same publication, with
+a catalog checkpoint preserving original accounting and append progress.
+Concurrent rewriting, retirement for pinned views, background sealing,
 bounded-metadata startup, and Committed integration remain subsequent slices.
 
 ### Committed record identity

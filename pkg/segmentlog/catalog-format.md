@@ -24,6 +24,13 @@ coverage (or at Start when no sealed ranges exist). Its end is read from validat
 append groups, not copied from a stale catalog. Closed unsealed tails are not yet
 represented in this version.
 
+A rewritten TailRef can include an optional Checkpoint with End, Last, Count,
+and Framed fields. It restores original append accounting at a fixed complete-
+group boundary; later appends are recovered from groups beyond that boundary.
+See [the tail checkpoint contract](tail-format.md). Omission preserves existing
+catalog encoding. Older experimental readers reject checkpoint-bearing catalogs
+through their canonical encoding check; this is not a production upgrade path.
+
 Data filenames must be single non-hidden path components ending in `.seg` or
 `.active`. Referenced files must be regular files; symbolic links are rejected.
 Limits are 65,536 ranges and 16 MiB encoded catalog payload. The directory is

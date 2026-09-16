@@ -9,8 +9,9 @@ This is experimental and is not connected to Committed's RTBF protocol.
 The returned `SealedEnd` is the exclusive end of the sealed scope. The active
 tail is untouched, including its append frontier and original rotation accounting.
 An application cannot treat this operation as completing erasure of active records.
-Active-tail rewriting needs persisted original accounting and append progress
-before it can safely join the transaction.
+Use `Log.Rewrite` when the tail must join the transaction. It preserves original
+accounting and append progress through a catalog checkpoint; see
+[whole-log rewriting](whole-log-rewriting.md).
 
 Each examined record is transformed once. Payloads may be modified in place;
 IDs and range coverage cannot change. Unchanged ranges keep their exact file

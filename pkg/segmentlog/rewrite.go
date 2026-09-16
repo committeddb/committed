@@ -43,7 +43,11 @@ func (s *Segment) Rewrite(ctx context.Context, create func() (io.Writer, error),
 // creation behind this boundary lets a managed transaction durably install a
 // replacement without buffering or copying an entire segment through a spool.
 func (s *Segment) prepareRewrite(ctx context.Context, transform Transform, emit func(iter.Seq2[Record, error]) error) (bool, error) {
-	next, stop := iter.Pull2(s.Records())
+	return prepareRewrite(ctx, s.Records(), transform, emit)
+}
+
+func prepareRewrite(ctx context.Context, input iter.Seq2[Record, error], transform Transform, emit func(iter.Seq2[Record, error]) error) (bool, error) {
+	next, stop := iter.Pull2(input)
 	defer stop()
 	apply := func(rec Record) (Record, bool, bool, error) {
 		if err := ctx.Err(); err != nil {
@@ -79,7 +83,7 @@ func (s *Segment) prepareRewrite(ctx context.Context, transform Transform, emit 
 			continue
 		}
 		records := func(yield func(Record, error) bool) {
-			for prefix, err := range s.Records() {
+			for prefix, err := range input {
 				if err != nil {
 					yield(Record{}, err)
 					return
