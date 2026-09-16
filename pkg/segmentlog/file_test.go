@@ -46,3 +46,33 @@ func TestInstallSegmentFile(t *testing.T) {
 		t.Fatal(r, err)
 	}
 }
+
+func TestInstallAndAppendTail(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("unsupported durability platform")
+	}
+	path := t.TempDir()
+	dir, err := durablefs.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := dir.Install("events.active", func(w io.Writer) error { return WriteTailHeader(w, 10) }); err != nil || !result.Durable {
+		t.Fatal(result, err)
+	}
+	f, err := os.OpenFile(filepath.Join(path, "events.active"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tail, err := OpenTail(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tail.Append([]Record{{10, []byte("ten")}, {100, []byte("hundred")}}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := tail.State()
+	if err != nil || state.Count != 2 || state.Last != 100 {
+		t.Fatal(state, err)
+	}
+}

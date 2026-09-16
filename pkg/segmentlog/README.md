@@ -4,8 +4,8 @@ An ordered segmented log being developed within the Committed repository and Go
 module. It has no dependencies on Committed's application packages. Record IDs
 are sparse `uint64` values; payloads are opaque bytes.
 
-**Current scope: immutable segments and preparation of selective replacements.**
-There is no durable append log or catalog yet. Neither the API nor the file format
+**Current scope: immutable segments, selective replacement preparation, and a
+synchronized single-file active tail.** There is no complete durable log or catalog yet. Neither the API nor the file format
 is stable. This package is not connected to the running database.
 
 ## Boundaries
@@ -14,7 +14,7 @@ is stable. This package is not connected to the running database.
 | --- | --- | --- |
 | Committed adapter (`internal/cluster/db/`) | Raft entry serialization, visibility, scrub policy, metadata reconciliation, backup/peer protocols | Future integration |
 | Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Planned |
-| Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement | Initial implementation |
+| Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement, active append groups | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
 | Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
 
@@ -117,12 +117,20 @@ Use an explicit `WriteSegment` over `Records()` for deliberate re-encoding.
 [Synthetic benchmark notes](compression-benchmarks.md) record initial CPU, size,
 and allocation tradeoffs; these are not production storage or durability results.
 
+## Active tail
+
+`WriteTailHeader`, `OpenTail`, `Tail.Append`, and `ScanTail` now provide bounded,
+checksummed append groups with sync-before-success and permanently poisoned
+handles after I/O failure. Reopening recovers and syncs complete groups. The
+scanner reports incomplete suffixes without truncating; it cannot prove that
+discarding them is safe. See [the tail format and recovery contract](tail-format.md).
+
 ## Next slices
 
 1. Extend compression experiments with representative event payloads and compare
    against the tidwall baseline before selecting production policy.
-2. Recoverable active append groups and directory recovery, using the publication
-   primitives and extending fault tests to append/recovery boundaries.
+2. Recovery coordination: directory orphans, external durability bounds, and the
+   proof required before discarding any incomplete suffix.
 3. Catalog publication, rotation, concurrent rewriting, captured views, and
    resumable physical retirement. Publish a whole rewrite transaction atomically.
 4. Committed adapter and offline opt-in conversion, then compatibility, peer,
@@ -135,6 +143,7 @@ The full requirements remain in [the design draft](../../docs/event-segment-desi
 ```sh
 go test -race ./pkg/segmentlog/...
 go test ./pkg/segmentlog -run '^$' -fuzz FuzzSegment -fuzztime 10s
+go test ./pkg/segmentlog -run '^$' -fuzz FuzzTail -fuzztime 10s
 go test ./pkg/segmentlog/internal/format -run '^$' -fuzz FuzzDecode -fuzztime 10s
 go test ./pkg/segmentlog -run '^$' -bench BenchmarkCompression -benchtime 100ms
 ```

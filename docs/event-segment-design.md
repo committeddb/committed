@@ -81,8 +81,11 @@ segments and replacement preparation only. Its experimental format 1 supports pl
 blocks, with backward reads of format 0. It is not the complete proposed format
 below. Internal file-publication primitives now implement synced immutable
 installation and atomic pointer replacement, including explicit uncertainty after
-a failed publication sync. Active tails, catalog/recovery coordination, complete
-log durability, and Committed integration remain subsequent slices.
+a failed publication sync. A single-file active-tail appender and non-mutating
+scanner now validate bounded groups and poison handles after I/O failures.
+Incomplete suffixes are reported but never automatically discarded. Catalog/
+recovery coordination, rotation, complete log durability, and Committed integration
+remain subsequent slices.
 
 ### Committed record identity
 

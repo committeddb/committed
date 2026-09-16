@@ -26,6 +26,15 @@ var table = crc32.MakeTable(crc32.Castagnoli)
 
 func CRC(b []byte) uint32 { return crc32.Checksum(b, table) }
 
+// CRCParts checksums consecutive regions without concatenating their buffers.
+func CRCParts(parts ...[]byte) uint32 {
+	var sum uint32
+	for _, part := range parts {
+		sum = crc32.Update(sum, table, part)
+	}
+	return sum
+}
+
 // AppendFrame encodes payload length, stable ID, payload, then CRC32C of all
 // preceding frame bytes. Callers validate payload size before encoding.
 func AppendFrame(dst []byte, id uint64, payload []byte) []byte {
