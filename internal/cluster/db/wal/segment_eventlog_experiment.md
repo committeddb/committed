@@ -115,8 +115,37 @@ entries, and maximum indexes. They also verify erased-index behavior, streaming
 cursor independence, visibility gating, retry after resolution failure, corrupt
 identities, and both skippable and must-understand unknown system types.
 
-Production integration still needs the protected lifetime for multi-call reads,
-checkpoint loading, and storage/application coordination.
+## Protected multi-call reads
+
+`protectedReaderAt` protects a logical rewrite generation across multiple Read
+calls. Its context must have a deadline. Closing the reader, canceling the context,
+or reaching the deadline ends its lifetime and releases protection. Close is
+idempotent and safe to race with cancellation. Reads after the lifetime ends
+return its cancellation cause (or `segmentlog.ErrClosed` for explicit Close).
+An in-flight read checks cancellation again after decoding and does not advance
+its cursor or return an Actual if cancellation occurred during decoding.
+
+Acquisition and rewrite exclusion share the adapter lock, so a read registers
+either before or after a complete rewrite. While any protected reader remains,
+`rewriteRaw` returns retryable `errSegmentRewriteDeferred` before invoking a
+transform or creating files. This does not poison the log or consume a generation;
+the future coordinator must retain pending work and retry. Appends and rotation
+remain available between Read calls. This protects logical record history, not
+a fixed tail limit or a set of backup files.
+
+Cancellation cannot interrupt a type resolver or filesystem call. Protection
+remains until an in-flight Read releases the adapter lock, and
+`protectedReadCount` reports these blockers without waiting for decoding. Close
+waits for release, so callbacks must not close or reenter their own reader/adapter.
+Always close a protected reader when finished rather than waiting for its deadline.
+
+Tests exercise overlapping holds, appends during a hold, retry of the same rewrite
+generation, automatic expiry, concurrent close/cancel, and cancellation during
+decoding. Production from-zero replay is not wired to this API yet; backup capture
+and file pins remain separate work.
+
+Production integration still needs checkpoint loading, protected-reader wiring,
+and storage/application coordination.
 Recovered append progress and raw committed replay are implemented experimentally;
 BoltDB/Raft recovery coordination and applied-index invariants remain pending.
 Backup/restore, peer transfer, format gates, offline conversion, and workload

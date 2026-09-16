@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
@@ -20,8 +21,9 @@ import (
 // The adapter must not be copied after use. Mutations must go through it while
 // readers are live; its lock protects each complete Read from rewrite publication.
 type segmentEventLog struct {
-	mu  sync.RWMutex
-	log *segmentlog.Log
+	mu             sync.RWMutex
+	log            *segmentlog.Log
+	protectedReads atomic.Int64
 }
 
 // appendRaw validates the entire batch before appending and preserves the exact
@@ -151,8 +153,14 @@ func checkedSegmentEntry(r segmentlog.Record, err error) ([]byte, error) {
 func (l *segmentEventLog) rewriteRaw(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (segmentlog.RewriteResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if transform == nil {
+	if ctx == nil || transform == nil {
 		return segmentlog.RewriteResult{}, segmentlog.ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return segmentlog.RewriteResult{}, err
+	}
+	if l.protectedReads.Load() > 0 {
+		return segmentlog.RewriteResult{}, errSegmentRewriteDeferred
 	}
 	return l.log.Rewrite(ctx, generation, func(r segmentlog.Record) ([]byte, bool, error) {
 		raw, err := checkedSegmentEntry(r, nil)

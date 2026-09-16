@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -18,7 +19,8 @@ import (
 // contract. Its cursor is the last examined Raft index, never a physical offset.
 // Each Read holds the adapter's read lock through decode and filtering, so it
 // cannot combine records from different rewrite generations. No view is pinned
-// between calls. The caller owns protected multi-call reads and adapter lifetime.
+// between ordinary calls. protectedReaderAt adds a bounded multi-call lifetime;
+// the caller owns adapter lifetime.
 type segmentActualReader struct {
 	mu       sync.Mutex
 	events   *segmentEventLog
@@ -26,6 +28,7 @@ type segmentActualReader struct {
 	applied  func() uint64
 	index    uint64
 	pos      atomic.Uint64
+	ctx      context.Context // optional lifetime for a protected reader
 }
 
 var _ db.ActualReader = (*segmentActualReader)(nil)
@@ -48,6 +51,11 @@ func (r *segmentActualReader) Read() (*cluster.Actual, error) {
 	r.events.mu.RLock()
 	defer r.events.mu.RUnlock()
 	for {
+		if r.ctx != nil {
+			if err := context.Cause(r.ctx); err != nil {
+				return nil, err
+			}
+		}
 		if r.index == ^uint64(0) {
 			return nil, io.EOF
 		}
@@ -77,6 +85,11 @@ func (r *segmentActualReader) Read() (*cluster.Actual, error) {
 				}
 			} else {
 				entities = userTopicEntities(proposal.Entities)
+			}
+		}
+		if r.ctx != nil {
+			if err := context.Cause(r.ctx); err != nil {
+				return nil, err
 			}
 		}
 		r.index = index

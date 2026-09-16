@@ -104,7 +104,10 @@ exposes recovered original append progress and validates/deduplicates replay of
 already-committed raw batches, including after complete erasure; application
 metadata replay and AppliedIndex coordination remain pending. Experimental exact
 Actual lookup now preserves metadata and error behavior, with an explicit applied
-watermark guard; production lookup remains unchanged.
+watermark guard; production lookup remains unchanged. Deadline-bound protected
+readers now defer experimental rewrite publication across calls while allowing
+appends, with automatic release and observable blocker counts. Production
+from-zero reader wiring and backup file captures remain pending.
 
 ### Committed record identity
 
