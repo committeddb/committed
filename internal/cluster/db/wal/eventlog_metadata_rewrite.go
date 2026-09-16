@@ -3,7 +3,7 @@ package wal
 import (
 	"context"
 
-	"github.com/committeddb/committed/pkg/segmentlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
 // rewriteMetadata performs experimental snapshot compaction with one adapter
@@ -16,29 +16,29 @@ import (
 // supersession rules only: no RTBF tombstone selection, delete-key erasure, or
 // BoltDB metadata updates. It preserves entries beyond bound and requires Reclaim
 // for physical cleanup. Production Storage is not wired to this operation.
-func (l *segmentEventLog) rewriteMetadata(ctx context.Context, generation, bound uint64, applied func() uint64) (segmentlog.RewriteResult, error) {
+func (l *eventLogAdapter) rewriteMetadata(ctx context.Context, generation, bound uint64, applied func() uint64) (eventlog.RewriteResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if ctx == nil || applied == nil {
-		return segmentlog.RewriteResult{}, segmentlog.ErrInvalid
+		return eventlog.RewriteResult{}, eventlog.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
-		return segmentlog.RewriteResult{}, err
+		return eventlog.RewriteResult{}, err
 	}
 	if l.protectedReads.Load() > 0 {
-		return segmentlog.RewriteResult{}, errSegmentRewriteDeferred
+		return eventlog.RewriteResult{}, errEventRewriteDeferred
 	}
 	frontier, err := l.eventIndexLocked()
 	if err != nil {
-		return segmentlog.RewriteResult{}, err
+		return eventlog.RewriteResult{}, err
 	}
 	watermark := applied()
 	if bound > watermark || watermark > frontier {
-		return segmentlog.RewriteResult{}, segmentlog.ErrInvalid
+		return eventlog.RewriteResult{}, eventlog.ErrInvalid
 	}
 	selections, err := l.metadataSupersessionsLocked(ctx, bound)
 	if err != nil {
-		return segmentlog.RewriteResult{}, err
+		return eventlog.RewriteResult{}, err
 	}
 	return l.rewriteRawLocked(ctx, generation, func(raw []byte) (bool, []byte, error) { return scrubFilterEntry(raw, nil, selections, 0) })
 }

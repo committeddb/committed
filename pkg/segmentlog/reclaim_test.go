@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/committeddb/committed/pkg/segmentlog/internal/durablefs"
+	"github.com/committeddb/committed/internal/durablefs"
 )
 
 func rotatedLog(t *testing.T) *Log {

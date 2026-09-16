@@ -9,7 +9,8 @@ immutable segments, transactional whole-log rewriting, and atomic local catalogs
 Explicit reclamation of obsolete managed files is implemented. Background sealing,
 concurrent rewriting, and retirement of pinned views remain pending.
 Neither the API nor the file format is stable. This package is not connected to the running database.
-A [raw-entry adapter experiment](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
+The shared [EventLog contract](../../internal/cluster/db/eventlog/README.md) now has
+separate tidwall and segmented implementations. A [raw-entry adapter experiment](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
 compares Committed protobuf records and existing scrub transformations with tidwall.
 
 ## Boundaries
@@ -20,7 +21,7 @@ compares Committed protobuf records and existing scrub transformations with tidw
 | Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Synchronous append/read/rotation with whole-log rewriting and explicit reclamation implemented; pins pending |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement, active append groups | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
-| Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
+| Durable filesystem (`internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
 
 Keep segment lifecycle, catalog publication, and rewriting in one package until
 separating them makes their durability rules easier to enforce. Add no separate
@@ -56,7 +57,7 @@ retirement protocol. The managed `Rewrite` operation supplies these steps
 through publication and represents fully erased ranges without a payload file;
 physical retirement remains an explicit `Reclaim` operation.
 
-The internal [durable filesystem layer](internal/durablefs/README.md) now supplies
+The internal [durable filesystem layer](../../internal/durablefs/README.md) now supplies
 no-clobber immutable installation and atomic pointer replacement, with explicit
 results for uncertain durability and cleanup failures. The catalog layer
 now uses these primitives; the public segment encoding APIs remain I/O-based.

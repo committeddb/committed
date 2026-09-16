@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/committeddb/committed/pkg/segmentlog/internal/durablefs"
+	"github.com/committeddb/committed/internal/durablefs"
 )
 
 func TestInstallSegmentFile(t *testing.T) {

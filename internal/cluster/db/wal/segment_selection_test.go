@@ -6,12 +6,13 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+
 	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 func selectionEntry(t *testing.T, index uint64, entities ...*cluster.Entity) []byte {
@@ -108,7 +109,7 @@ func TestSegmentSelectionsMatchLegacyPrefix(t *testing.T) {
 	if err != nil || !result.Published {
 		t.Fatal(result, err)
 	}
-	if _, err := adapter.readRaw(30); !errors.Is(err, segmentlog.ErrNotFound) {
+	if _, err := adapter.readRaw(30); !errors.Is(err, eventlog.ErrNotFound) {
 		t.Fatal("superseded internal entry retained", err)
 	}
 	for _, index := range []uint64{10, 20, 40, 50, 60, 70} {

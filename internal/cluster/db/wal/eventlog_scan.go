@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/committeddb/committed/pkg/segmentlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
 // scanRaw streams validated Entry bytes in the half-open Raft-index interval.
@@ -12,9 +12,9 @@ import (
 // callers choose their bound for scrub selection, recovery, or verification.
 // It holds the adapter and engine view through the callback. Callbacks must not
 // reenter either, and errors/cancellation can follow an already delivered prefix.
-func (l *segmentEventLog) scanRaw(ctx context.Context, bounds segmentlog.Coverage, visit func(uint64, []byte) error) error {
+func (l *eventLogAdapter) scanRaw(ctx context.Context, bounds eventlog.Coverage, visit func(uint64, []byte) error) error {
 	if visit == nil {
-		return segmentlog.ErrInvalid
+		return eventlog.ErrInvalid
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -22,15 +22,15 @@ func (l *segmentEventLog) scanRaw(ctx context.Context, bounds segmentlog.Coverag
 }
 
 // scanRawLocked requires the adapter read or write lock.
-func (l *segmentEventLog) scanRawLocked(ctx context.Context, bounds segmentlog.Coverage, visit func(uint64, []byte) error) error {
-	err := l.log.Scan(ctx, bounds, func(r segmentlog.Record) error {
-		raw, err := checkedSegmentEntry(r, nil)
+func (l *eventLogAdapter) scanRawLocked(ctx context.Context, bounds eventlog.Coverage, visit func(uint64, []byte) error) error {
+	err := l.log.Scan(ctx, bounds, func(r eventlog.Record) error {
+		raw, err := checkedEventEntry(r, nil)
 		if err != nil {
 			return err
 		}
 		return visit(r.ID, raw)
 	})
-	if errors.Is(err, segmentlog.ErrCorrupt) {
+	if errors.Is(err, eventlog.ErrCorrupt) {
 		return errors.Join(ErrCorruptEntry, err)
 	}
 	return err

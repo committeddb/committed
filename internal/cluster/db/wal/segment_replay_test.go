@@ -8,6 +8,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
+
 	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/pkg/segmentlog"
@@ -31,12 +34,12 @@ func TestSegmentReplayPreservesErasureAfterReopen(t *testing.T) {
 	if err := adapter.log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	log, err := segmentlog.OpenLog(path, segmentlog.Options{})
+	log, err := segmented.Open(path, segmentlog.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	adapter = &segmentEventLog{log: log}
+	adapter = &eventLogAdapter{log: log}
 	if index, err := adapter.eventIndex(); err != nil || index != 100 {
 		t.Fatal("lost erased frontier", index, err)
 	}
@@ -75,7 +78,7 @@ func TestSegmentReplayPreservesErasureAfterReopen(t *testing.T) {
 		t.Fatal(index, err)
 	}
 	for _, id := range []uint64{10, 40, 100} {
-		if _, err := adapter.readRaw(id); !errors.Is(err, segmentlog.ErrNotFound) {
+		if _, err := adapter.readRaw(id); !errors.Is(err, eventlog.ErrNotFound) {
 			t.Fatal("resurrected erased record", id, err)
 		}
 	}
@@ -98,20 +101,20 @@ func TestSegmentReplayValidatesSkippedPrefix(t *testing.T) {
 		{experimentEntry(t, 0, pb.EntryNormal), next},
 		{next, first},
 	} {
-		if _, err := adapter.appendCommittedRaw(batch); !errors.Is(err, segmentlog.ErrInvalid) {
+		if _, err := adapter.appendCommittedRaw(batch); !errors.Is(err, eventlog.ErrInvalid) {
 			t.Fatal(err)
 		}
 		if index, err := adapter.eventIndex(); err != nil || index != 10 {
 			t.Fatal("invalid batch advanced frontier", index, err)
 		}
-		if _, err := adapter.readRaw(20); !errors.Is(err, segmentlog.ErrNotFound) {
+		if _, err := adapter.readRaw(20); !errors.Is(err, eventlog.ErrNotFound) {
 			t.Fatal(err)
 		}
 	}
 	if err := adapter.log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adapter.appendCommittedRaw([][]byte{first}); !errors.Is(err, segmentlog.ErrClosed) {
+	if _, err := adapter.appendCommittedRaw([][]byte{first}); !errors.Is(err, eventlog.ErrClosed) {
 		t.Fatal("replay bypassed closed handle", err)
 	}
 }

@@ -10,19 +10,19 @@ import (
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/committeddb/committed/pkg/segmentlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
-// segmentEventLog is an experimental raw-entry adapter. It is intentionally not
+// eventLogAdapter is an experimental raw-entry adapter. It is intentionally not
 // wired into Storage: reader visibility is experimental; metadata recovery, backup, and peer protocols
 // still require integration. The caller owns the supplied log and its Close.
-// Payloads are unframed raftpb.Entry bytes; segmentlog supplies integrity framing.
+// Payloads are unframed raftpb.Entry bytes; each backend supplies integrity framing.
 // IDs are the entries' Raft indexes, never tidwall sequence numbers.
 // The adapter must not be copied after use. Mutations must go through it while
 // readers are live; its lock protects each complete Read from rewrite publication.
-type segmentEventLog struct {
+type eventLogAdapter struct {
 	mu             sync.RWMutex
-	log            *segmentlog.Log
+	log            eventlog.EventLog
 	protectedReads atomic.Int64
 }
 
@@ -30,39 +30,39 @@ type segmentEventLog struct {
 // input bytes, including protobuf unknown fields. Append failure can leave a
 // durable prefix; callers must reopen and reconcile before retrying. This method
 // does not implement Storage's applied-index or replay-deduplication protocol.
-func (l *segmentEventLog) appendRaw(payloads [][]byte) error {
+func (l *eventLogAdapter) appendRaw(payloads [][]byte) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	records, err := segmentEntryRecords(payloads)
+	records, err := eventEntryRecords(payloads)
 	if err != nil {
 		return err
 	}
 	return l.log.Append(records)
 }
 
-func segmentEntryRecords(payloads [][]byte) ([]segmentlog.Record, error) {
-	records := make([]segmentlog.Record, 0, len(payloads))
+func eventEntryRecords(payloads [][]byte) ([]eventlog.Record, error) {
+	records := make([]eventlog.Record, 0, len(payloads))
 	var previous uint64
 	for _, raw := range payloads {
 		entry := new(pb.Entry)
 		if err := proto.Unmarshal(raw, entry); err != nil || entry.GetIndex() == 0 || entry.GetIndex() == ^uint64(0) || entry.GetIndex() <= previous {
-			return nil, fmt.Errorf("invalid event entry batch: %w", segmentlog.ErrInvalid)
+			return nil, fmt.Errorf("invalid event entry batch: %w", eventlog.ErrInvalid)
 		}
 		previous = entry.GetIndex()
-		records = append(records, segmentlog.Record{ID: previous, Payload: raw})
+		records = append(records, eventlog.Record{ID: previous, Payload: raw})
 	}
 	return records, nil
 }
 
 // eventIndex reports original durable append progress, including erased entries.
 // It returns zero for a fresh log. A poisoned handle must be reopened first.
-func (l *segmentEventLog) eventIndex() (uint64, error) {
+func (l *eventLogAdapter) eventIndex() (uint64, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.eventIndexLocked()
 }
 
-func (l *segmentEventLog) eventIndexLocked() (uint64, error) {
+func (l *eventLogAdapter) eventIndexLocked() (uint64, error) {
 	index, ok, err := l.log.LastAppended()
 	if err != nil {
 		return 0, err
@@ -80,10 +80,10 @@ func (l *segmentEventLog) eventIndexLocked() (uint64, error) {
 // Empty/all-replayed batches make no writes and return the existing frontier.
 // On error the returned index is unusable; reopen after storage failure before
 // retrying. Success does not apply entries to BoltDB or advance AppliedIndex.
-func (l *segmentEventLog) appendCommittedRaw(payloads [][]byte) (uint64, error) {
+func (l *eventLogAdapter) appendCommittedRaw(payloads [][]byte) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	records, err := segmentEntryRecords(payloads)
+	records, err := eventEntryRecords(payloads)
 	if err != nil {
 		return 0, err
 	}
@@ -106,31 +106,31 @@ func (l *segmentEventLog) appendCommittedRaw(payloads [][]byte) (uint64, error) 
 
 // readRaw and seekRaw retain ErrNotFound for absent/erased indexes. Corruption
 // must never be interpreted as a gap or EOF. Returned payloads belong to the caller.
-func (l *segmentEventLog) readRaw(index uint64) ([]byte, error) {
+func (l *eventLogAdapter) readRaw(index uint64) ([]byte, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	r, err := l.log.Read(index)
-	return checkedSegmentEntry(r, err)
+	return checkedEventEntry(r, err)
 }
 
-func (l *segmentEventLog) seekRaw(index uint64) (uint64, []byte, error) {
+func (l *eventLogAdapter) seekRaw(index uint64) (uint64, []byte, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.seekRawLocked(index)
 }
 
-func (l *segmentEventLog) seekRawLocked(index uint64) (uint64, []byte, error) {
+func (l *eventLogAdapter) seekRawLocked(index uint64) (uint64, []byte, error) {
 	r, err := l.log.Seek(index)
-	raw, err := checkedSegmentEntry(r, err)
+	raw, err := checkedEventEntry(r, err)
 	if err != nil {
 		return 0, nil, err
 	}
 	return r.ID, raw, nil
 }
 
-func checkedSegmentEntry(r segmentlog.Record, err error) ([]byte, error) {
+func checkedEventEntry(r eventlog.Record, err error) ([]byte, error) {
 	if err != nil {
-		if errors.Is(err, segmentlog.ErrCorrupt) {
+		if errors.Is(err, eventlog.ErrCorrupt) {
 			return nil, errors.Join(ErrCorruptEntry, err)
 		}
 		return nil, err
@@ -150,25 +150,25 @@ func checkedSegmentEntry(r segmentlog.Record, err error) ([]byte, error) {
 // It does not authorize a scrub, update BoltDB, or declare physical erasure done.
 // Even removal validates the original entry's identity before invoking transform;
 // surviving replacements must retain it. Callbacks may not reenter the log.
-func (l *segmentEventLog) rewriteRaw(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (segmentlog.RewriteResult, error) {
+func (l *eventLogAdapter) rewriteRaw(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (eventlog.RewriteResult, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.rewriteRawLocked(ctx, generation, transform)
 }
 
 // rewriteRawLocked requires the adapter write lock throughout preparation and publication.
-func (l *segmentEventLog) rewriteRawLocked(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (segmentlog.RewriteResult, error) {
+func (l *eventLogAdapter) rewriteRawLocked(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (eventlog.RewriteResult, error) {
 	if ctx == nil || transform == nil {
-		return segmentlog.RewriteResult{}, segmentlog.ErrInvalid
+		return eventlog.RewriteResult{}, eventlog.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
-		return segmentlog.RewriteResult{}, err
+		return eventlog.RewriteResult{}, err
 	}
 	if l.protectedReads.Load() > 0 {
-		return segmentlog.RewriteResult{}, errSegmentRewriteDeferred
+		return eventlog.RewriteResult{}, errEventRewriteDeferred
 	}
-	return l.log.Rewrite(ctx, generation, func(r segmentlog.Record) ([]byte, bool, error) {
-		raw, err := checkedSegmentEntry(r, nil)
+	return l.log.Rewrite(ctx, generation, func(r eventlog.Record) ([]byte, bool, error) {
+		raw, err := checkedEventEntry(r, nil)
 		if err != nil {
 			return nil, false, err
 		}
@@ -176,7 +176,7 @@ func (l *segmentEventLog) rewriteRawLocked(ctx context.Context, generation uint6
 		if err != nil || !keep {
 			return nil, false, err
 		}
-		payload, err = checkedSegmentEntry(segmentlog.Record{ID: r.ID, Payload: payload}, nil)
+		payload, err = checkedEventEntry(eventlog.Record{ID: r.ID, Payload: payload}, nil)
 		return payload, true, err
 	})
 }

@@ -456,3 +456,19 @@ Some older architecture prose predates the fork's directory-fsync and live-backu
 changes. Implementation and current tests must be reconciled with those documents
 as part of any adopted design; this draft does not silently redefine the shipped
 durability contract.
+
+## Shared backend contract
+
+The permanent storage boundary now lives in
+[`internal/cluster/db/eventlog/eventlog.go`](../internal/cluster/db/eventlog/eventlog.go)
+as `EventLog`. Separate `tidwall` and `segmented` subpackages implement it. The
+experimental application adapter consumes that interface, keeping protobuf,
+visibility, replay, protected-read coordination, and scrub policy above both
+backends. Common conformance tests run against both, in plain and zstd modes.
+
+The tidwall wrapper adds an explicit experimental generation container for
+atomic replacement and original append progress; it does not auto-adopt legacy
+production directories. Production Storage and its backup/peer/migration protocols
+remain on the existing path. The generic durable filesystem primitives moved to
+`internal/durablefs` so both engines share their tested publication/ownership
+implementation without importing one another's internals.

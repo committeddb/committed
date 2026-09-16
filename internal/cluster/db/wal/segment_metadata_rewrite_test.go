@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
+
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
@@ -30,10 +33,10 @@ func TestSegmentMetadataRewriteBoundAndPartialRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := adapter.rewriteMetadata(t.Context(), 1, 20, func() uint64 { return 20 })
-	if err != nil || !result.Published || result.ChangedSegments == 0 {
+	if err != nil || !result.Published || result.ChangedRecords == 0 {
 		t.Fatal(result, err)
 	}
-	if _, err := adapter.readRaw(5); !errors.Is(err, segmentlog.ErrNotFound) {
+	if _, err := adapter.readRaw(5); !errors.Is(err, eventlog.ErrNotFound) {
 		t.Fatal("superseded metadata retained", err)
 	}
 	raw, err := adapter.readRaw(10)
@@ -63,14 +66,14 @@ func TestSegmentMetadataRewriteBoundAndPartialRecord(t *testing.T) {
 	if err := adapter.log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	log, err := segmentlog.OpenLog(path, segmentlog.Options{})
+	log, err := segmented.Open(path, segmentlog.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	adapter = &segmentEventLog{log: log}
+	adapter = &eventLogAdapter{log: log}
 	result, err = adapter.rewriteMetadata(t.Context(), 2, 20, func() uint64 { return 30 })
-	if err != nil || !result.Published || result.ChangedSegments != 0 || result.TailChanged {
+	if err != nil || !result.Published || result.ChangedRecords != 0 {
 		t.Fatal("non-idempotent metadata rewrite", result, err)
 	}
 	if index, err := adapter.eventIndex(); err != nil || index != 30 {
@@ -84,7 +87,7 @@ func TestSegmentMetadataRewriteValidationAndProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, bounds := range [][2]uint64{{11, 10}, {10, 11}} {
-		if _, err := adapter.rewriteMetadata(t.Context(), 1, bounds[0], func() uint64 { return bounds[1] }); !errors.Is(err, segmentlog.ErrInvalid) {
+		if _, err := adapter.rewriteMetadata(t.Context(), 1, bounds[0], func() uint64 { return bounds[1] }); !errors.Is(err, eventlog.ErrInvalid) {
 			t.Fatal(err)
 		}
 	}
@@ -96,7 +99,7 @@ func TestSegmentMetadataRewriteValidationAndProtection(t *testing.T) {
 	}
 	defer reader.Close()
 	called := false
-	if _, err := adapter.rewriteMetadata(t.Context(), 1, 10, func() uint64 { called = true; return 10 }); !errors.Is(err, errSegmentRewriteDeferred) || called {
+	if _, err := adapter.rewriteMetadata(t.Context(), 1, 10, func() uint64 { called = true; return 10 }); !errors.Is(err, errEventRewriteDeferred) || called {
 		t.Fatal(err)
 	}
 	if err := reader.Close(); err != nil {

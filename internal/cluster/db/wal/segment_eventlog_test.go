@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
+
 	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
@@ -14,15 +17,15 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func newSegmentEventExperiment(t *testing.T) (*segmentEventLog, string) {
+func newSegmentEventExperiment(t *testing.T) (*eventLogAdapter, string) {
 	t.Helper()
 	path := t.TempDir()
-	log, err := segmentlog.CreateLog(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}})
+	log, err := segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	return &segmentEventLog{log: log}, path
+	return &eventLogAdapter{log: log}, path
 }
 
 func experimentEntry(t testing.TB, index uint64, kind pb.EntryType, entities ...*clusterpb.LogEntity) []byte {
@@ -117,7 +120,7 @@ func TestSegmentEventsScrubMatchesLegacyBytes(t *testing.T) {
 		}
 	}
 	result, err := adapter.rewriteRaw(t.Context(), 1, filter)
-	if err != nil || !result.Published || !result.TailChanged || result.ChangedSegments == 0 {
+	if err != nil || !result.Published || result.ChangedRecords == 0 {
 		t.Fatal(result, err)
 	}
 	if _, err := adapter.log.Reclaim(t.Context()); err != nil {
@@ -126,12 +129,12 @@ func TestSegmentEventsScrubMatchesLegacyBytes(t *testing.T) {
 	if err := adapter.log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := segmentlog.OpenLog(path, segmentlog.Options{})
+	reopened, err := segmented.Open(path, segmentlog.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	adapter = &segmentEventLog{log: reopened}
+	adapter = &eventLogAdapter{log: reopened}
 	if len(expected) != 5 {
 		t.Fatal("unexpected scrub survivors", len(expected))
 	}
@@ -145,7 +148,7 @@ func TestSegmentEventsScrubMatchesLegacyBytes(t *testing.T) {
 			if err != nil || !bytes.Equal(want, got) {
 				t.Fatal("scrub mismatch", entry.GetIndex(), err)
 			}
-		} else if !errors.Is(err, segmentlog.ErrNotFound) {
+		} else if !errors.Is(err, eventlog.ErrNotFound) {
 			t.Fatal(err)
 		}
 	}
@@ -153,7 +156,7 @@ func TestSegmentEventsScrubMatchesLegacyBytes(t *testing.T) {
 	if err != nil || id != 20 {
 		t.Fatal("erased checkpoint resume", id, err)
 	}
-	if _, _, err := adapter.seekRaw(91); !errors.Is(err, segmentlog.ErrNotFound) {
+	if _, _, err := adapter.seekRaw(91); !errors.Is(err, eventlog.ErrNotFound) {
 		t.Fatal(err)
 	}
 	// Assert domain semantics independently of the byte comparison.
@@ -178,7 +181,7 @@ func TestSegmentEventsScrubMatchesLegacyBytes(t *testing.T) {
 		t.Fatal("delete key not erased")
 	}
 	result, err = adapter.rewriteRaw(t.Context(), 2, filter)
-	if err != nil || result.ChangedSegments != 0 || result.TailChanged {
+	if err != nil || result.ChangedRecords != 0 {
 		t.Fatal("non-idempotent scrub", result, err)
 	}
 }
@@ -187,10 +190,10 @@ func TestSegmentEventsRejectBadAppendBatch(t *testing.T) {
 	for _, bad := range [][]byte{{0xff}, experimentEntry(t, 0, pb.EntryNormal), experimentEntry(t, ^uint64(0), pb.EntryNormal)} {
 		adapter, _ := newSegmentEventExperiment(t)
 		err := adapter.appendRaw([][]byte{experimentEntry(t, 1, pb.EntryNormal), bad})
-		if !errors.Is(err, segmentlog.ErrInvalid) {
+		if !errors.Is(err, eventlog.ErrInvalid) {
 			t.Fatal(err)
 		}
-		if _, err := adapter.readRaw(1); !errors.Is(err, segmentlog.ErrNotFound) {
+		if _, err := adapter.readRaw(1); !errors.Is(err, eventlog.ErrNotFound) {
 			t.Fatal("partially appended invalid batch", err)
 		}
 	}
@@ -199,7 +202,7 @@ func TestSegmentEventsRejectBadAppendBatch(t *testing.T) {
 func TestSegmentEventsRejectStoredIdentityMismatch(t *testing.T) {
 	for _, payload := range [][]byte{{0xff}, experimentEntry(t, 2, pb.EntryNormal)} {
 		adapter, _ := newSegmentEventExperiment(t)
-		if err := adapter.log.Append([]segmentlog.Record{{ID: 1, Payload: payload}}); err != nil {
+		if err := adapter.log.Append([]eventlog.Record{{ID: 1, Payload: payload}}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := adapter.readRaw(1); !errors.Is(err, ErrCorruptEntry) {
@@ -229,12 +232,12 @@ func TestSegmentEventsRejectReplacementIdentityChange(t *testing.T) {
 	if err := adapter.log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	log, err := segmentlog.OpenLog(path, segmentlog.Options{})
+	log, err := segmented.Open(path, segmentlog.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	got, err := (&segmentEventLog{log: log}).readRaw(10)
+	got, err := (&eventLogAdapter{log: log}).readRaw(10)
 	if err != nil || !bytes.Equal(got, original) {
 		t.Fatal("published changed identity", err)
 	}

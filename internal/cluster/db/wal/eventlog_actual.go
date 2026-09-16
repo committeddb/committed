@@ -7,7 +7,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/pkg/segmentlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
 // actualAt performs an experimental exact lookup without changing reader cursors.
@@ -17,15 +17,15 @@ import (
 // It additionally gates proposal decoding on the supplied applied watermark:
 // a durable but unapplied entry is temporarily ErrActualNotFound. Production
 // Storage.ActualAt is unchanged. Resolver and applied must not reenter the adapter.
-func (l *segmentEventLog) actualAt(index uint64, resolver cluster.TypeResolver, applied func() uint64) (*cluster.Actual, error) {
+func (l *eventLogAdapter) actualAt(index uint64, resolver cluster.TypeResolver, applied func() uint64) (*cluster.Actual, error) {
 	if resolver == nil || applied == nil {
-		return nil, segmentlog.ErrInvalid
+		return nil, eventlog.ErrInvalid
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	record, err := l.log.Read(index)
-	raw, err := checkedSegmentEntry(record, err)
-	if errors.Is(err, segmentlog.ErrNotFound) {
+	raw, err := checkedEventEntry(record, err)
+	if errors.Is(err, eventlog.ErrNotFound) {
 		return nil, ErrActualNotFound
 	}
 	if err != nil {

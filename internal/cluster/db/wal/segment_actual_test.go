@@ -6,12 +6,13 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+
 	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 func TestSegmentActualMatchesLegacy(t *testing.T) {
@@ -115,16 +116,16 @@ func TestSegmentActualVisibilityAndErrors(t *testing.T) {
 	if actual, err := adapter.actualAt(10, resolver, applied.Load); err != nil || actual.Index != 10 {
 		t.Fatal(actual, err)
 	}
-	if _, err := adapter.actualAt(10, nil, applied.Load); !errors.Is(err, segmentlog.ErrInvalid) {
+	if _, err := adapter.actualAt(10, nil, applied.Load); !errors.Is(err, eventlog.ErrInvalid) {
 		t.Fatal(err)
 	}
-	if _, err := adapter.actualAt(10, resolver, nil); !errors.Is(err, segmentlog.ErrInvalid) {
+	if _, err := adapter.actualAt(10, resolver, nil); !errors.Is(err, eventlog.ErrInvalid) {
 		t.Fatal(err)
 	}
 	if err := adapter.log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adapter.actualAt(10, resolver, applied.Load); !errors.Is(err, segmentlog.ErrClosed) {
+	if _, err := adapter.actualAt(10, resolver, applied.Load); !errors.Is(err, eventlog.ErrClosed) {
 		t.Fatal(err)
 	}
 }
@@ -132,7 +133,7 @@ func TestSegmentActualVisibilityAndErrors(t *testing.T) {
 func TestSegmentActualCorruptionAndUnknownTypes(t *testing.T) {
 	for _, payload := range [][]byte{{0xff}, experimentEntry(t, 11, pb.EntryNormal)} {
 		adapter, _ := newSegmentEventExperiment(t)
-		if err := adapter.log.Append([]segmentlog.Record{{ID: 10, Payload: payload}}); err != nil {
+		if err := adapter.log.Append([]eventlog.Record{{ID: 10, Payload: payload}}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := adapter.actualAt(10, segmentTestResolver(segmentTestType), func() uint64 { return 100 }); !errors.Is(err, ErrCorruptEntry) {

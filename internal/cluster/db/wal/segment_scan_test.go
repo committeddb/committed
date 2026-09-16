@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	pb "go.etcd.io/raft/v3/raftpb"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 
-	"github.com/committeddb/committed/pkg/segmentlog"
+	pb "go.etcd.io/raft/v3/raftpb"
 )
 
 func TestSegmentScanRawRangeAndIdentity(t *testing.T) {
@@ -17,15 +17,15 @@ func TestSegmentScanRawRangeAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got [][]byte
-	err := adapter.scanRaw(t.Context(), segmentlog.Coverage{Start: 20, End: 101}, func(_ uint64, raw []byte) error { got = append(got, raw); return nil })
+	err := adapter.scanRaw(t.Context(), eventlog.Coverage{Start: 20, End: 101}, func(_ uint64, raw []byte) error { got = append(got, raw); return nil })
 	if err != nil || len(got) != 2 || !bytes.Equal(got[0], records[1]) || !bytes.Equal(got[1], records[2]) {
 		t.Fatal(got, err)
 	}
-	if err := adapter.log.Append([]segmentlog.Record{{ID: 200, Payload: experimentEntry(t, 201, pb.EntryNormal)}}); err != nil {
+	if err := adapter.log.Append([]eventlog.Record{{ID: 200, Payload: experimentEntry(t, 201, pb.EntryNormal)}}); err != nil {
 		t.Fatal(err)
 	}
 	called := false
-	err = adapter.scanRaw(t.Context(), segmentlog.Coverage{Start: 200, End: 201}, func(uint64, []byte) error { called = true; return nil })
+	err = adapter.scanRaw(t.Context(), eventlog.Coverage{Start: 200, End: 201}, func(uint64, []byte) error { called = true; return nil })
 	if !errors.Is(err, ErrCorruptEntry) || called {
 		t.Fatal("delivered mismatched entry", err)
 	}

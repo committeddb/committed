@@ -1,7 +1,10 @@
 # Experimental segment event-log adapter
 
-`segmentEventLog` connects Committed's serialized `raftpb.Entry` records to
-`pkg/segmentlog`. It is package-private and exercised only by tests. `Storage`
+`eventLogAdapter` connects Committed's serialized `raftpb.Entry` records to the
+shared [EventLog contract](../eventlog/README.md). The storage implementations live
+in `eventlog/tidwall` and `eventlog/segmented`; application readers, visibility,
+selection, replay, and protected-read coordination remain shared here.
+The adapter is package-private and exercised only by tests. `Storage`
 continues to use tidwall; there is no configuration switch, conversion command,
 or automatic format activation.
 
@@ -16,7 +19,7 @@ or automatic format activation.
 - Original protobuf bytes are retained, including unknown fields. An unchanged
   record is not decoded and re-encoded merely to store it.
 - Exact lookup and seek-at-or-after retain sparse indexes. Missing records return
-  `segmentlog.ErrNotFound`; malformed entries, mismatched indexes, and underlying
+  `eventlog.ErrNotFound`; malformed entries, mismatched indexes, and underlying
   segment corruption are classified with `ErrCorruptEntry`.
 - Rewrite accepts a raw-entry transformation with the existing `scrubFilterEntry`
   signature. It validates both the source and every surviving replacement. It
@@ -121,13 +124,13 @@ identities, and both skippable and must-understand unknown system types.
 calls. Its context must have a deadline. Closing the reader, canceling the context,
 or reaching the deadline ends its lifetime and releases protection. Close is
 idempotent and safe to race with cancellation. Reads after the lifetime ends
-return its cancellation cause (or `segmentlog.ErrClosed` for explicit Close).
+return its cancellation cause (or `eventlog.ErrClosed` for explicit Close).
 An in-flight read checks cancellation again after decoding and does not advance
 its cursor or return an Actual if cancellation occurred during decoding.
 
 Acquisition and rewrite exclusion share the adapter lock, so a read registers
 either before or after a complete rewrite. While any protected reader remains,
-`rewriteRaw` returns retryable `errSegmentRewriteDeferred` before invoking a
+`rewriteRaw` returns retryable `errEventRewriteDeferred` before invoking a
 transform or creating files. This does not poison the log or consume a generation;
 the future coordinator must retain pending work and retry. Appends and rotation
 remain available between Read calls. This protects logical record history, not
@@ -154,7 +157,7 @@ benchmarks remain separate prerequisites for activation.
 Run the focused checks with:
 
 ```sh
-go test -race ./internal/cluster/db/wal -run '^TestSegment'
+go test -race ./internal/cluster/db/wal -run '^(TestSegment|TestEventLogAdapter)'
 ```
 
 ## Rewrite churn measurements
@@ -222,3 +225,20 @@ can still publish a newer generation. Tests cover bound rejection, partial-recor
 preservation, post-bound bytes, reopen/reclaim/idempotence, protected-reader deferral,
 and append exclusion across the transaction. This remains a synchronous experiment;
 background preparation and full application recovery coordination are pending.
+
+## Backend separation
+
+The application adapter now holds `eventlog.EventLog`, not `*segmentlog.Log`.
+Its implementation files are named `eventlog_*.go`. The interface is defined in
+`eventlog/eventlog.go`, with opaque Record/Coverage types and backend-neutral
+errors/results. The shared rewrite result counts changed records rather than
+exposing segmentlog's sealed-file/tail statistics. Physical churn still comes
+from engine-specific tests and filesystem inventories.
+
+`TestEventLogAdapterBackends` exercises the same adapter code with both concrete
+backends. `eventlog` also has a shared storage conformance suite, including reopen,
+complete erasure, replay frontier, failure recovery, and ownership. The original
+production Storage still owns its legacy layout and protocols; the new tidwall
+wrapper has an explicit experimental CURRENT/generation layout, not automatic
+compatibility with production directories. See the contract README for the
+remaining production migration work.

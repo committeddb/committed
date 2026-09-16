@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
+
 	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
@@ -147,12 +150,12 @@ func TestSegmentRewriteChurnExperiment(t *testing.T) {
 					drainChurnCompression(t, source)
 				}
 				oldLegacy, _ := inventoryChurn(t, sourcePath, false)
-				log, err := segmentlog.CreateLog(segmentPath, 1, segmentlog.LogOptions{SegmentBytes: target, Encoding: segmentlog.Options{Compression: encoding}})
+				log, err := segmented.Create(segmentPath, 1, segmentlog.LogOptions{SegmentBytes: target, Encoding: segmentlog.Options{Compression: encoding}})
 				if err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = log.Close() })
-				adapter := &segmentEventLog{log: log}
+				adapter := &eventLogAdapter{log: log}
 				if err := adapter.appendRaw(records); err != nil {
 					t.Fatal(err)
 				}
@@ -204,7 +207,7 @@ func TestSegmentRewriteChurnExperiment(t *testing.T) {
 				}
 				// Compare each surviving protobuf byte and index, and reject extra survivors.
 				var scanned uint64
-				err = adapter.scanRaw(t.Context(), segmentlog.Coverage{Start: 1, End: ^uint64(0)}, func(id uint64, actual []byte) error {
+				err = adapter.scanRaw(t.Context(), eventlog.Coverage{Start: 1, End: ^uint64(0)}, func(id uint64, actual []byte) error {
 					scanned++
 					if scanned > count {
 						return errors.New("unexpected trailing record")
@@ -235,10 +238,10 @@ func TestSegmentRewriteChurnExperiment(t *testing.T) {
 				ss, sw, sn, sr := churnSizes(oldSegments, newSegments, false)
 				t.Logf("%s %s tidwall %d %d %d %d %d 0", codec, mode, ls, lw, ln, lr, len(newLegacy))
 				t.Logf("%s %s segmentlog %d %d %d %d %d %d", codec, mode, ss, sw, sn, sr, len(newSegments), metadata)
-				if mode == "noop" && (sw != 0 || sn != 0 || result.ChangedSegments != 0 || result.TailChanged) {
+				if mode == "noop" && (sw != 0 || sn != 0 || result.ChangedRecords != 0) {
 					t.Fatal("no-op changed payload files", result)
 				}
-				if mode == "isolated" && (result.ChangedSegments != 1 || result.TailChanged || sr != len(oldSegments)-1 || sw >= lw) {
+				if mode == "isolated" && (result.ChangedRecords != 1 || sr != len(oldSegments)-1 || sw >= lw) {
 					t.Fatal("isolated edit churned unrelated files", result, sr, sw, lw)
 				}
 			})

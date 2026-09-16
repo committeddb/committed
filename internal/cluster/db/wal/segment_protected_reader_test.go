@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+
 	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 func TestSegmentProtectedReaderDefersRewriteAllowsAppend(t *testing.T) {
@@ -39,7 +40,7 @@ func TestSegmentProtectedReaderDefersRewriteAllowsAppend(t *testing.T) {
 	}
 	called := false
 	erase := func([]byte) (bool, []byte, error) { called = true; return false, nil, nil }
-	if _, err := adapter.rewriteRaw(t.Context(), 1, erase); !errors.Is(err, errSegmentRewriteDeferred) || called {
+	if _, err := adapter.rewriteRaw(t.Context(), 1, erase); !errors.Is(err, errEventRewriteDeferred) || called {
 		t.Fatal("prepared protected rewrite", err)
 	}
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 30, pb.EntryNormal, experimentRow("next", "value"))}); err != nil {
@@ -58,10 +59,10 @@ func TestSegmentProtectedReaderDefersRewriteAllowsAppend(t *testing.T) {
 	if adapter.protectedReadCount() != 1 {
 		t.Fatal("double release")
 	}
-	if _, err := first.Read(); !errors.Is(err, segmentlog.ErrClosed) {
+	if _, err := first.Read(); !errors.Is(err, eventlog.ErrClosed) {
 		t.Fatal(err)
 	}
-	if _, err := adapter.rewriteRaw(t.Context(), 1, erase); !errors.Is(err, errSegmentRewriteDeferred) {
+	if _, err := adapter.rewriteRaw(t.Context(), 1, erase); !errors.Is(err, errEventRewriteDeferred) {
 		t.Fatal(err)
 	}
 	if err := second.Close(); err != nil {
@@ -95,7 +96,7 @@ func TestSegmentProtectedReaderCancellation(t *testing.T) {
 		t.Fatal("leaked protection")
 	}
 	// No deadline is an invalid unbounded hold; an expired deadline cannot acquire.
-	if _, err := adapter.protectedReaderAt(context.Background(), 0, segmentTestResolver(segmentTestType), func() uint64 { return 100 }); !errors.Is(err, segmentlog.ErrInvalid) {
+	if _, err := adapter.protectedReaderAt(context.Background(), 0, segmentTestResolver(segmentTestType), func() uint64 { return 100 }); !errors.Is(err, eventlog.ErrInvalid) {
 		t.Fatal(err)
 	}
 	expired, stop := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))

@@ -12,18 +12,18 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
-	"github.com/committeddb/committed/pkg/segmentlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
-// segmentActualReader is experimental and implements the streaming ActualReader
+// eventActualReader is experimental and implements the streaming ActualReader
 // contract. Its cursor is the last examined Raft index, never a physical offset.
 // Each Read holds the adapter's read lock through decode and filtering, so it
 // cannot combine records from different rewrite generations. No view is pinned
 // between ordinary calls. protectedReaderAt adds a bounded multi-call lifetime;
 // the caller owns adapter lifetime.
-type segmentActualReader struct {
+type eventActualReader struct {
 	mu       sync.Mutex
-	events   *segmentEventLog
+	events   *eventLogAdapter
 	resolver cluster.TypeResolver
 	applied  func() uint64
 	index    uint64
@@ -31,21 +31,21 @@ type segmentActualReader struct {
 	ctx      context.Context // optional lifetime for a protected reader
 }
 
-var _ db.ActualReader = (*segmentActualReader)(nil)
+var _ db.ActualReader = (*eventActualReader)(nil)
 
 // readerAt resumes strictly after index. applied must return a monotonically
 // advancing, concurrency-safe applied watermark; resolver must safely resolve
 // the types visible through that watermark. Neither may reenter this adapter.
-func (l *segmentEventLog) readerAt(index uint64, resolver cluster.TypeResolver, applied func() uint64) (*segmentActualReader, error) {
+func (l *eventLogAdapter) readerAt(index uint64, resolver cluster.TypeResolver, applied func() uint64) (*eventActualReader, error) {
 	if resolver == nil || applied == nil {
-		return nil, segmentlog.ErrInvalid
+		return nil, eventlog.ErrInvalid
 	}
-	return &segmentActualReader{events: l, index: index, resolver: resolver, applied: applied}, nil
+	return &eventActualReader{events: l, index: index, resolver: resolver, applied: applied}, nil
 }
 
-func (r *segmentActualReader) Position() uint64 { return r.pos.Load() }
+func (r *eventActualReader) Position() uint64 { return r.pos.Load() }
 
-func (r *segmentActualReader) Read() (*cluster.Actual, error) {
+func (r *eventActualReader) Read() (*cluster.Actual, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events.mu.RLock()
@@ -60,7 +60,7 @@ func (r *segmentActualReader) Read() (*cluster.Actual, error) {
 			return nil, io.EOF
 		}
 		index, raw, err := r.events.seekRawLocked(r.index + 1)
-		if errors.Is(err, segmentlog.ErrNotFound) {
+		if errors.Is(err, eventlog.ErrNotFound) {
 			return nil, io.EOF
 		}
 		if err != nil {

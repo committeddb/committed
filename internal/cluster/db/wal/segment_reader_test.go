@@ -8,12 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+
 	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 type segmentTestResolver func(cluster.TypeRef) (*cluster.Type, error)
@@ -188,7 +189,7 @@ func TestSegmentReaderResumeAfterRewrite(t *testing.T) {
 func TestSegmentReaderCorruptionDoesNotAdvance(t *testing.T) {
 	for _, raw := range [][]byte{{0xff}, experimentEntry(t, 11, pb.EntryNormal)} {
 		adapter, _ := newSegmentEventExperiment(t)
-		if err := adapter.log.Append([]segmentlog.Record{{ID: 10, Payload: raw}}); err != nil {
+		if err := adapter.log.Append([]eventlog.Record{{ID: 10, Payload: raw}}); err != nil {
 			t.Fatal(err)
 		}
 		r, err := adapter.readerAt(0, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
