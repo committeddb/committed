@@ -129,6 +129,9 @@ func (l *Log) Reclaim(ctx context.Context) (result ReclaimResult, err error) {
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
+		if file.size < 0 {
+			return result, l.fail(ErrCorrupt)
+		}
 		removed, e := l.remover.Remove(file.name)
 		if removed {
 			result.RemovedFiles++

@@ -29,7 +29,7 @@ func verifySegmentDigest(r io.ReaderAt, size int64, ref SegmentRef) error {
 	offset := int64(format.HeaderSize)
 	for _, block := range segment.blocks {
 		stored := make([]byte, int(block.size))
-		if _, err := r.ReadAt(stored, int64(block.offset)); err != nil {
+		if _, err := r.ReadAt(stored, int64(block.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 			return err
 		}
 		_, _ = digest.Write(stored)

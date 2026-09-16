@@ -178,7 +178,7 @@ func attachLog(path string, dir *durablefs.Dir, store *CatalogStore, encoding Op
 	if err = checkLogEncoding(c.SegmentBytes, encoding); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(filepath.Join(path, c.Active.File), os.O_RDWR, 0)
+	file, err := os.OpenFile(filepath.Join(path, c.Active.File), os.O_RDWR, 0) // #nosec G304 -- Validated catalog basename in the exclusively managed log directory.
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +334,7 @@ func (l *Log) rotate() error {
 	if _, err = l.dir.Install(newName, func(w io.Writer) error { return WriteTailHeader(w, coverage.End) }); err != nil {
 		return err
 	}
-	newFile, err := os.OpenFile(filepath.Join(l.path, newName), os.O_RDWR, 0)
+	newFile, err := os.OpenFile(filepath.Join(l.path, newName), os.O_RDWR, 0) // #nosec G304 -- Internally generated basename in the exclusively managed log directory.
 	if err != nil {
 		return err
 	}

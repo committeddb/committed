@@ -115,14 +115,14 @@ func encodeCatalog(c Catalog) ([]byte, error) {
 	}
 	b := make([]byte, 16, 16+len(payload)+4)
 	copy(b, "SLCAT000")
-	format.LE.PutUint32(b[12:], uint32(len(payload)))
+	format.LE.PutUint32(b[12:], uint32(len(payload))) // #nosec G115 -- Payload length is bounded by maxCatalogBytes above.
 	b = append(b, payload...)
 	b = format.LE.AppendUint32(b, format.CRC(b))
 	return b, nil
 }
 
 func decodeCatalog(b []byte) (c Catalog, err error) {
-	if len(b) < 20 || len(b) > maxCatalogBytes+20 || format.LE.Uint32(b[12:]) != uint32(len(b)-20) || format.CRC(b[:len(b)-4]) != format.LE.Uint32(b[len(b)-4:]) {
+	if len(b) < 20 || len(b) > maxCatalogBytes+20 || int64(format.LE.Uint32(b[12:])) != int64(len(b))-20 || format.CRC(b[:len(b)-4]) != format.LE.Uint32(b[len(b)-4:]) {
 		return c, ErrCorrupt
 	}
 	if string(b[:8]) != "SLCAT000" || format.LE.Uint32(b[8:]) != 0 {
@@ -169,7 +169,7 @@ func readBounded(path string, limit int64) (data []byte, err error) {
 	if !info.Mode().IsRegular() || info.Size() > limit {
 		return nil, ErrCorrupt
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +402,7 @@ func syncRegular(path string) error {
 	if !info.Mode().IsRegular() {
 		return ErrCorrupt
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
 	if err != nil {
 		return err
 	}
@@ -423,7 +423,7 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 			if !info.Mode().IsRegular() {
 				return ErrCorrupt
 			}
-			f, err := os.Open(path)
+			f, err := os.Open(path) // #nosec G304 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
 			if err != nil {
 				return err
 			}
@@ -446,7 +446,7 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 		if !info.Mode().IsRegular() {
 			return ErrCorrupt
 		}
-		f, err := os.Open(path)
+		f, err := os.Open(path) // #nosec G304 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
 		if err != nil {
 			return err
 		}

@@ -111,8 +111,8 @@ func WriteSegment(w io.Writer, coverage Coverage, records iter.Seq2[Record, erro
 			return ErrInvalid
 		}
 		codec, stored := encoder.Encode(data)
-		current.codec, current.decoded = codec, uint32(len(data))
-		current.offset, current.size, current.crc = offset, uint32(len(stored)), format.CRC(stored)
+		current.codec, current.decoded = codec, uint32(len(data))                                   // #nosec G115 -- Packing bounds data by MaxBlock, including oversized single records.
+		current.offset, current.size, current.crc = offset, uint32(len(stored)), format.CRC(stored) // #nosec G115 -- Encode returns at most len(data), bounded by MaxBlock.
 		if err := writeFull(w, stored); err != nil {
 			return err
 		}
@@ -164,7 +164,7 @@ func WriteSegment(w io.Writer, coverage Coverage, records iter.Seq2[Record, erro
 	}
 	f := make([]byte, format.FooterSize)
 	format.LE.PutUint64(f, offset)
-	format.LE.PutUint32(f[8:], uint32(len(blocks)))
+	format.LE.PutUint32(f[8:], uint32(len(blocks))) // #nosec G115 -- flush rejects additions beyond MaxBlocks.
 	format.LE.PutUint64(f[12:], total)
 	format.LE.PutUint32(f[20:], format.CRC(index))
 	copy(f[24:], "END1")
@@ -217,9 +217,9 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 	if n > format.MaxBlocks || offset < format.HeaderSize || offset > uint64(size-format.FooterSize) || indexSize != uint64(size-format.FooterSize)-offset {
 		return nil, ErrCorrupt
 	}
-	index := make([]byte, int(indexSize))
+	index := make([]byte, int(indexSize)) // #nosec G115 -- n <= MaxBlocks and entrySize <= IndexEntrySize bound this to 3 MiB.
 	if len(index) > 0 {
-		if _, err := r.ReadAt(index, int64(offset)); err != nil {
+		if _, err := r.ReadAt(index, int64(offset)); err != nil { // #nosec G115 -- Offset is bounded above by the nonnegative int64 file size.
 			return nil, err
 		}
 	}
@@ -272,7 +272,7 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 
 func (s *Segment) readBlock(b block) ([]Record, error) {
 	data := make([]byte, int(b.size))
-	if _, err := s.r.ReadAt(data, int64(b.offset)); err != nil {
+	if _, err := s.r.ReadAt(data, int64(b.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 		return nil, err
 	}
 	return decodeBlock(b, data)
@@ -340,7 +340,7 @@ func (s *Segment) Seek(id uint64) (Record, error) {
 	}
 	b := s.blocks[i]
 	stored := make([]byte, int(b.size))
-	if _, err := s.r.ReadAt(stored, int64(b.offset)); err != nil {
+	if _, err := s.r.ReadAt(stored, int64(b.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 		return Record{}, err
 	}
 	var result Record
@@ -407,7 +407,7 @@ func (s *Segment) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 func (s *Segment) Verify() error {
 	for _, b := range s.blocks {
 		stored := make([]byte, int(b.size))
-		if _, err := s.r.ReadAt(stored, int64(b.offset)); err != nil {
+		if _, err := s.r.ReadAt(stored, int64(b.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 			return err
 		}
 		if err := walkBlock(b, stored, nil); err != nil {

@@ -43,7 +43,7 @@ func CRCParts(parts ...[]byte) uint32 {
 // preceding frame bytes. Callers validate payload size before encoding.
 func AppendFrame(dst []byte, id uint64, payload []byte) []byte {
 	start := len(dst)
-	dst = LE.AppendUint32(dst, uint32(len(payload)))
+	dst = LE.AppendUint32(dst, uint32(len(payload))) // #nosec G115 -- Internal encoder contract: callers bound payloads to MaxPayload before encoding.
 	dst = LE.AppendUint64(dst, id)
 	dst = append(dst, payload...)
 	return LE.AppendUint32(dst, CRC(dst[start:]))

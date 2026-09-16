@@ -257,12 +257,13 @@ func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, trans
 				if len(r.Payload) > format.MaxPayload {
 					return ErrInvalid
 				}
-				n := uint64(len(r.Payload) + format.FrameOverhead)
+				framed := len(r.Payload) + format.FrameOverhead
+				n := uint64(framed)
 				if n > limit-remaining-physical {
 					return ErrInvalid
 				}
 				physical += n
-				group := encodeTailGroup([]Record{r}, int(n))
+				group := encodeTailGroup([]Record{r}, framed)
 				if end > int64(^uint64(0)>>1)-int64(len(group)) {
 					return ErrInvalid
 				}
