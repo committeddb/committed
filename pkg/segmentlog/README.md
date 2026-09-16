@@ -142,6 +142,17 @@ A nonblocking directory lock enforces exclusive managed
 log ownership until Close, including across processes. Sealing currently blocks
 other operations; old files remain until explicit reclamation. See [the lifecycle contract and limitations](log-lifecycle.md).
 
+## Streaming scans
+
+`Log.Scan(ctx, bounds, visit)` reads surviving records in a half-open ID interval
+under one managed view. Sealed scans skip unrelated ranges and blocks; the
+unindexed tail prefix is scanned once. Memory is bounded by decoded blocks/groups
+unless callbacks retain payloads. Callbacks must not reenter the log. Appends,
+rewrites, and reclamation wait until completion; this is not a long-lived file pin.
+Cancellation and callback errors stop delivery without poisoning the log. Errors
+can follow a delivered prefix. Selected blocks/groups are fully checked before
+delivery, but unrelated payloads are not verified by a bounded scan.
+
 ## Sealed rewriting
 
 `Log.RewriteSealed(ctx, generation, transform)` prepares only changed sealed

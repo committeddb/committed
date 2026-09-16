@@ -164,3 +164,16 @@ completed payload sizes, retained files, and new content hashes for identical
 no-op, isolated, and scattered scrubs in plain and zstd storage. Survivor bytes
 are verified against the tidwall rewrite. These are synthetic size/churn results,
 not production performance or backup-cost projections.
+
+## Bounded raw scans
+
+`scanRaw` uses the managed single-pass `Log.Scan` over a half-open Raft-index
+interval. It validates outer/inner index identity before each delivery, includes
+control and metadata records, and preserves corruption errors. It does not apply
+an AppliedIndex filter: scrub selection and recovery callers must supply the
+appropriate bound. Callbacks may not reenter the adapter or underlying engine.
+The adapter and engine locks hold one view for the full scan, so writes wait.
+
+The rewrite-churn experiment now compares survivors through this scan instead
+of issuing one seek per record. Streaming ActualReader calls still use individual
+seeks; improving those calls requires a separate reader lifetime/cache design.

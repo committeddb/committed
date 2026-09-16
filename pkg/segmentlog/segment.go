@@ -327,14 +327,30 @@ func (s *Segment) Read(id uint64) (Record, error) {
 // Records scans in ID order with at most one decoded block resident at a time
 // unless the caller retains returned records. Each error ends the iteration.
 func (s *Segment) Records() iter.Seq2[Record, error] {
+	return s.recordsIn(s.coverage)
+}
+
+// recordsIn skips blocks outside the requested interval. Selected blocks are
+// fully validated before delivery, including boundary records outside the range.
+func (s *Segment) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 	return func(yield func(Record, error) bool) {
-		for _, b := range s.blocks {
+		first := sort.Search(len(s.blocks), func(i int) bool { return s.blocks[i].last >= bounds.Start })
+		for _, b := range s.blocks[first:] {
+			if b.first >= bounds.End {
+				return
+			}
 			records, err := s.readBlock(b)
 			if err != nil {
 				yield(Record{}, err)
 				return
 			}
 			for _, rec := range records {
+				if rec.ID < bounds.Start {
+					continue
+				}
+				if rec.ID >= bounds.End {
+					return
+				}
 				if !yield(rec, nil) {
 					return
 				}

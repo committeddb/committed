@@ -1,0 +1,32 @@
+package wal
+
+import (
+	"context"
+	"errors"
+
+	"github.com/committeddb/committed/pkg/segmentlog"
+)
+
+// scanRaw streams validated Entry bytes in the half-open Raft-index interval.
+// It includes control and metadata entries and has no AppliedIndex filter:
+// callers choose their bound for scrub selection, recovery, or verification.
+// It holds the adapter and engine view through the callback. Callbacks must not
+// reenter either, and errors/cancellation can follow an already delivered prefix.
+func (l *segmentEventLog) scanRaw(ctx context.Context, bounds segmentlog.Coverage, visit func(uint64, []byte) error) error {
+	if visit == nil {
+		return segmentlog.ErrInvalid
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	err := l.log.Scan(ctx, bounds, func(r segmentlog.Record) error {
+		raw, err := checkedSegmentEntry(r, nil)
+		if err != nil {
+			return err
+		}
+		return visit(r.ID, raw)
+	})
+	if errors.Is(err, segmentlog.ErrCorrupt) {
+		return errors.Join(ErrCorruptEntry, err)
+	}
+	return err
+}

@@ -203,28 +203,31 @@ func TestSegmentRewriteChurnExperiment(t *testing.T) {
 					t.Fatal(err)
 				}
 				// Compare each surviving protobuf byte and index, and reject extra survivors.
-				next := uint64(1)
-				for seq := uint64(1); seq <= count; seq++ {
-					framed, err := rewritten.Read(seq)
+				var scanned uint64
+				err = adapter.scanRaw(t.Context(), segmentlog.Coverage{Start: 1, End: ^uint64(0)}, func(id uint64, actual []byte) error {
+					scanned++
+					if scanned > count {
+						return errors.New("unexpected trailing record")
+					}
+					framed, err := rewritten.Read(scanned)
 					if err != nil {
-						t.Fatal(err)
+						return err
 					}
 					expected, err := unframe(framed)
 					if err != nil {
-						t.Fatal(err)
+						return err
 					}
 					entry := new(pb.Entry)
 					if err := proto.Unmarshal(expected, entry); err != nil {
-						t.Fatal(err)
+						return err
 					}
-					id, actual, err := adapter.seekRaw(next)
-					if err != nil || id != entry.GetIndex() || !bytes.Equal(actual, expected) {
-						t.Fatal("survivors differ", id, err)
+					if id != entry.GetIndex() || !bytes.Equal(actual, expected) {
+						return fmt.Errorf("survivors differ at index %d", id)
 					}
-					next = id + 1
-				}
-				if _, _, err := adapter.seekRaw(next); !errors.Is(err, segmentlog.ErrNotFound) {
-					t.Fatal("unexpected trailing record", err)
+					return nil
+				})
+				if err != nil || scanned != count {
+					t.Fatal("survivor scan mismatch", scanned, count, err)
 				}
 				newLegacy, _ := inventoryChurn(t, targetPath, false)
 				newSegments, metadata := inventoryChurn(t, segmentPath, true)
