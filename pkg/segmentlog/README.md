@@ -211,7 +211,8 @@ engine, application boundary, and experimental limitations.
 
 ```sh
 go test -race ./pkg/segmentlog/...
-go test ./pkg/segmentlog -run '^$' -fuzz FuzzSegment -fuzztime 10s
+go test ./pkg/segmentlog -run '^$' -fuzz '^FuzzSegment$' -fuzztime 10s
+go test ./pkg/segmentlog -run '^$' -fuzz '^FuzzSegmentIndexValidation$' -fuzztime 20s
 go test ./pkg/segmentlog -run '^$' -fuzz '^FuzzTail$' -fuzztime 10s
 go test ./pkg/segmentlog -run '^$' -fuzz '^FuzzTailGroupValidation$' -fuzztime 20s
 go test ./pkg/segmentlog -run '^$' -fuzz FuzzCatalog -fuzztime 10s
@@ -228,6 +229,12 @@ The structured tail-group fuzzer generates valid outer checksums while varying
 record IDs, declared counts, and the declared last ID. It compares verification
 and delivery against the input's expected validity and checks that rejected
 groups deliver nothing and leave the validated prefix unchanged.
+
+The structured segment-index fuzzer replaces plain-block frames and index claims
+while preserving valid file checksums. It checks opening, full verification,
+record delivery, and sparse lookup against the input IDs. Cases include duplicate
+or decreasing IDs, incorrect first/last IDs and counts, and the reserved maximum
+ID. The raw segment fuzzer also includes compressed file seeds.
 
 Compression tests also cover mixed codecs, deterministic output, sparse block-local
 seeks, compressed partial rewrites, maximum-size records, decoded-size mismatches,
