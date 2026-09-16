@@ -83,9 +83,10 @@ below. Internal file-publication primitives now implement synced immutable
 installation and atomic pointer replacement, including explicit uncertainty after
 a failed publication sync. A single-file active-tail appender and non-mutating
 scanner now validate bounded groups and poison handles after I/O failures.
-Incomplete suffixes are reported but never automatically discarded. Catalog/
-recovery coordination, rotation, complete log durability, and Committed integration
-remain subsequent slices.
+Incomplete suffixes are reported but never automatically discarded. Atomic local catalogs now validate references and publish through CURRENT; their
+initial verifier scans full payloads and retains old revisions. Lifecycle/recovery
+coordination, bounded-metadata startup, rotation, complete log durability, and
+Committed integration remain subsequent slices.
 
 ### Committed record identity
 

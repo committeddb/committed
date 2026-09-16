@@ -192,3 +192,7 @@ func (w *strictWriter) Write(b []byte) (int, error) {
 	w.err = err
 	return n, err
 }
+
+// Sync confirms existing directory entries after their files have been synced.
+// It does not create the directory or sync its parent.
+func (d *Dir) Sync() error { return d.ops.syncDir(d.path) }

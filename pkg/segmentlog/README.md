@@ -5,7 +5,8 @@ module. It has no dependencies on Committed's application packages. Record IDs
 are sparse `uint64` values; payloads are opaque bytes.
 
 **Current scope: immutable segments, selective replacement preparation, and a
-synchronized single-file active tail.** There is no complete durable log or catalog yet. Neither the API nor the file format
+synchronized single-file active tail, and atomic local catalogs.** There is no
+complete integrated log lifecycle yet. Neither the API nor the file format
 is stable. This package is not connected to the running database.
 
 ## Boundaries
@@ -13,7 +14,7 @@ is stable. This package is not connected to the running database.
 | Layer | Responsibility | Status |
 | --- | --- | --- |
 | Committed adapter (`internal/cluster/db/`) | Raft entry serialization, visibility, scrub policy, metadata reconciliation, backup/peer protocols | Future integration |
-| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Planned |
+| Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Catalog publication implemented; lifecycle integration pending |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement, active append groups | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
 | Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
@@ -53,8 +54,8 @@ the catalog layer will represent them without a payload file.
 
 The internal [durable filesystem layer](internal/durablefs/README.md) now supplies
 no-clobber immutable installation and atomic pointer replacement, with explicit
-results for uncertain durability and cleanup failures. The future ordered-log
-layer will coordinate these primitives; the public segment APIs remain I/O-based.
+results for uncertain durability and cleanup failures. The catalog layer
+now uses these primitives; the public segment encoding APIs remain I/O-based.
 
 Memory scales with block data and the block index rather than the entire log.
 Opening reads at most 3 MiB of encoded index metadata; decoded descriptors and
@@ -125,14 +126,23 @@ handles after I/O failure. Reopening recovers and syncs complete groups. The
 scanner reports incomplete suffixes without truncating; it cannot prove that
 discarding them is safe. See [the tail format and recovery contract](tail-format.md).
 
+## Local catalogs
+
+`CatalogStore` now validates and atomically publishes a complete file layout via
+CURRENT. It represents empty ranges without files, separates physical revision
+from logical scrub generation, and stops publication after I/O failure. Recovery
+selects only CURRENT and rejects missing/corrupt references. It currently scans
+full file contents, retains old revisions, and requires exclusive caller-managed
+directory ownership. See [the catalog format and publication contract](catalog-format.md).
+
 ## Next slices
 
 1. Extend compression experiments with representative event payloads and compare
    against the tidwall baseline before selecting production policy.
 2. Recovery coordination: directory orphans, external durability bounds, and the
    proof required before discarding any incomplete suffix.
-3. Catalog publication, rotation, concurrent rewriting, captured views, and
-   resumable physical retirement. Publish a whole rewrite transaction atomically.
+3. Integrate catalogs with rotation, concurrent rewriting, captured views, and
+   resumable physical retirement; optimize normal-open verification work.
 4. Committed adapter and offline opt-in conversion, then compatibility, peer,
    backup, and baseline performance experiments.
 
@@ -144,6 +154,7 @@ The full requirements remain in [the design draft](../../docs/event-segment-desi
 go test -race ./pkg/segmentlog/...
 go test ./pkg/segmentlog -run '^$' -fuzz FuzzSegment -fuzztime 10s
 go test ./pkg/segmentlog -run '^$' -fuzz FuzzTail -fuzztime 10s
+go test ./pkg/segmentlog -run '^$' -fuzz FuzzCatalog -fuzztime 10s
 go test ./pkg/segmentlog/internal/format -run '^$' -fuzz FuzzDecode -fuzztime 10s
 go test ./pkg/segmentlog -run '^$' -bench BenchmarkCompression -benchtime 100ms
 ```
