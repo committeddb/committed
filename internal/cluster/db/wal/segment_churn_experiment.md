@@ -1,4 +1,4 @@
-# Initial event-log rewrite churn experiment
+# Event-log rewrite churn experiments
 
 Local exploratory run: macOS arm64, Go 1.26.6. This is a deterministic filesystem
 and content-equivalence experiment, not a throughput benchmark or a production
@@ -66,6 +66,51 @@ Final zstd payload footprints were similar: isolated tidwall 368,432 bytes versu
 segmentlog 367,937 bytes; scattered 348,998 versus 348,585. The main isolated-edit
 benefit here is stable historical files, not a smaller complete snapshot.
 
+## Repeated scrub sequence
+
+`TestSegmentRepeatedRewriteChurn` follows one history through six rewrite
+generations, reclaiming and reopening the segmented backend after each rewrite.
+The fixture starts with 64 sparse-indexed records and an 8 KiB segment target.
+Each subject has 1 KiB of deterministic varying text; the first record also has
+an audit entity. Precomputed subject selections are supplied directly to the
+existing scrub filter. This tests storage and filter behavior, not authorization
+or the production scrub coordinator.
+
+The sequence performs a no-op, removes the first subject while retaining its
+audit entity, erases all seven records in the second sealed range, erases the
+single active-tail record, repeats the selections, and finally appends 16 records
+before repeating the selections again. Both backends receive the same appends
+and cumulative selections. The reference remains the legacy tidwall copy
+primitive, not the experimental tidwall generation container.
+
+Measured completed replacement payload bytes from the local run:
+
+| Step | Changed records | Legacy plain | Segmented plain | Legacy zstd | Segmented zstd |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| No-op | 0 | 69,138 | 0 | 45,552 | 0 |
+| Partial record | 1 | 68,078 | 6,678 | 47,475 | 4,476 |
+| Whole sealed range | 7 | 60,523 | 0 | 39,885 | 0 |
+| Active tail | 1 | 59,443 | 32 | 41,757 | 32 |
+| Repeat | 0 | 59,443 | 0 | 41,757 | 0 |
+| Append and repeat | 0 | 76,723 | 0 | 53,123 | 0 |
+| **Rewrite-only total** | | **393,348** | **6,710** | **269,549** | **4,508** |
+
+Append bytes are excluded: inventories are captured after any appends and before
+each rewrite. Metadata is also separate; the current segmented catalog/CURRENT
+footprint was about 2.4–2.9 KiB. A zero in the table means no newly created payload
+bytes, not that a rewrite performed no reads, metadata writes, or file removals.
+The 32-byte replacement is an empty active-tail header; its catalog checkpoint
+retains the erased append progress.
+
+The test verifies unchanged sealed descriptors and retained file bytes, removal
+of obsolete erased-range/tail files after reclamation, and byte-equivalent
+survivors against the legacy rewrite. It checks original append progress after
+reopen, including after tail erasure and subsequent appends. Repeating selections
+produces no new segmented payload files. Legacy no-op rewrites reproduce existing
+hashes despite creating replacement files, so replacement-byte totals are not
+unique backup-byte totals. Per-step new-hash measurements are included in test
+output.
+
 ## Evidence and limits
 
 This fixture confirms byte-equivalent scrub output and demonstrates that isolated
@@ -82,6 +127,6 @@ cannot predict TB-scale costs or justify a production compression policy.
 Reproduce the inventory and correctness checks:
 
 ```sh
-go test ./internal/cluster/db/wal -run '^TestSegmentRewriteChurnExperiment$' -v
+go test ./internal/cluster/db/wal -run '^TestSegment(RewriteChurnExperiment|RepeatedRewriteChurn)$' -v
 go test -race ./internal/cluster/db/wal -run '^TestSegment'
 ```
