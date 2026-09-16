@@ -177,3 +177,25 @@ The adapter and engine locks hold one view for the full scan, so writes wait.
 The rewrite-churn experiment now compares survivors through this scan instead
 of issuing one seek per record. Streaming ActualReader calls still use individual
 seeks; improving those calls requires a separate reader lifetime/cache design.
+
+## Log-derived snapshot selections
+
+The experimental `metadataSupersessions` scans one coherent prefix through an
+inclusive Raft-index bound and feeds the same selection accumulator used by
+legacy Storage. Internal snapshot types and user snapshot types select the latest
+entry per key. User type kinds are learned from type registrations in log order;
+mutable live type state is not consulted. Revision/event records remain retained
+under the existing policy. The accumulator logic is extracted from the production
+selector without changing its rules.
+
+This call computes snapshot supersessions only. RTBF selections still come from
+the authoritative tombstone index, and delete-key erasure still requires the
+application gate. The caller must supply an authorized applied bound and coordinate
+selection with later publication; returning a map does not keep a view protected
+through a subsequent rewrite. Any scan/decode/cancellation error discards partial
+results. Memory grows with registered types and selected keys.
+
+Tests compare both backends against explicit expected maps at multiple bounds,
+including registration changes, user revisions, internal snapshots, deletes,
+sparse indexes, repeated selection after compaction, malformed registrations,
+and canceled scans. The existing scrub tests also exercise the shared helper.

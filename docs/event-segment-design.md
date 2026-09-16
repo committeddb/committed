@@ -107,7 +107,10 @@ Actual lookup now preserves metadata and error behavior, with an explicit applie
 watermark guard; production lookup remains unchanged. Deadline-bound protected
 readers now defer experimental rewrite publication across calls while allowing
 appends, with automatic release and observable blocker counts. Production
-from-zero reader wiring and backup file captures remain pending.
+from-zero reader wiring and backup file captures remain pending. Snapshot
+supersession selection now scans the experimental log using the same accumulator
+as legacy Storage; authoritative RTBF tombstone state and erasure gates remain
+application-owned.
 
 ### Committed record identity
 
