@@ -77,9 +77,10 @@ retirement are distinct outcomes. Consistent captured views support backup and
 transfer without making either protocol part of the engine.
 
 The [initial package implementation](../pkg/segmentlog/README.md) covers sealed
-segments and replacement preparation only. Its experimental format 0 uses plain
-blocks and is not the complete proposed format below. Active tails, catalogs,
-durability, compression, and Committed integration remain subsequent slices.
+segments and replacement preparation only. Its experimental format 1 supports plain and zstd
+blocks, with backward reads of format 0. It is not the complete proposed format
+below. Active tails, catalogs, durability, and Committed integration remain
+subsequent slices.
 
 ### Committed record identity
 

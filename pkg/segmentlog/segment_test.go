@@ -149,7 +149,7 @@ func TestUnsupportedAndMalformedIndex(t *testing.T) {
 	data := encode(t, Record{1, []byte("one")})
 	for _, offset := range []int{8, 10} {
 		bad := bytes.Clone(data)
-		bad[offset] = 1
+		bad[offset] = 99
 		format.LE.PutUint32(bad[28:], format.CRC(bad[:28]))
 		if _, err := OpenSegment(bytes.NewReader(bad), int64(len(bad))); !errors.Is(err, ErrUnsupported) {
 			t.Fatal(err)
@@ -393,6 +393,7 @@ func TestConcurrentReads(t *testing.T) {
 func FuzzSegment(f *testing.F) {
 	f.Add(encode(f, Record{0, []byte("zero")}, Record{50, []byte("fifty")}))
 	f.Add(encode(f))
+	f.Add(compressed(f, ZstdDefault, Record{1, bytes.Repeat([]byte("payload"), 100)}))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s, err := OpenSegment(bytes.NewReader(data), int64(len(data)))
 		if err != nil {

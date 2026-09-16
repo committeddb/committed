@@ -15,7 +15,7 @@ is stable. This package is not connected to the running database.
 | Committed adapter (`internal/cluster/db/`) | Raft entry serialization, visibility, scrub policy, metadata reconciliation, backup/peer protocols | Future integration |
 | Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, captured views, retirement | Planned |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement | Initial implementation |
-| Encoding (`pkg/segmentlog/internal/format`) | Bounded frames and CRC32C; later block codecs | Plain frames implemented |
+| Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
 | Durable filesystem (`pkg/segmentlog/internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Planned; no empty placeholder package |
 
 Keep segment lifecycle, catalog publication, and rewriting in one package until
@@ -52,24 +52,23 @@ retirement protocol. Fully erased ranges currently encode as empty segments;
 the catalog layer will represent them without a payload file.
 
 Memory scales with block data and the block index rather than the entire log.
-Opening reads at most 2.5 MiB of encoded index metadata; decoded descriptors and
+Opening reads at most 3 MiB of encoded index metadata; decoded descriptors and
 record slices add bounded overhead. Rewriting can hold several block-sized
 buffers while copying the prefix and encoding output. No cache is implemented.
 
-## Experimental format 0
+## Experimental format 1
 
 All integers are unsigned little-endian. CRC is CRC32C (Castagnoli). Checksums
-detect corruption, not malicious modification. The format currently supports
-**plain blocks only**. Compression and stronger file identity belong in later
-slices, before format adoption.
+detect corruption, not malicious modification. Each block is either plain or an independent zstd frame. File-level identity
+and publication belong to the future catalog layer.
 
 | Region | Byte layout |
 | --- | --- |
-| Header (32 bytes) | `magic[8]="SEGLOG00", version:u16=0, required_features:u16=0, start:u64, end:u64, crc:u32` |
+| Header (32 bytes) | `magic[8]="SEGLOG00", version:u16=1, required_features:u16=0, start:u64, end:u64, crc:u32` |
 | Record frame | `payload_length:u32, id:u64, payload[payload_length], crc:u32` |
-| Block | One or more complete record frames, no padding |
-| Index entry (40 bytes) | `first_id:u64, last_id:u64, offset:u64, stored_length:u32, record_count:u32, block_crc:u32, reserved:u32=0` |
-| Footer (32 bytes) | `index_offset:u64, block_count:u32, total_records:u64, index_crc:u32, magic[4]="END0", crc:u32` |
+| Block | Plain record frames or one zstd encoding of those frames |
+| Index entry (48 bytes) | `first_id:u64, last_id:u64, offset:u64, stored_length:u32, record_count:u32, block_crc:u32, decoded_length:u32, codec:u16, reserved:u16=0, reserved:u32=0` |
+| Footer (32 bytes) | `index_offset:u64, block_count:u32, total_records:u64, index_crc:u32, magic[4]="END1", crc:u32` |
 
 Header, frame, and footer CRCs cover all preceding bytes within their region.
 Index CRC covers the complete encoded index; block CRC covers all stored block
@@ -86,15 +85,37 @@ no blocks, count zero, and retain the original coverage. These are experiment
 limits, not changes to Committed's application limits.
 
 Bytes contain no paths, timestamps, generation IDs, or host identity. Identical
-records, coverage, and options produce identical bytes. Unlike the fuller design
-proposal, this initial encoding omits compressed block headers and decoded-size
-fields because it has only one codec. Adding codecs will require a new encoding
-version; no compatibility with format 0 is promised yet.
+records, coverage, options, and encoder version produce identical bytes. Block
+metadata lives in the checksummed index rather than a duplicated block header.
+Readers also accept experimental format 0 (40-byte index entries, plain blocks,
+reserved zero at offset 36, and END0 footer). New writes always use format 1.
+A fixed format-0 fixture tests that reader compatibility; old readers reject v1.
+Neither experimental format is an adopted production storage contract.
+
+## Compression policy
+
+`Options.Compression` supports `NoCompression` (default), `ZstdFast`,
+`ZstdDefault`, `ZstdBetter`, and `ZstdBest`. The four zstd policies map to the
+existing dependency's named effort levels, not numeric zstd CLI levels. All use
+one encoder worker, a 1 MiB window, and zstd checksums. Encoding options never
+change record IDs, coverage, or decoded block boundaries.
+
+Codec IDs are `0=plain` and `1=zstd`. If compression would not shrink a block, the
+writer stores it plain; a segment can contain both codecs. The reader checks the
+stored CRC before decompression, caps the output at the declared decoded length
+and global limit, caps the decoder window at 1 MiB, and requires the exact decoded
+length. Unknown codecs fail at open. Reads instantiate a decoder per compressed
+block, so concurrent readers share no decoder state; pooling is not implemented.
+
+No-op rewrites still create no output even when requested compression differs.
+Use an explicit `WriteSegment` over `Records()` for deliberate re-encoding.
+[Synthetic benchmark notes](compression-benchmarks.md) record initial CPU, size,
+and allocation tradeoffs; these are not production storage or durability results.
 
 ## Next slices
 
-1. Independent compressed blocks and measured codec/level tradeoffs; strengthen
-   format fixtures and fuzzing before freezing the byte layout.
+1. Extend compression experiments with representative event payloads and compare
+   against the tidwall baseline before selecting production policy.
 2. Durable filesystem operations and recoverable active append groups, including
    injected short-write/sync failures and crash recovery bounds.
 3. Catalog publication, rotation, concurrent rewriting, captured views, and
@@ -109,9 +130,15 @@ The full requirements remain in [the design draft](../../docs/event-segment-desi
 ```sh
 go test -race ./pkg/segmentlog/...
 go test ./pkg/segmentlog -run '^$' -fuzz FuzzSegment -fuzztime 10s
+go test ./pkg/segmentlog/internal/format -run '^$' -fuzz FuzzDecode -fuzztime 10s
+go test ./pkg/segmentlog -run '^$' -bench BenchmarkCompression -benchtime 100ms
 ```
 
 Tests cover sparse reads, empty and oversized blocks, invalid ordering, every
 single-byte corruption and truncation of a sample segment, malformed index bounds,
 selective/all/no-op/in-place transformations, callback counts, file identity and
 hash preservation, cancellation, output failures, and concurrent reads.
+
+Compression tests also cover mixed codecs, deterministic output, sparse block-local
+seeks, compressed partial rewrites, maximum-size records, decoded-size mismatches,
+malformed streams, concatenated-frame output bounds, and format-0 compatibility.

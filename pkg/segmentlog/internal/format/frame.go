@@ -14,7 +14,7 @@ var ErrUnsupported = errors.New("segmentlog: unsupported format")
 const (
 	HeaderSize     = 32
 	FooterSize     = 32
-	IndexEntrySize = 40
+	IndexEntrySize = 48
 	FrameOverhead  = 16
 	MaxPayload     = 16 << 20
 	MaxBlock       = MaxPayload + FrameOverhead

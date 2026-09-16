@@ -27,16 +27,33 @@ type Record struct {
 // The experimental encoding reserves MaxUint64 as an exclusive end bound.
 type Coverage struct{ Start, End uint64 }
 
+// Compression selects encoder effort. Each compressed block identifies its
+// decoder independently, and incompressible blocks are stored plain.
+type Compression uint8
+
+const (
+	NoCompression Compression = iota
+	ZstdFast
+	ZstdDefault
+	ZstdBetter
+	ZstdBest
+)
+
 // Options controls encoding policy, independently of record semantics.
 type Options struct {
 	// BlockSize is the target decoded block size. Zero selects 256 KiB.
 	// Records larger than the target occupy a block alone (maximum 16 MiB payload).
 	BlockSize int
+	// Compression defaults to NoCompression. It does not change record IDs or
+	// block boundaries. Encoder levels are policy, not required decoder features.
+	Compression Compression
 }
 
 type block struct {
 	first, last, offset uint64
 	size, count, crc    uint32
+	decoded             uint32
+	codec               format.Codec
 }
 
 // Segment reads an immutable file using an index entry per block. Its ReaderAt
@@ -63,13 +80,18 @@ func WriteSegment(w io.Writer, coverage Coverage, records iter.Seq2[Record, erro
 	if target == 0 {
 		target = 256 << 10
 	}
-	if target < format.FrameOverhead || target > format.MaxBlock {
+	if target < format.FrameOverhead || target > format.MaxBlock || opts.Compression > ZstdBest {
 		return ErrInvalid
 	}
+	encoder, err := format.NewEncoder(int(opts.Compression))
+	if err != nil {
+		return err
+	}
+	defer encoder.Close()
 	h := make([]byte, format.HeaderSize)
 	copy(h, "SEGLOG00")
-	format.LE.PutUint16(h[8:], 0)  // experimental version
-	format.LE.PutUint16(h[10:], 0) // required features; plain blocks only
+	format.LE.PutUint16(h[8:], 1)  // experimental version
+	format.LE.PutUint16(h[10:], 0) // no additional required features
 	format.LE.PutUint64(h[12:], coverage.Start)
 	format.LE.PutUint64(h[20:], coverage.End)
 	format.LE.PutUint32(h[28:], format.CRC(h[:28]))
@@ -88,11 +110,13 @@ func WriteSegment(w io.Writer, coverage Coverage, records iter.Seq2[Record, erro
 		if len(blocks) >= format.MaxBlocks {
 			return ErrInvalid
 		}
-		current.offset, current.size, current.crc = offset, uint32(len(data)), format.CRC(data)
-		if err := writeFull(w, data); err != nil {
+		codec, stored := encoder.Encode(data)
+		current.codec, current.decoded = codec, uint32(len(data))
+		current.offset, current.size, current.crc = offset, uint32(len(stored)), format.CRC(stored)
+		if err := writeFull(w, stored); err != nil {
 			return err
 		}
-		offset += uint64(len(data))
+		offset += uint64(len(stored))
 		blocks = append(blocks, current)
 		data = data[:0]
 		current = block{}
@@ -130,6 +154,9 @@ func WriteSegment(w io.Writer, coverage Coverage, records iter.Seq2[Record, erro
 		index = format.LE.AppendUint32(index, b.size)
 		index = format.LE.AppendUint32(index, b.count)
 		index = format.LE.AppendUint32(index, b.crc)
+		index = format.LE.AppendUint32(index, b.decoded)
+		index = format.LE.AppendUint16(index, uint16(b.codec))
+		index = format.LE.AppendUint16(index, 0) // reserved
 		index = format.LE.AppendUint32(index, 0) // reserved
 	}
 	if err := writeFull(w, index); err != nil {
@@ -140,7 +167,7 @@ func WriteSegment(w io.Writer, coverage Coverage, records iter.Seq2[Record, erro
 	format.LE.PutUint32(f[8:], uint32(len(blocks)))
 	format.LE.PutUint64(f[12:], total)
 	format.LE.PutUint32(f[20:], format.CRC(index))
-	copy(f[24:], "END0")
+	copy(f[24:], "END1")
 	format.LE.PutUint32(f[28:], format.CRC(f[:28]))
 	return writeFull(w, f)
 }
@@ -170,7 +197,15 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 	if format.CRC(h[:28]) != format.LE.Uint32(h[28:]) || format.CRC(f[:28]) != format.LE.Uint32(f[28:]) {
 		return nil, ErrCorrupt
 	}
-	if string(h[:8]) != "SEGLOG00" || format.LE.Uint16(h[8:]) != 0 || format.LE.Uint16(h[10:]) != 0 || string(f[24:28]) != "END0" {
+	version := format.LE.Uint16(h[8:])
+	if string(h[:8]) != "SEGLOG00" || version > 1 || format.LE.Uint16(h[10:]) != 0 {
+		return nil, ErrUnsupported
+	}
+	entrySize, endMagic := format.IndexEntrySize, "END1"
+	if version == 0 {
+		entrySize, endMagic = 40, "END0"
+	}
+	if string(f[24:28]) != endMagic {
 		return nil, ErrUnsupported
 	}
 	coverage := Coverage{format.LE.Uint64(h[12:]), format.LE.Uint64(h[20:])}
@@ -178,7 +213,7 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 		return nil, ErrCorrupt
 	}
 	offset, n := format.LE.Uint64(f), format.LE.Uint32(f[8:])
-	indexSize := uint64(n) * format.IndexEntrySize
+	indexSize := uint64(n) * uint64(entrySize)
 	if n > format.MaxBlocks || offset < format.HeaderSize || offset > uint64(size-format.FooterSize) || indexSize != uint64(size-format.FooterSize)-offset {
 		return nil, ErrCorrupt
 	}
@@ -195,22 +230,33 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 	next := uint64(format.HeaderSize)
 	var total, previous uint64
 	for i := uint32(0); i < n; i++ {
-		entry := index[int(i)*format.IndexEntrySize:]
+		entry := index[int(i)*entrySize:]
 		b := block{
 			first: format.LE.Uint64(entry), last: format.LE.Uint64(entry[8:]),
 			offset: format.LE.Uint64(entry[16:]), size: format.LE.Uint32(entry[24:]),
 			count: format.LE.Uint32(entry[28:]), crc: format.LE.Uint32(entry[32:]),
 		}
-		if format.LE.Uint32(entry[36:]) != 0 {
-			return nil, ErrUnsupported
+		b.decoded = b.size
+		if version == 0 {
+			if format.LE.Uint32(entry[36:]) != 0 {
+				return nil, ErrUnsupported
+			}
+		} else {
+			b.decoded, b.codec = format.LE.Uint32(entry[36:]), format.Codec(format.LE.Uint16(entry[40:]))
+			if b.codec > format.Zstd || format.LE.Uint16(entry[42:]) != 0 || format.LE.Uint32(entry[44:]) != 0 {
+				return nil, ErrUnsupported
+			}
 		}
 		if b.first < coverage.Start || b.last >= coverage.End || b.first > b.last || (i > 0 && b.first <= previous) {
 			return nil, ErrCorrupt
 		}
-		if b.offset != next || b.size < format.FrameOverhead || b.size > format.MaxBlock || uint64(b.size) > offset-next {
+		if b.offset != next || b.size == 0 || b.size > format.MaxBlock || uint64(b.size) > offset-next {
 			return nil, ErrCorrupt
 		}
-		if b.count == 0 || b.count > b.size/format.FrameOverhead || (b.count > 1 && b.first == b.last) {
+		if b.decoded < format.FrameOverhead || b.decoded > format.MaxBlock || (b.codec == format.Plain && b.size != b.decoded) {
+			return nil, ErrCorrupt
+		}
+		if b.count == 0 || b.count > b.decoded/format.FrameOverhead || (b.count > 1 && b.first == b.last) {
 			return nil, ErrCorrupt
 		}
 		next += uint64(b.size)
@@ -231,6 +277,10 @@ func (s *Segment) readBlock(b block) ([]Record, error) {
 	}
 	if format.CRC(data) != b.crc {
 		return nil, ErrCorrupt
+	}
+	data, err := format.Decode(b.codec, data, b.decoded)
+	if err != nil {
+		return nil, err
 	}
 	var records []Record
 	var previous uint64
