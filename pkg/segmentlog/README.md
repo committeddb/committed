@@ -209,6 +209,10 @@ engine, application boundary, and experimental limitations.
 
 ## Validation
 
+[Concurrency tests](concurrency-testing.md) exercise paused readers, cancellation,
+competing mutations, concurrent shutdown, and mixed operation histories. The
+application adapter's protected-reader test runs against both storage backends.
+
 ```sh
 go test -race ./pkg/segmentlog/...
 go test ./pkg/segmentlog -run '^$' -fuzz '^FuzzSegment$' -fuzztime 10s
