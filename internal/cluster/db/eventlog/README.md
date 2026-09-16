@@ -98,6 +98,15 @@ selects a complete old/new generation. The existing segmentlog and moved durable
 suites retain their deeper fault tests. These tests do not establish filesystem
 power-loss behavior or prove that an incomplete tail is safe to discard.
 
+`TestEventLogRepeatedHistory` compares both backends with an independent in-memory
+history model in plain and zstd modes. Three fixed seeds each run eight cycles of
+sparse appends, partial replacements, erasure, no-op rewrites, reclamation, and
+reopen. Checks compare survivor bytes, exact and forward lookups, bounded scans,
+and original append progress. Invalid batches and stale generations are rejected.
+Injected callback failures after a changed record check that reopening preserves
+the old complete history and that failed preparation does not consume a generation.
+These are small correctness workloads, not throughput or backup-size benchmarks.
+
 ```sh
 go test -race ./internal/cluster/db/eventlog/... ./internal/durablefs/... ./pkg/segmentlog/...
 go test -race ./internal/cluster/db/wal -run '^(TestEventLogAdapter|TestEventLogCopy|TestSegment|TestScrub_)'
