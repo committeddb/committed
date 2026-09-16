@@ -119,3 +119,8 @@ middle-seek costs at two logical history sizes for both backends in plain/zstd
 modes. They report local timings and allocations with explicit fixture and cache
 limitations. Segmented rotation and reopen currently verify the full referenced
 history; these measurements do not establish production throughput.
+
+The [on-disk lifecycle baseline](scale-benchmarks.md) measures larger histories
+through recovery, a boundary append, one-record erasure, reclamation, and a full
+scan. It includes survivor and post-reopen checks and reports phase costs
+separately from history construction.
