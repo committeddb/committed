@@ -7,8 +7,7 @@ import "context"
 // Bbolt validates all range metadata, then scans directory entries in bounded
 // batches and removes unselected managed data/temp files. It does not verify
 // payloads or acknowledge queued retirements; Reclaim drains that queue separately.
-// Unknown names, directories, and symlinks are preserved. The complete-catalog
-// backend uses its existing Reclaim implementation, including payload verification.
+// Unknown names, directories, and symlinks are preserved.
 // This is full-directory maintenance, never part of open or append. Cancellation
 // can report partial progress; other errors poison the handle until reopen.
 func (l *Log) ReclaimOrphans(ctx context.Context) (ReclaimResult, error) {

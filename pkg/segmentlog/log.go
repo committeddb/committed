@@ -76,11 +76,7 @@ func checkLogEncoding(target uint64, encoding Options) error {
 // CreateLog initializes an empty, existing directory. The directory and its
 // parents must already be durable. Failed initialization can leave artifacts;
 // it never deletes existing files or silently reinitializes them.
-func CreateLog(path string, start uint64, opts LogOptions) (*Log, error) {
-	return createLog(path, start, opts, false)
-}
-
-func createLog(path string, start uint64, opts LogOptions, useBolt bool) (result *Log, retErr error) {
+func CreateLog(path string, start uint64, opts LogOptions) (result *Log, retErr error) {
 	target := opts.SegmentBytes
 	if target == 0 {
 		target = 20 << 20
@@ -127,12 +123,7 @@ func createLog(path string, start uint64, opts LogOptions, useBolt bool) (result
 		return nil, err
 	}
 	c := Catalog{History: history, Revision: 1, Start: start, SegmentBytes: uint64(target), Active: &TailRef{File: name, Start: start}}
-	var store layout
-	if useBolt {
-		store, err = createBoltCatalog(path, c)
-	} else {
-		store, err = CreateCatalogStore(path, c)
-	}
+	store, err := createBoltCatalog(path, c)
 	if err != nil {
 		return nil, err
 	}
@@ -145,13 +136,11 @@ func createLog(path string, start uint64, opts LogOptions, useBolt bool) (result
 	return result, retErr
 }
 
-// OpenLog follows CURRENT and verifies all referenced history. It refuses
-// incomplete tails without truncation. It ignores unreferenced artifacts and
-// leaves them for Reclaim. Encoding affects indexed rewrite outputs only.
-// Catalogs without a managed rotation target are not adopted.
-func OpenLog(path string, encoding Options) (*Log, error) { return openLog(path, encoding, false) }
-
-func openLog(path string, encoding Options, useBolt bool) (result *Log, retErr error) {
+// OpenLog recovers metadata.db and verifies the active tail. Closed history is
+// checked on access or explicitly with Verify. It refuses incomplete tails
+// without truncation and leaves unselected files for ReclaimOrphans. Encoding
+// affects indexed rewrite outputs only. Missing metadata is never initialized.
+func OpenLog(path string, encoding Options) (result *Log, retErr error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -169,12 +158,7 @@ func openLog(path string, encoding Options, useBolt bool) (result *Log, retErr e
 	if err != nil {
 		return nil, err
 	}
-	var store layout
-	if useBolt {
-		store, err = openBoltCatalog(path)
-	} else {
-		store, err = OpenCatalogStore(path)
-	}
+	store, err := openBoltCatalog(path)
 	if err != nil {
 		return nil, err
 	}

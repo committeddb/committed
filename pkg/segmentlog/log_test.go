@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/committeddb/committed/internal/durablefs"
 )
 
@@ -129,26 +131,24 @@ func TestLogInvalidBatchIsNotPartiallyWritten(t *testing.T) {
 	}
 }
 
-type rotationPublisher struct {
-	catalogPublisher
-	failAt, calls int
-	after         bool
-	boom          error
-}
-
-func (p *rotationPublisher) Replace(name string, w func(io.Writer) error) (durablefs.Result, error) {
-	p.calls++
-	if p.calls == p.failAt && !p.after {
-		return durablefs.Result{}, p.boom
+// failMetadataCommit injects an error before or after the selected durable commit.
+func failMetadataCommit(log *Log, failAt int, after bool, boom error) *int {
+	s := log.catalog.(*boltCatalog)
+	calls := 0
+	s.commit = func(fn func(*bolt.Tx) error) error {
+		calls++
+		if calls == failAt && !after {
+			return boom
+		}
+		if err := s.db.Update(fn); err != nil {
+			return err
+		}
+		if calls == failAt {
+			return boom
+		}
+		return nil
 	}
-	result, err := p.catalogPublisher.Replace(name, w)
-	if err != nil {
-		return result, err
-	}
-	if p.calls == p.failAt && p.after {
-		return durablefs.Result{Installed: true}, errors.Join(durablefs.ErrUncertain, p.boom)
-	}
-	return result, nil
+	return &calls
 }
 
 func TestLogRotationFailurePreservesDurablePrefix(t *testing.T) {
@@ -158,14 +158,13 @@ func TestLogRotationFailurePreservesDurablePrefix(t *testing.T) {
 			t.Fatal(err)
 		}
 		boom := errors.New("catalog failure")
-		pub := &rotationPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, failAt: 2, after: after, boom: boom}
-		log.catalog.(*CatalogStore).pub = pub
+		calls := failMetadataCommit(log, 2, after, boom)
 		err := log.Append([]Record{{2, []byte("second")}, {3, []byte("third")}, {4, []byte("fourth")}})
 		if !errors.Is(err, ErrLogPoisoned) || !errors.Is(err, boom) {
 			t.Fatal(err)
 		}
-		count := pub.calls
-		if err := log.Append([]Record{{5, nil}}); !errors.Is(err, ErrLogPoisoned) || pub.calls != count {
+		count := *calls
+		if err := log.Append([]Record{{5, nil}}); !errors.Is(err, ErrLogPoisoned) || *calls != count {
 			t.Fatal("continued after failure", err)
 		}
 		if _, err := log.Seek(0); !errors.Is(err, ErrLogPoisoned) {
@@ -366,7 +365,7 @@ func TestLogPreparedFileFailuresKeepOldTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			// An orphaned empty replacement tail does not change recovery selection
-			// while CURRENT still references the old append file.
+			// while committed metadata still references the old append file.
 			log = reopenLog(t, log)
 			got, _ := log.catalog.Current()
 			if got.Revision != before.Revision || got.Active.File != before.Active.File {
@@ -387,49 +386,24 @@ func TestLogPreparedFileFailuresKeepOldTail(t *testing.T) {
 
 func TestLogEmptyRangesAndPersistedTarget(t *testing.T) {
 	log := newLog(t, 40)
-	dir := log.path
-	if err := log.Close(); err != nil {
+	if err := log.Append([]Record{{999, make([]byte, 24)}}); err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenCatalogStore(dir)
-	if err != nil {
+	if _, err := log.Rewrite(t.Context(), 1, func(Record) ([]byte, bool, error) { return nil, false, nil }); err != nil {
 		t.Fatal(err)
 	}
-	current, _ := store.Current()
-	bad := cloneCatalog(current)
-	bad.Revision++
-	bad.SegmentBytes = 80
-	if err := store.Publish(current.Revision, bad); !errors.Is(err, ErrInvalid) {
-		t.Fatal("changed rotation target", err)
-	}
-	// Prepare a generic catalog with a known empty historical range and a new tail.
-	d, err := durablefs.Open(dir)
-	if err != nil {
+	log = reopenLog(t, log)
+	if err := log.Append([]Record{{999, nil}}); !errors.Is(err, ErrInvalid) {
 		t.Fatal(err)
 	}
-	if _, err := d.Install("later.active", func(w io.Writer) error { return WriteTailHeader(w, 1000) }); err != nil {
+	if err := log.Append([]Record{{1010, []byte("new")}}); err != nil {
 		t.Fatal(err)
 	}
-	next := cloneCatalog(current)
-	next.Revision++
-	next.Generation++
-	next.Segments = []SegmentRef{{Coverage: Coverage{0, 1000}}}
-	next.Active = &TailRef{File: "later.active", Start: 1000}
-	if err := store.Publish(current.Revision, next); err != nil {
-		t.Fatal(err)
+	c, err := log.catalog.Current()
+	if err != nil || c.SegmentBytes != 40 || len(c.Segments) != 1 || c.Segments[0].Coverage != (Coverage{0, 1000}) || c.Segments[0].File != "" {
+		t.Fatal(c, err)
 	}
-	recovered, err := OpenLog(dir, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer recovered.Close()
-	if err := recovered.Append([]Record{{999, nil}}); !errors.Is(err, ErrInvalid) {
-		t.Fatal(err)
-	}
-	if err := recovered.Append([]Record{{1010, []byte("new")}}); err != nil {
-		t.Fatal(err)
-	}
-	if r, err := recovered.Seek(0); err != nil || r.ID != 1010 {
+	if r, err := log.Seek(0); err != nil || r.ID != 1010 {
 		t.Fatal(r, err)
 	}
 }

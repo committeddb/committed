@@ -16,7 +16,7 @@ import (
 // completed fixture is opened through the real managed recovery path.
 func seedErasedHistory(t testing.TB, count uint64) *Log {
 	t.Helper()
-	l, err := CreateBoltLog(t.TempDir(), 0, LogOptions{SegmentBytes: 16})
+	l, err := CreateLog(t.TempDir(), 0, LogOptions{SegmentBytes: 16})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func seedErasedHistory(t testing.TB, count uint64) *Log {
 	if err = l.Close(); err != nil {
 		t.Fatal(err)
 	}
-	l, err = OpenBoltLog(path, Options{})
+	l, err = OpenLog(path, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func BenchmarkBoltCatalogScale(b *testing.B) {
 					b.Fatal(e)
 				}
 				start = time.Now()
-				l, e = OpenBoltLog(path, Options{})
+				l, e = OpenLog(path, Options{})
 				if e != nil {
 					b.Fatal(e)
 				}

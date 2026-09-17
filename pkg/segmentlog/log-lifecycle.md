@@ -9,8 +9,8 @@ implementation. It is not yet connected to Committed's database engine.
 CreateLog requires an empty, already durably created directory; it never empties
 or reinitializes a directory. It generates a history identity, durably installs an
 empty active tail, and publishes the initial catalog. Failed initialization can
-leave files for investigation. OpenLog follows CURRENT and validates referenced
-history. Incomplete tails remain errors and are never truncated automatically.
+leave files for investigation. OpenLog reads committed bbolt metadata and validates the active tail. Historical
+files are checked on access or by explicit `Verify`. Incomplete tails remain errors and are never truncated automatically.
 
 CreateLog and OpenLog acquire a nonblocking advisory lock on the directory inode
 before reading recovery state or publishing files. A competing process or instance
@@ -22,7 +22,7 @@ ownership and does not force a new segment boundary.
 Methods also serialize within a Log instance. All other maintenance/writers must
 cooperate with this ownership protocol: the lock does not prevent direct writes
 by a non-cooperating process. Do not replace/rename away the managed directory or
-separately mutate its CatalogStore, tails, or files while the Log is open. Raw
+separately mutate its metadata, tails, or files while the Log is open. Raw
 catalog/tail/file primitives do not acquire the lock themselves; callers must
 acquire the same ownership before using them.
 
@@ -31,7 +31,6 @@ acquire the same ownership before using them.
 LogOptions.SegmentBytes is persisted in the catalog and cannot change through
 publication. Zero at creation selects 20 MiB; explicit targets range from 16 bytes
 to 32 MiB, subject to the block-index capacity for the chosen encoding options.
-Standalone catalogs omit this field; OpenLog refuses to adopt those catalogs.
 Encoding options may change on reopen and affect indexed rewrite outputs.
 Rollover retains the plain append format and does not compress records.
 
@@ -71,7 +70,7 @@ Under the log mutex:
 
 New tail and indexed rewrite files receive unique names; the catalog digest
 identifies immutable content. Names do not affect encoded bytes. Before step 3,
-CURRENT still selects the old tail. After step 3, CURRENT selects that same file as an immutable range
+Committed metadata still selects the old tail. After step 3, it selects that same file as an immutable range
 and the new empty tail. Reopening uses that selection and ignores unpublished artifacts.
 
 Any append or rotation failure poisons the Log. Reads and writes then refuse to
@@ -96,17 +95,16 @@ Rollover and catalog validation run synchronously while reads/appends are blocke
 Rollover performs no format conversion, compression, or replacement-file write.
 Rollover publication trusts the exclusively owned appender's synchronized state
 and the installer's completed durability work. It neither reopens payload files
-nor repeats their file/directory synchronization. It installs the catalog and
-replaces CURRENT with the existing durable filesystem primitives. The preparation
+nor repeats their file/directory synchronization. It commits the changed range and active-tail state in bbolt. The preparation
 handle is in memory only; recovery never trusts it.
 
-Standalone catalog publication and rewrite publication still verify new or changed
-sealed references and the active tail. Unchanged immutable files reuse their
-confirmed verification and durability.
-Complete catalog metadata is still validated and serialized on each rotation.
+Rewrite publication verifies changed sealed files and the active tail before
+committing their new references and retirement records. Unchanged ranges retain
+their existing references. Metadata work does not serialize a complete range list.
 
-Obsolete tails, catalogs, rewritten revisions, and crash orphans remain until explicit
-`Reclaim(ctx)` validates the live set and removes recognized obsolete files.
+Obsolete published files remain until explicit `Reclaim(ctx)` drains retirements.
+Unpublished preparation files remain until explicit `ReclaimOrphans(ctx)` sweeps
+the directory. Neither operation verifies all live payloads.
 Closed append files remain live references and are preserved by reclamation. See the
 [reclamation contract](reclamation.md). Whole-log transformations now publish
 through `Rewrite`; see [its contract](whole-log-rewriting.md). The managed log has
@@ -117,7 +115,7 @@ integration. It does not establish application erasure completion.
 
 Tests compare ranges and counts across multiple batch sizes and restarts;
 check that rollover preserves file identity and bytes; cover oversized records and gaps; ensure invalid batches do not partly
-write; simulate failures preparing the new tail and before/after CURRENT switches;
+write; simulate failures preparing the new tail and before/after metadata commits;
 recover acknowledged and unacknowledged durable prefixes; preserve incomplete
 tails; change encoding without touching existing files; and run concurrent reads
 with appends under the race detector. Fault injection tests protocol behavior,

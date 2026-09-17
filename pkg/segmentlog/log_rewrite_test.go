@@ -63,7 +63,7 @@ func TestRewriteSealedPreservesUnaffectedFiles(t *testing.T) {
 	}
 	for name := range referencedNames(t, log) {
 		old, exists := originals[name]
-		if !exists || name == "CURRENT" {
+		if !exists || name == boltCatalogName {
 			continue
 		}
 		info, err := os.Stat(filepath.Join(log.path, name))
@@ -91,7 +91,7 @@ func TestRewriteSealedPreservesUnaffectedFiles(t *testing.T) {
 	if r, err := log.Seek(4); err != nil || r.ID != 5 {
 		t.Fatal(r, err)
 	}
-	if _, err := log.Reclaim(t.Context()); err != nil {
+	if _, err := log.ReclaimOrphans(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	for _, i := range []int{1, 3} {
@@ -174,7 +174,7 @@ func TestRewriteSealedPreparationFailures(t *testing.T) {
 			if r, err := log.Read(1); err != nil || string(r.Payload) != "value" {
 				t.Fatal(r, err)
 			}
-			if _, err := log.Reclaim(t.Context()); err != nil {
+			if _, err := log.ReclaimOrphans(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			entries, err := os.ReadDir(log.path)
@@ -189,8 +189,8 @@ func TestRewriteSealedPublicationFailure(t *testing.T) {
 	for _, after := range []bool{false, true} {
 		t.Run(fmt.Sprint(after), func(t *testing.T) {
 			log := rotatedLog(t)
-			boom := errors.New("CURRENT failure")
-			log.catalog.(*CatalogStore).pub = &rotationPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, failAt: 1, after: after, boom: boom}
+			boom := errors.New("metadata commit failure")
+			failMetadataCommit(log, 1, after, boom)
 			result, err := log.RewriteSealed(t.Context(), 1, func(r Record) ([]byte, bool, error) { return []byte("replacement"), r.ID != 4, nil })
 			if !errors.Is(err, boom) || !errors.Is(err, ErrLogPoisoned) || result.Published {
 				t.Fatal(result, err)

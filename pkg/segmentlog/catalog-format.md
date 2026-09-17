@@ -1,5 +1,8 @@
 # Local catalog: experimental format 0
 
+This document describes the standalone complete-catalog prototype. Managed `Log`
+uses [bbolt metadata](bbolt-experiment.md); this format is not opened by `OpenLog`.
+
 The catalog names one complete local layout: a contiguous sequence of sealed or
 empty ranges and an optional active tail. It is not a hosted backup manifest.
 This slice supplies validation, publication, and recovery selection. It does not
@@ -138,18 +141,3 @@ integrity checks. The catalog itself is still validated and serialized in full.
   The managed Log supplies record transformations and original rotation accounting.
 - Catalog publication does not yet reconcile metadata in another database, prove
   incomplete suffixes safe to discard, implement backups, or negotiate peer data.
-
-## Managed rollover publication
-
-Managed rollover has a private preparation contract separate from public
-`CatalogStore.Publish`. Segment storage retains the synchronized old append file,
-computes its digest, and durably installs the new empty tail. The catalog publisher
-consumes that process-local preparation once, checking its source directory,
-history, revision, and active filename. It builds and validates the successor
-layout, installs its catalog, and replaces CURRENT. It does not reopen or resync
-the prepared payload files or repeat the installer's directory sync.
-
-There is no persisted preparation receipt or additional on-disk format. A failed
-publication still poisons the managed log; recovery follows CURRENT and verifies
-all references from disk. Standalone publication and rewrite publication retain
-the verification protocol described above.

@@ -23,7 +23,7 @@ func TestBoltLogCrashHelper(t *testing.T) {
 	if dir == "" {
 		return
 	}
-	l, err := OpenBoltLog(dir, Options{})
+	l, err := OpenLog(dir, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

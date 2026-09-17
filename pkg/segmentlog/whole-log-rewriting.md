@@ -37,7 +37,7 @@ the result can be sealed within the segment format's block/index limits. A
 conservative byte bound also reserves index capacity for later appends up to
 the original rotation target; excessive payload growth fails before publication.
 
-All replacements are installed and synced before CURRENT changes. On success,
+All replacements are installed and synced before metadata selection changes. On success,
 the managed handle switches to the replacement tail; the original byte accounting
 is unchanged. If an entirely empty log has no changes, only the requested newer
 generation is published. The result embeds sealed preparation counts and adds
@@ -49,10 +49,10 @@ confirmed catalog publication; a later old-handle close failure can return an
 error with Published true. Cancellation is cooperative between records and does
 not interrupt callbacks, syncs, or whole-file verification.
 
-Logical publication retains old files. `Reclaim` removes obsolete tails, segments,
-catalogs, and recognized orphans. Physical erasure requires that cleanup; readers
-and backups with captured views are not implemented yet. Rewrites still block
-all managed operations, and verification still scans historical payloads.
+Logical publication retains old files. `Reclaim` removes obsolete published tails
+and segments; `ReclaimOrphans` separately removes unpublished preparation files.
+Physical erasure requires cleanup. The API has no pinned readers or backup views.
+Rewrites block all managed operations and scan records while preparing changes.
 
 ## Evidence
 
@@ -60,6 +60,6 @@ Tests compare rotation boundaries with an untouched log across rewrites, payload
 shrink/growth, complete erasure, appends, and restarts. They also exercise no-op
 identity, empty-range rotation, checkpoint validation, forbidden reuse of erased
 IDs, catalog copy isolation, and old/new recovery after callback, cancellation,
-replacement installation, and CURRENT publication failures. Existing race tests,
+replacement installation, and metadata publication failures. Existing race tests,
 format checks, and lint remain part of validation. Filesystem power-loss testing
 and application integration are still required before production use.

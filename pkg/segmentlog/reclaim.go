@@ -1,12 +1,9 @@
 package segmentlog
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -25,23 +22,14 @@ type ReclaimResult struct {
 
 type fileRemover interface{ Remove(string) (bool, error) }
 
-// Reclaim removes obsolete files under exclusive log ownership. Bbolt catalogs
-// drain committed retirement records in bounded batches; they do not discover
-// unpublished orphans or verify all live history. The protocol below describes
-// the complete-catalog backend.
-// It validates and confirms CURRENT and all references before any deletion, then
-// removes unreferenced managed segment/tail/catalog/temp files and syncs each
-// removal. It preserves unknown names, directories, and symbolic links.
-//
-// Log reads/appends and Close are excluded by the mutex. There are no public
-// pinned views yet; callers must not hold external file handles or run lower-level
-// readers/maintenance outside this ownership protocol. Existing in-memory Record
-// payloads are unaffected. Reclaim is explicit, never automatic during open.
-//
-// Cancellation can return a durably removed prefix without poisoning the log.
-// Filesystem or consistency errors poison it; Close/reopen and retry. After a
-// crash, CURRENT remains authoritative and another call finds remaining orphans.
-// This cleans managed files only, not old backups, snapshots, or device cells.
+// Reclaim drains committed retirement records in bounded batches. Each obsolete
+// file is durably removed before its queue entry is acknowledged. It holds the
+// Log mutex and exclusive directory ownership; reads and writes cannot overlap.
+// It does not discover unpublished files or verify all live payloads. Use
+// ReclaimOrphans for a directory sweep and Verify for a full integrity check.
+// Cancellation can leave durable partial progress. Other failures poison the
+// handle until Close/reopen; retry also handles already-removed queued names.
+// This cleans local files only, not backups, snapshots, or device cells.
 func (l *Log) Reclaim(ctx context.Context) (result ReclaimResult, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -55,100 +43,6 @@ func (l *Log) Reclaim(ctx context.Context) (result ReclaimResult, err error) {
 		return result, err
 	}
 	return l.catalog.reclaim(l, ctx)
-}
-
-func (s *CatalogStore) reclaim(l *Log, ctx context.Context) (result ReclaimResult, err error) {
-	current, err := l.catalog.Current()
-	if err != nil {
-		return result, l.fail(err)
-	}
-	disk, name, err := loadCatalog(l.path)
-	if err != nil {
-		return result, l.fail(err)
-	}
-	expected, err := encodeCatalog(current)
-	if err != nil {
-		return result, l.fail(err)
-	}
-	actual, err := encodeCatalog(disk)
-	if err != nil {
-		return result, l.fail(err)
-	}
-	if !bytes.Equal(expected, actual) {
-		return result, l.fail(ErrCatalogConflict)
-	}
-	// Refuse destructive cleanup when the selected history cannot be verified.
-	// This full verification is intentionally conservative and currently expensive.
-	if err = verifyCatalogFiles(l.path, disk); err != nil {
-		return result, l.fail(err)
-	}
-	for _, file := range []string{name, "CURRENT"} {
-		if err = ctx.Err(); err != nil {
-			return result, err
-		}
-		if err = syncRegular(filepath.Join(l.path, file)); err != nil {
-			return result, l.fail(err)
-		}
-	}
-	if err = s.pub.Sync(); err != nil {
-		return result, l.fail(err)
-	}
-	live := map[string]bool{"CURRENT": true, name: true}
-	for _, ref := range disk.Segments {
-		if ref.File != "" {
-			live[ref.File] = true
-		}
-	}
-	if disk.Active != nil {
-		live[disk.Active.File] = true
-	}
-	entries, err := os.ReadDir(l.path)
-	if err != nil {
-		return result, l.fail(err)
-	}
-	type candidate struct {
-		name string
-		size int64
-	}
-	var obsolete []candidate
-	for _, entry := range entries {
-		if err = ctx.Err(); err != nil {
-			return result, err
-		}
-		if live[entry.Name()] {
-			continue
-		}
-		if !managedArtifact(entry.Name()) {
-			result.SkippedEntries++
-			continue
-		}
-		info, e := entry.Info()
-		if e != nil {
-			return result, l.fail(e)
-		}
-		if !info.Mode().IsRegular() {
-			result.SkippedEntries++
-			continue
-		}
-		obsolete = append(obsolete, candidate{entry.Name(), info.Size()})
-	}
-	for _, file := range obsolete {
-		if err = ctx.Err(); err != nil {
-			return result, err
-		}
-		if file.size < 0 {
-			return result, l.fail(ErrCorrupt)
-		}
-		removed, e := l.remover.Remove(file.name)
-		if removed {
-			result.RemovedFiles++
-			result.RemovedBytes += uint64(file.size)
-		}
-		if e != nil {
-			return result, l.fail(fmt.Errorf("segmentlog: reclaim %s: %w", file.name, e))
-		}
-	}
-	return result, nil
 }
 
 func managedArtifact(name string) bool {

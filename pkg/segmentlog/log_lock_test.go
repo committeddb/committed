@@ -74,7 +74,7 @@ func TestFailedLogOpenAndCreateReleaseLock(t *testing.T) {
 		t.Fatal("failed create leaked ownership", err)
 	}
 	_ = owner.Close()
-	current := filepath.Join(dir, "CURRENT")
+	current := filepath.Join(dir, boltCatalogName)
 	old, err := os.ReadFile(current)
 	if err != nil {
 		t.Fatal(err)

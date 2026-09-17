@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func prepareTestRollover(t *testing.T, log *Log) *preparedRollover {
@@ -39,18 +41,16 @@ func TestPreparedRolloverPublishesMetadataOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	pub := &failingPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, at: "sync", boom: errors.New("redundant directory sync")}
-	log.catalog.(*CatalogStore).pub = pub
-	if err := log.catalog.(*CatalogStore).publishRollover(p); err != nil {
+	if err := log.catalog.publishRollover(p); err != nil {
 		t.Fatal(err)
 	}
-	if len(pub.calls) != 2 || pub.calls[0] != "install" || pub.calls[1] != "replace" {
-		t.Fatal("unexpected publication protocol", pub.calls)
+	if err := log.catalog.publishRollover(p); !errors.Is(err, ErrInvalid) {
+		t.Fatal(err)
 	}
-	if err := log.catalog.(*CatalogStore).publishRollover(p); !errors.Is(err, ErrInvalid) {
-		t.Fatal("reused preparation", err)
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := OpenCatalogStore(log.path); !errors.Is(err, os.ErrNotExist) {
+	if _, err := OpenLog(log.path, log.encoding); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("recovery trusted preparation", err)
 	}
 	for _, name := range []string{p.closed.File, p.active.File} {
@@ -77,16 +77,18 @@ func TestPreparedRolloverRejectsWrongLayout(t *testing.T) {
 				t.Fatal(err)
 			}
 			p := prepareTestRollover(t, log)
-			store := log.catalog.(*CatalogStore)
+			store := log.catalog.(*boltCatalog)
 			if mode == "other-store" {
-				store = newLog(t, 32).catalog.(*CatalogStore)
+				store = newLog(t, 32).catalog.(*boltCatalog)
 			} else {
-				c, err := store.Current()
-				if err != nil {
-					t.Fatal(err)
-				}
-				c.Revision++
-				if err := store.Publish(c.Revision-1, c); err != nil {
+				if err := store.db.Update(func(tx *bolt.Tx) error {
+					h, err := readBoltHeader(tx)
+					if err != nil {
+						return err
+					}
+					h.Catalog.Revision++
+					return putBoltHeader(tx, h)
+				}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -98,7 +100,7 @@ func TestPreparedRolloverRejectsWrongLayout(t *testing.T) {
 }
 
 func TestPreparedRolloverPublicationFailures(t *testing.T) {
-	for _, stage := range []string{"install", "replace-before", "replace-after"} {
+	for _, stage := range []string{"before", "after"} {
 		t.Run(stage, func(t *testing.T) {
 			log := newLog(t, 32)
 			if err := log.Append([]Record{{0, nil}, {10, nil}}); err != nil {
@@ -109,7 +111,7 @@ func TestPreparedRolloverPublicationFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			boom := errors.New("publication failure")
-			log.catalog.(*CatalogStore).pub = &failingPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, at: stage, boom: boom}
+			failMetadataCommit(log, 1, stage == "after", boom)
 			if err := log.Append([]Record{{20, nil}}); !errors.Is(err, boom) || !errors.Is(err, ErrLogPoisoned) {
 				t.Fatal(err)
 			}
@@ -119,7 +121,7 @@ func TestPreparedRolloverPublicationFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantRevision := before.Revision
-			if stage == "replace-after" {
+			if stage == "after" {
 				wantRevision++
 			}
 			if after.Revision != wantRevision {

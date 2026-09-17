@@ -1,11 +1,9 @@
 # Integrated bbolt catalog experiment
 
-`CreateBoltLog` and `OpenBoltLog` connect the managed segment engine to a separate
-`metadata.db` using the repository's bbolt dependency. `CreateLog` and `OpenLog`
-retain the complete-catalog/CURRENT format. Both entry points require exclusive
-ownership of the directory. There is no format autodetection, conversion, or
-production database activation. The segmented EventLog adapter exposes matching
-`CreateBolt`/`OpenBolt` entry points for conformance tests and benchmarks.
+`CreateLog` and `OpenLog` use a dedicated `metadata.db` through the repository's
+bbolt dependency. They require exclusive ownership of the directory. There is no
+format autodetection, conversion, or production database activation. The segmented
+EventLog adapter uses the same catalog through `Create`/`Open`.
 
 ## Metadata boundary
 
@@ -18,7 +16,10 @@ The private `layout` interface separates the managed log from metadata storage:
 - `publishRewrite` atomically publishes changed references and tail state.
 - `reclaim` applies each backend's retirement policy.
 
-`Current` remains a full diagnostic snapshot used in tests. Managed bbolt append,
+`Log.InspectCatalog` exposes a detached diagnostic snapshot under the log mutex.
+It materializes every range, so its time and memory grow with history size; it
+does not pin files after returning. The private `Current` operation builds it.
+Managed bbolt append,
 read, progress, rewrite, and reclamation do not request it. Rewrite streams all
 selected ranges and retains only changed references for publication; transforms
 still inspect the record stream because there is no subject-selection index.
@@ -163,10 +164,14 @@ failure. Full scans, large replacement sets, cold-cache behavior, metadata repai
 backup capture, physical file-count scaling, and long-running fragmented workloads
 are not established by these tests.
 
-## Reproducible benchmarks
+## Benchmarks
 
-`BenchmarkEventLogScale` includes `segmented-bbolt/plain` and
-`segmented-bbolt/zstd`. It creates actual segment files and measures managed
+The comparison measurements below were captured before consolidation, when both
+managed catalog implementations were available. The complete-catalog benchmark
+variant is no longer present in the managed engine.
+
+`BenchmarkEventLogScale` includes `segmented/plain` and
+`segmented/zstd`, both using bbolt. It creates actual segment files and measures managed
 reopen, boundary append, rewrite, reclaim, and scan. Each iteration checks all
 survivor IDs/payload lengths and verifies erasure and progress after another open.
 The tidwall row still does not force tidwall rollover and is not a boundary-to-

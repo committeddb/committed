@@ -72,19 +72,18 @@ The implemented binary layouts and limits are documented in:
 
 ## Publication, recovery, and current limits
 
-The complete-catalog and tidwall backends use CURRENT to select their catalog or
-generation. The opt-in bbolt catalog selects its layout through a metadata
-transaction. Replacement files are synced
-and durably installed before the selection changes. Unreferenced newer files do
-not select themselves. Complete-catalog recovery checks all referenced state;
-bbolt recovery checks metadata boundaries and the active tail, with historical
-files checked on access or by explicit `Log.Verify`.
+The segmented engine uses bbolt transactions to select its layout. The tidwall
+adapter uses CURRENT to select a generation. Replacement files are synced and
+durably installed before selection changes. Unreferenced newer files do not
+select themselves. Segmented recovery checks metadata boundaries and the active
+tail; historical files are checked on access or by explicit `Log.Verify`.
 Publication errors can leave an uncertain outcome; affected handles require
 close/reopen rather than continuing mutation or attempting a destructive rollback.
 
 Publication and physical cleanup are separate operations. Explicit `Reclaim`
 removes obsolete files under exclusive ownership. Bbolt reclamation drains
-committed retirement records and does not discover unpublished orphan files. Old payload files can remain until reclamation succeeds.
+committed retirement records. `Log.ReclaimOrphans` separately scans for unpublished
+files. Old payload files can remain until reclamation succeeds.
 
 The segmented managed log serializes reads, append, sealing, rewrite, and
 reclamation. Rollover and catalog publication are synchronous, but rollover does

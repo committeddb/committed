@@ -11,6 +11,7 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 
 	"github.com/committeddb/committed/internal/durablefs"
 	"github.com/committeddb/committed/pkg/segmentlog/internal/format"
@@ -40,17 +41,6 @@ type boltCatalog struct {
 	commit func(func(*bolt.Tx) error) error
 	poison error
 }
-
-// CreateBoltLog creates an experimental log with a dedicated bbolt catalog.
-// It requires an empty durable directory. It does not change CreateLog's format.
-func CreateBoltLog(path string, start uint64, opts LogOptions) (*Log, error) {
-	return createLog(path, start, opts, true)
-}
-
-// OpenBoltLog recovers the bbolt header and active tail. Closed ranges are read
-// and checked on demand; it does not verify all historical payloads at startup.
-// Missing metadata is an error, never an instruction to initialize a new log.
-func OpenBoltLog(path string, encoding Options) (*Log, error) { return openLog(path, encoding, true) }
 
 func boltEncode(v any) ([]byte, error) {
 	b, err := json.Marshal(v)
@@ -153,6 +143,12 @@ func putBoltRef(tx *bolt.Tx, ref SegmentRef) error {
 func openBoltDB(path string) (*boltCatalog, error) {
 	db, err := bolt.Open(filepath.Join(path, boltCatalogName), 0o600, &bolt.Options{Timeout: time.Second, FreelistType: bolt.FreelistMapType})
 	if err != nil {
+		if errors.Is(err, bolterrors.ErrInvalid) || errors.Is(err, bolterrors.ErrChecksum) {
+			return nil, errors.Join(ErrCorrupt, err)
+		}
+		if errors.Is(err, bolterrors.ErrVersionMismatch) {
+			return nil, errors.Join(ErrUnsupported, err)
+		}
 		return nil, err
 	}
 	return &boltCatalog{path: path, db: db, commit: db.Update}, nil

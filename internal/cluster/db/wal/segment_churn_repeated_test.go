@@ -15,13 +15,9 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func churnCatalog(t *testing.T, path string) segmentlog.Catalog {
+func churnCatalog(t *testing.T, log *segmentlog.Log) segmentlog.Catalog {
 	t.Helper()
-	store, err := segmentlog.OpenCatalogStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog, err := store.Current()
+	catalog, err := log.InspectCatalog()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,10 +52,11 @@ func TestSegmentRepeatedRewriteChurn(t *testing.T) {
 		}
 		t.Run(codec, func(t *testing.T) {
 			path, legacyPath := t.TempDir(), t.TempDir()
-			log, err := segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 8 << 10, Encoding: segmentlog.Options{Compression: encoding}})
+			engine, err := segmentlog.CreateLog(path, 1, segmentlog.LogOptions{SegmentBytes: 8 << 10, Encoding: segmentlog.Options{Compression: encoding}})
 			if err != nil {
 				t.Fatal(err)
 			}
+			log := segmented.Wrap(engine)
 			t.Cleanup(func() { _ = log.Close() })
 			adapter := &eventLogAdapter{log: log}
 			legacy, err := tidwal.Open(legacyPath, &options)
@@ -110,7 +107,7 @@ func TestSegmentRepeatedRewriteChurn(t *testing.T) {
 				if mode == "append-and-repeat" {
 					appendRange(65, 81)
 				}
-				before := churnCatalog(t, path)
+				before := churnCatalog(t, engine)
 				if len(before.Segments) < 3 {
 					t.Fatal("fixture lacks sealed ranges")
 				}
@@ -178,7 +175,7 @@ func TestSegmentRepeatedRewriteChurn(t *testing.T) {
 				if _, e := log.Reclaim(t.Context()); e != nil {
 					t.Fatal(e)
 				}
-				after := churnCatalog(t, path)
+				after := churnCatalog(t, engine)
 				if len(after.Segments) != len(before.Segments) {
 					t.Fatal(mode, "changed sealed range count")
 				}
@@ -206,10 +203,11 @@ func TestSegmentRepeatedRewriteChurn(t *testing.T) {
 				if e := log.Close(); e != nil {
 					t.Fatal(e)
 				}
-				log, e = segmented.Open(path, segmentlog.Options{Compression: encoding})
+				engine, e = segmentlog.OpenLog(path, segmentlog.Options{Compression: encoding})
 				if e != nil {
 					t.Fatal(e)
 				}
+				log = segmented.Wrap(engine)
 				adapter = &eventLogAdapter{log: log}
 				frontier := uint64(640)
 				if mode == "append-and-repeat" {

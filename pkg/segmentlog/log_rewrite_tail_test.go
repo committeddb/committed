@@ -80,7 +80,7 @@ func TestRewriteWholeLogPreservesRotation(t *testing.T) {
 			if erase && (got.Segments[0].File != "" || got.Segments[1].Count != 1) {
 				t.Fatal(got.Segments)
 			}
-			if _, err := log.Reclaim(t.Context()); err != nil {
+			if _, err := log.ReclaimOrphans(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(filepath.Join(log.path, before.Active.File)); !errors.Is(err, os.ErrNotExist) {
@@ -112,7 +112,7 @@ func TestRewriteErasedTailRotatesAsEmptyRange(t *testing.T) {
 	if len(c.Segments) != 1 || c.Segments[0] != (SegmentRef{Coverage: Coverage{0, 101}}) {
 		t.Fatal(c)
 	}
-	if _, err := log.Reclaim(t.Context()); err != nil {
+	if _, err := log.ReclaimOrphans(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	log = reopenLog(t, log)
@@ -133,7 +133,7 @@ func TestRewriteWholeLogNoop(t *testing.T) {
 }
 
 func TestRewriteWholeLogFailures(t *testing.T) {
-	for _, mode := range []string{"callback", "cancel", "tail-install-before", "tail-install-after", "current-before", "current-after"} {
+	for _, mode := range []string{"callback", "cancel", "tail-install-before", "tail-install-after", "commit-before", "commit-after"} {
 		t.Run(mode, func(t *testing.T) {
 			log := newLog(t, 40)
 			if err := log.Append([]Record{{1, []byte("value")}, {2, []byte("value")}}); err != nil {
@@ -146,8 +146,8 @@ func TestRewriteWholeLogFailures(t *testing.T) {
 			switch mode {
 			case "tail-install-before", "tail-install-after":
 				log.dir = &rotationInstaller{fileInstaller: log.dir, failAt: 2, after: mode == "tail-install-after", boom: boom}
-			case "current-before", "current-after":
-				log.catalog.(*CatalogStore).pub = &rotationPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, failAt: 1, after: mode == "current-after", boom: boom}
+			case "commit-before", "commit-after":
+				failMetadataCommit(log, 1, mode == "commit-after", boom)
 			}
 			result, err := log.Rewrite(ctx, 1, func(r Record) ([]byte, bool, error) {
 				if r.ID == 2 {
@@ -170,7 +170,7 @@ func TestRewriteWholeLogFailures(t *testing.T) {
 			log = reopenLog(t, log)
 			c, _ := log.catalog.Current()
 			want := "value"
-			if mode == "current-after" {
+			if mode == "commit-after" {
 				want = "changed"
 				if c.Generation != 1 || c.Active.Checkpoint == nil {
 					t.Fatal(c)
@@ -184,7 +184,7 @@ func TestRewriteWholeLogFailures(t *testing.T) {
 					t.Fatal("mixed transaction", r, err)
 				}
 			}
-			if _, err := log.Reclaim(t.Context()); err != nil {
+			if _, err := log.ReclaimOrphans(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			entries, err := os.ReadDir(log.path)

@@ -33,24 +33,6 @@ func Open(path string, opts segmentlog.Options) (*Log, error) {
 	return Wrap(l), nil
 }
 
-// CreateBolt creates an experimental segmented log with a bbolt metadata catalog.
-func CreateBolt(path string, start uint64, opts segmentlog.LogOptions) (*Log, error) {
-	l, e := segmentlog.CreateBoltLog(path, start, opts)
-	if e != nil {
-		return nil, translate(e)
-	}
-	return Wrap(l), nil
-}
-
-// OpenBolt opens only the experimental bbolt catalog format.
-func OpenBolt(path string, opts segmentlog.Options) (*Log, error) {
-	l, e := segmentlog.OpenBoltLog(path, opts)
-	if e != nil {
-		return nil, translate(e)
-	}
-	return Wrap(l), nil
-}
-
 func translate(err error) error {
 	if err == nil {
 		return nil

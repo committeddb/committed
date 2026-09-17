@@ -16,7 +16,7 @@ import (
 
 func newBoltLog(t *testing.T, target int) *Log {
 	t.Helper()
-	l, e := CreateBoltLog(t.TempDir(), 0, LogOptions{SegmentBytes: target, Encoding: Options{Compression: ZstdDefault}})
+	l, e := CreateLog(t.TempDir(), 0, LogOptions{SegmentBytes: target, Encoding: Options{Compression: ZstdDefault}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -29,7 +29,7 @@ func reopenBoltLog(t *testing.T, l *Log) *Log {
 	if e := l.Close(); e != nil {
 		t.Fatal(e)
 	}
-	next, e := OpenBoltLog(l.path, l.encoding)
+	next, e := OpenLog(l.path, l.encoding)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -201,7 +201,7 @@ func TestBoltLogReclaimRetriesAfterQueueFailure(t *testing.T) {
 func TestBoltLogCorruptionAndExplicitOpen(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		dir := t.TempDir()
-		if _, e := OpenBoltLog(dir, Options{}); !errors.Is(e, os.ErrNotExist) {
+		if _, e := OpenLog(dir, Options{}); !errors.Is(e, os.ErrNotExist) {
 			t.Fatal(e)
 		}
 		entries, e := os.ReadDir(dir)
@@ -252,7 +252,7 @@ func TestBoltLogCorruptionAndExplicitOpen(t *testing.T) {
 			if e = l.Close(); e != nil {
 				t.Fatal(e)
 			}
-			next, e := OpenBoltLog(l.path, Options{})
+			next, e := OpenLog(l.path, Options{})
 			if mode == "header" || mode == "active" {
 				if !errors.Is(e, ErrCorrupt) {
 					if next != nil {

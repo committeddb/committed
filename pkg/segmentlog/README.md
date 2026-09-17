@@ -16,16 +16,17 @@ experiment](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
 compares Committed protobuf records and existing scrub transformations with
 tidwall.
 
-## Bbolt catalog experiment
+## Bbolt catalog
 
-`CreateBoltLog`/`OpenBoltLog` provide an opt-in integrated bbolt metadata backend.
-Managed operations use targeted state/range queries; rollover and rewrite publish
-metadata transactions. Open validates metadata boundaries and the active tail;
-historical payload verification is explicit through `Log.Verify`. Reclaim drains
-committed retirements; `Log.ReclaimOrphans` separately scans for unpublished files.
-The original
-complete-catalog entry points remain available. See the
-[experiment contract and evidence](bbolt-experiment.md).
+`CreateLog`/`OpenLog` use bbolt metadata in `metadata.db`. Managed operations use
+targeted state/range queries; rollover and rewrite publish metadata transactions.
+Open validates metadata boundaries and the active tail. Full metadata and payload
+verification is explicit through `Log.Verify`. Reclaim drains committed retirements;
+`Log.ReclaimOrphans` separately scans for unpublished files.
+See the [catalog contract and experimental evidence](bbolt-experiment.md).
+
+`Log.InspectCatalog` returns a detached metadata snapshot for diagnostics. It
+allocates the complete range list and does not pin the referenced files.
 
 ## Boundaries
 
@@ -206,33 +207,21 @@ even when no records survive. See [whole-log rewriting](whole-log-rewriting.md).
 
 ## Local catalogs
 
-`CatalogStore` now validates and atomically publishes a complete file layout via
-CURRENT. It represents empty ranges without files, separates physical revision
-from logical scrub generation, and stops publication after I/O failure. Recovery
-selects only CURRENT and rejects missing/corrupt references. It scans full file
-contents. Indexed files share each stored payload block between digest and frame
-verification; closed append files use separate semantic and digest passes.
-Verification validates frames without collecting per-record result slices.
-Publication reuses prior verification for exact unchanged immutable references;
-new or changed sealed references and active tails are verified and synced by
-standalone publication. Managed rollover uses the private preparation contract
-instead; it publishes metadata after segment storage establishes file durability.
-It retains old revisions and requires exclusive caller-managed directory ownership. See [the catalog format and publication contract](catalog-format.md).
+The managed engine uses a bbolt catalog; see the [metadata contract](bbolt-experiment.md).
+The standalone `CatalogStore` complete-file prototype remains available for its
+lower-level tests. It is not used by `Log` or the segmented EventLog adapter.
+Its [format](catalog-format.md) is separate from `metadata.db`; no conversion or
+format autodetection is provided.
 
 ## Reclamation
 
-For complete catalogs, `Log.Reclaim(ctx)` verifies the confirmed live layout,
-preserves all referenced files, and durably removes recognized obsolete artifacts.
-See [the cleanup contract](reclamation.md).
-
-For bbolt, `Log.Reclaim(ctx)` drains the committed retirement queue without a
-directory scan. `Log.ReclaimOrphans(ctx)` separately validates all range metadata
-and scans the directory in bounded batches for unselected managed data and
-temporary files. It preserves unknown files, directories, and symlinks, and does
-not verify live payloads. It holds the log mutex throughout, so it blocks reads
-and writes. The complete-catalog backend maps this method to its existing cleanup.
-Both operations can report partial progress; filesystem failures require reopening
-before retry. See [the bbolt cleanup behavior](bbolt-experiment.md#reclamation).
+`Log.Reclaim(ctx)` drains the committed retirement queue without a directory scan.
+`Log.ReclaimOrphans(ctx)` separately validates range metadata and scans the directory
+in bounded batches for unselected managed data and temporary files. It preserves
+unknown files, directories, and symlinks, and does not verify live payloads. Both
+operations hold the log mutex throughout, blocking reads and writes. Errors can
+report partial progress; filesystem failures require reopening before retry.
+See [reclamation](reclamation.md).
 
 ## Rewrite churn experiment
 

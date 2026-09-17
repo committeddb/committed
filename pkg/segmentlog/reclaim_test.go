@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sync"
 	"testing"
 
@@ -26,11 +25,11 @@ func rotatedLog(t *testing.T) *Log {
 
 func referencedNames(t *testing.T, log *Log) map[string]bool {
 	t.Helper()
-	c, name, err := loadCatalog(log.path)
+	c, err := log.catalog.Current()
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := map[string]bool{"CURRENT": true, name: true, c.Active.File: true}
+	names := map[string]bool{boltCatalogName: true, c.Active.File: true}
 	for _, s := range c.Segments {
 		if s.File != "" {
 			names[s.File] = true
@@ -74,10 +73,7 @@ func TestReclaimObsoleteFilesPreservesCurrent(t *testing.T) {
 	if err := temp.Close(); err != nil {
 		t.Fatal(err)
 	}
-	orphan := catalogName(999, [32]byte{9})
-	if err := os.WriteFile(filepath.Join(log.path, orphan), []byte("unpublished future catalog"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	orphanFile(t, log, 999)
 	var expectedFiles, expectedBytes uint64
 	entries, err := os.ReadDir(log.path)
 	if err != nil {
@@ -93,7 +89,7 @@ func TestReclaimObsoleteFilesPreservesCurrent(t *testing.T) {
 			expectedBytes += uint64(info.Size())
 		}
 	}
-	result, err := log.Reclaim(context.Background())
+	result, err := log.ReclaimOrphans(context.Background())
 	if err != nil || result.RemovedFiles != expectedFiles || result.RemovedBytes != expectedBytes || result.SkippedEntries != 0 {
 		t.Fatal(result, expectedFiles, expectedBytes, err)
 	}
@@ -111,7 +107,7 @@ func TestReclaimObsoleteFilesPreservesCurrent(t *testing.T) {
 			t.Fatal("changed referenced file", name, err)
 		}
 	}
-	again, err := log.Reclaim(context.Background())
+	again, err := log.ReclaimOrphans(context.Background())
 	if err != nil || again != (ReclaimResult{}) {
 		t.Fatal("not idempotent", again, err)
 	}
@@ -151,7 +147,7 @@ func TestReclaimPreservesUnknownEntries(t *testing.T) {
 	if err := os.Symlink("notes.txt", filepath.Join(log.path, link)); err != nil {
 		t.Fatal(err)
 	}
-	result, err := log.Reclaim(context.Background())
+	result, err := log.ReclaimOrphans(context.Background())
 	if err != nil || result.SkippedEntries != uint64(len(unknown)+2) {
 		t.Fatal(result, err)
 	}
@@ -194,10 +190,13 @@ func (r *failingRemover) Remove(name string) (bool, error) {
 func TestReclaimFailureAndRestart(t *testing.T) {
 	for _, after := range []bool{false, true} {
 		log := rotatedLog(t)
+		for i := range 3 {
+			orphanFile(t, log, uint64(i))
+		}
 		boom := errors.New("remove failed")
 		remover := &failingRemover{fileRemover: log.remover, failAt: 2, after: after, boom: boom}
 		log.remover = remover
-		result, err := log.Reclaim(context.Background())
+		result, err := log.ReclaimOrphans(context.Background())
 		want := uint64(1)
 		if after {
 			want = 2
@@ -206,11 +205,11 @@ func TestReclaimFailureAndRestart(t *testing.T) {
 			t.Fatal(result, err)
 		}
 		count := remover.calls
-		if _, err := log.Reclaim(context.Background()); !errors.Is(err, ErrLogPoisoned) || remover.calls != count {
+		if _, err := log.ReclaimOrphans(context.Background()); !errors.Is(err, ErrLogPoisoned) || remover.calls != count {
 			t.Fatal("continued after uncertain cleanup", err)
 		}
 		log = reopenLog(t, log)
-		if _, err := log.Reclaim(context.Background()); err != nil {
+		if _, err := log.ReclaimOrphans(context.Background()); err != nil {
 			t.Fatal("could not resume", err)
 		}
 		for id := uint64(1); id <= 6; id++ {
@@ -227,49 +226,26 @@ func TestReclaimFailureAndRestart(t *testing.T) {
 
 func TestReclaimCancellation(t *testing.T) {
 	log := rotatedLog(t)
+	for i := range 3 {
+		orphanFile(t, log, uint64(i))
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if result, err := log.Reclaim(ctx); !errors.Is(err, context.Canceled) || result != (ReclaimResult{}) {
+	if result, err := log.ReclaimOrphans(ctx); !errors.Is(err, context.Canceled) || result != (ReclaimResult{}) {
 		t.Fatal(result, err)
 	}
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
 	log.remover = &failingRemover{fileRemover: log.remover, cancel: cancel}
-	result, err := log.Reclaim(ctx)
+	result, err := log.ReclaimOrphans(ctx)
 	if !errors.Is(err, context.Canceled) || result.RemovedFiles != 1 {
 		t.Fatal(result, err)
 	}
 	if _, err := log.Read(1); err != nil {
 		t.Fatal("cancellation poisoned log", err)
 	}
-	if _, err := log.Reclaim(context.Background()); err != nil {
+	if _, err := log.ReclaimOrphans(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestReclaimRefusesDamagedCurrentState(t *testing.T) {
-	for _, pointer := range []bool{false, true} {
-		log := rotatedLog(t)
-		entries, err := os.ReadDir(log.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		path := filepath.Join(log.path, "CURRENT")
-		if !pointer {
-			c, _ := log.catalog.Current()
-			path = filepath.Join(log.path, c.Segments[0].File)
-		}
-		if err := os.WriteFile(path, []byte("damaged"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		result, err := log.Reclaim(context.Background())
-		if !errors.Is(err, ErrLogPoisoned) || result.RemovedFiles != 0 {
-			t.Fatal(result, err)
-		}
-		after, err := os.ReadDir(log.path)
-		if err != nil || !reflect.DeepEqual(entries, after) {
-			t.Fatal("deleted despite failed verification", err)
-		}
 	}
 }
 
@@ -298,7 +274,7 @@ func TestReclaimConcurrentRotation(t *testing.T) {
 	})
 	wg.Go(func() {
 		for range 3 {
-			if _, err := log.Reclaim(context.Background()); err != nil {
+			if _, err := log.ReclaimOrphans(context.Background()); err != nil {
 				t.Error(err)
 				return
 			}
@@ -309,15 +285,5 @@ func TestReclaimConcurrentRotation(t *testing.T) {
 		if _, err := log.Read(id); err != nil {
 			t.Fatal("cleanup raced rotation", id, err)
 		}
-	}
-}
-
-func TestReclaimRequiresMatchingConfirmedCatalog(t *testing.T) {
-	log := rotatedLog(t)
-	// Simulate a mismatch between memory and the pointer recovered from disk.
-	log.catalog.(*CatalogStore).current.Generation++
-	result, err := log.Reclaim(context.Background())
-	if result.RemovedFiles != 0 || !errors.Is(err, ErrCatalogConflict) || !errors.Is(err, ErrLogPoisoned) {
-		t.Fatal(result, err)
 	}
 }
