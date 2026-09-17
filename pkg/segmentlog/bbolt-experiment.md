@@ -165,6 +165,11 @@ are not established by these tests.
 
 ## Benchmarks
 
+The [full-size rollover workload](rollover-size.md) measures the default 20 MiB
+target and separates full-tail recovery, boundary append, new-tail installation,
+and metadata commit costs. Its timings differ substantially from the earlier
+small-segment samples; those samples do not establish default-size latency.
+
 The [live-segment churn experiment](live-churn.md) records Linux validation and
 repeated scrub/reclaim cycles over actual managed files, including metadata page
 allocation and file growth. The large-catalog measurements below use erased

@@ -235,6 +235,9 @@ engine, application boundary, and experimental limitations.
 [Live-segment churn and Linux validation](live-churn.md) covers repeated scrubs,
 metadata page reuse, file retirement, recovery, and post-churn rollover.
 
+[Full-size rollover measurements](rollover-size.md) cover 1, 20, and 32 MiB
+targets, full-active-tail recovery, and installation/metadata commit timing.
+
 [Concurrency tests](concurrency-testing.md) exercise paused readers, cancellation,
 competing mutations, concurrent shutdown, and mixed operation histories. The
 application adapter's protected-reader test runs against both storage backends.
