@@ -110,6 +110,12 @@ The integrated tests cover:
 - Atomic replacement of multiple closed ranges and the active tail, preserving
   either the original or replacement selection and retirement queue on reopen.
 - Retrying reclamation when unlink succeeds and queue acknowledgement fails.
+- Subprocess termination without deferred cleanup before metadata transactions,
+  after their in-memory mutations, and after successful commits during rollover,
+  multi-range/tail rewrite, and retirement acknowledgement. A separate boundary
+  terminates after the first durable retirement removal. Recovery checks the
+  selected layout, survivor IDs, append progress, idempotent reclamation, full
+  verification, and subsequent append/reopen.
 - Metadata checksum damage, missing historical files, invalid active-tail start,
   symlink references, and refusing to initialize missing metadata on open.
 - A controlled scan/rewrite overlap and shared backend race tests.
@@ -117,7 +123,8 @@ The integrated tests cover:
   wrapper rejects any request for a complete catalog snapshot while exercising
   managed operations. Full verification succeeds after reopen.
 
-Fault injection operates at transaction and filesystem boundaries. It does not
+Fault injection and subprocess exits operate at transaction and filesystem
+boundaries. Subprocess tests leave the operating system running; they do not
 simulate arbitrary torn bbolt writes, hardware power loss, or every filesystem
 failure. Full scans, large replacement sets, cold-cache behavior, metadata repair,
 backup capture, physical file-count scaling, and long-running fragmented workloads
