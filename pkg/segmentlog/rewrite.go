@@ -49,12 +49,16 @@ func (s *Segment) prepareRewrite(ctx context.Context, transform Transform, emit 
 func prepareRewrite(ctx context.Context, input iter.Seq2[Record, error], transform Transform, emit func(iter.Seq2[Record, error]) error) (bool, error) {
 	next, stop := iter.Pull2(input)
 	defer stop()
-	apply := func(rec Record) (Record, bool, bool, error) {
+	var original []byte
+	apply := func(rec Record, detectChange bool) (Record, bool, bool, error) {
 		if err := ctx.Err(); err != nil {
 			return Record{}, false, false, err
 		}
-		// Retain original bytes to detect in-place mutation by the callback.
-		original := bytes.Clone(rec.Payload)
+		// Reuse private comparison bytes until the first change. Once a replacement
+		// is required, later records need transformation but no change comparison.
+		if detectChange {
+			original = append(original[:0], rec.Payload...)
+		}
 		payload, keep, err := transform(rec)
 		if err != nil {
 			return Record{}, false, false, err
@@ -62,7 +66,7 @@ func prepareRewrite(ctx context.Context, input iter.Seq2[Record, error], transfo
 		if err := ctx.Err(); err != nil {
 			return Record{}, false, false, err
 		}
-		return Record{rec.ID, payload}, keep, !keep || !bytes.Equal(original, payload), nil
+		return Record{rec.ID, payload}, keep, detectChange && (!keep || !bytes.Equal(original, payload)), nil
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -75,13 +79,14 @@ func prepareRewrite(ctx context.Context, input iter.Seq2[Record, error], transfo
 		if err != nil {
 			return false, err
 		}
-		replacement, keep, differs, err := apply(rec)
+		replacement, keep, differs, err := apply(rec, true)
 		if err != nil {
 			return false, err
 		}
 		if !differs {
 			continue
 		}
+		original = nil
 		records := func(yield func(Record, error) bool) {
 			for prefix, err := range input {
 				if err != nil {
@@ -115,7 +120,7 @@ func prepareRewrite(ctx context.Context, input iter.Seq2[Record, error], transfo
 					yield(Record{}, err)
 					return
 				}
-				replacement, keep, _, err := apply(rec)
+				replacement, keep, _, err := apply(rec, false)
 				if err != nil {
 					yield(Record{}, err)
 					return

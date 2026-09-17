@@ -18,7 +18,10 @@ IDs and range coverage cannot change. Unchanged ranges keep their exact file
 names and bytes, even if current encoding options differ. Changed ranges use
 the current encoding policy. Entirely erased ranges retain coverage in the
 catalog with zero count and no payload file. Subsequent scans skip those ranges.
-A changed range is never merged with a neighbor.
+A changed range is never merged with a neighbor. Change detection uses one
+private comparison buffer until the first change, then skips further original-
+payload comparisons while continuing to transform each record. See the
+[preparation allocation measurements](rewrite-preparation.md).
 
 The caller supplies a strictly newer generation. Even a no-op publishes that
 generation in a new catalog revision, without creating payload files. This is a

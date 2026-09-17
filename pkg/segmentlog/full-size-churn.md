@@ -89,3 +89,6 @@ go test ./pkg/segmentlog -run '^$' -bench '^BenchmarkLiveSegmentChurnFullSize$' 
 
 Each encoding creates a fresh history. Overall Go `ns/op` includes fixture
 construction and correctness checks; use the named metrics for individual phases.
+
+A [rewrite-preparation comparison](rewrite-preparation.md) measures a subsequent
+change that reuses comparison bytes and skips comparisons once a range changes.
