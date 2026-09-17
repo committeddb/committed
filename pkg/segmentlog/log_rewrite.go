@@ -1,6 +1,7 @@
 package segmentlog
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -251,7 +252,9 @@ func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, trans
 		var physical uint64
 		end := int64(tailHeaderSize)
 		if _, e = l.dir.Install(name, func(w io.Writer) error {
-			if e := WriteTailHeader(w, ref.Start); e != nil {
+			// Flush every encoded byte before the installer syncs and publishes.
+			buffered := bufio.NewWriterSize(w, 256<<10)
+			if e := WriteTailHeader(buffered, ref.Start); e != nil {
 				return e
 			}
 			for r, e := range records {
@@ -271,12 +274,12 @@ func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, trans
 				if end > int64(^uint64(0)>>1)-int64(len(group)) {
 					return ErrInvalid
 				}
-				if e := writeFull(w, group); e != nil {
+				if e := writeFull(buffered, group); e != nil {
 					return e
 				}
 				end += int64(len(group))
 			}
-			return nil
+			return buffered.Flush()
 		}); e != nil {
 			return e
 		}

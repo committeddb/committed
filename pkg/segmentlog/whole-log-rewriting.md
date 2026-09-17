@@ -30,7 +30,10 @@ catalogs containing the new field. No production format activation is implied.
 
 The tail reuses the segment transformation machinery: scan until the first change,
 then reread the unchanged prefix without invoking callbacks twice. Output streams
-into a newly installed tail, currently one append group per survivor. This can
+into a newly installed tail, currently one append group per survivor. A 256 KiB
+output buffer combines small file writes without changing those encoded groups.
+The buffer must flush successfully before the installer syncs and publishes the
+file; a write or flush failure prevents publication. One group per survivor can
 increase group overhead. Payloads remain bounded
 by the existing per-record limit, and a streaming trial encoding verifies that
 the result can be sealed within the segment format's block/index limits. A
@@ -63,3 +66,41 @@ IDs, catalog copy isolation, and old/new recovery after callback, cancellation,
 replacement installation, and metadata publication failures. Existing race tests,
 format checks, and lint remain part of validation. Filesystem power-loss testing
 and application integration are still required before production use.
+
+## Buffered tail-write measurements
+
+`BenchmarkTailRewriteWrites` fills a 20 MiB active tail with 5,120 records in
+64-record batches, then changes the first payload byte of the first record.
+A test-only installer wrapper counts underlying writes while timing the complete
+managed Rewrite call, including validation, installation, and metadata commit.
+It compares the replacement's digest with the original one-group-per-record
+encoding, checks its byte count, reopens, verifies the file and append progress,
+and appends again. Fixture creation and those checks are outside `rewrite-ms`;
+overall Go `ns/op` includes them.
+
+Recorded September 17, 2026, Go 1.26.6, Linux/arm64, Alpine 3.20 on the local
+OrbStack VM. Data resides on disposable container overlay filesystems. Baseline
+`9639f47` and buffered binaries ran three sequential pairs after tests and lint,
+reversing order in the second pair. The host and VM were not load-controlled.
+All six runs passed their checks.
+
+| Implementation | File writes/rewrite | Replacement bytes | Median rewrite ms | Range of rewrite ms |
+| --- | ---: | ---: | ---: | ---: |
+| Unbuffered | 5,121 | 21,217,312 | 410.2 | 264.7–439.6 |
+| 256 KiB output buffer | 81 | 21,217,312 | 416.6 | 377.4–668.0 |
+
+Write calls fell by about 98%, but this small, variable sample does not establish
+an end-to-end latency improvement. Buffering adds 256 KiB of temporary memory
+for a changed active tail. It does not combine append groups, reduce encoded
+size, or remove the later validation/recovery work. No-op tails do not create an
+output buffer.
+
+Failure tests inject errors and short writes during a full-buffer write, a small
+final flush, and a final flush following a successful full-buffer write. All must
+prevent publication, poison the managed handle, and recover the original catalog
+and payloads. The byte-equivalence regression, storage/backend race tests, Linux
+storage suite, lint, and gosec pass.
+
+```sh
+go test ./pkg/segmentlog -run '^$' -bench '^BenchmarkTailRewriteWrites$' -benchtime=1x -count=3
+```
