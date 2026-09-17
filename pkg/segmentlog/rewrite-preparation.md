@@ -15,14 +15,17 @@ transform once. Cancellation and callback errors retain their existing behavior.
 The buffer is local to one preparation call and is never passed to a callback.
 Growth follows encountered payload sizes. It is not a pool, shared cache, or
 whole-history buffer. Decoded blocks/groups, record descriptors, changed output,
-and the unchanged-prefix reread still have their existing costs. Managed rewrites
+and replay of the unchanged prefix still allocate. Replay stops at the known
+unchanged record count; a first-record change needs no prefix replay. Managed rewrites
 still scan selected history and hold the log mutex throughout.
 
 ## Focused benchmark
 
 `BenchmarkRewritePreparation` prepares a 20 MiB append-format range containing
 5,120 records with 4,080-byte payloads, in groups of 64. Cases leave all records
-unchanged, modify the first record in place, or modify the last record in place.
+unchanged, modify the first record in place, modify the first record of the second
+group, or modify the last record in place. The second-group case was added for
+the prefix-replay measurements below.
 Each iteration checks callback counts and, when changed, all output IDs, payload
 lengths, and expected first bytes. Fixture construction is outside the timer.
 Output is consumed but not encoded, synced, or published. The benchmark isolates
@@ -87,3 +90,38 @@ go test -race ./pkg/segmentlog/... ./internal/cluster/db/eventlog/...
 go test ./pkg/segmentlog -run '^$' -bench '^BenchmarkRewritePreparation$' -benchtime=20x -count=1
 go test ./pkg/segmentlog -run '^$' -bench '^BenchmarkLiveSegmentChurnFullSize/codec=0$' -benchtime=1x -count=1 -timeout=15m
 ```
+
+## Stopping prefix replay before the changed record
+
+Preparation records how many records were unchanged before the first change.
+Output replays exactly that many records, stopping immediately after the last
+unchanged one. Previously, it fetched the first changed record again to discover
+where to stop. A change to the first record therefore now skips prefix replay
+entirely; a change at a block/group boundary avoids decoding that next block or
+group during replay. Later transformations still run once per record. An explicit
+context check before output preserves cancellation when replay is skipped.
+
+Tests use sparse IDs starting above zero and verify exact input traversal counts,
+callback counts, survivor IDs, and payloads for both replacement and erasure.
+A separate test cancels after detecting the first change but before output and
+requires cancellation without delivering a replacement record.
+
+Recorded September 17, 2026, Go 1.26.6, Linux/arm64, Alpine 3.20 on the local
+OrbStack VM. Baseline `ef8ae68` and changed binaries ran sequentially, one run per
+version with 20 iterations per case, after validation finished. Both runs passed.
+The fixture is the 20 MiB append-format range described above; the boundary case
+changes ID 64, the first record of the second group. Host/VM load was uncontrolled.
+
+| First change | Before B/op | After B/op | Before ms/op | After ms/op |
+| --- | ---: | ---: | ---: | ---: |
+| None | 21,815,904 | 21,816,389 | 27.04 | 27.12 |
+| First record | 22,088,954 | 21,816,080 | 22.89 | 27.38 |
+| First record of second group | 22,361,544 | 22,088,850 | 30.95 | 19.09 |
+| Last record | 43,628,046 | 43,627,795 | 46.78 | 49.21 |
+
+First-record and group-boundary changes avoid roughly 266 KiB of allocation in
+this fixture by skipping an unnecessary group decode and associated descriptors.
+No-op and last-record cases allocate about the same amount. Timing moved in both
+directions; this single pair establishes no general latency improvement. The
+unchanged prefix still needs replay when it exists, and managed rewriting still
+holds the log mutex and scans its requested scope.

@@ -50,6 +50,7 @@ func prepareRewrite(ctx context.Context, input iter.Seq2[Record, error], transfo
 	next, stop := iter.Pull2(input)
 	defer stop()
 	var original []byte
+	var unchanged uint64
 	apply := func(rec Record, detectChange bool) (Record, bool, bool, error) {
 		if err := ctx.Err(); err != nil {
 			return Record{}, false, false, err
@@ -84,24 +85,35 @@ func prepareRewrite(ctx context.Context, input iter.Seq2[Record, error], transfo
 			return false, err
 		}
 		if !differs {
+			unchanged++
 			continue
 		}
 		original = nil
 		records := func(yield func(Record, error) bool) {
-			for prefix, err := range input {
-				if err != nil {
-					yield(Record{}, err)
-					return
-				}
-				if err := ctx.Err(); err != nil {
-					yield(Record{}, err)
-					return
-				}
-				if prefix.ID >= rec.ID {
-					break
-				}
-				if !yield(prefix, nil) {
-					return
+			if err := ctx.Err(); err != nil {
+				yield(Record{}, err)
+				return
+			}
+			// Stop after the known unchanged prefix, before reading or decoding
+			// the changed record again. A first-record change needs no replay.
+			if unchanged > 0 {
+				remaining := unchanged
+				for prefix, err := range input {
+					if err != nil {
+						yield(Record{}, err)
+						return
+					}
+					if err := ctx.Err(); err != nil {
+						yield(Record{}, err)
+						return
+					}
+					if !yield(prefix, nil) {
+						return
+					}
+					remaining--
+					if remaining == 0 {
+						break
+					}
 				}
 			}
 			if keep && !yield(replacement, nil) {

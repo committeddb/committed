@@ -29,7 +29,8 @@ catalogs containing the new field. No production format activation is implied.
 ## Preparation and publication
 
 The tail reuses the segment transformation machinery: scan until the first change,
-then reread the unchanged prefix without invoking callbacks twice. Output streams
+then reread only the unchanged prefix without invoking callbacks twice. A change
+to the first record needs no prefix replay. Output streams
 into a newly installed tail. Survivors are packed into groups targeting 256 KiB
 of framed data; a larger record occupies a group alone. Frames are copied into
 the group before invoking the next transform, so callbacks may reuse payload
