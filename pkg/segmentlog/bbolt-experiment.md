@@ -165,6 +165,11 @@ are not established by these tests.
 
 ## Benchmarks
 
+The [live-segment churn experiment](live-churn.md) records Linux validation and
+repeated scrub/reclaim cycles over actual managed files, including metadata page
+allocation and file growth. The large-catalog measurements below use erased
+range metadata instead.
+
 The comparison measurements below were captured before consolidation, when both
 managed catalog implementations were available. The complete-catalog benchmark
 variant is no longer present in the managed engine.

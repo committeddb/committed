@@ -232,6 +232,9 @@ engine, application boundary, and experimental limitations.
 
 ## Validation
 
+[Live-segment churn and Linux validation](live-churn.md) covers repeated scrubs,
+metadata page reuse, file retirement, recovery, and post-churn rollover.
+
 [Concurrency tests](concurrency-testing.md) exercise paused readers, cancellation,
 competing mutations, concurrent shutdown, and mixed operation histories. The
 application adapter's protected-reader test runs against both storage backends.
