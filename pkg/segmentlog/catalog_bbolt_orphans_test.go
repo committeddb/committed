@@ -118,6 +118,9 @@ func TestBoltOrphanSweepRejectsMetadataDamage(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
+			if err := l.Verify(t.Context()); !errors.Is(err, ErrCorrupt) {
+				t.Fatal("verification missed damaged metadata", err)
+			}
 			if result, err := l.ReclaimOrphans(t.Context()); !errors.Is(err, ErrCorrupt) || result.RemovedFiles != 0 {
 				t.Fatal(result, err)
 			}
@@ -185,6 +188,9 @@ func TestBoltOrphanSweepBeforeRetirement(t *testing.T) {
 		t.Fatal(result, err)
 	}
 	l = reopenBoltLog(t, l)
+	if err := l.Verify(t.Context()); err != nil {
+		t.Fatal("missing retired files must not fail verification", err)
+	}
 	if err := l.catalog.(*boltCatalog).db.View(func(tx *bolt.Tx) error {
 		if got := tx.Bucket(boltRetiredBucket).Stats().KeyN; got != 3 {
 			t.Errorf("sweep changed retirement queue: %d", got)

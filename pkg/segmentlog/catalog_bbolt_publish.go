@@ -20,7 +20,7 @@ func retireBoltFile(tx *bolt.Tx, file string, start uint64) error {
 	if file == "" {
 		return nil
 	}
-	if !managedArtifact(file) {
+	if fileStart, ok := dataFileStart(file); !ok || fileStart != start {
 		return ErrInvalid
 	}
 	b, err := boltEncode(retiredFile{file, start})
@@ -146,22 +146,9 @@ func (s *boltCatalog) reclaim(l *Log, ctx context.Context) (result ReclaimResult
 			}
 			cursor := tx.Bucket(boltRetiredBucket).Cursor()
 			for k, v := cursor.First(); k != nil && len(batch) < 128; k, v = cursor.Next() {
-				var item retiredFile
-				if e = boltDecode(v, &item); e != nil {
+				item, e := decodeRetiredFile(tx, h.Catalog, k, v)
+				if e != nil {
 					return e
-				}
-				if string(k) != item.File || !managedArtifact(item.File) || item.File == h.Catalog.Active.File {
-					return ErrCorrupt
-				}
-				rkey := rangeKey(item.Start)
-				if raw := tx.Bucket(boltRangesBucket).Get(rkey); raw != nil {
-					ref, e := decodeBoltRef(rkey, raw)
-					if e != nil {
-						return e
-					}
-					if ref.File == item.File {
-						return ErrCorrupt
-					}
 				}
 				batch = append(batch, item)
 			}
@@ -177,7 +164,7 @@ func (s *boltCatalog) reclaim(l *Log, ctx context.Context) (result ReclaimResult
 			if err = ctx.Err(); err != nil {
 				return result, err
 			}
-			info, e := os.Lstat(filepath.Join(s.path, item.File)) // #nosec G703 -- managedArtifact validates the queued basename before it enters this batch.
+			info, e := os.Lstat(filepath.Join(s.path, item.File)) // #nosec G703 -- decodeRetiredFile validates the queued basename before it enters this batch.
 			var size int64
 			if e != nil && !errors.Is(e, os.ErrNotExist) {
 				return result, l.fail(e)

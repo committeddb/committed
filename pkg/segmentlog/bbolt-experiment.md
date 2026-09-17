@@ -76,8 +76,14 @@ checksum checks; they do not recompute whole-file SHA-256. Missing files and
 corruption in unvisited historical ranges are detected when accessed, not
 necessarily at open.
 
-`Log.Verify(ctx)` explicitly streams every selected reference and checks payload
-integrity and whole-file digests, then checks the active tail. It currently uses
+`Log.Verify(ctx)` first validates the complete range index, its coverage and
+count, generated filename/start relationships, and every retirement record.
+Retirements must match their keys and filename starts and cannot select a live
+file. Already-removed retired files are valid pending queue acknowledgement.
+Verification then streams every selected reference and checks payload
+integrity and whole-file digests, then checks the active tail. These are logical
+metadata and payload checks, not a structural audit of bbolt's underlying pages.
+It currently uses
 the existing verifier, including its file syncs. Cancellation is checked between
 files. Verification and managed operations hold the Log mutex. This operation is
 full-history work and is not part of the fast open path.
@@ -137,6 +143,11 @@ The integrated tests cover:
   verification, and subsequent append/reopen.
 - Metadata checksum damage, missing historical files, invalid active-tail start,
   symlink references, and refusing to initialize missing metadata on open.
+- Explicit verification rejects incorrect range counts, extra range entries,
+  malformed retirement records, and queued live files. Retirement validation is
+  shared with reclamation, including rejecting a live filename paired with an
+  incorrect start. Verification checks beyond a single retirement batch and
+  accepts already-removed files awaiting acknowledgement.
 - A controlled scan/rewrite overlap and shared backend race tests.
 - Orphan cleanup after subprocess-interrupted publication, multiple directory
   batches, preserved unknown/nonregular entries, corrupt metadata refusal, and

@@ -12,6 +12,7 @@ import (
 // diagnostic full snapshot, not an operation used by the managed hot path.
 type layout interface {
 	head() (Catalog, error)
+	verifyMetadata(context.Context) (Catalog, error)
 	ranges(Coverage) iter.Seq2[SegmentRef, error]
 	Current() (Catalog, error)
 	preflight() error
@@ -31,6 +32,17 @@ func (s *CatalogStore) head() (Catalog, error) {
 }
 
 func (s *CatalogStore) Close() error { return nil }
+
+func (s *CatalogStore) verifyMetadata(ctx context.Context) (Catalog, error) {
+	if err := ctx.Err(); err != nil {
+		return Catalog{}, err
+	}
+	c, err := s.Current()
+	if err != nil {
+		return Catalog{}, err
+	}
+	return catalogHead(c), validateCatalog(c)
+}
 
 func (s *CatalogStore) reclaimOrphans(l *Log, ctx context.Context) (ReclaimResult, error) {
 	return s.reclaim(l, ctx)

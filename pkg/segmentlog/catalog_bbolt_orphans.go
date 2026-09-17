@@ -35,7 +35,7 @@ func dataFileStart(name string) (uint64, bool) {
 // using point lookups to prove absence. This also rejects gaps, extra entries,
 // incorrect counts, and damaged metadata before any file is deleted. No payload
 // reads or full in-memory live-name set are needed.
-func (s *boltCatalog) validateSweep(ctx context.Context) (head Catalog, err error) {
+func (s *boltCatalog) validateSelection(ctx context.Context) (head Catalog, err error) {
 	err = s.db.View(func(tx *bolt.Tx) error {
 		h, e := readBoltHeader(tx)
 		if e != nil {
@@ -80,7 +80,7 @@ func (s *boltCatalog) reclaimOrphans(l *Log, ctx context.Context) (result Reclai
 			err = l.fail(err)
 		}
 	}()
-	head, err := s.validateSweep(ctx)
+	head, err := s.validateSelection(ctx)
 	if err != nil {
 		return result, err
 	}
