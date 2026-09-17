@@ -1,7 +1,9 @@
 package segmentlog
 
 import (
+	"crypto/sha256"
 	"errors"
+	"hash"
 	"io"
 	"os"
 	"sync"
@@ -71,6 +73,12 @@ func scanManagedTail(r io.ReaderAt, size int64, ref TailRef, visit func(Record) 
 }
 
 func scanTailChecked(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start *uint64, visit func(Record) error) (state TailState, err error) {
+	return scanTailHashed(r, size, checkpoint, start, visit, nil)
+}
+
+// scanTailHashed optionally hashes physical bytes during the existing validation
+// pass. A failed scan never produces an appender or an authoritative digest.
+func scanTailHashed(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start *uint64, visit func(Record) error, digest hash.Hash) (state TailState, err error) {
 	if size < tailHeaderSize {
 		return state, ErrCorrupt
 	}
@@ -83,6 +91,9 @@ func scanTailChecked(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, star
 	}
 	if string(h[:8]) != "SLTAIL00" || format.LE.Uint16(h[8:]) != 0 || format.LE.Uint16(h[10:]) != 0 || format.LE.Uint64(h[20:]) != 0 {
 		return state, ErrUnsupported
+	}
+	if digest != nil {
+		_, _ = digest.Write(h)
 	}
 	state.Start = format.LE.Uint64(h[12:])
 	state.End = tailHeaderSize
@@ -142,6 +153,10 @@ func scanTailChecked(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, star
 		trailer := body[length:]
 		if string(trailer[:8]) != "SLEND000" || format.LE.Uint32(trailer[8:]) != length || format.CRCParts(header, body[:len(body)-4]) != format.LE.Uint32(trailer[12:]) {
 			return state, ErrCorrupt
+		}
+		if digest != nil {
+			_, _ = digest.Write(header)
+			_, _ = digest.Write(body)
 		}
 		data := body[:length]
 		var records []Record
@@ -210,6 +225,7 @@ type Tail struct {
 	file   TailFile
 	state  TailState
 	poison error
+	digest hash.Hash
 }
 
 // OpenTail validates the entire file and syncs recovered complete groups before
@@ -227,20 +243,34 @@ func openTail(f TailFile, checkpoint *TailCheckpoint) (*Tail, error) {
 	if !info.Mode().IsRegular() {
 		return nil, ErrInvalid
 	}
-	state, err := scanTail(f, info.Size(), checkpoint, nil)
+	digest := sha256.New()
+	state, err := scanTailHashed(f, info.Size(), checkpoint, nil, nil, digest)
 	if err != nil {
 		return nil, err
 	}
 	if err = f.Sync(); err != nil {
 		return nil, err
 	}
-	return &Tail{file: f, state: state}, nil
+	return &Tail{file: f, state: state, digest: digest}, nil
 }
 
 // State returns only the last successfully synchronized state of this handle.
 // After a failed append it returns that state with ErrTailPoisoned; recovery may
 // subsequently discover a complete unacknowledged group beyond it.
 func (t *Tail) State() (TailState, error) { t.mu.Lock(); defer t.mu.Unlock(); return t.state, t.poison }
+
+// rolloverState captures synchronized progress and its physical-byte digest
+// together. The caller must retain exclusive mutation through publication.
+func (t *Tail) rolloverState() (TailState, [sha256.Size]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var sum [sha256.Size]byte
+	if t.poison != nil {
+		return t.state, sum, t.poison
+	}
+	t.digest.Sum(sum[:0])
+	return t.state, sum, nil
+}
 
 // Append writes one bounded group and syncs before acknowledging success. Invalid
 // input does not poison the handle; any write/short-write/sync failure does.
@@ -283,6 +313,7 @@ func (t *Tail) Append(records []Record) error {
 		t.poison = errors.Join(ErrTailPoisoned, err)
 		return t.poison
 	}
+	_, _ = t.digest.Write(group)
 	t.state.End += int64(len(group))
 	t.state.Last = previous
 	t.state.Count += uint64(len(records))

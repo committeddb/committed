@@ -17,7 +17,7 @@ import (
 
 type rolloverSizeMetrics struct {
 	fullRecovery, boundary, smallRecovery time.Duration
-	install, commit                       time.Duration
+	install, commit, fill                 time.Duration
 }
 
 type timedRolloverInstall struct {
@@ -81,9 +81,11 @@ func measureRolloverSize(t testing.TB, target, samples int) rolloverSizeMetrics 
 				batch = append(batch, Record{next, payload(next)})
 				next++
 			}
+			started := time.Now()
 			if err = l.Append(batch); err != nil {
 				t.Fatal(err)
 			}
+			m.fill += time.Since(started)
 		}
 		m.fullRecovery += reopen()
 		if l.framed != uint64(target) {
@@ -160,6 +162,7 @@ func BenchmarkRolloverSize(b *testing.B) {
 		b.Run(fmt.Sprintf("MiB=%d", target>>20), func(b *testing.B) {
 			for b.Loop() {
 				m := measureRolloverSize(b, target, samples)
+				b.ReportMetric(float64(m.fill.Nanoseconds())/samples/1e6, "tail-fill-ms")
 				b.ReportMetric(float64(m.fullRecovery.Nanoseconds())/samples/1e6, "full-tail-reopen-ms")
 				b.ReportMetric(float64(m.boundary.Nanoseconds())/samples/1e6, "boundary-ms")
 				b.ReportMetric(float64(m.install.Nanoseconds())/samples/1e6, "tail-install-ms")

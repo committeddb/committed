@@ -44,7 +44,7 @@ still affect bbolt memory, write cost, and recovery cost.
 
 ## Publication and durability
 
-Rollover retains the synchronized predecessor, hashes its bytes, and durably
+Rollover retains the synchronized predecessor and its incremental digest, and durably
 installs the new tail header and first append group together. One bbolt
 transaction then inserts the closed range,
 updates active-tail state and revision, and queues the predecessor if the range

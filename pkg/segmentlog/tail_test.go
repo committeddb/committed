@@ -216,6 +216,9 @@ func TestTailFailurePoisonsAndRecoveryReplays(t *testing.T) {
 			if state != initial || !errors.Is(err, ErrTailPoisoned) {
 				t.Fatal(state, err)
 			}
+			if _, _, err := tail.rolloverState(); !errors.Is(err, ErrTailPoisoned) {
+				t.Fatal("published digest after failed append", err)
+			}
 			writes, syncs := f.writes, f.syncs
 			if err := tail.Append([]Record{{20, []byte("later")}}); !errors.Is(err, ErrTailPoisoned) {
 				t.Fatal(err)
@@ -236,6 +239,7 @@ func TestTailFailurePoisonsAndRecoveryReplays(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			checkTailDigest(t, recovered)
 			state, err = recovered.State()
 			if err != nil || state.Last != 10 || state.Count != 1 {
 				t.Fatal("lost complete unacknowledged group", state, err)

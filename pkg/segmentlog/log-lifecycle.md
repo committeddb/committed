@@ -57,7 +57,7 @@ original rotation budget or reduce the recovered append frontier.
 Under the log mutex:
 
 1. Retain the synchronized old append file under its existing name. Record its
-   exact byte size and compute its SHA-256 without changing or copying its bytes.
+   exact byte size and capture its incremental SHA-256 without rereading its bytes.
    An entirely erased tail becomes an empty range descriptor without a file.
 2. Segment storage durably installs the next tail header and first append group
    together, then constructs its appender from that known state. This does not
@@ -94,6 +94,13 @@ Closed append files are validated sequentially when opened for a read, including
 exact size, start, surviving count, and upper coverage bound. Their records are
 then read through the tail scanner. Indexed rewrite outputs retain block-index
 lookups. There are no long-lived iterators, reader pins, or block caches.
+
+The appender maintains SHA-256 over the physical header and synchronized groups.
+Recovery reconstructs it during its existing validation scan; rewritten active
+files use that same recovery path. Rollover captures this process-local digest
+with the synchronized tail state. A failed write or sync poisons the handle and
+prevents digest publication. The digest does not replace record checksums or
+explicit verification of stored files.
 
 Rollover and catalog validation run synchronously while reads/appends are blocked.
 Rollover performs no format conversion, compression, or replacement-file write.

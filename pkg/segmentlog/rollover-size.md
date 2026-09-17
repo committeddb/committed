@@ -16,8 +16,8 @@ size, original append progress, and the newly appended record after recovery.
 It scans every record against its expected payload and runs full verification at
 the end. A 64 KiB version runs as `TestRolloverSizeWorkload` in the normal suite.
 
-The benchmark adds test-only timers around the existing file installer and bbolt
-commit function. Production code and synchronization behavior are unchanged.
+The benchmark adds test-only timers around ordinary append calls while filling
+the tail, the existing file installer, and the bbolt commit function. Production code and synchronization behavior are unchanged.
 
 ## Linux baseline: separate empty-tail installation
 
@@ -91,8 +91,8 @@ reopen timings do not establish a recovery improvement.
 For the run supplying each median boundary mean, the baseline spent 5.10 ms in
 installation, 2.57 ms in metadata commit, and 11.91 ms in other work. The populated
 version spent 3.89, 2.50, and 9.48 ms respectively. Installation now includes the
-first group; other work no longer includes its separate append sync. Hashing the
-predecessor and durable installation/metadata commit remain synchronous.
+first group; other work no longer includes its separate append sync. At that revision, hashing the predecessor and durable installation/metadata
+commit remained synchronous.
 
 Failure and subprocess-exit tests check both sides of publication with a
 multi-record first group. Before commit, recovery ignores the populated orphan.
@@ -100,6 +100,47 @@ After commit, recovery retains the complete group even if the append was never
 acknowledged. Callers already reconcile durable record IDs after uncertain errors.
 The segmentlog and EventLog suites passed under the macOS race detector; the full
 segmentlog suite also passed on Linux, including subprocess recovery tests.
+
+## Incremental digest comparison
+
+The appender now maintains SHA-256 as groups are written. Recovery reconstructs
+it in the existing validation pass, reading each byte once. Rollover captures
+the digest with the synchronized tail state instead of rereading the predecessor.
+New-tail installation hashes the header and first group as they are written.
+The digest is process-local; no format or synchronization setting changes.
+
+A fresh September 17 comparison used baseline `e7c8e0c` (populated-tail
+installation) and incremental hashing on the same Linux setup. Each version ran
+three times at 20 MiB, five cycles per run. The second pair reversed execution
+order; all runs were sequential, after tests and lint completed. Both binaries
+included the same new `tail-fill-ms` timer. All six runs passed their checks.
+
+| Implementation | Median boundary mean (ms) | Range of boundary means (ms) | Median full-tail reopen (ms) | Median tail fill (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Hash predecessor at rollover | 16.22 | 15.62–16.24 | 18.09 | 160.6 |
+| Incremental digest | 5.28 | 4.25–10.52 | 27.05 | 149.5 |
+
+Boundary means improved in all three pairs, with a median reduction of about 67%.
+Work outside installation and metadata commit fell from 9.75–10.66 ms to
+0.055–0.069 ms. Installation and commit still depend on filesystem latency; their
+variation explains most of the remaining spread.
+
+This moves work rather than eliminating hashing. Full-tail recovery became slower
+in every pair, adding roughly 8–11 ms to reconstruct the 20 MiB digest. The tail
+fill metric totals ordinary batched Append calls while filling one segment,
+excluding payload construction. Its run means varied from 129–216 ms before and
+133–217 ms afterward; these samples do not isolate the extra append CPU cost or
+establish a throughput improvement. Recovery and ordinary appends now pay the
+hashing cost instead of concentrating it in boundary append. The benchmark
+reopens a full tail immediately before every boundary, so it also exercises the
+reconstructed digest.
+
+Tests independently hash physical file bytes and compare them with appender
+state after append, recovery, populated-tail installation, and partial or complete
+erasure of the active tail. They check that recovery reads the file only once,
+invalid input leaves the digest unchanged, and failed write/sync prevents digest
+publication. Existing full verification and process-crash tests also pass. The
+VM, warm-cache, small-sample, and production-scale limitations above still apply.
 
 ## Reproduction
 

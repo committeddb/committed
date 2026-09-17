@@ -33,32 +33,26 @@ type preparedRollover struct {
 }
 
 // prepareRollover accepts the exclusively owned appender's last synchronized
-// state. Its old name is already durable. The installer establishes both data
+// state and physical-byte digest. Its old name is already durable. The installer establishes both data
 // and directory durability for the header and first group together. records and
 // framed come from Append's validated batch and rotation partitioning.
-func (s segmentStorage) prepareRollover(c Catalog, file *os.File, state TailState, records []Record, framed uint64) (*preparedRollover, error) {
+func (s segmentStorage) prepareRollover(c Catalog, state TailState, digest [sha256.Size]byte, records []Record, framed uint64) (*preparedRollover, error) {
 	if c.Active == nil || !state.HasRecords || state.Start != c.Active.Start || len(records) == 0 || framed == 0 || framed > maxGroupBytes {
 		return nil, ErrInvalid
 	}
 	ref := SegmentRef{Coverage: Coverage{Start: state.Start, End: state.Last + 1}}
 	if state.Count > 0 {
-		hash := sha256.New()
-		n, err := io.Copy(hash, io.NewSectionReader(file, 0, state.End))
-		if err != nil {
-			return nil, err
-		}
-		if n != state.End {
-			return nil, ErrCorrupt
-		}
 		ref.File, ref.Count, ref.TailBytes = c.Active.File, state.Count, state.End
-		copy(ref.SHA256[:], hash.Sum(nil))
+		ref.SHA256 = digest
 	}
 	name, err := uniqueName("tail", ref.Coverage.End, ".active")
 	if err != nil {
 		return nil, err
 	}
 	group := encodeTailGroup(records, int(framed)) // #nosec G115 -- framed is bounded by maxGroupBytes above.
+	nextDigest := sha256.New()
 	if _, err = s.installer.Install(name, func(w io.Writer) error {
+		w = io.MultiWriter(w, nextDigest)
 		if e := WriteTailHeader(w, ref.Coverage.End); e != nil {
 			return e
 		}
@@ -72,7 +66,7 @@ func (s segmentStorage) prepareRollover(c Catalog, file *os.File, state TailStat
 	}
 	// These validated bytes were durably installed by us. Construct the known
 	// state directly; recovery scanning and another sync are unnecessary here.
-	tail := &Tail{file: f, state: TailState{
+	tail := &Tail{file: f, digest: nextDigest, state: TailState{
 		Start: ref.Coverage.End, End: tailHeaderSize + int64(len(group)),
 		Last: records[len(records)-1].ID, HasRecords: true,
 		Count: uint64(len(records)), OriginalCount: uint64(len(records)), Framed: framed,

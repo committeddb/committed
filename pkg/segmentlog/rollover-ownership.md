@@ -5,7 +5,8 @@ The managed log serializes rollover under its mutex and directory ownership lock
 | Layer | Responsibility |
 | --- | --- |
 | Log | Decide boundaries using original append accounting and switch active handles |
-| Segment storage | Retain and hash the synchronized old file, durably install the successor header and first append group together |
+| Segment storage | Retain the synchronized old file and its appender-maintained digest, durably install the successor header and first append group together |
+| Tail appender | Maintain the physical-byte digest during writes and reconstruct it during recovery |
 | Catalog | Consume the prepared handle once and atomically select the closed range and new tail |
 | durablefs | Install and sync payload files and directory entries |
 | bbolt | Commit the metadata transaction durably |
@@ -23,8 +24,8 @@ A publication error poisons the handle without deleting prepared files. Recovery
 uses committed metadata to resolve the outcome. Unpublished files remain for
 explicit `ReclaimOrphans`.
 
-Rollover still hashes the closed append file and synchronously installs the new
-tail before publishing metadata. It does not convert or compress the predecessor,
+Rollover captures the old appender's incremental digest and synchronously installs
+the new tail before publishing metadata. It does not reread the predecessor. It does not convert or compress the predecessor,
 copy its bytes, or serialize a full historical range list. Tests cover consumed,
 stale, and wrong-directory preparation, interrupted installation and commit,
 process termination, and preservation of acknowledged record prefixes.

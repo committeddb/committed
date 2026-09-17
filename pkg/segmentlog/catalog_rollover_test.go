@@ -15,12 +15,12 @@ func prepareTestRollover(t *testing.T, log *Log) *preparedRollover {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := log.tail.State()
+	state, digest, err := log.tail.rolloverState()
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := segmentStorage{path: log.path, installer: log.dir}
-	p, err := s.prepareRollover(c, log.file, state, []Record{{state.Last + 10, nil}}, 16)
+	p, err := s.prepareRollover(c, state, digest, []Record{{state.Last + 10, nil}}, 16)
 	if err != nil {
 		t.Fatal(err)
 	}

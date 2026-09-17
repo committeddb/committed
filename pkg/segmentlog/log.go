@@ -316,7 +316,7 @@ func tailRecords(file io.ReaderAt, end int64) iter.Seq2[Record, error] {
 // rotate runs under the log mutex. It keeps the old catalog/tail authoritative
 // until the new tail's first group is durably installed and metadata is committed.
 func (l *Log) rotate(records []Record, framed uint64) error {
-	state, err := l.tail.State()
+	state, digest, err := l.tail.rolloverState()
 	if err != nil {
 		return err
 	}
@@ -331,7 +331,7 @@ func (l *Log) rotate(records []Record, framed uint64) error {
 		return ErrInvalid
 	}
 	storage := segmentStorage{path: l.path, installer: l.dir}
-	prepared, err := storage.prepareRollover(c, l.file, state, records, framed)
+	prepared, err := storage.prepareRollover(c, state, digest, records, framed)
 	if err != nil {
 		return err
 	}
