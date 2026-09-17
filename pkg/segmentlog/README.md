@@ -141,9 +141,11 @@ Codec IDs are `0=plain` and `1=zstd`. If compression would not shrink a block, t
 writer stores it plain; a segment can contain both codecs. The reader checks the
 stored CRC before decompression, caps the output at the declared decoded length
 and global limit, caps the decoder window at 1 MiB, and requires the exact decoded
-length. Unknown codecs fail at open. Reads instantiate a decoder per compressed
-block, so concurrent readers share no decoder state; pooling is not implemented.
-Verification instead owns one decoder and reusable output buffer per pass. It
+length. Unknown codecs fail at open. Point reads instantiate a decoder per compressed block. Multi-block scans own
+one decoder per iterator and allocate independent output storage for each block,
+so retained payloads survive iterator advancement and closure. Concurrent scans
+share no decoder state; pooling is not implemented.
+Verification owns one decoder and reusable output buffer per pass. It
 retains no payloads and closes that decoder when the pass completes.
 
 No-op rewrites still create no output even when requested compression differs.
@@ -184,6 +186,9 @@ an unexpectedly empty file. These metadata checks complement selected-block
 validation; individual reads do not recompute the whole-file digest.
 
 ## Streaming scans
+
+[Indexed scan decoder measurements](scan-decoder.md) cover decoder-state reuse
+and retained-payload ownership.
 
 `Log.Scan(ctx, bounds, visit)` reads surviving records in a half-open ID interval
 under one managed view. Scans skip unrelated ranges; indexed ranges also skip

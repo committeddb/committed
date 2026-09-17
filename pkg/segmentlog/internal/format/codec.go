@@ -80,6 +80,15 @@ func (d *Decoder) Close() {
 	d.buffer = nil
 }
 
+// DecodeOwned reuses decoder state but gives compressed results independent
+// output storage. Plain results alias stored, which the caller must own.
+func (d *Decoder) DecodeOwned(codec Codec, stored []byte, decoded uint32) ([]byte, error) {
+	d.buffer = nil
+	data, err := d.Decode(codec, stored, decoded)
+	d.buffer = nil
+	return data, err
+}
+
 // Decode applies the same per-block limits as the standalone decoder.
 // The caller verifies the stored-byte checksum before decoding.
 func (d *Decoder) Decode(codec Codec, stored []byte, decoded uint32) ([]byte, error) {

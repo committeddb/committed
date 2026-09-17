@@ -270,28 +270,34 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 	return s, nil
 }
 
-func (s *Segment) readBlock(b block) ([]Record, error) {
+func (s *Segment) readBlock(b block, decoder *format.Decoder) ([]Record, error) {
 	data := make([]byte, int(b.size))
 	if _, err := s.r.ReadAt(data, int64(b.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 		return nil, err
 	}
-	return decodeBlock(b, data)
+	return decodeBlockWithDecoder(b, data, decoder)
 }
 
 func decodeBlock(b block, data []byte) ([]Record, error) {
+	var decoder format.Decoder
+	defer decoder.Close()
+	return decodeBlockWithDecoder(b, data, &decoder)
+}
+
+func decodeBlockWithDecoder(b block, data []byte, decoder *format.Decoder) ([]Record, error) {
 	// Bound the descriptor allocation independently of caller-supplied metadata.
 	if b.decoded > format.MaxBlock || b.count == 0 || b.count > b.decoded/format.FrameOverhead {
 		return nil, ErrCorrupt
 	}
 	var records []Record
-	err := walkBlock(b, data, func(r Record) {
+	err := walkBlockWithDecoder(b, data, func(r Record) {
 		// Allocate only after decoding and the first frame check succeed. Reads
 		// still expose nothing until the entire block passes validation.
 		if records == nil {
 			records = make([]Record, 0, int(b.count))
 		}
 		records = append(records, r)
-	})
+	}, decoder)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +317,13 @@ func walkBlockWithDecoder(b block, data []byte, visit func(Record), decoder *for
 	if format.CRC(data) != b.crc {
 		return ErrCorrupt
 	}
-	data, err := decoder.Decode(b.codec, data, b.decoded)
+	var err error
+	if visit == nil {
+		data, err = decoder.Decode(b.codec, data, b.decoded)
+	} else {
+		// Visitors may retain records after this block or scan finishes.
+		data, err = decoder.DecodeOwned(b.codec, data, b.decoded)
+	}
 	if err != nil {
 		return err
 	}
@@ -384,12 +396,14 @@ func (s *Segment) Records() iter.Seq2[Record, error] {
 // fully validated before delivery, including boundary records outside the range.
 func (s *Segment) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 	return func(yield func(Record, error) bool) {
+		var decoder format.Decoder
+		defer decoder.Close()
 		first := sort.Search(len(s.blocks), func(i int) bool { return s.blocks[i].last >= bounds.Start })
 		for _, b := range s.blocks[first:] {
 			if b.first >= bounds.End {
 				return
 			}
-			records, err := s.readBlock(b)
+			records, err := s.readBlock(b, &decoder)
 			if err != nil {
 				yield(Record{}, err)
 				return

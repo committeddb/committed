@@ -142,8 +142,8 @@ zstd. Each compressed block receives an output slice whose capacity is limited
 to that block's declared decoded size, even when the retained backing allocation
 is larger. Exact decoded-length, checksum, frame, index, maximum-memory, and
 window checks remain in place. The decoder closes on success or failure.
-Ordinary reads use a fresh decoder per block, so returned payloads remain
-independent. There is no global pool or decoder shared across verification calls.
+Point reads use a fresh decoder per block. Multi-block scans reuse decoder state
+with independent output storage per block, so returned payloads remain independent. There is no global pool or decoder shared across verification calls.
 
 The same 80-block, 20 MiB in-memory benchmark ran on September 17, 2026 with Go
 1.26.6, Linux/arm64, Alpine 3.20 on the local OrbStack VM. Baseline `7ba814a` and
