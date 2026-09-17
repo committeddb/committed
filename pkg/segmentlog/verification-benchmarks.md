@@ -93,3 +93,42 @@ the full-history scrub selection scan.
 ```sh
 go test ./pkg/segmentlog -run '^$' -bench '^BenchmarkClosedTailVerification$' -benchtime=30x -count=3
 ```
+
+## Reusing stored-block buffers
+
+Both `Segment.Verify` and catalog digest verification reuse one stored-block
+buffer within each pass. The buffer grows only when a larger block requires it;
+its size is bounded by the validated maximum stored block size. Verification
+retains no records, so overwriting the buffer after a block validates is safe.
+Payload-returning reads retain their independent buffers. Compressed blocks
+still allocate decoded output and decoder state separately.
+
+`BenchmarkMultiBlockVerification` encodes 5,120 records with repeated 4,080-byte
+payloads into 80 blocks of 256 KiB each before compression: 20 MiB of framed data.
+The `frames` case runs `Segment.Verify` on an already-open segment. The `digest`
+case includes opening/index validation and checking the full SHA-256 against the
+catalog reference. Both use in-memory readers; setup is outside the timer. This
+measures allocated bytes and CPU work, not filesystem syncs or peak memory.
+
+Recorded September 17, 2026, Go 1.26.6, Linux/arm64, Alpine 3.20 on the local
+OrbStack VM. Baseline `6097873` and changed binaries ran three sequential pairs
+of 20 iterations per case, explicitly waiting for each process to finish before
+starting the next and reversing order in the second pair. Tests and lint were
+finished before measurement. All runs passed; host and VM load were uncontrolled.
+An earlier batch without explicit process-completion waits is excluded below.
+Values are medians across the three sequential runs.
+
+| Encoding / check | Before B/op | After B/op | Before allocs/op | After allocs/op | Before time | After time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain / frames | 20,971,882 | 262,144 | 81 | 1 | 25.78 ms | 14.68 ms |
+| Plain / digest | 21,021,067 | 311,616 | 97 | 18 | 49.35 ms | 36.90 ms |
+| ZstdDefault / frames | 33,147,271 | 33,097,992 | 1,130 | 1,054 | 56.99 ms | 53.29 ms |
+| ZstdDefault / digest | 33,196,910 | 33,146,620 | 1,148 | 1,069 | 88.86 ms | 55.51 ms |
+
+The plain cases avoid allocating another buffer for each of the remaining 79
+blocks. Compression makes stored buffers small in this deliberately repetitive
+fixture, so reusing them barely changes total allocated bytes. Timings varied
+substantially; these measurements establish no production latency guarantee.
+Variable-block-size tests cover growth, shrinking, and later read failures in
+both verification paths. Existing corruption, checksum, truncation, and legacy
+format tests remain in place.

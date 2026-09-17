@@ -36,8 +36,14 @@ func verifySegmentDigest(r io.ReaderAt, size int64, ref SegmentRef) error {
 	}
 	_, _ = digest.Write(header[:])
 	offset := int64(format.HeaderSize)
+	// Verification retains no payloads; reuse stored bytes between blocks.
+	var stored []byte
 	for _, block := range segment.blocks {
-		stored := make([]byte, int(block.size))
+		if cap(stored) < int(block.size) {
+			stored = make([]byte, int(block.size))
+		} else {
+			stored = stored[:int(block.size)]
+		}
 		if _, err := r.ReadAt(stored, int64(block.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 			return err
 		}

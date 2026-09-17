@@ -152,3 +152,44 @@ func TestSegmentDigestChecksFramesWithValidOuterChecksums(t *testing.T) {
 		t.Fatal("accepted corrupt frame with valid enclosing checksums", err)
 	}
 }
+
+func TestSegmentVerificationVariableBlockSizes(t *testing.T) {
+	for _, codec := range []Compression{NoCompression, ZstdDefault} {
+		records := []Record{
+			{0, bytes.Repeat([]byte("a"), 5000)},
+			{10, []byte("small")},
+			{20, bytes.Repeat([]byte("b"), 8000)},
+			{30, []byte("tiny")},
+			{40, bytes.Repeat([]byte("c"), 2000)},
+		}
+		var buf bytes.Buffer
+		if err := WriteSegment(&buf, Coverage{0, 50}, sequence(records...), Options{BlockSize: 64, Compression: codec}); err != nil {
+			t.Fatal(err)
+		}
+		raw := buf.Bytes()
+		ref := digestRef(t, raw)
+		segment := open(t, raw)
+		if err := segment.Verify(); err != nil {
+			t.Fatal(codec, err)
+		}
+		if err := verifySegmentDigest(bytes.NewReader(raw), int64(len(raw)), ref); err != nil {
+			t.Fatal(codec, err)
+		}
+		// Each block must still be read and its I/O error propagated, including
+		// small blocks after large ones and a later block that grows the buffer.
+		injected := errors.New("block read failed")
+		for _, block := range segment.blocks {
+			reader := &countedSegmentReader{data: raw, reads: make([]int, len(raw)), failAt: int64(block.offset), failure: injected}
+			s, err := OpenSegment(reader, int64(len(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Verify(); !errors.Is(err, injected) {
+				t.Fatal("lost block read failure", codec, block.offset, err)
+			}
+			if err := verifySegmentDigest(reader, int64(len(raw)), ref); !errors.Is(err, injected) {
+				t.Fatal("lost digest read failure", codec, block.offset, err)
+			}
+		}
+	}
+}

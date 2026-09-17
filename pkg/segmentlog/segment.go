@@ -405,8 +405,13 @@ func (s *Segment) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 
 // Verify validates every frame, including data outside a particular seek.
 func (s *Segment) Verify() error {
+	var stored []byte
 	for _, b := range s.blocks {
-		stored := make([]byte, int(b.size))
+		if cap(stored) < int(b.size) {
+			stored = make([]byte, int(b.size))
+		} else {
+			stored = stored[:int(b.size)]
+		}
 		if _, err := s.r.ReadAt(stored, int64(b.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 			return err
 		}
