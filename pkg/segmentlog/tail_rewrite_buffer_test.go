@@ -2,7 +2,6 @@ package segmentlog
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -112,7 +111,7 @@ func TestTailRewriteFlushFailures(t *testing.T) {
 	}
 }
 
-func measureTailRewrite(t testing.TB, count int) (time.Duration, int, int64) {
+func measureTailRewrite(t testing.TB, count int) (time.Duration, time.Duration, int, int64) {
 	t.Helper()
 	l := tailRewriteFixture(t, count)
 	probe := &tailWriteProbe{fileInstaller: l.dir}
@@ -131,25 +130,27 @@ func measureTailRewrite(t testing.TB, count int) (time.Duration, int, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := sha256.New()
-	if err := WriteTailHeader(expected, 0); err != nil {
-		t.Fatal(err)
-	}
-	for i := range count {
-		r := Record{uint64(i), bytes.Repeat([]byte("v"), 4080)}
-		if i == 0 {
-			r.Payload[0] = 'w'
+	var seen int
+	_, err = ScanTail(bytes.NewReader(raw), int64(len(raw)), func(r Record) error {
+		want := bytes.Repeat([]byte("v"), 4080)
+		if seen == 0 {
+			want[0] = 'w'
 		}
-		_, _ = expected.Write(encodeTailGroup([]Record{r}, 4096))
-	}
-	actual := sha256.Sum256(raw)
-	if !bytes.Equal(actual[:], expected.Sum(nil)) || probe.written != int64(len(raw)) {
-		t.Fatal("changed encoded bytes or byte accounting")
+		if r.ID != uint64(seen) || !bytes.Equal(r.Payload, want) {
+			t.Fatal("changed rewritten record", r.ID, seen)
+		}
+		seen++
+		return nil
+	})
+	if err != nil || seen != count || probe.written != int64(len(raw)) {
+		t.Fatal("invalid replacement or byte accounting", seen, err)
 	}
 	if err := l.Close(); err != nil {
 		t.Fatal(err)
 	}
+	reopenStarted := time.Now()
 	reopened, err := OpenLog(l.path, Options{})
+	reopenElapsed := time.Since(reopenStarted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,20 +164,21 @@ func measureTailRewrite(t testing.TB, count int) (time.Duration, int, int64) {
 	if err := reopened.Append([]Record{{uint64(count), []byte("after rewrite")}}); err != nil {
 		t.Fatal(err)
 	}
-	return elapsed, probe.calls, probe.written
+	return elapsed, reopenElapsed, probe.calls, probe.written
 }
 
 func TestTailRewriteBuffersWrites(t *testing.T) {
-	_, calls, size := measureTailRewrite(t, 80)
-	if calls != 2 || size != 32+80*4144 {
+	_, _, calls, size := measureTailRewrite(t, 80)
+	if calls != 2 || size != 32+80*4096+2*(groupHeaderSize+groupTrailerSize) {
 		t.Fatal(calls, size)
 	}
 }
 
 func BenchmarkTailRewriteWrites(b *testing.B) {
 	for b.Loop() {
-		elapsed, calls, size := measureTailRewrite(b, 5120)
+		elapsed, reopen, calls, size := measureTailRewrite(b, 5120)
 		b.ReportMetric(float64(elapsed.Nanoseconds())/1e6, "rewrite-ms")
+		b.ReportMetric(float64(reopen.Nanoseconds())/1e6, "reopen-ms")
 		b.ReportMetric(float64(calls), "file-writes/op")
 		b.ReportMetric(float64(size), "replacement-B/op")
 	}

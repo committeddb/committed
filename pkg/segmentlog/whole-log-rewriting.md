@@ -30,11 +30,13 @@ catalogs containing the new field. No production format activation is implied.
 
 The tail reuses the segment transformation machinery: scan until the first change,
 then reread the unchanged prefix without invoking callbacks twice. Output streams
-into a newly installed tail, currently one append group per survivor. A 256 KiB
-output buffer combines small file writes without changing those encoded groups.
-The buffer must flush successfully before the installer syncs and publishes the
-file; a write or flush failure prevents publication. One group per survivor can
-increase group overhead. Payloads remain bounded
+into a newly installed tail. Survivors are packed into groups targeting 256 KiB
+of framed data; a larger record occupies a group alone. Frames are copied into
+the group before invoking the next transform, so callbacks may reuse payload
+buffers. A separate 256 KiB output buffer combines file writes. Both the final
+group and output buffer must flush successfully before the installer syncs and
+publishes the file; a write or flush failure prevents publication. Grouping uses
+the existing tail format and reduces per-group scan work. Payloads remain bounded
 by the existing per-record limit. A conservative framed-byte bound guarantees
 that survivors fit the segment format's block index and reserves capacity for
 later appends up to the original rotation target. Adjacent encoded blocks
@@ -86,10 +88,11 @@ and application integration are still required before production use.
 64-record batches, then changes the first payload byte of the first record.
 A test-only installer wrapper counts underlying writes while timing the complete
 managed Rewrite call, including validation, installation, and metadata commit.
-It compares the replacement's digest with the original one-group-per-record
-encoding, checks its byte count, reopens, verifies the file and append progress,
+It validates each replacement record, checks the byte count, reopens, verifies
+the file and append progress,
 and appends again. Fixture creation and those checks are outside `rewrite-ms`;
-overall Go `ns/op` includes them.
+overall Go `ns/op` includes them. The benchmark also reports `reopen-ms` for
+OpenLog after the rewrite.
 
 Recorded September 17, 2026, Go 1.26.6, Linux/arm64, Alpine 3.20 on the local
 OrbStack VM. Data resides on disposable container overlay filesystems. Baseline
@@ -145,3 +148,40 @@ The median run time fell from 8.711 ms to 1.861 ms. Publication no longer reads
 or syncs the unchanged active file and skips the directory sync when no payload
 references change. Whole-log rewrite preparation still scans the active tail,
 and all managed rewrite operations still hold the log mutex throughout.
+
+## Grouped tail-rewrite measurements
+
+The same 20 MiB `BenchmarkTailRewriteWrites` fixture compares baseline `712887a`
+(one group per survivor) with 256 KiB group packing. Both versions use the
+256 KiB output buffer. The benchmark checks every replacement ID and payload,
+verifies the reopened log and original append progress, and appends again.
+`rewrite-ms` times the complete rewrite; `reopen-ms` times the subsequent
+OpenLog call. Setup and data checks are outside these two timings.
+
+Recorded September 17, 2026, Go 1.26.6, Linux/arm64, Alpine 3.20 on the local
+OrbStack VM, using disposable container overlay storage. Three sequential pairs
+ran one iteration each after tests and lint, reversing order in the second pair.
+All six runs passed; the host and VM were not load-controlled.
+
+| Measurement | One record per group | Bounded groups |
+| --- | --- | --- |
+| Groups in replacement | 5,120 | 80 |
+| Replacement bytes | 21,217,312 | 20,975,392 |
+| Underlying write calls | 81 | 81 |
+| Rewrite time, run 1 | 75.25 ms | 67.21 ms |
+| Rewrite time, run 2 | 75.56 ms | 63.45 ms |
+| Rewrite time, run 3 | 73.26 ms | 52.37 ms |
+| Reopen time, run 1 | 16.81 ms | 17.41 ms |
+| Reopen time, run 2 | 18.81 ms | 12.67 ms |
+| Reopen time, run 3 | 14.86 ms | 12.89 ms |
+
+Median rewrite time decreased from 75.25 ms to 63.45 ms; median reopen time
+from 16.81 ms to 12.89 ms. This small sample establishes no production latency
+bound. The reduction of 241,920 bytes comes entirely from group overhead;
+payload compression is unchanged. Preparation holds a reusable encoded-group
+buffer in addition to its output buffer; a record above the target enlarges the
+group buffer, bounded by the maximum record size plus framing and group overhead
+(apart from allocator capacity rounding). The complete rewrite still holds the
+log mutex. Tests cover reused callback payload buffers, sparse IDs, erasure,
+records at and above the group target, the maximum payload size, checkpoint
+recovery, later appends, and output failures before publication.

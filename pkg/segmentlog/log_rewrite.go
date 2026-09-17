@@ -253,6 +253,26 @@ func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, trans
 			if e := WriteTailHeader(buffered, ref.Start); e != nil {
 				return e
 			}
+			const groupTarget = 256 << 10
+			group := make([]byte, groupHeaderSize, groupHeaderSize+groupTarget+groupTrailerSize)
+			var count int
+			var last uint64
+			flushGroup := func() error {
+				if count == 0 {
+					return nil
+				}
+				group = finishTailGroup(group, count, last)
+				if end > int64(^uint64(0)>>1)-int64(len(group)) {
+					return ErrInvalid
+				}
+				if e := writeFull(buffered, group); e != nil {
+					return e
+				}
+				end += int64(len(group))
+				group = group[:groupHeaderSize]
+				count = 0
+				return nil
+			}
 			for r, e := range records {
 				if e != nil {
 					return e
@@ -266,14 +286,18 @@ func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, trans
 					return ErrInvalid
 				}
 				physical += n
-				group := encodeTailGroup([]Record{r}, framed)
-				if end > int64(^uint64(0)>>1)-int64(len(group)) {
-					return ErrInvalid
+				if len(group)-groupHeaderSize+framed > groupTarget {
+					if e := flushGroup(); e != nil {
+						return e
+					}
 				}
-				if e := writeFull(buffered, group); e != nil {
-					return e
-				}
-				end += int64(len(group))
+				// Copy frames now: transforms may reuse their payload buffer.
+				group = format.AppendFrame(group, r.ID, r.Payload)
+				count++
+				last = r.ID
+			}
+			if e := flushGroup(); e != nil {
+				return e
 			}
 			return buffered.Flush()
 		}); e != nil {

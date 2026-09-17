@@ -20,9 +20,11 @@ Each group is nonempty and contains at most 32 MiB of framed data. A payload is
 at most 16 MiB. IDs must stay at or above the tail's Start, strictly increase
 within and across groups, and be less than MaxUint64. ID zero is valid.
 
-Groups express the boundary of one local append call. They are not consensus
-commits and must not determine future sealed-segment boundaries. Sealing reads
-the records and reconstructs canonical blocks independently of these groups.
+Ordinary append groups express the boundary of one local append call. Tail
+rewrites regroup surviving records into bounded batches and preserve original
+append progress in a catalog checkpoint. Groups are not consensus commits and
+do not determine future sealed-segment boundaries. Indexed segment encoding
+reconstructs blocks independently of these groups.
 No compression runs on the active append path.
 
 ## Creation and append

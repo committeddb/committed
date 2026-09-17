@@ -334,14 +334,21 @@ func (t *Tail) Append(records []Record) error {
 // encodeTailGroup requires a nonempty, validated batch and its framed byte size.
 func encodeTailGroup(records []Record, size int) []byte {
 	group := make([]byte, groupHeaderSize, groupHeaderSize+size+groupTrailerSize)
-	copy(group, "SLGROUP0")
-	format.LE.PutUint32(group[8:], uint32(size))          // #nosec G115 -- Internal encoder receives positive framed size bounded by maxGroupBytes.
-	format.LE.PutUint32(group[12:], uint32(len(records))) // #nosec G115 -- Validated records each consume FrameOverhead within maxGroupBytes.
-	format.LE.PutUint64(group[16:], records[len(records)-1].ID)
-	format.LE.PutUint32(group[28:], format.CRC(group[:28]))
 	for _, r := range records {
 		group = format.AppendFrame(group, r.ID, r.Payload)
 	}
+	return finishTailGroup(group, len(records), records[len(records)-1].ID)
+}
+
+// finishTailGroup completes a header followed by validated record frames.
+// Callers bound framed bytes by maxGroupBytes and supply a nonempty record count.
+func finishTailGroup(group []byte, count int, last uint64) []byte {
+	size := len(group) - groupHeaderSize
+	copy(group, "SLGROUP0")
+	format.LE.PutUint32(group[8:], uint32(size))   // #nosec G115 -- Internal callers bound framed bytes by maxGroupBytes.
+	format.LE.PutUint32(group[12:], uint32(count)) // #nosec G115 -- Each record consumes FrameOverhead within maxGroupBytes.
+	format.LE.PutUint64(group[16:], last)
+	format.LE.PutUint32(group[28:], format.CRC(group[:28]))
 	group = append(group, []byte("SLEND000")...)
 	group = format.LE.AppendUint32(group, uint32(size)) // #nosec G115 -- Same bounded framed size as the group header.
 	group = format.LE.AppendUint32(group, format.CRC(group))
