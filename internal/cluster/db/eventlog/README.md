@@ -129,3 +129,7 @@ The [on-disk lifecycle baseline](scale-benchmarks.md) measures larger histories
 through recovery, a boundary append, one-record erasure, reclamation, and a full
 scan. It includes survivor and post-reopen checks and reports phase costs
 separately from history construction.
+
+The [sustained rollover comparison](rollover-benchmarks.md) detects actual
+segment creation in both plain backends and measures boundary batches separately
+from ordinary append batches, with identical logical histories and batch sizes.

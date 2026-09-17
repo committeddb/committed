@@ -18,8 +18,9 @@ activation.
 | Filesystem primitives | `internal/durablefs`: directory ownership, durable immutable installation and atomic pointer replacement |
 
 The generic engine stores sparse `uint64` IDs and opaque bytes. It has no
-application, protobuf, Raft, or BoltDB dependencies. The application adapter uses
-the embedded Raft index as the record ID and validates the outer/inner identity.
+application, protobuf, or Raft dependencies; it uses bbolt for its own metadata.
+The application adapter uses the embedded Raft index as the record ID and
+validates the outer/inner identity.
 It preserves original protobuf bytes, including unknown fields.
 
 The experimental tidwall backend stores dense physical sequences internally and
@@ -88,14 +89,15 @@ files. Old payload files can remain until reclamation succeeds.
 The segmented managed log serializes reads, append, sealing, rewrite, and
 reclamation. Rollover and catalog publication are synchronous, but rollover does
 not convert or compress the old append file. It has no background preparation, pinned
-backup views, or decoded-block cache. Complete-catalog startup verifies all
-referenced payloads. The bbolt catalog uses bounded metadata queries and active-
-tail recovery; see [the experiment](../pkg/segmentlog/bbolt-experiment.md).
-Standalone and rewrite publication verify new or changed sealed references and
+backup views, or decoded-block cache. The bbolt catalog uses bounded metadata
+queries and active-tail recovery; see [the experiment](../pkg/segmentlog/bbolt-experiment.md).
+Rewrite publication verifies new or changed sealed references and
 the active tail, reusing prior verification for exact unchanged immutable references.
 Managed rollover separates physical preparation from metadata publication through
-a private, single-use handle; it does not repeat preparation's file checks or syncs. Both formats select a complete logical layout; bbolt stores range entries
-individually rather than serializing their full list at each publication. The tests do not establish TB- or PB-scale operation.
+a private, single-use handle; it does not repeat preparation's file checks or syncs.
+The bbolt catalog selects a complete logical layout, storing range entries
+individually rather than serializing their full list at each publication. The
+tests do not establish TB- or PB-scale operation.
 
 Incomplete tail suffixes are reported without automatic truncation. Storage alone
 does not prove that discarding a suffix preserves previously acknowledged data.
