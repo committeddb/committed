@@ -20,7 +20,7 @@ func prepareTestRollover(t *testing.T, log *Log) *preparedRollover {
 		t.Fatal(err)
 	}
 	s := segmentStorage{path: log.path, installer: log.dir}
-	p, err := s.prepareRollover(c, log.file, state)
+	p, err := s.prepareRollover(c, log.file, state, []Record{{state.Last + 10, nil}}, 16)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,10 +59,10 @@ func TestPreparedRolloverPublishesMetadataOnly(t *testing.T) {
 		}
 	}
 	log = reopenLog(t, log)
-	if err := log.Append([]Record{{20, nil}}); err != nil {
+	if err := log.Append([]Record{{30, nil}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []uint64{0, 10, 20} {
+	for _, id := range []uint64{0, 10, 20, 30} {
 		if _, err := log.Read(id); err != nil {
 			t.Fatal(id, err)
 		}
@@ -132,8 +132,13 @@ func TestPreparedRolloverPublicationFailures(t *testing.T) {
 					t.Fatal(id, err)
 				}
 			}
-			if _, err := log.Read(20); !errors.Is(err, ErrNotFound) {
-				t.Fatal("appended before publication succeeded", err)
+			_, err = log.Read(20)
+			if stage == "after" {
+				if err != nil {
+					t.Fatal("lost committed first group", err)
+				}
+			} else if !errors.Is(err, ErrNotFound) {
+				t.Fatal("adopted unpublished first group", err)
 			}
 		})
 	}

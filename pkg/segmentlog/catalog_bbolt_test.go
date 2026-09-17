@@ -161,13 +161,23 @@ func TestBoltLogCommitFailures(t *testing.T) {
 				if _, e = l.Read(10); e != nil {
 					t.Fatal(e)
 				}
-				if _, e = l.Read(20); !errors.Is(e, ErrNotFound) {
+				_, e = l.Read(20)
+				committedAppend := operation == "rollover" && stage == "after"
+				if committedAppend {
+					if e != nil {
+						t.Fatal(e)
+					}
+				} else if !errors.Is(e, ErrNotFound) {
 					t.Fatal(e)
 				}
 				if _, e = l.Reclaim(t.Context()); e != nil {
 					t.Fatal(e)
 				}
-				if e = l.Append([]Record{{20, nil}}); e != nil {
+				next := uint64(20)
+				if committedAppend {
+					next = 30
+				}
+				if e = l.Append([]Record{{next, nil}}); e != nil {
 					t.Fatal(e)
 				}
 			})

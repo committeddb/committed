@@ -19,7 +19,7 @@ the end. A 64 KiB version runs as `TestRolloverSizeWorkload` in the normal suite
 The benchmark adds test-only timers around the existing file installer and bbolt
 commit function. Production code and synchronization behavior are unchanged.
 
-## Linux results
+## Linux baseline: separate empty-tail installation
 
 Recorded September 17, 2026 with Go 1.26.6, Linux/arm64, and Alpine 3.20 in the
 local OrbStack VM. Data resides on the container's disposable `overlay` writable
@@ -45,7 +45,7 @@ each size's median boundary mean:
 | 20 MiB | 19.43 | 28.92 | 28.74 | 77.09 |
 | 32 MiB | 20.94 | 21.07 | 25.12 | 67.13 |
 
-Installation includes writing/syncing the empty new tail and publishing its name
+In this baseline, installation includes writing/syncing the empty new tail and publishing its name
 durably. Metadata commit includes the bbolt transaction and its synchronization.
 Other work includes hashing the old tail, changing handles, and writing/syncing
 the new record. It is **not** a measurement of hashing alone.
@@ -63,6 +63,43 @@ users. Closing/reopening does not evict the operating-system cache. The workload
 does not establish cold recovery, 100 TB scale, physical device flush behavior,
 or power-loss durability. The earlier small-segment timings should not be used
 as estimates for default-size rollover.
+
+## Populated-tail installation comparison
+
+Rollover now installs the header and first append group together before committing
+metadata. The file installer syncs those bytes and their directory entry; a
+successful metadata commit needs no separate append write/sync for that group.
+The on-disk format and normal synchronization settings are unchanged.
+
+A fresh comparison on September 17 used the same Linux setup, with committed
+baseline `cdb84f1` and the populated-tail implementation. Three sequential pairs
+ran baseline then populated, each measuring five cycles at the default 20 MiB
+target. All six runs passed payload, coverage, recovery, and verification checks.
+No other test or lint job from this experiment ran during the comparison.
+
+| Implementation | Median boundary mean (ms) | Range of boundary means (ms) | Median full-tail reopen (ms) | Median one-record-tail reopen (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Separate empty-tail installation | 19.57 | 16.97–20.03 | 18.14 | 1.13 |
+| Header and first group installed together | 15.88 | 15.86–16.49 | 14.70 | 1.26 |
+
+The median boundary mean decreased by about 19%; each pair improved. This is a
+small, fixed-order sample on an uncontrolled VM, not a latency guarantee. The
+fresh baseline is much faster than the earlier baseline above, demonstrating
+substantial environment variability. Recovery code is unchanged; differences in
+reopen timings do not establish a recovery improvement.
+
+For the run supplying each median boundary mean, the baseline spent 5.10 ms in
+installation, 2.57 ms in metadata commit, and 11.91 ms in other work. The populated
+version spent 3.89, 2.50, and 9.48 ms respectively. Installation now includes the
+first group; other work no longer includes its separate append sync. Hashing the
+predecessor and durable installation/metadata commit remain synchronous.
+
+Failure and subprocess-exit tests check both sides of publication with a
+multi-record first group. Before commit, recovery ignores the populated orphan.
+After commit, recovery retains the complete group even if the append was never
+acknowledged. Callers already reconcile durable record IDs after uncertain errors.
+The segmentlog and EventLog suites passed under the macOS race detector; the full
+segmentlog suite also passed on Linux, including subprocess recovery tests.
 
 ## Reproduction
 

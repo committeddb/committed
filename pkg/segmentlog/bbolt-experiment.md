@@ -45,10 +45,13 @@ still affect bbolt memory, write cost, and recovery cost.
 ## Publication and durability
 
 Rollover retains the synchronized predecessor, hashes its bytes, and durably
-installs the new empty tail. One bbolt transaction then inserts the closed range,
+installs the new tail header and first append group together. One bbolt
+transaction then inserts the closed range,
 updates active-tail state and revision, and queues the predecessor if the range
 was entirely erased. The log changes appenders only after the transaction
-succeeds. New record writes and their sync follow. There is no per-rollover
+succeeds. The first group needs no additional sync; remaining groups use normal
+append/sync. Recovery selects the entire first group if publication committed,
+even if the caller received an error afterward. There is no per-rollover
 catalog file or CURRENT replacement in this backend.
 
 Rewrite prepares replacement files with the existing segment and tail code.

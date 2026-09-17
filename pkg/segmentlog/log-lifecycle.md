@@ -59,19 +59,23 @@ Under the log mutex:
 1. Retain the synchronized old append file under its existing name. Record its
    exact byte size and compute its SHA-256 without changing or copying its bytes.
    An entirely erased tail becomes an empty range descriptor without a file.
-2. Segment storage durably installs the next empty tail and constructs its
-   appender from the known empty header. This does not call recovery scanning.
+2. Segment storage durably installs the next tail header and first append group
+   together, then constructs its appender from that known state. This does not
+   call recovery scanning or perform a separate append sync.
 3. The catalog publisher consumes the private prepared-rollover handle and
    publishes a successor catalog containing the closed range and new active tail.
    The handle is bound to the source directory, history, revision, and active file
    and can be consumed only once. Generation remains unchanged.
 4. Switch the in-memory active handle and close the predecessor.
-5. Append the next records to the new tail and sync before acknowledging them.
+5. Continue with any remaining append groups. Acknowledge only after every group
+   in the call is durable.
 
 New tail and indexed rewrite files receive unique names; the catalog digest
 identifies immutable content. Names do not affect encoded bytes. Before step 3,
-Committed metadata still selects the old tail. After step 3, it selects that same file as an immutable range
-and the new empty tail. Reopening uses that selection and ignores unpublished artifacts.
+committed metadata still selects the old tail. After step 3, it selects that same
+file as an immutable range and the new tail including its first group. Reopening
+uses that selection and ignores unpublished artifacts. If publication commits
+but returns an error, that complete first group survives recovery.
 
 Any append or rotation failure poisons the Log. Reads and writes then refuse to
 use the potentially uncertain view until Close/reopen. Recovery can retain valid

@@ -52,7 +52,7 @@ func TestBoltLogCrashHelper(t *testing.T) {
 	}
 	switch operation {
 	case "rollover":
-		err = l.Append([]Record{{20, nil}})
+		err = l.Append([]Record{{20, nil}, {30, nil}})
 	case "rewrite":
 		_, err = l.Rewrite(t.Context(), 1, eraseEvenTens)
 	case "reclaim":
@@ -155,12 +155,10 @@ func TestBoltLogProcessCrash(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				checkBoltCrashRecords(t, l, records, erased)
-				if operation == "rollover" {
-					if _, err := l.Read(20); !errors.Is(err, ErrNotFound) {
-						t.Fatal("append passed interrupted publication", err)
-					}
+				if operation == "rollover" && published {
+					records = append(records, Record{20, nil}, Record{30, nil})
 				}
+				checkBoltCrashRecords(t, l, records, erased)
 				// Retried reclamation must tolerate a queue whose files were already
 				// removed, and must never delete the selected replacements.
 				if _, err := l.Reclaim(t.Context()); err != nil {
@@ -203,7 +201,7 @@ func TestBoltLogProcessCrash(t *testing.T) {
 				if err := l.Verify(t.Context()); err != nil {
 					t.Fatal(err)
 				}
-				// Appending after recovery also exercises the newly selected empty
+				// Appending after recovery also exercises the newly selected
 				// tail and its checkpoint when the highest record was erased.
 				next := records[len(records)-1].ID + 10
 				if err := l.Append([]Record{{next, []byte("after recovery")}}); err != nil {

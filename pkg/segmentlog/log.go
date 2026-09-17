@@ -263,13 +263,12 @@ func (l *Log) Append(records []Record) error {
 	}
 	for i := 0; i < len(records); {
 		size := uint64(len(records[i].Payload) + format.FrameOverhead)
-		if l.framed > 0 && (l.framed >= c.SegmentBytes || size > c.SegmentBytes-l.framed) {
-			if err := l.rotate(); err != nil {
-				return l.fail(err)
-			}
-		}
+		rotate := l.framed > 0 && (l.framed >= c.SegmentBytes || size > c.SegmentBytes-l.framed)
 		end := i
 		bytes := l.framed
+		if rotate {
+			bytes = 0
+		}
 		for end < len(records) {
 			n := uint64(len(records[end].Payload) + format.FrameOverhead)
 			if end > i && (bytes >= c.SegmentBytes || n > c.SegmentBytes-bytes) {
@@ -281,7 +280,13 @@ func (l *Log) Append(records []Record) error {
 				break
 			}
 		}
-		if err := l.tail.Append(records[i:end]); err != nil {
+		var err error
+		if rotate {
+			err = l.rotate(records[i:end], bytes)
+		} else {
+			err = l.tail.Append(records[i:end])
+		}
+		if err != nil {
 			return l.fail(err)
 		}
 		l.framed = bytes
@@ -309,8 +314,8 @@ func tailRecords(file io.ReaderAt, end int64) iter.Seq2[Record, error] {
 }
 
 // rotate runs under the log mutex. It keeps the old catalog/tail authoritative
-// until the new empty tail is durably installed and the successor catalog is published.
-func (l *Log) rotate() error {
+// until the new tail's first group is durably installed and metadata is committed.
+func (l *Log) rotate(records []Record, framed uint64) error {
 	state, err := l.tail.State()
 	if err != nil {
 		return err
@@ -326,7 +331,7 @@ func (l *Log) rotate() error {
 		return ErrInvalid
 	}
 	storage := segmentStorage{path: l.path, installer: l.dir}
-	prepared, err := storage.prepareRollover(c, l.file, state)
+	prepared, err := storage.prepareRollover(c, l.file, state, records, framed)
 	if err != nil {
 		return err
 	}
@@ -334,7 +339,7 @@ func (l *Log) rotate() error {
 		return errors.Join(err, prepared.file.Close())
 	}
 	old := l.file
-	l.file, l.tail, l.framed = prepared.file, prepared.tail, 0
+	l.file, l.tail, l.framed = prepared.file, prepared.tail, framed
 	return old.Close()
 }
 

@@ -32,13 +32,6 @@ func TestLastAppendedSurvivesErasureAndRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertProgress(t, log, 200, true)
-	// Rotation can publish an empty new tail before the next append succeeds.
-	log.mu.Lock()
-	err := log.rotate()
-	log.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
 	log = reopenLog(t, log)
 	assertProgress(t, log, 200, true)
 	if _, err := log.Reclaim(t.Context()); err != nil {
@@ -48,7 +41,7 @@ func TestLastAppendedSurvivesErasureAndRotation(t *testing.T) {
 	if _, err := log.Seek(0); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
 	}
-	if err := log.Append([]Record{{500, nil}}); err != nil {
+	if err := log.Append([]Record{{500, []byte("forces a new range")}}); err != nil {
 		t.Fatal(err)
 	}
 	assertProgress(t, log, 500, true)

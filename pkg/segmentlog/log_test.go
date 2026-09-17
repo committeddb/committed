@@ -177,10 +177,19 @@ func TestLogRotationFailurePreservesDurablePrefix(t *testing.T) {
 				t.Fatal("lost durable prefix", id, err)
 			}
 		}
-		if _, err := log.Read(3); !errors.Is(err, ErrNotFound) {
+		_, err = log.Read(3)
+		if after {
+			if err != nil {
+				t.Fatal(err)
+			}
+		} else if !errors.Is(err, ErrNotFound) {
 			t.Fatal(err)
 		}
-		if err := log.Append([]Record{{3, []byte("third")}, {4, []byte("fourth")}}); err != nil {
+		remaining := []Record{{3, []byte("third")}, {4, []byte("fourth")}}
+		if after {
+			remaining = remaining[1:]
+		}
+		if err := log.Append(remaining); err != nil {
 			t.Fatal(err)
 		}
 		for _, id := range []uint64{1, 2, 3, 4} {
@@ -364,7 +373,7 @@ func TestLogPreparedFileFailuresKeepOldTail(t *testing.T) {
 			if err := log.Append([]Record{{2, []byte("second")}}); !errors.Is(err, ErrLogPoisoned) || !errors.Is(err, boom) {
 				t.Fatal(err)
 			}
-			// An orphaned empty replacement tail does not change recovery selection
+			// An orphaned populated replacement tail does not change recovery selection
 			// while committed metadata still references the old append file.
 			log = reopenLog(t, log)
 			got, _ := log.catalog.Current()
