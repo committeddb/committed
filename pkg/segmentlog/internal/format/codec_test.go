@@ -58,3 +58,70 @@ func FuzzDecode(f *testing.F) {
 		}
 	})
 }
+
+func TestDecoderReusePreservesBounds(t *testing.T) {
+	e, err := NewEncoder(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	var d Decoder
+	defer d.Close()
+	for _, size := range []int{4096, 16384, 32, 8192, 16} {
+		input := bytes.Repeat([]byte("a"), size)
+		codec, stored := e.Encode(input)
+		data, err := d.Decode(codec, stored, uint32(size))
+		if err != nil || !bytes.Equal(data, input) {
+			t.Fatal(size, err)
+		}
+		// A large retained output allocation must not admit oversized output
+		// for a later block, including concatenated compressed frames.
+		if size > FrameOverhead {
+			if _, err := d.Decode(codec, stored, uint32(size-1)); !errors.Is(err, ErrCorrupt) {
+				t.Fatal("accepted undersized declaration", size, err)
+			}
+		}
+		if codec == Zstd {
+			joined := append(bytes.Clone(stored), stored...)
+			if _, err := d.Decode(codec, joined, uint32(size)); !errors.Is(err, ErrCorrupt) {
+				t.Fatal("accepted concatenated output", size, err)
+			}
+			corrupt := bytes.Clone(stored)
+			corrupt[len(corrupt)-1] ^= 1
+			if _, err := d.Decode(codec, corrupt, uint32(size)); !errors.Is(err, ErrCorrupt) {
+				t.Fatal("accepted corrupt frame", err)
+			}
+		}
+		// Errors and intervening plain blocks must not contaminate later output.
+		plain := bytes.Repeat([]byte("b"), FrameOverhead)
+		if data, err := d.Decode(Plain, plain, FrameOverhead); err != nil || !bytes.Equal(data, plain) {
+			t.Fatal(err)
+		}
+		data, err = d.Decode(codec, stored, uint32(size))
+		if err != nil || !bytes.Equal(data, input) {
+			t.Fatal("failed after reuse/error", size, err)
+		}
+	}
+}
+
+func TestStandaloneDecodeOwnsOutput(t *testing.T) {
+	e, err := NewEncoder(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	first := bytes.Repeat([]byte("a"), 4096)
+	codec, stored := e.Encode(first)
+	data, err := Decode(codec, stored, uint32(len(first)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := bytes.Repeat([]byte("b"), 4096)
+	codec, stored = e.Encode(second)
+	if _, err := Decode(codec, stored, uint32(len(second))); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, first) {
+		t.Fatal("later decode changed retained output")
+	}
+}

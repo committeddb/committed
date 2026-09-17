@@ -143,6 +143,8 @@ stored CRC before decompression, caps the output at the declared decoded length
 and global limit, caps the decoder window at 1 MiB, and requires the exact decoded
 length. Unknown codecs fail at open. Reads instantiate a decoder per compressed
 block, so concurrent readers share no decoder state; pooling is not implemented.
+Verification instead owns one decoder and reusable output buffer per pass. It
+retains no payloads and closes that decoder when the pass completes.
 
 No-op rewrites still create no output even when requested compression differs.
 Use an explicit `WriteSegment` over `Records()` for deliberate re-encoding.

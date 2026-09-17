@@ -37,6 +37,8 @@ func verifySegmentDigest(r io.ReaderAt, size int64, ref SegmentRef) error {
 	_, _ = digest.Write(header[:])
 	offset := int64(format.HeaderSize)
 	// Verification retains no payloads; reuse stored bytes between blocks.
+	var decoder format.Decoder
+	defer decoder.Close()
 	var stored []byte
 	for _, block := range segment.blocks {
 		if cap(stored) < int(block.size) {
@@ -48,7 +50,7 @@ func verifySegmentDigest(r io.ReaderAt, size int64, ref SegmentRef) error {
 			return err
 		}
 		_, _ = digest.Write(stored)
-		if err := walkBlock(block, stored, nil); err != nil {
+		if err := walkBlockWithDecoder(block, stored, nil, &decoder); err != nil {
 			return err
 		}
 		offset += int64(block.size)

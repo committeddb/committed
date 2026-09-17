@@ -100,8 +100,9 @@ Both `Segment.Verify` and catalog digest verification reuse one stored-block
 buffer within each pass. The buffer grows only when a larger block requires it;
 its size is bounded by the validated maximum stored block size. Verification
 retains no records, so overwriting the buffer after a block validates is safe.
-Payload-returning reads retain their independent buffers. Compressed blocks
-still allocate decoded output and decoder state separately.
+Payload-returning reads retain their independent buffers. The measurements in this section precede decoder/output reuse, described below;
+at that point compressed blocks still allocated decoded output and decoder state
+separately.
 
 `BenchmarkMultiBlockVerification` encodes 5,120 records with repeated 4,080-byte
 payloads into 80 blocks of 256 KiB each before compression: 20 MiB of framed data.
@@ -132,3 +133,39 @@ substantially; these measurements establish no production latency guarantee.
 Variable-block-size tests cover growth, shrinking, and later read failures in
 both verification paths. Existing corruption, checksum, truncation, and legacy
 format tests remain in place.
+
+## Reusing the verification decoder
+
+Verification now owns one lazy zstd decoder and reusable decoded-output buffer
+per pass, in addition to the stored-block buffer. Plain blocks do not initialize
+zstd. Each compressed block receives an output slice whose capacity is limited
+to that block's declared decoded size, even when the retained backing allocation
+is larger. Exact decoded-length, checksum, frame, index, maximum-memory, and
+window checks remain in place. The decoder closes on success or failure.
+Ordinary reads use a fresh decoder per block, so returned payloads remain
+independent. There is no global pool or decoder shared across verification calls.
+
+The same 80-block, 20 MiB in-memory benchmark ran on September 17, 2026 with Go
+1.26.6, Linux/arm64, Alpine 3.20 on the local OrbStack VM. Baseline `7ba814a` and
+changed binaries ran three sequential pairs of 20 iterations per case after
+validation completed, reversing order in the second pair. Each process finished
+before the next started. All six runs passed. Host and VM load were uncontrolled.
+Medians across the three runs follow.
+
+| Encoding / check | Before B/op | After B/op | Before allocs/op | After allocs/op | Before time | After time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain / frames | 262,144 | 262,144 | 1 | 1 | 4.431 ms | 6.071 ms |
+| Plain / digest | 311,616 | 311,616 | 18 | 18 | 11.437 ms | 15.403 ms |
+| ZstdDefault / frames | 33,097,834 | 416,019 | 1,051 | 16 | 10.309 ms | 4.980 ms |
+| ZstdDefault / digest | 33,147,659 | 465,487 | 1,069 | 33 | 12.631 ms | 5.018 ms |
+
+Compressed verification allocated about 98.7% fewer bytes. Plain allocation was
+unchanged, but plain timing was worse in these samples; the cause is unresolved.
+These small, uncontrolled measurements establish neither production latency nor
+an across-the-board timing improvement. Allocation is cumulative per pass, not
+peak resident memory. Decoded-buffer growth and decoder internals still allocate.
+
+Tests exercise large/small block transitions, undersized declarations after a
+larger allocation, concatenated compressed frames, corrupt frames, intervening
+plain blocks, successful reuse after errors, and standalone output ownership.
+The complete storage race suites, Linux segmentlog suite, lint, and gosec passed.

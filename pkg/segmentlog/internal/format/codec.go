@@ -53,6 +53,30 @@ func (e *Encoder) Encode(data []byte) (Codec, []byte) {
 // the declared size, the package maximum, and a fixed maximum decoder window.
 // The caller verifies the stored-byte checksum before calling Decode.
 func Decode(codec Codec, stored []byte, decoded uint32) ([]byte, error) {
+	var d Decoder
+	defer d.Close()
+	return d.Decode(codec, stored, decoded)
+}
+
+// Decoder reuses decompression state and output within one sequential operation.
+// The zero value is ready to use. Results are borrowed until the next Decode;
+// plain results alias stored. It must not be shared by concurrent operations.
+type Decoder struct {
+	zstd   *zstd.Decoder
+	buffer []byte
+}
+
+func (d *Decoder) Close() {
+	if d.zstd != nil {
+		d.zstd.Close()
+		d.zstd = nil
+	}
+	d.buffer = nil
+}
+
+// Decode applies the same per-block limits as the standalone decoder.
+// The caller verifies the stored-byte checksum before decoding.
+func (d *Decoder) Decode(codec Codec, stored []byte, decoded uint32) ([]byte, error) {
 	if decoded < FrameOverhead || decoded > MaxBlock || len(stored) == 0 || len(stored) > MaxBlock {
 		return nil, ErrCorrupt
 	}
@@ -63,14 +87,20 @@ func Decode(codec Codec, stored []byte, decoded uint32) ([]byte, error) {
 		}
 		return stored, nil
 	case Zstd:
-		d, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1),
-			zstd.WithDecoderMaxMemory(uint64(MaxBlock)), zstd.WithDecoderMaxWindow(1<<20),
-			zstd.WithDecodeAllCapLimit(true))
-		if err != nil {
-			return nil, err
+		if d.zstd == nil {
+			var err error
+			d.zstd, err = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1),
+				zstd.WithDecoderMaxMemory(uint64(MaxBlock)), zstd.WithDecoderMaxWindow(1<<20),
+				zstd.WithDecodeAllCapLimit(true))
+			if err != nil {
+				return nil, err
+			}
 		}
-		defer d.Close()
-		data, err := d.DecodeAll(stored, make([]byte, 0, int(decoded)))
+		if cap(d.buffer) < int(decoded) {
+			d.buffer = make([]byte, int(decoded))
+		}
+		// Spare capacity from an earlier large block must not relax this limit.
+		data, err := d.zstd.DecodeAll(stored, d.buffer[:0:int(decoded)])
 		if err != nil {
 			return nil, fmt.Errorf("%w: zstd: %v", ErrCorrupt, err)
 		}

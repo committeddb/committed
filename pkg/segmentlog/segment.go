@@ -302,10 +302,16 @@ func decodeBlock(b block, data []byte) ([]Record, error) {
 // for reads and verification. A nil visitor avoids retaining record descriptors.
 // Visitors are internal: no records escape a public read until validation passes.
 func walkBlock(b block, data []byte, visit func(Record)) error {
+	var decoder format.Decoder
+	defer decoder.Close()
+	return walkBlockWithDecoder(b, data, visit, &decoder)
+}
+
+func walkBlockWithDecoder(b block, data []byte, visit func(Record), decoder *format.Decoder) error {
 	if format.CRC(data) != b.crc {
 		return ErrCorrupt
 	}
-	data, err := format.Decode(b.codec, data, b.decoded)
+	data, err := decoder.Decode(b.codec, data, b.decoded)
 	if err != nil {
 		return err
 	}
@@ -405,6 +411,8 @@ func (s *Segment) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 
 // Verify validates every frame, including data outside a particular seek.
 func (s *Segment) Verify() error {
+	var decoder format.Decoder
+	defer decoder.Close()
 	var stored []byte
 	for _, b := range s.blocks {
 		if cap(stored) < int(b.size) {
@@ -415,7 +423,7 @@ func (s *Segment) Verify() error {
 		if _, err := s.r.ReadAt(stored, int64(b.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 			return err
 		}
-		if err := walkBlock(b, stored, nil); err != nil {
+		if err := walkBlockWithDecoder(b, stored, nil, &decoder); err != nil {
 			return err
 		}
 	}
