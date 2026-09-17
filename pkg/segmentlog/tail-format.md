@@ -77,9 +77,11 @@ append. This layer cannot distinguish them and does not consult external
 metadata/Raft bounds. The appender refuses to open such files. There is no API that silently
 repairs, skips, or truncates them.
 
-The scanner bounds group allocation before reading payloads. It retains one group
-plus record descriptors at a time; callers retaining records can retain additional
-groups. Append assembles one bounded group in memory. No tail index/cache is
+The scanner bounds group allocation before reading payloads. Validation-only
+scans, including recovery, reuse a body buffer across groups, growing it when a
+larger validated group requires more space. They create no record descriptors.
+Scans with a visitor allocate separate group bodies so retained payloads remain
+valid; callers retaining records can retain additional groups. Append assembles one bounded group in memory. No tail index/cache is
 implemented. Managed rotation and original-input accounting across rewrites
 are supplied by Log and its catalog checkpoint.
 

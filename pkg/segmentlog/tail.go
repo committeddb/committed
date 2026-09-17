@@ -103,6 +103,8 @@ func scanTailHashed(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start
 	if checkpoint != nil && (!checkpoint.valid(state.Start) || checkpoint.End > size) {
 		return state, ErrCorrupt
 	}
+	header := make([]byte, groupHeaderSize)
+	var body []byte
 	for {
 		if checkpoint != nil {
 			if state.End > checkpoint.End {
@@ -124,7 +126,6 @@ func scanTailHashed(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start
 		if size-state.End < groupHeaderSize {
 			return state, ErrIncompleteTail
 		}
-		header := make([]byte, groupHeaderSize)
 		if _, err = r.ReadAt(header, state.End); err != nil {
 			return state, err
 		}
@@ -146,7 +147,14 @@ func scanTailHashed(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start
 		if total > size-state.End {
 			return state, ErrIncompleteTail
 		}
-		body := make([]byte, int(length)+groupTrailerSize)
+		// Validation-only scans retain no payloads, so reuse their group buffer.
+		// Visitors may keep records after returning and need independent bytes.
+		needed := int(length) + groupTrailerSize
+		if visit != nil || cap(body) < needed {
+			body = make([]byte, needed)
+		} else {
+			body = body[:needed]
+		}
 		if _, err = r.ReadAt(body, state.End+groupHeaderSize); err != nil {
 			return state, err
 		}

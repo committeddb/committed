@@ -142,6 +142,9 @@ invalid input leaves the digest unchanged, and failed write/sync prevents digest
 publication. Existing full verification and process-crash tests also pass. The
 VM, warm-cache, small-sample, and production-scale limitations above still apply.
 
+The [tail recovery buffer comparison](tail-recovery.md) records a subsequent
+change to reduce recovery allocation while retaining incremental hashing.
+
 ## Reproduction
 
 ```sh
