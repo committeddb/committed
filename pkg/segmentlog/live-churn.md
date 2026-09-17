@@ -16,7 +16,8 @@ unaffected append-format files remain selected with identical descriptors.
 
 Each round checks stable coverage and unaffected references, exact retirement
 counts, and all survivor IDs and payloads against an independent expected map
-after reopen. The final append must cross a boundary despite erasure. Another
+after reopen. The fixture now streams append batches and retains expected payload
+digests rather than duplicate payload bytes. The final append must cross a boundary despite erasure. Another
 reopen checks its payload; full verification checks selected file digests, and an
 orphan sweep must find no unpublished files. Normal synchronization is enabled.
 
@@ -68,3 +69,6 @@ files, long-lived metadata readers, sustained fragmentation, or 100 TB payloads.
 The VM's fsync behavior and scheduling do not establish production latency or
 power-loss durability. The Linux binaries were built without the race detector;
 the new regression test separately passed the macOS race detector.
+
+The [full-size experiment](full-size-churn.md) uses the same checks with 64 closed
+20 MiB ranges and a full active tail, and reports replacement and retired bytes.

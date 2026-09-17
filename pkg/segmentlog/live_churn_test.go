@@ -2,6 +2,7 @@ package segmentlog
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -14,6 +15,8 @@ type liveChurnMetrics struct {
 	append, rewrite, reclaim, reopen time.Duration
 	metadataStart, metadataEnd       int64
 	allocated                        int64
+	payloadStart, replacements       int64
+	retired                          uint64
 	free, pending                    int
 }
 
@@ -21,8 +24,18 @@ type liveChurnMetrics struct {
 // per range. It is a file-count/churn fixture, not a large-payload experiment.
 func runLiveChurn(t testing.TB, ranges, rounds int, codec Compression) liveChurnMetrics {
 	t.Helper()
-	const perRange = 8
-	opts := LogOptions{SegmentBytes: perRange * (128 + 16), Encoding: Options{Compression: codec}}
+	return runLiveChurnSize(t, ranges, rounds, codec, 8, 128)
+}
+
+// runLiveChurnSize streams fixture appends and retains expected digests rather
+// than a second copy of the entire payload history.
+func runLiveChurnSize(t testing.TB, ranges, rounds int, codec Compression, perRange, payloadSize int) liveChurnMetrics {
+	t.Helper()
+	if perRange <= 0 || payloadSize < 9 {
+		t.Fatal("invalid churn fixture dimensions")
+		return liveChurnMetrics{}
+	}
+	opts := LogOptions{SegmentBytes: perRange * (payloadSize + 16), Encoding: Options{Compression: codec}}
 	l, err := CreateLog(t.TempDir(), 0, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -32,17 +45,20 @@ func runLiveChurn(t testing.TB, ranges, rounds int, codec Compression) liveChurn
 			_ = l.Close()
 		}
 	})
-	expected := make(map[uint64][]byte, (ranges+1)*perRange)
-	records := make([]Record, 0, (ranges+1)*perRange)
+	expected := make(map[uint64][sha256.Size]byte, (ranges+1)*perRange)
+	records := make([]Record, 0, 64)
 	for i := range (ranges + 1) * perRange {
 		id := uint64(i) * 3
-		payload := bytes.Repeat([]byte{'a'}, 128)
+		payload := bytes.Repeat([]byte{'a'}, payloadSize)
 		binary.LittleEndian.PutUint64(payload, id)
-		expected[id] = bytes.Clone(payload)
+		expected[id] = sha256.Sum256(payload)
 		records = append(records, Record{id, payload})
-	}
-	if err = l.Append(records); err != nil {
-		t.Fatal(err)
+		if len(records) == cap(records) || i == (ranges+1)*perRange-1 {
+			if err = l.Append(records); err != nil {
+				t.Fatal(err)
+			}
+			records = records[:0]
+		}
 	}
 	metadataSize := func() int64 {
 		info, e := os.Stat(filepath.Join(l.path, boltCatalogName))
@@ -51,7 +67,21 @@ func runLiveChurn(t testing.TB, ranges, rounds int, codec Compression) liveChurn
 		}
 		return info.Size()
 	}
-	m := liveChurnMetrics{metadataStart: metadataSize()}
+	fileSize := func(name string) int64 {
+		info, e := os.Stat(filepath.Join(l.path, name))
+		if e != nil {
+			t.Fatal(e)
+		}
+		return info.Size()
+	}
+	initial, err := l.InspectCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := liveChurnMetrics{metadataStart: metadataSize(), payloadStart: fileSize(initial.Active.File)}
+	for _, ref := range initial.Segments {
+		m.payloadStart += fileSize(ref.File)
+	}
 	for round := range rounds {
 		before, e := l.InspectCatalog()
 		if e != nil || len(before.Segments) != ranges {
@@ -62,15 +92,15 @@ func runLiveChurn(t testing.TB, ranges, rounds int, codec Compression) liveChurn
 		result, e := l.Rewrite(t.Context(), uint64(round+1), func(r Record) ([]byte, bool, error) {
 			ordinal := r.ID / 3
 			// Revisit the same scattered ranges to exercise metadata page reuse.
-			if (ordinal/perRange)%16 != 0 {
+			if (ordinal/uint64(perRange))%16 != 0 {
 				return r.Payload, true, nil
 			}
-			if ordinal%perRange == 0 {
+			if ordinal%uint64(perRange) == 0 {
 				delete(expected, r.ID)
 				return nil, false, nil
 			}
 			r.Payload[8]++
-			expected[r.ID] = bytes.Clone(r.Payload)
+			expected[r.ID] = sha256.Sum256(r.Payload)
 			return r.Payload, true, nil
 		})
 		m.rewrite += time.Since(started)
@@ -86,10 +116,17 @@ func runLiveChurn(t testing.TB, ranges, rounds int, codec Compression) liveChurn
 			if previous.Coverage != current.Coverage || (i%16 != 0 && previous != current) {
 				t.Fatal("changed unrelated range", i)
 			}
+			if previous.File != current.File && current.File != "" {
+				m.replacements += fileSize(current.File)
+			}
+		}
+		if result.TailChanged {
+			m.replacements += fileSize(after.Active.File)
 		}
 		started = time.Now()
 		reclaimed, e := l.Reclaim(t.Context())
 		m.reclaim += time.Since(started)
+		m.retired += reclaimed.RemovedBytes
 		wantRemoved := result.ChangedSegments
 		if result.TailChanged {
 			wantRemoved++
@@ -114,7 +151,7 @@ func runLiveChurn(t testing.TB, ranges, rounds int, codec Compression) liveChurn
 		seen := 0
 		if e = l.Scan(t.Context(), Coverage{0, ^uint64(0)}, func(r Record) error {
 			want, ok := expected[r.ID]
-			if !ok || !bytes.Equal(r.Payload, want) {
+			if !ok || sha256.Sum256(r.Payload) != want {
 				return fmt.Errorf("unexpected survivor %d", r.ID)
 			}
 			seen++
@@ -125,7 +162,7 @@ func runLiveChurn(t testing.TB, ranges, rounds int, codec Compression) liveChurn
 	}
 	// The active range remains full according to original accounting, including
 	// erased records. This append must cross a boundary after all churn rounds.
-	last := records[len(records)-1].ID
+	last := uint64((ranges+1)*perRange-1) * 3
 	started := time.Now()
 	if err = l.Append([]Record{{last + 3, []byte("after churn")}}); err != nil {
 		t.Fatal(err)
@@ -187,5 +224,38 @@ func BenchmarkLiveSegmentChurn(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// BenchmarkLiveSegmentChurnFullSize creates 64 closed 20 MiB ranges and a full
+// active tail. Use -benchtime=1x; fixture creation and validation are included in
+// ns/op, while the named phase metrics isolate each operation.
+func BenchmarkLiveSegmentChurnFullSize(b *testing.B) {
+	const rounds = 2
+	for _, codec := range []Compression{NoCompression, ZstdDefault} {
+		b.Run(fmt.Sprintf("codec=%d", codec), func(b *testing.B) {
+			for b.Loop() {
+				m := runLiveChurnSize(b, 64, rounds, codec, (20<<20)/4096, 4080)
+				b.ReportMetric(float64(m.payloadStart), "initial-payload-file-B")
+				b.ReportMetric(float64(m.replacements)/rounds, "replacement-B/round")
+				b.ReportMetric(float64(m.retired)/rounds, "retired-B/round")
+				b.ReportMetric(float64(m.rewrite.Nanoseconds())/rounds/1e6, "scrub-ms/round")
+				b.ReportMetric(float64(m.reclaim.Nanoseconds())/rounds/1e6, "reclaim-ms/round")
+				b.ReportMetric(float64(m.reopen.Nanoseconds())/rounds/1e6, "reopen-ms/round")
+				b.ReportMetric(float64(m.append.Nanoseconds())/1e6, "boundary-ms")
+				b.ReportMetric(float64(m.metadataEnd), "metadata-end-B")
+			}
+		})
+	}
+}
+
+func TestLiveChurnBatchedFixture(t *testing.T) {
+	for _, codec := range []Compression{NoCompression, ZstdDefault} {
+		t.Run(fmt.Sprint(codec), func(t *testing.T) {
+			m := runLiveChurnSize(t, 16, 2, codec, 32, 4080)
+			if m.replacements <= 0 || m.replacements >= m.payloadStart || m.retired <= 0 {
+				t.Fatal("unexpected selective replacement accounting", m)
+			}
+		})
 	}
 }

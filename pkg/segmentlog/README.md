@@ -233,7 +233,9 @@ engine, application boundary, and experimental limitations.
 ## Validation
 
 [Live-segment churn and Linux validation](live-churn.md) covers repeated scrubs,
-metadata page reuse, file retirement, recovery, and post-churn rollover.
+metadata page reuse, file retirement, recovery, and post-churn rollover. The
+[full-size rewrite experiment](full-size-churn.md) extends these checks to a
+1,300 MiB original-frame history and measures local replacement bytes.
 
 [Full-size rollover measurements](rollover-size.md) cover 1, 20, and 32 MiB
 targets, full-active-tail recovery, and installation/metadata commit timing.
