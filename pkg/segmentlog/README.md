@@ -26,6 +26,12 @@ tidwall.
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
 | Durable filesystem (`internal/durablefs`) | File/directory sync and replacement primitives, fault injection | Immutable installation and pointer replacement implemented |
 
+For managed rollover, `segmentStorage` prepares physical files and a private,
+single-use handle. The catalog publisher consumes that handle to select the new
+layout without repeating payload verification or synchronization. Recovery and
+standalone publication establish trust from disk. See the
+[ownership contract](rollover-ownership.md).
+
 Segment lifecycle, catalog publication, and rewriting share one package in the
 repository's Go module. The package does not import the application adapter,
 Raft, protobuf, or bbolt. The adapter checks that an outer record ID matches the
@@ -52,6 +58,10 @@ ID inside its serialized Raft entry.
 - The caller owns input file lifetime and immutability. Returned payloads are
   private to that read, with capacity limited to their length. Retaining a small
   payload can retain its decoded block; clone it for long-lived use.
+
+The standalone segment APIs encode indexed files. Closed append-file ranges are
+opened internally using their catalog references. Their filenames and bytes stay
+unchanged until a rewrite replaces them; no-op rewriting does not re-encode them.
 
 The public I/O boundary deliberately does **not** promise durability or publication.
 Writing/replacing one segment is preparation only. A caller must discard partial
@@ -143,12 +153,14 @@ before delivery. See [tail allocation measurements](tail-benchmarks.md).
 
 `CreateLog` and `OpenLog` connect the tail, segments, and catalog. `Append`
 syncs before success and rotates by a persisted original-frame byte target;
-`Read` and `Seek` span sealed ranges and the active tail. Batch boundaries and
-restarts do not alter sealed ranges. `LastAppended` reports original append
+`Read` and `Seek` span immutable ranges and the active tail. Rollover retains the
+old append file unchanged, recording its size in the catalog; it does not encode
+or compress a replacement. Changed ranges can become indexed rewrite outputs.
+Batch boundaries and restarts do not alter sealed ranges. `LastAppended` reports original append
 progress even when the highest record or every record has been erased. It
 distinguishes an empty log from an appended ID zero and refuses poisoned handles
 until recovery. A nonblocking directory lock enforces exclusive managed log
-ownership until Close, including across processes. Sealing currently blocks
+ownership until Close, including across processes. Rollover currently blocks
 other operations; old files remain until explicit reclamation. See [the
 lifecycle contract and limitations](log-lifecycle.md).
 
@@ -160,8 +172,9 @@ validation; individual reads do not recompute the whole-file digest.
 ## Streaming scans
 
 `Log.Scan(ctx, bounds, visit)` reads surviving records in a half-open ID interval
-under one managed view. Sealed scans skip unrelated ranges and blocks; the
-unindexed tail prefix is scanned once. Memory is bounded by decoded blocks/groups
+under one managed view. Scans skip unrelated ranges; indexed ranges also skip
+unrelated blocks. Closed append files use sequential validation and scanning.
+The active tail prefix is scanned once. Memory is bounded by decoded blocks/groups
 unless callbacks retain payloads. Callbacks must not reenter the log. Appends,
 rewrites, and reclamation wait until completion; this is not a long-lived file pin.
 Cancellation and callback errors stop delivery without poisoning the log. Errors
@@ -186,10 +199,13 @@ even when no records survive. See [whole-log rewriting](whole-log-rewriting.md).
 CURRENT. It represents empty ranges without files, separates physical revision
 from logical scrub generation, and stops publication after I/O failure. Recovery
 selects only CURRENT and rejects missing/corrupt references. It scans full file
-contents, sharing each stored payload block between digest and frame verification.
+contents. Indexed files share each stored payload block between digest and frame
+verification; closed append files use separate semantic and digest passes.
 Verification validates frames without collecting per-record result slices.
 Publication reuses prior verification for exact unchanged immutable references;
-new or changed sealed references and active tails are verified and synced.
+new or changed sealed references and active tails are verified and synced by
+standalone publication. Managed rollover uses the private preparation contract
+instead; it publishes metadata after segment storage establishes file durability.
 It retains old revisions and requires exclusive caller-managed directory ownership. See [the catalog format and publication contract](catalog-format.md).
 
 ## Reclamation

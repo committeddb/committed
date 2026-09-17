@@ -4,6 +4,11 @@ Local exploratory run: macOS arm64, Go 1.26.6. This is a deterministic filesyste
 and content-equivalence experiment, not a throughput benchmark or a production
 backup-cost estimate. Production Storage remains unchanged.
 
+The measurements below were recorded before rollover retained append files.
+That implementation converted and compressed closed tails during rollover;
+the current implementation retains their original uncompressed bytes. The
+recorded sizes do not describe the current initial storage footprint.
+
 ## Workload and comparison
 
 The fixture has 512 sparse-indexed Committed proposals. Each contains one subject

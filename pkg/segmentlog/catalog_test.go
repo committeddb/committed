@@ -98,6 +98,10 @@ func TestCatalogValidation(t *testing.T) {
 		func(c *Catalog) { c.Segments[0].Coverage.Start = 1 }, func(c *Catalog) { c.Segments[0].Coverage.End = 0 },
 		func(c *Catalog) { c.Segments[0].File = "../one.seg" }, func(c *Catalog) { c.Segments[0].File = "CURRENT" },
 		func(c *Catalog) { c.Segments[0].SHA256 = [32]byte{} }, func(c *Catalog) { c.Segments[0].Count = 0 },
+		func(c *Catalog) { c.Segments[0].TailBytes = -1 },
+		func(c *Catalog) { c.Segments[0].TailBytes = 1 },
+		func(c *Catalog) { c.Segments[0].TailBytes = 4096 },    // Indexed filename cannot name an append file.
+		func(c *Catalog) { c.Segments[0].File = "one.active" }, // Append filename requires frozen size.
 		func(c *Catalog) { c.Segments[0].Count = 1001 }, func(c *Catalog) { c.Active = &TailRef{File: "tail.active", Start: 99} },
 		func(c *Catalog) {
 			c.Segments = append(c.Segments, SegmentRef{Coverage: Coverage{1000, 2000}, File: "one.seg", Count: 1, SHA256: c.Segments[0].SHA256})

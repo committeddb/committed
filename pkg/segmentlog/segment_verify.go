@@ -8,11 +8,23 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog/internal/format"
 )
 
-// verifySegmentDigest retains full file and semantic verification while reading
-// stored payload blocks only once. The ReaderAt must remain immutable, as for
-// OpenSegment. Metadata is first validated by OpenSegment, then read in file
-// order for the whole-file digest; only one bounded stored/decoded block is live.
+// verifySegmentDigest verifies file contents and metadata against the reference.
+// The ReaderAt must remain immutable. Indexed payload blocks are read once;
+// closed append files have separate semantic and digest passes.
 func verifySegmentDigest(r io.ReaderAt, size int64, ref SegmentRef) error {
+	if ref.TailBytes != 0 {
+		if _, err := openRangeSource(r, size, ref); err != nil {
+			return err
+		}
+		digest := sha256.New()
+		if _, err := io.Copy(digest, io.NewSectionReader(r, 0, size)); err != nil {
+			return err
+		}
+		if !bytes.Equal(digest.Sum(nil), ref.SHA256[:]) {
+			return ErrCorrupt
+		}
+		return nil
+	}
 	segment, err := OpenSegment(r, size)
 	if err != nil {
 		return err

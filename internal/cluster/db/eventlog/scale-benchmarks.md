@@ -17,7 +17,9 @@ Each iteration builds a new history, reclaims setup artifacts, and closes it.
 Timed phases reopen it, append one record, erase one middle record, reclaim
 obsolete files, and scan every survivor. The append forces segmented rotation:
 255 original frames consume 1,048,560 bytes, just below the 1 MiB target.
-Tidwall framing differs, so the same input does not imply the same rotation work.
+Tidwall does not rotate on this measured append: its current file is below its
+rollover threshold in both cases. These append timings are not a comparison of
+rollover latency between backends.
 The comparison uses the experimental tidwall generation container, not production
 Storage's append path.
 
@@ -26,7 +28,7 @@ reopen checks that the erased ID remains absent, the appended payload remains
 byte-identical, and original append progress is preserved. The benchmark fails
 if those checks fail.
 
-## Measured phase times
+## Recorded baseline before retained append files
 
 All times below are milliseconds. Each row is a single sample.
 
@@ -94,8 +96,67 @@ The established structural improvement is that unchanged sealed payloads are no
 longer read or synced during publication. Complete catalog metadata work remains.
 Recovery, rewrite preflight, and reclamation still verify the complete live layout.
 
-The remaining boundary cost includes four synchronous durable publications:
+That implementation still had four synchronous durable publications:
 sealed segment, new active tail, catalog, and CURRENT, followed by the new append.
 A separate local timing trace measured roughly 10 ms per publication. Sealing and
-these durability steps still block the caller. The follow-up does not establish
+these durability steps blocked the caller. The follow-up did not establish
 acceptable production append latency or solve the remaining synchronous stall.
+
+## Retained append-file rollover
+
+After rollover began retaining the completed append file unchanged, a separate
+single-iteration run produced the following times in milliseconds. Tests and lint
+had completed before this run. These are individual warm-filesystem samples,
+not latency distributions or a controlled before/after comparison.
+
+| Encoding | Batches | Build | Reopen | Append | Scrub | Reclaim | Scan |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain | 8 | 288.3 | 6.04 | 32.74 | 54.95 | 24.00 | 4.75 |
+| Plain | 64 | 2,694 | 97.88 | 53.96 | 165.4 | 177.3 | 36.72 |
+| Zstd | 8 | 322.3 | 38.16 | 51.68 | 80.87 | 41.30 | 4.81 |
+| Zstd | 64 | 2,766 | 53.68 | 32.18 | 139.7 | 82.07 | 35.01 |
+
+The verified structural change is removal of rollover's converted segment write
+and publication. The old append file keeps its name, inode, and bytes. Only the
+new tail, catalog, and CURRENT are published; appending and syncing the new
+records follows. Hashing and validation of the newly immutable reference remain.
+The append samples do not establish a consistent latency improvement over the
+incremental-publication run, and synchronous boundary stalls remain.
+
+Both encoding configurations now retain uncompressed append files on rollover.
+The zstd setting applies to indexed rewrite outputs; the initial histories have
+the same physical encoding. A changed range becomes an indexed replacement,
+while unchanged ranges retain their append framing. Reclamation removed about
+1.08 MB at 64 batches, compared with the earlier 2.13 MB baseline that also
+retired a converted tail.
+
+Closed append files use sequential validation and scanning instead of indexed
+block reads. The measured 64-batch scans took about 35–37 ms, versus 20–21 ms in
+the original segmented baseline. Recovery still verifies all referenced history;
+these samples do not demonstrate improved recovery performance. Every measured
+run checked survivor IDs, payload lengths, erasure, and append recovery.
+
+## Explicit rollover preparation contract
+
+With segment storage owning file preparation and the catalog publisher consuming
+a private prepared-rollover handle, three single-iteration runs per segmented
+case measured the following boundary appends. Tests and lint completed before
+this run; the same machine and warm-filesystem workload were used.
+
+| Encoding | Batches | Append range (ms) | Median (ms) |
+| --- | ---: | ---: | ---: |
+| plain | 8 | 30.27–35.78 | 34.48 |
+| plain | 64 | 30.21–34.03 | 33.71 |
+| zstd | 8 | 28.06–29.87 | 28.71 |
+| zstd | 64 | 27.86–32.60 | 29.03 |
+
+The code path now omits recovery-style opening of the new empty tail, repeated
+verification and synchronization of prepared payloads, and the catalog layer's
+extra directory sync before metadata installation. The old file is still read
+once to calculate its digest. New tail, catalog, and CURRENT installations still
+synchronize their files and directories, followed by the new append's sync.
+
+These samples establish neither production latency nor a controlled speedup over
+the earlier single samples. Boundary latency remains tens of milliseconds.
+Recovery and read paths are unchanged by the preparation contract. The measured
+lifecycle and subsequent reopen checks passed for all twelve runs.

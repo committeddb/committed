@@ -2,7 +2,6 @@ package segmentlog
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -23,7 +22,7 @@ var (
 )
 
 // LogOptions configures creation. The rotation target is persisted in the
-// catalog; encoding policy may change on reopen without rewriting existing files.
+// catalog; encoding applies to indexed rewrite outputs, not rollover.
 type LogOptions struct {
 	// SegmentBytes targets original framed record bytes, excluding append-group
 	// overhead. Zero selects 20 MiB. Maximum is 32 MiB. Oversized records stand alone.
@@ -31,17 +30,19 @@ type LogOptions struct {
 	Encoding     Options
 }
 
+// fileInstaller returns success only after both file contents and its directory
+// entry are durable. Failed installs may leave artifacts; callers must not
+// publish references to them.
 type fileInstaller interface {
 	Install(string, func(io.Writer) error) (durablefs.Result, error)
 }
 
-// Log integrates a catalog, one active tail, and synchronous segment sealing.
+// Log integrates a catalog, one active tail, and immutable closed ranges.
 // It holds an advisory directory lock across processes and instances until Close.
-// Methods serialize; this prototype blocks reads/appends while sealing. The caller
+// Methods serialize; rollover blocks reads/appends. The caller
 // must not replace the directory or bypass ownership with lower-level writers.
 // Rewrite publishes whole-log transformations; RewriteSealed limits their scope.
-// Reclaim cleans obsolete managed files. Retirement for future pinned views
-// remains pending.
+// Reclaim cleans obsolete managed files. There are no pinned views.
 type Log struct {
 	mu       sync.Mutex
 	path     string
@@ -136,8 +137,8 @@ func CreateLog(path string, start uint64, opts LogOptions) (result *Log, retErr 
 
 // OpenLog follows CURRENT and verifies all referenced history. It refuses
 // incomplete tails without truncation. It ignores unreferenced artifacts and
-// leaves them for future retirement/recovery policy. Encoding affects future
-// sealing only. Catalogs without a managed rotation target are not adopted.
+// leaves them for Reclaim. Encoding affects indexed rewrite outputs only.
+// Catalogs without a managed rotation target are not adopted.
 func OpenLog(path string, encoding Options) (result *Log, retErr error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
@@ -295,7 +296,7 @@ func tailRecords(file io.ReaderAt, end int64) iter.Seq2[Record, error] {
 }
 
 // rotate runs under the log mutex. It keeps the old catalog/tail authoritative
-// until both the sealed replacement and new empty tail are durably installed.
+// until the new empty tail is durably installed and the successor catalog is published.
 func (l *Log) rotate() error {
 	state, err := l.tail.State()
 	if err != nil {
@@ -311,45 +312,16 @@ func (l *Log) rotate() error {
 	if c.Revision == ^uint64(0) || len(c.Segments) >= format.MaxBlocks {
 		return ErrInvalid
 	}
-	coverage := Coverage{Start: state.Start, End: state.Last + 1}
-	ref := SegmentRef{Coverage: coverage}
-	if state.Count > 0 {
-		name, err := uniqueName("segment", coverage.Start, ".seg")
-		if err != nil {
-			return err
-		}
-		hash := sha256.New()
-		if _, err = l.dir.Install(name, func(w io.Writer) error {
-			return WriteSegment(io.MultiWriter(w, hash), coverage, tailRecords(l.file, state.End), l.encoding)
-		}); err != nil {
-			return err
-		}
-		ref.File, ref.Count = name, state.Count
-		copy(ref.SHA256[:], hash.Sum(nil))
-	}
-	newName, err := uniqueName("tail", coverage.End, ".active")
+	storage := segmentStorage{path: l.path, installer: l.dir}
+	prepared, err := storage.prepareRollover(c, l.file, state)
 	if err != nil {
 		return err
 	}
-	if _, err = l.dir.Install(newName, func(w io.Writer) error { return WriteTailHeader(w, coverage.End) }); err != nil {
-		return err
-	}
-	newFile, err := os.OpenFile(filepath.Join(l.path, newName), os.O_RDWR, 0) // #nosec G304 -- Internally generated basename in the exclusively managed log directory.
-	if err != nil {
-		return err
-	}
-	newTail, err := OpenTail(newFile)
-	if err != nil {
-		return errors.Join(err, newFile.Close())
-	}
-	c.Revision++
-	c.Segments = append(c.Segments, ref)
-	c.Active = &TailRef{File: newName, Start: coverage.End}
-	if err = l.catalog.Publish(c.Revision-1, c); err != nil {
-		return errors.Join(err, newFile.Close())
+	if err = l.catalog.publishRollover(prepared); err != nil {
+		return errors.Join(err, prepared.file.Close())
 	}
 	old := l.file
-	l.file, l.tail, l.framed = newFile, newTail, 0
+	l.file, l.tail, l.framed = prepared.file, prepared.tail, 0
 	return old.Close()
 }
 
@@ -380,7 +352,7 @@ func (l *Log) Seek(id uint64) (Record, error) {
 			if err != nil {
 				return Record{}, err
 			}
-			s, err := OpenSegment(f, info.Size())
+			s, err := openRangeSource(f, info.Size(), ref)
 			if err != nil {
 				return Record{}, err
 			}

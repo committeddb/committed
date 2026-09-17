@@ -21,8 +21,16 @@ and surviving Count. Empty ranges retain Coverage with zero Count, empty filenam
 and zero digest. Ranges are contiguous from Start, cannot overlap, and cannot
 reference the same file twice. An active tail begins immediately after sealed
 coverage (or at Start when no sealed ranges exist). Its end is read from validated
-append groups, not copied from a stale catalog. Closed unsealed tails are not yet
-represented in this version.
+append groups, not copied from a stale catalog.
+
+An immutable SegmentRef may have a nonzero `TailBytes` field. It identifies a
+closed append-format file, retaining its `.active` basename and exactly that byte
+size. Its Count describes physical survivors and Coverage preserves the original
+range, including any erased high IDs. No footer or conversion is written into the
+old file. Zero/omitted TailBytes identifies the existing indexed `.seg` format.
+Readers reject size, count, starting-ID, coverage, or digest mismatches. Indexed
+rewrite outputs reset TailBytes to zero. Older readers reject the added field
+through canonical catalog validation; this remains an experimental format.
 
 A rewritten TailRef can include an optional Checkpoint with End, Last, Count,
 and Framed fields. It restores original append accounting at a fixed complete-
@@ -32,7 +40,9 @@ catalog encoding. Older experimental readers reject checkpoint-bearing catalogs
 through their canonical encoding check; this is not a production upgrade path.
 
 Data filenames must be single non-hidden path components ending in `.seg` or
-`.active`. Referenced files must be regular files; symbolic links are rejected.
+`.active`. Closed append references use `.active` too; catalog position determines
+whether a file is writable. Referenced files must be regular files; symbolic
+links are rejected.
 Limits are 65,536 ranges and 16 MiB encoded catalog payload. The directory is
 trusted and exclusively managed; these checks are not a sandbox against a
 concurrent process replacing files or directories.
@@ -77,7 +87,7 @@ The CRC covers its first 48 bytes. Revision and digest derive the exact catalog
 filename. CURRENT's revision must match the decoded catalog. Neither file format
 is stable or adopted as a production storage contract yet.
 
-## Publication protocol
+## Standalone publication protocol
 
 1. Validate the candidate layout and expected revision.
 2. Check new or changed segment references for coverage/count, whole-file SHA-256,
@@ -113,11 +123,12 @@ integrity checks. The catalog itself is still validated and serialized in full.
 
 ## Current limitations
 
-- Startup reads all referenced segment contents; publication reads only new or
-  changed sealed references and the active tail. SHA-256 and
-  block/frame verification share one read of each stored payload block. Header,
+- Startup reads all referenced segment contents; standalone publication reads
+  new or changed sealed references and the active tail. For indexed files, SHA-256
+  and block/frame verification share one read of each stored payload block. Header,
   index, and footer metadata are read for structural validation and again for
-  the whole-file digest. Startup work still grows with stored payload bytes.
+  the whole-file digest. Closed append files use separate semantic and digest
+  passes. Startup work still grows with stored payload bytes.
 - Catalog publication itself retains old catalogs and payload revisions. The
   managed Log now provides explicit [reclamation](reclamation.md) of recognized
   obsolete files under exclusive ownership, with reopen/retry after failure.
@@ -127,3 +138,18 @@ integrity checks. The catalog itself is still validated and serialized in full.
   The managed Log supplies record transformations and original rotation accounting.
 - Catalog publication does not yet reconcile metadata in another database, prove
   incomplete suffixes safe to discard, implement backups, or negotiate peer data.
+
+## Managed rollover publication
+
+Managed rollover has a private preparation contract separate from public
+`CatalogStore.Publish`. Segment storage retains the synchronized old append file,
+computes its digest, and durably installs the new empty tail. The catalog publisher
+consumes that process-local preparation once, checking its source directory,
+history, revision, and active filename. It builds and validates the successor
+layout, installs its catalog, and replaces CURRENT. It does not reopen or resync
+the prepared payload files or repeat the installer's directory sync.
+
+There is no persisted preparation receipt or additional on-disk format. A failed
+publication still poisons the managed log; recovery follows CURRENT and verifies
+all references from disk. Standalone publication and rewrite publication retain
+the verification protocol described above.

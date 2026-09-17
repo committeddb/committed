@@ -30,6 +30,8 @@ type SegmentRef struct {
 	File     string
 	SHA256   [32]byte
 	Count    uint64
+	// TailBytes freezes an append-format file at this exact size. Zero denotes indexed encoding.
+	TailBytes int64 `json:",omitempty"`
 }
 
 // TailRef names the single active tail, whose end is recovered from its groups.
@@ -55,7 +57,7 @@ func (c TailCheckpoint) valid(start uint64) bool {
 // Catalog is an experimental complete local layout. Revision tracks physical
 // layout, Generation tracks logical rewriting, and History identifies the stream.
 // Segments cover a contiguous interval beginning at Start. Active, if present,
-// begins immediately after them. This first catalog format has no closed tails.
+// begins immediately after them. Immutable ranges may retain closed append-format files.
 type Catalog struct {
 	History    [16]byte
 	Revision   uint64
@@ -83,12 +85,19 @@ func validateCatalog(c Catalog) error {
 		}
 		next = s.Coverage.End
 		if s.Count == 0 {
-			if s.File != "" || s.SHA256 != ([32]byte{}) {
+			if s.File != "" || s.SHA256 != ([32]byte{}) || s.TailBytes != 0 {
 				return ErrInvalid
 			}
 			continue
 		}
-		if s.Count > s.Coverage.End-s.Coverage.Start || !validDataName(s.File, ".seg") || s.SHA256 == ([32]byte{}) || seen[s.File] {
+		suffix := ".seg"
+		if s.TailBytes != 0 {
+			if s.TailBytes < tailHeaderSize+groupHeaderSize+groupTrailerSize+format.FrameOverhead {
+				return ErrInvalid
+			}
+			suffix = ".active"
+		}
+		if s.Count > s.Coverage.End-s.Coverage.Start || !validDataName(s.File, suffix) || s.SHA256 == ([32]byte{}) || seen[s.File] {
 			return ErrInvalid
 		}
 		seen[s.File] = true
@@ -361,6 +370,15 @@ func (s *CatalogStore) publish(next Catalog, initial bool) error {
 	if err = s.pub.Sync(); err != nil {
 		return fail(err)
 	}
+	return s.publishMetadata(next, b, initial)
+}
+
+// publishMetadata requires durable referenced files and validated catalog bytes.
+// Its caller holds s.mu (or exclusively owns an unpublished new store).
+// Only catalog installation and authoritative pointer replacement happen here.
+func (s *CatalogStore) publishMetadata(next Catalog, b []byte, initial bool) error {
+	var err error
+	fail := func(err error) error { s.poison = errors.Join(ErrCatalogPoisoned, err); return s.poison }
 	name := catalogName(next.Revision, sha256.Sum256(b))
 	path := filepath.Join(s.path, name)
 	if _, err = os.Lstat(path); err == nil {

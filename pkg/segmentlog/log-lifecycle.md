@@ -32,7 +32,8 @@ LogOptions.SegmentBytes is persisted in the catalog and cannot change through
 publication. Zero at creation selects 20 MiB; explicit targets range from 16 bytes
 to 32 MiB, subject to the block-index capacity for the chosen encoding options.
 Standalone catalogs omit this field; OpenLog refuses to adopt those catalogs.
-Encoding options may change on reopen and affect future sealed files only.
+Encoding options may change on reopen and affect indexed rewrite outputs.
+Rollover retains the plain append format and does not compress records.
 
 The rotation counter counts original record frames: payload bytes plus 16 bytes
 per frame. It excludes append-group headers/trailers and compression. Before a
@@ -43,10 +44,10 @@ at the target is also sealed on the next record. No empty segment is produced.
 Each sealed range retains its tail's original Start and ends at its last record
 ID plus one. The new active tail starts at that exclusive end. Sparse IDs do not
 shift these boundaries. Close/reopen reconstructs the current framed-byte count
-from validated records and any persisted rewrite checkpoint. Identical records,
-target, and encoding produce the same
-sealed ranges and bytes regardless of append batch boundaries or intervening
-reopens. Append-group bytes in the active tail can differ between batch schedules.
+from validated records and any persisted rewrite checkpoint. Identical records
+and target produce the same sealed ranges regardless of append batch boundaries
+or intervening reopens. Retained append-group bytes and hashes can differ between
+batch schedules. Once a file becomes immutable, no-op rewrites preserve its bytes.
 
 Whole-log rewriting persists original input accounting in a catalog checkpoint,
 independently of surviving payload size. Erasing tail records does not free their
@@ -56,18 +57,22 @@ original rotation budget or reduce the recovered append frontier.
 
 Under the log mutex:
 
-1. Encode the complete validated active tail into a new sealed file. Sync/install
-   it and compute its whole-file SHA-256 for the catalog.
-2. Durably install the next empty tail and open its appender.
-3. Publish a successor catalog containing the sealed range and new active tail.
-   Generation remains unchanged; this is a physical layout change.
+1. Retain the synchronized old append file under its existing name. Record its
+   exact byte size and compute its SHA-256 without changing or copying its bytes.
+   An entirely erased tail becomes an empty range descriptor without a file.
+2. Segment storage durably installs the next empty tail and constructs its
+   appender from the known empty header. This does not call recovery scanning.
+3. The catalog publisher consumes the private prepared-rollover handle and
+   publishes a successor catalog containing the closed range and new active tail.
+   The handle is bound to the source directory, history, revision, and active file
+   and can be consumed only once. Generation remains unchanged.
 4. Switch the in-memory active handle and close the predecessor.
 5. Append the next records to the new tail and sync before acknowledging them.
 
-Sealed files and tails receive unique names; the catalog digest identifies sealed
-content. Names do not affect encoded bytes. Before step 3, CURRENT still selects
-the old tail. After step 3, CURRENT selects its sealed replacement and the new
-empty tail. Reopening uses that selection and ignores unpublished artifacts.
+New tail and indexed rewrite files receive unique names; the catalog digest
+identifies immutable content. Names do not affect encoded bytes. Before step 3,
+CURRENT still selects the old tail. After step 3, CURRENT selects that same file as an immutable range
+and the new empty tail. Reopening uses that selection and ignores unpublished artifacts.
 
 Any append or rotation failure poisons the Log. Reads and writes then refuse to
 use the potentially uncertain view until Close/reopen. Recovery can retain valid
@@ -82,16 +87,27 @@ are rejected before any of its records are written.
 Read performs exact lookup; Seek finds the first survivor at or above an ID,
 including across sparse/empty ranges. They hold the Log mutex, open sealed files
 on demand, and scan the active tail. Returned payloads are private to the read.
-There are no long-lived iterators, reader pins, or block caches at this layer yet.
+Closed append files are validated sequentially when opened for a read, including
+exact size, start, surviving count, and upper coverage bound. Their records are
+then read through the tail scanner. Indexed rewrite outputs retain block-index
+lookups. There are no long-lived iterators, reader pins, or block caches.
 
-Sealing and catalog validation run synchronously while reads/appends are blocked.
-Catalog publication verifies new or changed sealed references and the active tail.
-Unchanged immutable files reuse their confirmed verification and durability.
+Rollover and catalog validation run synchronously while reads/appends are blocked.
+Rollover performs no format conversion, compression, or replacement-file write.
+Rollover publication trusts the exclusively owned appender's synchronized state
+and the installer's completed durability work. It neither reopens payload files
+nor repeats their file/directory synchronization. It installs the catalog and
+replaces CURRENT with the existing durable filesystem primitives. The preparation
+handle is in memory only; recovery never trusts it.
+
+Standalone catalog publication and rewrite publication still verify new or changed
+sealed references and the active tail. Unchanged immutable files reuse their
+confirmed verification and durability.
 Complete catalog metadata is still validated and serialized on each rotation.
 
-Old tails, catalogs, sealed revisions, and crash orphans remain until explicit
+Obsolete tails, catalogs, rewritten revisions, and crash orphans remain until explicit
 `Reclaim(ctx)` validates the live set and removes recognized obsolete files.
-Rotation temporarily increases disk usage until that call. See the
+Closed append files remain live references and are preserved by reclamation. See the
 [reclamation contract](reclamation.md). Whole-log transformations now publish
 through `Rewrite`; see [its contract](whole-log-rewriting.md). The managed log has
 no pinned views, background sealing, backup capture, or production database
@@ -99,9 +115,9 @@ integration. It does not establish application erasure completion.
 
 ## Evidence
 
-Tests compare ranges and sealed SHA-256 values across multiple batch sizes and
-restarts; cover oversized records and gaps; ensure invalid batches do not partly
-write; simulate failures preparing either file and before/after CURRENT switches;
+Tests compare ranges and counts across multiple batch sizes and restarts;
+check that rollover preserves file identity and bytes; cover oversized records and gaps; ensure invalid batches do not partly
+write; simulate failures preparing the new tail and before/after CURRENT switches;
 recover acknowledged and unacknowledged durable prefixes; preserve incomplete
 tails; change encoding without touching existing files; and run concurrent reads
 with appends under the race detector. Fault injection tests protocol behavior,

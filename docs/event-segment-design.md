@@ -46,13 +46,16 @@ after erasing 110:
 ```
 
 Managed append syncs before returning success. Rotation uses persisted original
-framed-byte accounting, independent of append batch boundaries. Tail rewrite
+framed-byte accounting, independent of append batch boundaries. A completed append
+file becomes an immutable range without copying or changing its bytes. Its exact
+size is recorded in the catalog; subsequent writes use a new active file. Tail rewrite
 checkpoints preserve original append progress and rotation accounting even when
 records are erased. `LastAppended` reports original progress rather than the last
 surviving record.
 
 `Read` performs exact lookup, `Seek` finds the next survivor at or after an ID,
-and `Scan` visits a half-open range under one managed view. Missing IDs are
+and `Scan` visits a half-open range under one managed view. Closed append files
+use sequential validation and reads; indexed files use block indexes. Missing IDs are
 reported separately from corrupt data. Segment blocks support plain encoding and
 independent zstd compression; a block is stored plain when compression would not
 reduce its size.
@@ -80,10 +83,13 @@ removes recognized obsolete artifacts under exclusive ownership and retains
 unknown files. Old payload files can remain until reclamation succeeds.
 
 The segmented managed log serializes reads, append, sealing, rewrite, and
-reclamation. Sealing is synchronous. It has no background preparation, pinned
+reclamation. Rollover and catalog publication are synchronous, but rollover does
+not convert or compress the old append file. It has no background preparation, pinned
 backup views, or decoded-block cache. Startup verifies all referenced payloads.
-Publication verifies new or changed sealed references and the active tail, reusing
-prior verification for exact unchanged immutable references. Catalogs contain
+Standalone and rewrite publication verify new or changed sealed references and
+the active tail, reusing prior verification for exact unchanged immutable references.
+Managed rollover separates physical preparation from metadata publication through
+a private, single-use handle; it does not repeat preparation's file checks or syncs. Catalogs contain
 complete layouts. The tests do not establish TB- or PB-scale operation.
 
 Incomplete tail suffixes are reported without automatic truncation. Storage alone

@@ -102,7 +102,7 @@ func (l *Log) scanSegment(ref SegmentRef, bounds Coverage, visit func(Record) er
 	if err != nil {
 		return err
 	}
-	segment, err := OpenSegment(f, info.Size())
+	segment, err := openRangeSource(f, info.Size(), ref)
 	if err != nil {
 		return err
 	}

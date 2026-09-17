@@ -165,7 +165,7 @@ func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Trans
 	if err != nil {
 		return replacement, false, err
 	}
-	segment, err := OpenSegment(f, info.Size())
+	segment, err := openRangeSource(f, info.Size(), ref)
 	if err != nil {
 		return replacement, false, err
 	}
@@ -173,7 +173,7 @@ func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Trans
 		return replacement, false, ErrCorrupt
 	}
 	replacement = ref
-	changed, err = segment.prepareRewrite(ctx, transform, func(records iter.Seq2[Record, error]) error {
+	changed, err = prepareRewrite(ctx, segment.Records(), transform, func(records iter.Seq2[Record, error]) error {
 		// Peek at the transformed stream: an entirely erased range needs no file.
 		// Pulling is bounded by decoded blocks and never repeats the transformation.
 		next, stop := iter.Pull2(records)
