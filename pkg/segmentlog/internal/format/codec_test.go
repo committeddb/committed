@@ -3,6 +3,8 @@ package format
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"testing"
 )
 
@@ -123,5 +125,42 @@ func TestStandaloneDecodeOwnsOutput(t *testing.T) {
 	}
 	if !bytes.Equal(data, first) {
 		t.Fatal("later decode changed retained output")
+	}
+}
+
+func TestEncoderReusePreservesBytes(t *testing.T) {
+	random := make([]byte, 256<<10)
+	rng := rand.New(rand.NewPCG(1, 2))
+	for i := range random {
+		random[i] = byte(rng.Uint32())
+	}
+	inputs := [][]byte{
+		bytes.Repeat([]byte("a"), 4096), random,
+		bytes.Repeat([]byte("large"), 200000), bytes.Repeat([]byte("b"), 32), random[:64],
+	}
+	for level := 1; level <= 4; level++ {
+		t.Run(fmt.Sprint(level), func(t *testing.T) {
+			e, err := NewEncoder(level)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer e.Close()
+			for _, input := range inputs {
+				// EncodeAll with a nil destination is the previous allocation policy.
+				expected := e.zstd.EncodeAll(input, nil)
+				wantCodec := Zstd
+				if len(expected) >= len(input) {
+					expected, wantCodec = input, Plain
+				}
+				codec, stored := e.Encode(input)
+				if codec != wantCodec || !bytes.Equal(stored, expected) {
+					t.Fatal("changed encoding", level, len(input), codec, wantCodec)
+				}
+				decoded, err := Decode(codec, stored, uint32(len(input)))
+				if err != nil || !bytes.Equal(decoded, input) {
+					t.Fatal("roundtrip", level, len(input), err)
+				}
+			}
+		})
 	}
 }

@@ -247,3 +247,30 @@ func TestConcurrentCompressedReads(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkMultiBlockEncoding(b *testing.B) {
+	for _, random := range []bool{false, true} {
+		records := make([]Record, 5120)
+		rng := rand.New(rand.NewPCG(1, 2))
+		for i := range records {
+			payload := bytes.Repeat([]byte("x"), 4080)
+			if random {
+				for j := range payload {
+					payload[j] = byte(rng.Uint32())
+				}
+			}
+			records[i] = Record{uint64(i), payload}
+		}
+		for _, codec := range []Compression{NoCompression, ZstdDefault} {
+			b.Run(fmt.Sprintf("random=%t/codec=%d", random, codec), func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(5120 * 4096)
+				for b.Loop() {
+					if err := WriteSegment(io.Discard, Coverage{0, 5120}, sequence(records...), Options{Compression: codec}); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}

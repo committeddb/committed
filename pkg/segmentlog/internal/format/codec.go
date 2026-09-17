@@ -15,7 +15,10 @@ const (
 )
 
 // Encoder is owned by one segment writer, with no background workers.
-type Encoder struct{ zstd *zstd.Encoder }
+type Encoder struct {
+	zstd   *zstd.Encoder
+	buffer []byte
+}
 
 // NewEncoder accepts 0 for plain or zstd effort levels 1 (fast) through 4 (best).
 // The caller validates the public encoding options before construction.
@@ -34,15 +37,18 @@ func (e *Encoder) Close() {
 	if e.zstd != nil {
 		_ = e.zstd.Close()
 	}
+	e.buffer = nil
 }
 
 // Encode falls back to plain storage if compression does not save bytes. Both
-// encodings are bounded by the decoded block limit. Plain output aliases input.
+// encodings are bounded by the decoded block limit. Plain output aliases input;
+// compressed output is borrowed until the next Encode call.
 func (e *Encoder) Encode(data []byte) (Codec, []byte) {
 	if e.zstd == nil {
 		return Plain, data
 	}
-	encoded := e.zstd.EncodeAll(data, nil)
+	encoded := e.zstd.EncodeAll(data, e.buffer[:0])
+	e.buffer = encoded
 	if len(encoded) >= len(data) {
 		return Plain, data
 	}
