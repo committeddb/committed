@@ -39,15 +39,15 @@ func TestPreparedRolloverPublishesMetadataOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	pub := &failingPublisher{catalogPublisher: log.catalog.pub, at: "sync", boom: errors.New("redundant directory sync")}
-	log.catalog.pub = pub
-	if err := log.catalog.publishRollover(p); err != nil {
+	pub := &failingPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, at: "sync", boom: errors.New("redundant directory sync")}
+	log.catalog.(*CatalogStore).pub = pub
+	if err := log.catalog.(*CatalogStore).publishRollover(p); err != nil {
 		t.Fatal(err)
 	}
 	if len(pub.calls) != 2 || pub.calls[0] != "install" || pub.calls[1] != "replace" {
 		t.Fatal("unexpected publication protocol", pub.calls)
 	}
-	if err := log.catalog.publishRollover(p); !errors.Is(err, ErrInvalid) {
+	if err := log.catalog.(*CatalogStore).publishRollover(p); !errors.Is(err, ErrInvalid) {
 		t.Fatal("reused preparation", err)
 	}
 	if _, err := OpenCatalogStore(log.path); !errors.Is(err, os.ErrNotExist) {
@@ -77,9 +77,9 @@ func TestPreparedRolloverRejectsWrongLayout(t *testing.T) {
 				t.Fatal(err)
 			}
 			p := prepareTestRollover(t, log)
-			store := log.catalog
+			store := log.catalog.(*CatalogStore)
 			if mode == "other-store" {
-				store = newLog(t, 32).catalog
+				store = newLog(t, 32).catalog.(*CatalogStore)
 			} else {
 				c, err := store.Current()
 				if err != nil {
@@ -109,7 +109,7 @@ func TestPreparedRolloverPublicationFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			boom := errors.New("publication failure")
-			log.catalog.pub = &failingPublisher{catalogPublisher: log.catalog.pub, at: stage, boom: boom}
+			log.catalog.(*CatalogStore).pub = &failingPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, at: stage, boom: boom}
 			if err := log.Append([]Record{{20, nil}}); !errors.Is(err, boom) || !errors.Is(err, ErrLogPoisoned) {
 				t.Fatal(err)
 			}

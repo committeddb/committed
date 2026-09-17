@@ -3,9 +3,6 @@ package segmentlog
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
-	"sort"
 )
 
 // Scan visits surviving records in [bounds.Start, bounds.End), in increasing ID
@@ -34,7 +31,7 @@ func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) erro
 	if bounds.Start == bounds.End {
 		return nil
 	}
-	c, err := l.catalog.Current()
+	c, err := l.catalog.head()
 	if err != nil {
 		return err
 	}
@@ -47,8 +44,10 @@ func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) erro
 		}
 		return ctx.Err()
 	}
-	first := sort.Search(len(c.Segments), func(i int) bool { return c.Segments[i].Coverage.End > bounds.Start })
-	for _, ref := range c.Segments[first:] {
+	for ref, err := range l.catalog.ranges(bounds) {
+		if err != nil {
+			return err
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -93,7 +92,7 @@ func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) erro
 }
 
 func (l *Log) scanSegment(ref SegmentRef, bounds Coverage, visit func(Record) error) (err error) {
-	f, err := os.Open(filepath.Join(l.path, ref.File))
+	f, err := openRangeFile(l.path, ref)
 	if err != nil {
 		return err
 	}

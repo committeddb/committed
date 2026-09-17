@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io"
 	"iter"
+	"os"
+	"path/filepath"
 )
 
 // rangeSource keeps managed range operations independent of physical encoding.
@@ -80,4 +82,18 @@ func rangeRecords(records iter.Seq2[Record, error], bounds Coverage) iter.Seq2[R
 
 func (s *closedTail) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 	return rangeRecords(s.Records(), bounds)
+}
+
+// openRangeFile checks the selected on-demand file before reading it. Exclusive
+// directory ownership prevents replacement between the check and open.
+func openRangeFile(dir string, ref SegmentRef) (*os.File, error) {
+	path := filepath.Join(dir, ref.File)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, ErrCorrupt
+	}
+	return os.Open(path) // #nosec G304 -- Validated range basename in the exclusively owned log directory.
 }

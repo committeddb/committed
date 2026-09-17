@@ -72,25 +72,31 @@ The implemented binary layouts and limits are documented in:
 
 ## Publication, recovery, and current limits
 
-Backend CURRENT selects its catalog or generation. Replacement files are synced
+The complete-catalog and tidwall backends use CURRENT to select their catalog or
+generation. The opt-in bbolt catalog selects its layout through a metadata
+transaction. Replacement files are synced
 and durably installed before the selection changes. Unreferenced newer files do
-not select themselves. Missing or corrupt referenced state causes open to fail.
+not select themselves. Complete-catalog recovery checks all referenced state;
+bbolt recovery checks metadata boundaries and the active tail, with historical
+files checked on access or by explicit `Log.Verify`.
 Publication errors can leave an uncertain outcome; affected handles require
 close/reopen rather than continuing mutation or attempting a destructive rollback.
 
 Publication and physical cleanup are separate operations. Explicit `Reclaim`
-removes recognized obsolete artifacts under exclusive ownership and retains
-unknown files. Old payload files can remain until reclamation succeeds.
+removes obsolete files under exclusive ownership. Bbolt reclamation drains
+committed retirement records and does not discover unpublished orphan files. Old payload files can remain until reclamation succeeds.
 
 The segmented managed log serializes reads, append, sealing, rewrite, and
 reclamation. Rollover and catalog publication are synchronous, but rollover does
 not convert or compress the old append file. It has no background preparation, pinned
-backup views, or decoded-block cache. Startup verifies all referenced payloads.
+backup views, or decoded-block cache. Complete-catalog startup verifies all
+referenced payloads. The bbolt catalog uses bounded metadata queries and active-
+tail recovery; see [the experiment](../pkg/segmentlog/bbolt-experiment.md).
 Standalone and rewrite publication verify new or changed sealed references and
 the active tail, reusing prior verification for exact unchanged immutable references.
 Managed rollover separates physical preparation from metadata publication through
-a private, single-use handle; it does not repeat preparation's file checks or syncs. Catalogs contain
-complete layouts. The tests do not establish TB- or PB-scale operation.
+a private, single-use handle; it does not repeat preparation's file checks or syncs. Both formats select a complete logical layout; bbolt stores range entries
+individually rather than serializing their full list at each publication. The tests do not establish TB- or PB-scale operation.
 
 Incomplete tail suffixes are reported without automatic truncation. Storage alone
 does not prove that discarding a suffix preserves previously acknowledged data.

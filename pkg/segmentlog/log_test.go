@@ -46,7 +46,7 @@ type rangeDigest struct {
 	Count    uint64
 }
 
-func layout(t *testing.T, log *Log) []rangeDigest {
+func logLayout(t *testing.T, log *Log) []rangeDigest {
 	t.Helper()
 	c, err := log.catalog.Current()
 	if err != nil {
@@ -72,7 +72,7 @@ func TestLogBatchIndependentRotation(t *testing.T) {
 			// Reopening between batches must not reset original framed-byte accounting.
 			log = reopenLog(t, log)
 		}
-		got := layout(t, log)
+		got := logLayout(t, log)
 		// Original coverage/counts are batch-independent; retained append-group
 		// framing (and therefore file digests) reflects the supplied batches.
 		for i := range got {
@@ -158,8 +158,8 @@ func TestLogRotationFailurePreservesDurablePrefix(t *testing.T) {
 			t.Fatal(err)
 		}
 		boom := errors.New("catalog failure")
-		pub := &rotationPublisher{catalogPublisher: log.catalog.pub, failAt: 2, after: after, boom: boom}
-		log.catalog.pub = pub
+		pub := &rotationPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, failAt: 2, after: after, boom: boom}
+		log.catalog.(*CatalogStore).pub = pub
 		err := log.Append([]Record{{2, []byte("second")}, {3, []byte("third")}, {4, []byte("fourth")}})
 		if !errors.Is(err, ErrLogPoisoned) || !errors.Is(err, boom) {
 			t.Fatal(err)
@@ -242,7 +242,7 @@ func TestLogEncodingChangePreservesExistingFiles(t *testing.T) {
 	if err := log.Append([]Record{{1, []byte("one")}, {2, []byte("two")}, {3, []byte("three")}}); err != nil {
 		t.Fatal(err)
 	}
-	old := layout(t, log)
+	old := logLayout(t, log)
 	c, _ := log.catalog.Current()
 	info, err := os.Stat(filepath.Join(log.path, c.Segments[0].File))
 	if err != nil {
@@ -259,7 +259,7 @@ func TestLogEncodingChangePreservesExistingFiles(t *testing.T) {
 	if err := next.Append([]Record{{4, []byte("four")}}); err != nil {
 		t.Fatal(err)
 	}
-	got := layout(t, next)
+	got := logLayout(t, next)
 	if !reflect.DeepEqual(got[:len(old)], old) {
 		t.Fatal("reencoded unrelated segments")
 	}

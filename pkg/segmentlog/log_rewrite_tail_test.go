@@ -147,7 +147,7 @@ func TestRewriteWholeLogFailures(t *testing.T) {
 			case "tail-install-before", "tail-install-after":
 				log.dir = &rotationInstaller{fileInstaller: log.dir, failAt: 2, after: mode == "tail-install-after", boom: boom}
 			case "current-before", "current-after":
-				log.catalog.pub = &rotationPublisher{catalogPublisher: log.catalog.pub, failAt: 1, after: mode == "current-after", boom: boom}
+				log.catalog.(*CatalogStore).pub = &rotationPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, failAt: 1, after: mode == "current-after", boom: boom}
 			}
 			result, err := log.Rewrite(ctx, 1, func(r Record) ([]byte, bool, error) {
 				if r.ID == 2 {

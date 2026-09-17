@@ -8,7 +8,6 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 
 	"github.com/committeddb/committed/internal/durablefs"
@@ -48,7 +47,7 @@ type Log struct {
 	path     string
 	dir      fileInstaller
 	remover  fileRemover
-	catalog  *CatalogStore
+	catalog  layout
 	file     *os.File
 	tail     *Tail
 	framed   uint64
@@ -77,7 +76,11 @@ func checkLogEncoding(target uint64, encoding Options) error {
 // CreateLog initializes an empty, existing directory. The directory and its
 // parents must already be durable. Failed initialization can leave artifacts;
 // it never deletes existing files or silently reinitializes them.
-func CreateLog(path string, start uint64, opts LogOptions) (result *Log, retErr error) {
+func CreateLog(path string, start uint64, opts LogOptions) (*Log, error) {
+	return createLog(path, start, opts, false)
+}
+
+func createLog(path string, start uint64, opts LogOptions, useBolt bool) (result *Log, retErr error) {
 	target := opts.SegmentBytes
 	if target == 0 {
 		target = 20 << 20
@@ -124,13 +127,20 @@ func CreateLog(path string, start uint64, opts LogOptions) (result *Log, retErr 
 		return nil, err
 	}
 	c := Catalog{History: history, Revision: 1, Start: start, SegmentBytes: uint64(target), Active: &TailRef{File: name, Start: start}}
-	store, err := CreateCatalogStore(path, c)
+	var store layout
+	if useBolt {
+		store, err = createBoltCatalog(path, c)
+	} else {
+		store, err = CreateCatalogStore(path, c)
+	}
 	if err != nil {
 		return nil, err
 	}
 	result, retErr = attachLog(path, dir, store, opts.Encoding)
 	if result != nil {
 		result.lock = lock
+	} else {
+		retErr = errors.Join(retErr, store.Close())
 	}
 	return result, retErr
 }
@@ -139,7 +149,9 @@ func CreateLog(path string, start uint64, opts LogOptions) (result *Log, retErr 
 // incomplete tails without truncation. It ignores unreferenced artifacts and
 // leaves them for Reclaim. Encoding affects indexed rewrite outputs only.
 // Catalogs without a managed rotation target are not adopted.
-func OpenLog(path string, encoding Options) (result *Log, retErr error) {
+func OpenLog(path string, encoding Options) (*Log, error) { return openLog(path, encoding, false) }
+
+func openLog(path string, encoding Options, useBolt bool) (result *Log, retErr error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -157,19 +169,26 @@ func OpenLog(path string, encoding Options) (result *Log, retErr error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := OpenCatalogStore(path)
+	var store layout
+	if useBolt {
+		store, err = openBoltCatalog(path)
+	} else {
+		store, err = OpenCatalogStore(path)
+	}
 	if err != nil {
 		return nil, err
 	}
 	result, retErr = attachLog(path, dir, store, encoding)
 	if result != nil {
 		result.lock = lock
+	} else {
+		retErr = errors.Join(retErr, store.Close())
 	}
 	return result, retErr
 }
 
-func attachLog(path string, dir *durablefs.Dir, store *CatalogStore, encoding Options) (*Log, error) {
-	c, err := store.Current()
+func attachLog(path string, dir *durablefs.Dir, store layout, encoding Options) (*Log, error) {
+	c, err := store.head()
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +197,13 @@ func attachLog(path string, dir *durablefs.Dir, store *CatalogStore, encoding Op
 	}
 	if err = checkLogEncoding(c.SegmentBytes, encoding); err != nil {
 		return nil, err
+	}
+	info, err := os.Lstat(filepath.Join(path, c.Active.File))
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, ErrCorrupt
 	}
 	file, err := os.OpenFile(filepath.Join(path, c.Active.File), os.O_RDWR, 0) // #nosec G304 -- Validated catalog basename in the exclusively managed log directory.
 	if err != nil {
@@ -192,6 +218,9 @@ func attachLog(path string, dir *durablefs.Dir, store *CatalogStore, encoding Op
 	if err != nil {
 		_ = file.Close()
 		return nil, err
+	}
+	if state.Start != c.Active.Start {
+		return nil, errors.Join(ErrCorrupt, file.Close())
 	}
 	framed := state.Framed
 
@@ -244,7 +273,7 @@ func (l *Log) Append(records []Record) error {
 		}
 		prev, has = r.ID, true
 	}
-	c, err := l.catalog.Current()
+	c, err := l.catalog.head()
 	if err != nil {
 		return l.fail(err)
 	}
@@ -305,11 +334,11 @@ func (l *Log) rotate() error {
 	if !state.HasRecords {
 		return ErrInvalid
 	}
-	c, err := l.catalog.Current()
+	c, err := l.catalog.head()
 	if err != nil {
 		return err
 	}
-	if c.Revision == ^uint64(0) || len(c.Segments) >= format.MaxBlocks {
+	if c.Revision == ^uint64(0) {
 		return ErrInvalid
 	}
 	storage := segmentStorage{path: l.path, installer: l.dir}
@@ -333,17 +362,18 @@ func (l *Log) Seek(id uint64) (Record, error) {
 	if err := l.usable(); err != nil {
 		return Record{}, err
 	}
-	c, err := l.catalog.Current()
+	c, err := l.catalog.head()
 	if err != nil {
 		return Record{}, err
 	}
-	i := sort.Search(len(c.Segments), func(i int) bool { return c.Segments[i].Coverage.End > id })
-	for ; i < len(c.Segments); i++ {
-		ref := c.Segments[i]
+	for ref, err := range l.catalog.ranges(Coverage{id, ^uint64(0)}) {
+		if err != nil {
+			return Record{}, err
+		}
 		if ref.Count == 0 {
 			continue
 		}
-		f, err := os.Open(filepath.Join(l.path, ref.File))
+		f, err := openRangeFile(l.path, ref)
 		if err != nil {
 			return Record{}, err
 		}
@@ -409,5 +439,5 @@ func (l *Log) Close() error {
 		return nil
 	}
 	l.closed = true
-	return errors.Join(l.file.Close(), l.lock.Close())
+	return errors.Join(l.file.Close(), l.catalog.Close(), l.lock.Close())
 }

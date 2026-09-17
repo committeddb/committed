@@ -75,18 +75,22 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	if err = ctx.Err(); err != nil {
 		return result, err
 	}
-	c, err := l.catalog.Current()
+	c, err := l.catalog.head()
 	if err != nil {
 		return result, l.fail(err)
 	}
-	result.SealedEnd = catalogEnd(c)
+	result.SealedEnd = c.Active.Start
 	if generation <= c.Generation || c.Revision == ^uint64(0) {
 		return result, ErrInvalid
 	}
-	if err = verifyCatalogFiles(l.path, c); err != nil {
+	if err = l.catalog.preflight(); err != nil {
 		return result, l.fail(err)
 	}
-	for i, ref := range c.Segments {
+	var changedRefs []SegmentRef
+	for ref, e := range l.catalog.ranges(Coverage{c.Start, c.Active.Start}) {
+		if e != nil {
+			return result, l.fail(e)
+		}
 		if err = ctx.Err(); err != nil {
 			return result, l.fail(err)
 		}
@@ -102,7 +106,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 			if replacement.Count == 0 {
 				result.EmptiedSegments++
 			}
-			c.Segments[i] = replacement
+			changedRefs = append(changedRefs, replacement)
 		}
 	}
 	var newFile *os.File
@@ -140,7 +144,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	}
 	c.Revision++
 	c.Generation = generation
-	if err = l.catalog.Publish(c.Revision-1, c); err != nil {
+	if err = l.catalog.publishRewrite(c.Revision-1, c.Generation, changedRefs, c.Active); err != nil {
 		return result, l.fail(err)
 	}
 	result.Published = true
@@ -156,7 +160,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 }
 
 func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Transform) (replacement SegmentRef, changed bool, err error) {
-	f, err := os.Open(filepath.Join(l.path, ref.File))
+	f, err := openRangeFile(l.path, ref)
 	if err != nil {
 		return replacement, false, err
 	}

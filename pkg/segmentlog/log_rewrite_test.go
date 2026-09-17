@@ -190,7 +190,7 @@ func TestRewriteSealedPublicationFailure(t *testing.T) {
 		t.Run(fmt.Sprint(after), func(t *testing.T) {
 			log := rotatedLog(t)
 			boom := errors.New("CURRENT failure")
-			log.catalog.pub = &rotationPublisher{catalogPublisher: log.catalog.pub, failAt: 1, after: after, boom: boom}
+			log.catalog.(*CatalogStore).pub = &rotationPublisher{catalogPublisher: log.catalog.(*CatalogStore).pub, failAt: 1, after: after, boom: boom}
 			result, err := log.RewriteSealed(t.Context(), 1, func(r Record) ([]byte, bool, error) { return []byte("replacement"), r.ID != 4, nil })
 			if !errors.Is(err, boom) || !errors.Is(err, ErrLogPoisoned) || result.Published {
 				t.Fatal(result, err)

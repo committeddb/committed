@@ -24,7 +24,7 @@ func backends() []backend {
 }
 
 func backendsWithSegmentBytes(segmentBytes int) []backend {
-	result := make([]backend, 0, 4)
+	result := make([]backend, 0, 6)
 	for _, compressed := range []bool{false, true} {
 		name := "plain"
 		codec := segmentlog.NoCompression
@@ -32,6 +32,11 @@ func backendsWithSegmentBytes(segmentBytes int) []backend {
 			name = "zstd"
 			codec = segmentlog.ZstdDefault
 		}
+		result = append(result, backend{"segmented-bbolt/" + name, func(path string) (eventlog.EventLog, error) {
+			return segmented.CreateBolt(path, 0, segmentlog.LogOptions{SegmentBytes: segmentBytes, Encoding: segmentlog.Options{Compression: codec}})
+		}, func(path string) (eventlog.EventLog, error) {
+			return segmented.OpenBolt(path, segmentlog.Options{Compression: codec})
+		}})
 		result = append(result, backend{"segmented/" + name, func(path string) (eventlog.EventLog, error) {
 			return segmented.Create(path, 0, segmentlog.LogOptions{SegmentBytes: segmentBytes, Encoding: segmentlog.Options{Compression: codec}})
 		}, func(path string) (eventlog.EventLog, error) {

@@ -16,6 +16,16 @@ experiment](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
 compares Committed protobuf records and existing scrub transformations with
 tidwall.
 
+## Bbolt catalog experiment
+
+`CreateBoltLog`/`OpenBoltLog` provide an opt-in integrated bbolt metadata backend.
+Managed operations use targeted state/range queries; rollover and rewrite publish
+metadata transactions. Open validates metadata boundaries and the active tail;
+historical payload verification is explicit through `Log.Verify`. Reclaim drains
+committed retirements and does not discover unpublished orphans. The original
+complete-catalog entry points remain available. See the
+[experiment contract and evidence](bbolt-experiment.md).
+
 ## Boundaries
 
 | Layer | Responsibility | Status |

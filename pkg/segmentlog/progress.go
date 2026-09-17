@@ -20,14 +20,14 @@ func (l *Log) LastAppended() (id uint64, ok bool, err error) {
 	if state.HasRecords {
 		return state.Last, true, nil
 	}
-	c, err := l.catalog.Current()
+	c, err := l.catalog.head()
 	if err != nil {
 		return 0, false, l.fail(err)
 	}
-	if len(c.Segments) > 0 {
+	if c.Active.Start > c.Start {
 		// Rotation fixes coverage at the original last ID + 1. It remains valid
 		// after every record in that range is erased, even with an empty new tail.
-		return c.Segments[len(c.Segments)-1].Coverage.End - 1, true, nil
+		return c.Active.Start - 1, true, nil
 	}
 	return 0, false, nil
 }

@@ -38,7 +38,11 @@ rewrites while protected readers remain. This is not a backup-capture/file-pin A
 **segmented** delegates to pkg/segmentlog. It retains sparse IDs and stable ranges,
 rewrites only changed files, persists erased append accounting, and translates its
 results/errors into the shared contract. `Wrap` transfers ownership of an existing
-managed engine; `Create` and `Open` are also available.
+managed engine; `Create` and `Open` use the complete-catalog format.
+`CreateBolt` and `OpenBolt` select the integrated experimental bbolt catalog.
+The latter recovers metadata boundaries and the active tail without checking all
+historical payloads on open, and reclaims committed retirement records without
+orphan discovery. See [the experiment](../../../../pkg/segmentlog/bbolt-experiment.md).
 
 **tidwall** uses dense physical sequences internally and binary-searches their
 stable record IDs. It prepares a complete replacement generation, synchronizes it,
@@ -118,8 +122,8 @@ go test -race ./internal/cluster/db/wal -run '^(TestEventLogAdapter|TestEventLog
 middle-seek costs at two logical history sizes for both backends in plain/zstd
 modes. They report local timings and allocations with explicit fixture and cache
 limitations. The recorded baseline reverified full history during rotation.
-Publication now reuses verification of unchanged immutable references; reopen
-still verifies full history. These measurements do not establish production throughput.
+The complete-catalog implementation reuses verification of unchanged immutable
+references during publication; its reopen still verifies full history. These measurements do not establish production throughput.
 
 The [on-disk lifecycle baseline](scale-benchmarks.md) measures larger histories
 through recovery, a boundary append, one-record erasure, reclamation, and a full

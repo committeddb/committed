@@ -25,7 +25,10 @@ type ReclaimResult struct {
 
 type fileRemover interface{ Remove(string) (bool, error) }
 
-// Reclaim removes recognized obsolete artifacts under exclusive log ownership.
+// Reclaim removes obsolete files under exclusive log ownership. Bbolt catalogs
+// drain committed retirement records in bounded batches; they do not discover
+// unpublished orphans or verify all live history. The protocol below describes
+// the complete-catalog backend.
 // It validates and confirms CURRENT and all references before any deletion, then
 // removes unreferenced managed segment/tail/catalog/temp files and syncs each
 // removal. It preserves unknown names, directories, and symbolic links.
@@ -51,6 +54,10 @@ func (l *Log) Reclaim(ctx context.Context) (result ReclaimResult, err error) {
 	if err = ctx.Err(); err != nil {
 		return result, err
 	}
+	return l.catalog.reclaim(l, ctx)
+}
+
+func (s *CatalogStore) reclaim(l *Log, ctx context.Context) (result ReclaimResult, err error) {
 	current, err := l.catalog.Current()
 	if err != nil {
 		return result, l.fail(err)
@@ -83,7 +90,7 @@ func (l *Log) Reclaim(ctx context.Context) (result ReclaimResult, err error) {
 			return result, l.fail(err)
 		}
 	}
-	if err = l.catalog.pub.Sync(); err != nil {
+	if err = s.pub.Sync(); err != nil {
 		return result, l.fail(err)
 	}
 	live := map[string]bool{"CURRENT": true, name: true}

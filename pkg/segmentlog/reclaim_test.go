@@ -315,7 +315,7 @@ func TestReclaimConcurrentRotation(t *testing.T) {
 func TestReclaimRequiresMatchingConfirmedCatalog(t *testing.T) {
 	log := rotatedLog(t)
 	// Simulate a mismatch between memory and the pointer recovered from disk.
-	log.catalog.current.Generation++
+	log.catalog.(*CatalogStore).current.Generation++
 	result, err := log.Reclaim(context.Background())
 	if result.RemovedFiles != 0 || !errors.Is(err, ErrCatalogConflict) || !errors.Is(err, ErrLogPoisoned) {
 		t.Fatal(result, err)
