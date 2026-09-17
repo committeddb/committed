@@ -171,14 +171,14 @@ func pointer(c Catalog, b []byte) []byte {
 }
 
 func readBounded(path string, limit int64) (data []byte, err error) {
-	info, err := os.Lstat(path)
+	info, err := os.Lstat(path) // #nosec G703 -- Callers join fixed or validated basenames to the owned catalog directory.
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > limit {
 		return nil, ErrCorrupt
 	}
-	f, err := os.Open(path) // #nosec G304 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
+	f, err := os.Open(path) // #nosec G304 G703 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
 	if err != nil {
 		return nil, err
 	}
@@ -434,14 +434,14 @@ func publicationFiles(current, next Catalog) Catalog {
 }
 
 func syncRegular(path string) error {
-	info, err := os.Lstat(path)
+	info, err := os.Lstat(path) // #nosec G703 -- Callers join fixed or validated basenames to the owned catalog directory.
 	if err != nil {
 		return err
 	}
 	if !info.Mode().IsRegular() {
 		return ErrCorrupt
 	}
-	f, err := os.Open(path) // #nosec G304 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
+	f, err := os.Open(path) // #nosec G304 G703 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
 	if err != nil {
 		return err
 	}
@@ -455,14 +455,14 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 		}
 		err := func() (err error) {
 			path := filepath.Join(dir, ref.File)
-			info, err := os.Lstat(path)
+			info, err := os.Lstat(path) // #nosec G703 -- Reference basenames are validated by catalog decoding/publication; dir is the exclusively owned log directory.
 			if err != nil {
 				return err
 			}
 			if !info.Mode().IsRegular() {
 				return ErrCorrupt
 			}
-			f, err := os.Open(path) // #nosec G304 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
+			f, err := os.Open(path) // #nosec G304 G703 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
 			if err != nil {
 				return err
 			}
@@ -478,14 +478,14 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 	}
 	if c.Active != nil {
 		path := filepath.Join(dir, c.Active.File)
-		info, err := os.Lstat(path)
+		info, err := os.Lstat(path) // #nosec G703 -- Active basename is validated by catalog decoding/publication; dir is the exclusively owned log directory.
 		if err != nil {
 			return err
 		}
 		if !info.Mode().IsRegular() {
 			return ErrCorrupt
 		}
-		f, err := os.Open(path) // #nosec G304 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
+		f, err := os.Open(path) // #nosec G304 G703 -- Fixed or validated catalog filename in the caller-selected, exclusively managed storage directory.
 		if err != nil {
 			return err
 		}

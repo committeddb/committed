@@ -94,6 +94,9 @@ func TestBoltLogBeyondFlatCatalogLimit(t *testing.T) {
 	if _, e := l.Reclaim(t.Context()); e != nil {
 		t.Fatal(e)
 	}
+	if _, e := l.ReclaimOrphans(t.Context()); e != nil {
+		t.Fatal(e)
+	}
 	l = reopenBoltLog(t, l)
 	if r, e := l.Seek(count - 1); e != nil || r.ID != count+10 || !bytes.Equal(r.Payload, []byte("next")) {
 		t.Fatal(r, e)

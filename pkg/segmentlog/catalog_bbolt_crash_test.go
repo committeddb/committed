@@ -57,6 +57,8 @@ func TestBoltLogCrashHelper(t *testing.T) {
 		_, err = l.Rewrite(t.Context(), 1, eraseEvenTens)
 	case "reclaim":
 		_, err = l.Reclaim(t.Context())
+	case "orphans":
+		_, err = l.ReclaimOrphans(t.Context())
 	default:
 		t.Fatal("unknown operation", operation)
 	}
@@ -186,6 +188,16 @@ func TestBoltLogProcessCrash(t *testing.T) {
 							t.Fatal("retired file still present", name, err)
 						}
 					}
+				}
+				checkBoltCrashRecords(t, l, records, erased)
+				wantOrphans := uint64(0)
+				if !published && operation == "rollover" {
+					wantOrphans = 1
+				} else if !published && operation == "rewrite" {
+					wantOrphans = 3
+				}
+				if result, err := l.ReclaimOrphans(t.Context()); err != nil || result.RemovedFiles != wantOrphans {
+					t.Fatal("orphan sweep", result, "want", wantOrphans, err)
 				}
 				checkBoltCrashRecords(t, l, records, erased)
 				if err := l.Verify(t.Context()); err != nil {

@@ -18,6 +18,7 @@ type layout interface {
 	publishRollover(*preparedRollover) error
 	publishRewrite(uint64, uint64, []SegmentRef, *TailRef) error
 	reclaim(*Log, context.Context) (ReclaimResult, error)
+	reclaimOrphans(*Log, context.Context) (ReclaimResult, error)
 	Close() error
 }
 
@@ -30,6 +31,10 @@ func (s *CatalogStore) head() (Catalog, error) {
 }
 
 func (s *CatalogStore) Close() error { return nil }
+
+func (s *CatalogStore) reclaimOrphans(l *Log, ctx context.Context) (ReclaimResult, error) {
+	return s.reclaim(l, ctx)
+}
 
 func (s *CatalogStore) ranges(bounds Coverage) iter.Seq2[SegmentRef, error] {
 	return func(yield func(SegmentRef, error) bool) {

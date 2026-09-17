@@ -1,5 +1,9 @@
 # Explicit reclamation (experimental)
 
+This page describes the complete-catalog backend. The bbolt backend uses a
+retirement queue for `Reclaim` and a separate `ReclaimOrphans` directory sweep;
+see [bbolt reclamation](bbolt-experiment.md#reclamation).
+
 `Log.Reclaim(ctx)` removes obsolete managed files after validating the currently
 selected history. It is explicit: opening or rotating a log does not silently
 sweep its directory. It runs under the Log mutex and advisory ownership lock, so

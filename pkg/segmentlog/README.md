@@ -22,7 +22,8 @@ tidwall.
 Managed operations use targeted state/range queries; rollover and rewrite publish
 metadata transactions. Open validates metadata boundaries and the active tail;
 historical payload verification is explicit through `Log.Verify`. Reclaim drains
-committed retirements and does not discover unpublished orphans. The original
+committed retirements; `Log.ReclaimOrphans` separately scans for unpublished files.
+The original
 complete-catalog entry points remain available. See the
 [experiment contract and evidence](bbolt-experiment.md).
 
@@ -220,10 +221,18 @@ It retains old revisions and requires exclusive caller-managed directory ownersh
 
 ## Reclamation
 
-`Log.Reclaim(ctx)` verifies the confirmed live layout, preserves all referenced
-files, and durably removes recognized obsolete artifacts. It preserves unknown
-files, directories, and symlinks. Errors can report partial progress; filesystem
-failures require reopening before retry. See [the cleanup contract](reclamation.md).
+For complete catalogs, `Log.Reclaim(ctx)` verifies the confirmed live layout,
+preserves all referenced files, and durably removes recognized obsolete artifacts.
+See [the cleanup contract](reclamation.md).
+
+For bbolt, `Log.Reclaim(ctx)` drains the committed retirement queue without a
+directory scan. `Log.ReclaimOrphans(ctx)` separately validates all range metadata
+and scans the directory in bounded batches for unselected managed data and
+temporary files. It preserves unknown files, directories, and symlinks, and does
+not verify live payloads. It holds the log mutex throughout, so it blocks reads
+and writes. The complete-catalog backend maps this method to its existing cleanup.
+Both operations can report partial progress; filesystem failures require reopening
+before retry. See [the bbolt cleanup behavior](bbolt-experiment.md#reclamation).
 
 ## Rewrite churn experiment
 

@@ -177,7 +177,7 @@ func (s *boltCatalog) reclaim(l *Log, ctx context.Context) (result ReclaimResult
 			if err = ctx.Err(); err != nil {
 				return result, err
 			}
-			info, e := os.Lstat(filepath.Join(s.path, item.File))
+			info, e := os.Lstat(filepath.Join(s.path, item.File)) // #nosec G703 -- managedArtifact validates the queued basename before it enters this batch.
 			var size int64
 			if e != nil && !errors.Is(e, os.ErrNotExist) {
 				return result, l.fail(e)

@@ -198,14 +198,14 @@ func attachLog(path string, dir *durablefs.Dir, store layout, encoding Options) 
 	if err = checkLogEncoding(c.SegmentBytes, encoding); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(filepath.Join(path, c.Active.File))
+	info, err := os.Lstat(filepath.Join(path, c.Active.File)) // #nosec G703 -- Catalog decoding validates the active basename before attachment.
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, ErrCorrupt
 	}
-	file, err := os.OpenFile(filepath.Join(path, c.Active.File), os.O_RDWR, 0) // #nosec G304 -- Validated catalog basename in the exclusively managed log directory.
+	file, err := os.OpenFile(filepath.Join(path, c.Active.File), os.O_RDWR, 0) // #nosec G304 G703 -- Validated catalog basename in the exclusively managed log directory.
 	if err != nil {
 		return nil, err
 	}

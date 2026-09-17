@@ -92,8 +92,27 @@ repeats removal safely, including directory synchronization for an absent name.
 The Log mutex excludes readers and mutations throughout the operation.
 
 This backend does not list the directory, scan all live payloads, or collect a
-full live-name map to reclaim committed retirements. Unpublished preparation
-orphans and temporary files are not discovered or deleted by this implementation.
+full live-name map to reclaim committed retirements.
+
+`Log.ReclaimOrphans(ctx)` provides separate, explicit full-directory maintenance.
+Before any deletion, it streams and validates every range entry, coverage
+continuity, the range count, and the generated filename/start relationship. It
+then reads directory entries in batches of 128 and checks each managed data
+filename against the live range index and active-tail name. Unselected regular
+data files and reserved installation temporary files are durably removed;
+unknown names (including complete-catalog manifests), directories, and symlinks
+are preserved. It does not read live payloads or collect all live names in memory.
+Metadata validation errors stop cleanup before any deletion. `Log.Verify` remains
+the separate payload integrity check.
+
+The sweep holds the log mutex for the entire operation. Its work grows with the
+number of ranges and directory entries; it is never automatic during open,
+append, or routine retirement. Cancellation leaves durable partial progress.
+Other failures poison the handle; reopen and retry. Successful completion syncs
+the directory even if a previous interrupted removal left no remaining filename.
+The sweep can also remove queued obsolete files, but leaves their retirement
+records intact for the idempotent `Reclaim` acknowledgement path.
+
 A bbolt read transaction protects metadata pages, not external segment files;
 managed serialization currently supplies file lifetime protection.
 
@@ -119,6 +138,9 @@ The integrated tests cover:
 - Metadata checksum damage, missing historical files, invalid active-tail start,
   symlink references, and refusing to initialize missing metadata on open.
 - A controlled scan/rewrite overlap and shared backend race tests.
+- Orphan cleanup after subprocess-interrupted publication, multiple directory
+  batches, preserved unknown/nonregular entries, corrupt metadata refusal, and
+  retries after cancellation, removal errors, and subprocess exit during a sweep.
 - A 100,000-range erased-history fixture, beyond the flat catalog limit. A test
   wrapper rejects any request for a complete catalog snapshot while exercising
   managed operations. Full verification succeeds after reopen.

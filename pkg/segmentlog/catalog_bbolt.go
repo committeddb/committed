@@ -201,7 +201,7 @@ func createBoltCatalog(path string, c Catalog) (*boltCatalog, error) {
 }
 
 func openBoltCatalog(path string) (*boltCatalog, error) {
-	info, err := os.Lstat(filepath.Join(path, boltCatalogName))
+	info, err := os.Lstat(filepath.Join(path, boltCatalogName)) // #nosec G703 -- Fixed metadata basename in the caller-selected log directory.
 	if err != nil {
 		return nil, err
 	}
