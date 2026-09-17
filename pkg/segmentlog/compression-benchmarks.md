@@ -96,3 +96,7 @@ policy at all four zstd effort levels, with large/small transitions and plain
 fallback, then decode every result. Existing mixed-codec, rewrite, recovery, and
 failure tests remain in place. Storage race suites, Linux tests, lint, and gosec
 passed.
+
+The [frame capacity reservation experiment](frame-encoding-experiment.md) measures
+another allocation candidate. Its standalone-frame savings did not establish a
+full-segment benefit, so it remains test-only.
