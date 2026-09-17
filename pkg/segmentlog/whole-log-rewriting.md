@@ -43,6 +43,12 @@ bytes to `floor(blockSize / 2) * (MaxBlocks - 1)` bounds the block count.
 Excessive payload growth fails before publication; preparation does not encode
 a second, discarded copy of the tail to establish this capacity.
 
+Publication verifies and syncs replacement files. It preserves an unchanged
+active tail and its checkpoint without reopening or rescanning that file. A
+no-op rewrite needs only the metadata commit at publication; preparation still
+scans its requested scope. `RewriteSealed` does not validate the active tail;
+`Verify` explicitly checks the entire log.
+
 All replacements are installed and synced before metadata selection changes. On success,
 the managed handle switches to the replacement tail; the original byte accounting
 is unchanged. If an entirely empty log has no changes, only the requested newer
@@ -111,3 +117,31 @@ storage suite, lint, and gosec pass.
 ```sh
 go test ./pkg/segmentlog -run '^$' -bench '^BenchmarkTailRewriteWrites$' -benchtime=1x -count=3
 ```
+
+## Unchanged-tail publication measurements
+
+`BenchmarkRewriteSealedWithFullTail` creates a 20 MiB active tail containing
+5,120 records in 64-record batches, with no sealed ranges. It repeatedly advances
+the sealed-only generation. The callback must never receive an active record.
+The benchmark times the complete RewriteSealed call, including its bbolt commit;
+fixture creation and final full-log verification are outside the timer. This
+isolates the cost of publication when the active tail is outside the rewrite's
+scope, not the cost of scanning or rewriting historical ranges.
+
+Recorded September 17, 2026, Go 1.26.6, Linux/arm64, Alpine 3.20 on the local
+OrbStack VM, using disposable container overlay storage. Baseline `a0614c6` and
+changed binaries ran three sequential pairs of 20 iterations, reversing order
+in the second pair, after tests and lint finished. All runs passed. The host and
+VM were not load-controlled.
+
+| Measurement | Baseline | Replacement-only publication |
+| --- | --- | --- |
+| Mean operation time, run 1 | 8.692 ms | 1.861 ms |
+| Mean operation time, run 2 | 8.711 ms | 2.101 ms |
+| Mean operation time, run 3 | 9.559 ms | 1.706 ms |
+| Median allocated bytes per operation | 288,212 | 15,565 |
+
+The median run time fell from 8.711 ms to 1.861 ms. Publication no longer reads
+or syncs the unchanged active file and skips the directory sync when no payload
+references change. Whole-log rewrite preparation still scans the active tail,
+and all managed rewrite operations still hold the log mutex throughout.

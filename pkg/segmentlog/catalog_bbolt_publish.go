@@ -66,6 +66,8 @@ func (s *boltCatalog) publishRollover(p *preparedRollover) error {
 	})
 }
 
+// publishRewrite verifies replacement files before selecting them. A nil active
+// leaves the current tail and its checkpoint unchanged.
 func (s *boltCatalog) publishRewrite(expected, generation uint64, changed []SegmentRef, active *TailRef) error {
 	c, err := s.head()
 	if err != nil {
@@ -74,20 +76,22 @@ func (s *boltCatalog) publishRewrite(expected, generation uint64, changed []Segm
 	if c.Revision != expected {
 		return ErrCatalogConflict
 	}
-	if expected == ^uint64(0) || generation <= c.Generation || active == nil || active.Start != c.Active.Start {
+	if expected == ^uint64(0) || generation <= c.Generation || (active != nil && active.Start != c.Active.Start) {
 		return ErrInvalid
 	}
 	// Generic rewrite preparation still establishes integrity and durability here.
-	// Only changed immutable files and the active tail are checked.
+	// Only changed immutable files and a replacement active tail are checked.
 	if err = verifyCatalogFiles(s.path, Catalog{Segments: changed, Active: active}); err != nil {
 		return s.fail(err)
 	}
-	dir, err := durablefs.Open(s.path)
-	if err != nil {
-		return s.fail(err)
-	}
-	if err = dir.Sync(); err != nil {
-		return s.fail(err)
+	if len(changed) > 0 || active != nil {
+		dir, err := durablefs.Open(s.path)
+		if err != nil {
+			return s.fail(err)
+		}
+		if err = dir.Sync(); err != nil {
+			return s.fail(err)
+		}
 	}
 	return s.update(func(tx *bolt.Tx) error {
 		h, e := readBoltHeader(tx)
@@ -114,12 +118,14 @@ func (s *boltCatalog) publishRewrite(expected, generation uint64, changed []Segm
 				return e
 			}
 		}
-		if active.File != h.Catalog.Active.File {
+		if active != nil && active.File != h.Catalog.Active.File {
 			if e = retireBoltFile(tx, h.Catalog.Active.File, h.Catalog.Active.Start); e != nil {
 				return e
 			}
 		}
-		h.Catalog.Active = active
+		if active != nil {
+			h.Catalog.Active = active
+		}
 		h.Catalog.Revision++
 		h.Catalog.Generation = generation
 		return putBoltHeader(tx, h)

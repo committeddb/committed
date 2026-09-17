@@ -55,10 +55,13 @@ even if the caller received an error afterward. There is no per-rollover
 catalog file or CURRENT replacement in this backend.
 
 Rewrite prepares replacement files with the existing segment and tail code.
-Publication verifies/syncs changed files and the active tail, confirms directory
-durability, then uses one transaction to change all selected references,
-revision/generation, the tail checkpoint, and retirement records. No-op ranges
-keep their existing references and bytes.
+Publication verifies/syncs replacement files, confirms directory durability when
+references change, then uses one transaction to change selected references,
+revision/generation, the tail checkpoint, and retirement records. An unchanged
+active tail retains its reference and checkpoint without another file scan or
+sync. A no-op rewrite publishes only metadata, with no payload-file or directory
+sync during publication; preparation still examines records in the requested
+scope. No-op ranges keep their existing references and bytes.
 
 Any error from the metadata commit boundary poisons the managed handle. A commit
 error can mean an uncertain outcome; files are retained and recovery determines

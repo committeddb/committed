@@ -112,6 +112,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	}
 	var newFile *os.File
 	var newTail *Tail
+	var replacementActive *TailRef
 	if includeTail {
 		ref, changed, e := l.prepareTail(ctx, *c.Active, c.SegmentBytes, transform)
 		if e != nil {
@@ -132,7 +133,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 			if e != nil {
 				return result, l.fail(e)
 			}
-			c.Active = &ref
+			replacementActive = &ref
 		}
 	}
 	if err = ctx.Err(); err != nil {
@@ -140,7 +141,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	}
 	c.Revision++
 	c.Generation = generation
-	if err = l.catalog.publishRewrite(c.Revision-1, c.Generation, changedRefs, c.Active); err != nil {
+	if err = l.catalog.publishRewrite(c.Revision-1, c.Generation, changedRefs, replacementActive); err != nil {
 		return result, l.fail(err)
 	}
 	result.Published = true

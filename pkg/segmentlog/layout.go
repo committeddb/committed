@@ -16,6 +16,7 @@ type layout interface {
 	Current() (Catalog, error)
 	preflight() error
 	publishRollover(*preparedRollover) error
+	// A nil tail reference preserves the current active tail without revalidation.
 	publishRewrite(uint64, uint64, []SegmentRef, *TailRef) error
 	reclaim(*Log, context.Context) (ReclaimResult, error)
 	reclaimOrphans(*Log, context.Context) (ReclaimResult, error)
