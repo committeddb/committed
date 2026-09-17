@@ -145,6 +145,9 @@ VM, warm-cache, small-sample, and production-scale limitations above still apply
 The [tail recovery buffer comparison](tail-recovery.md) records a subsequent
 change to reduce recovery allocation while retaining incremental hashing.
 
+The [ordinary append timing breakdown](append-timing.md) separates file writes,
+sync calls, and other work, including the slowest fill batch.
+
 ## Reproduction
 
 ```sh

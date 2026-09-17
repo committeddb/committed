@@ -16,8 +16,34 @@ import (
 )
 
 type rolloverSizeMetrics struct {
-	fullRecovery, boundary, smallRecovery time.Duration
-	install, commit, fill                 time.Duration
+	fullRecovery, boundary, smallRecovery  time.Duration
+	install, commit, fill                  time.Duration
+	fillWrite, fillSync                    time.Duration
+	slowestFill, slowestWrite, slowestSync time.Duration
+}
+
+// timedTailIO measures elapsed I/O calls, including time descheduled while in
+// those calls. It does not isolate physical device latency.
+type timedTailIO struct {
+	TailFile
+	write, sync   time.Duration
+	writes, syncs int
+}
+
+func (f *timedTailIO) WriteAt(p []byte, off int64) (int, error) {
+	started := time.Now()
+	n, err := f.TailFile.WriteAt(p, off)
+	f.write += time.Since(started)
+	f.writes++
+	return n, err
+}
+
+func (f *timedTailIO) Sync() error {
+	started := time.Now()
+	err := f.TailFile.Sync()
+	f.sync += time.Since(started)
+	f.syncs++
+	return err
 }
 
 type timedRolloverInstall struct {
@@ -81,11 +107,23 @@ func measureRolloverSize(t testing.TB, target, samples int) rolloverSizeMetrics 
 				batch = append(batch, Record{next, payload(next)})
 				next++
 			}
+			timed := &timedTailIO{TailFile: l.file}
+			l.tail.file = timed
 			started := time.Now()
 			if err = l.Append(batch); err != nil {
 				t.Fatal(err)
 			}
-			m.fill += time.Since(started)
+			elapsed := time.Since(started)
+			l.tail.file = l.file
+			if timed.writes != 1 || timed.syncs != 1 {
+				t.Fatal("fill batch must perform one ordinary write and sync", timed.writes, timed.syncs)
+			}
+			m.fill += elapsed
+			m.fillWrite += timed.write
+			m.fillSync += timed.sync
+			if elapsed > m.slowestFill {
+				m.slowestFill, m.slowestWrite, m.slowestSync = elapsed, timed.write, timed.sync
+			}
 		}
 		m.fullRecovery += reopen()
 		if l.framed != uint64(target) {
@@ -163,6 +201,13 @@ func BenchmarkRolloverSize(b *testing.B) {
 			for b.Loop() {
 				m := measureRolloverSize(b, target, samples)
 				b.ReportMetric(float64(m.fill.Nanoseconds())/samples/1e6, "tail-fill-ms")
+				b.ReportMetric(float64(m.fillWrite.Nanoseconds())/samples/1e6, "fill-write-ms")
+				b.ReportMetric(float64(m.fillSync.Nanoseconds())/samples/1e6, "fill-sync-ms")
+				b.ReportMetric(float64((m.fill-m.fillWrite-m.fillSync).Nanoseconds())/samples/1e6, "fill-other-ms")
+				b.ReportMetric(float64(m.slowestFill.Nanoseconds())/1e6, "slowest-fill-ms")
+				b.ReportMetric(float64(m.slowestWrite.Nanoseconds())/1e6, "slowest-fill-write-ms")
+				b.ReportMetric(float64(m.slowestSync.Nanoseconds())/1e6, "slowest-fill-sync-ms")
+				b.ReportMetric(float64((m.slowestFill-m.slowestWrite-m.slowestSync).Nanoseconds())/1e6, "slowest-fill-other-ms")
 				b.ReportMetric(float64(m.fullRecovery.Nanoseconds())/samples/1e6, "full-tail-reopen-ms")
 				b.ReportMetric(float64(m.boundary.Nanoseconds())/samples/1e6, "boundary-ms")
 				b.ReportMetric(float64(m.install.Nanoseconds())/samples/1e6, "tail-install-ms")
