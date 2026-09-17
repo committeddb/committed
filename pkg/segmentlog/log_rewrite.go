@@ -16,7 +16,7 @@ import (
 // exclusive end of its scope; the active tail is untouched. ChangedSegments
 // includes EmptiedSegments. Counts describe prepared replacements, even on error.
 // Published is true only after catalog durability is confirmed; false with an
-// error does not prove CURRENT stayed unchanged. Reopen to resolve uncertainty.
+// error does not prove the previous catalog remained selected. Reopen to resolve uncertainty.
 type SealedRewriteResult struct {
 	SealedEnd       uint64
 	ChangedSegments uint64

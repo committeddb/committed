@@ -10,14 +10,11 @@ import (
 
 // verifySegmentDigest verifies file contents and metadata against the reference.
 // The ReaderAt must remain immutable. Indexed payload blocks are read once;
-// closed append files have separate semantic and digest passes.
+// closed append files combine record validation and hashing in one pass.
 func verifySegmentDigest(r io.ReaderAt, size int64, ref SegmentRef) error {
 	if ref.TailBytes != 0 {
-		if _, err := openRangeSource(r, size, ref); err != nil {
-			return err
-		}
 		digest := sha256.New()
-		if _, err := io.Copy(digest, io.NewSectionReader(r, 0, size)); err != nil {
+		if err := checkClosedTail(r, size, ref, digest); err != nil {
 			return err
 		}
 		if !bytes.Equal(digest.Sum(nil), ref.SHA256[:]) {

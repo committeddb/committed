@@ -2,6 +2,7 @@ package segmentlog
 
 import (
 	"errors"
+	"hash"
 	"io"
 	"iter"
 	"os"
@@ -22,17 +23,26 @@ func openRangeSource(r io.ReaderAt, size int64, ref SegmentRef) (rangeSource, er
 	if ref.TailBytes == 0 {
 		return OpenSegment(r, size)
 	}
-	if size != ref.TailBytes {
-		return nil, ErrCorrupt
-	}
-	state, err := scanTail(r, size, nil, nil)
-	if err != nil {
+	if err := checkClosedTail(r, size, ref, nil); err != nil {
 		return nil, err
 	}
-	if state.Start != ref.Coverage.Start || state.Count != ref.Count || !state.HasRecords || state.Last >= ref.Coverage.End {
-		return nil, ErrCorrupt
-	}
 	return &closedTail{r: r, size: size, coverage: ref.Coverage, count: ref.Count}, nil
+}
+
+// checkClosedTail validates the complete frozen append file and its catalog
+// reference. An optional digest hashes physical bytes in the same scan.
+func checkClosedTail(r io.ReaderAt, size int64, ref SegmentRef, digest hash.Hash) error {
+	if size != ref.TailBytes {
+		return ErrCorrupt
+	}
+	state, err := scanTailHashed(r, size, nil, nil, nil, digest)
+	if err != nil {
+		return err
+	}
+	if state.Start != ref.Coverage.Start || state.Count != ref.Count || !state.HasRecords || state.Last >= ref.Coverage.End {
+		return ErrCorrupt
+	}
+	return nil
 }
 
 type closedTail struct {

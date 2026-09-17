@@ -280,6 +280,8 @@ malformed streams, concatenated-frame output bounds, and format-0 compatibility.
 [Verification measurements](verification-benchmarks.md) isolate sealed-file
 verification from filesystem sync and catalog publication. The verifier and read
 path share block/frame validation; only reads collect records for their callers.
+Frozen append-file verification combines record validation and whole-file hashing
+in one pass, reading each byte once.
 
 ## Sparse lookup allocations
 
