@@ -35,10 +35,13 @@ output buffer combines small file writes without changing those encoded groups.
 The buffer must flush successfully before the installer syncs and publishes the
 file; a write or flush failure prevents publication. One group per survivor can
 increase group overhead. Payloads remain bounded
-by the existing per-record limit, and a streaming trial encoding verifies that
-the result can be sealed within the segment format's block/index limits. A
-conservative byte bound also reserves index capacity for later appends up to
-the original rotation target; excessive payload growth fails before publication.
+by the existing per-record limit. A conservative framed-byte bound guarantees
+that survivors fit the segment format's block index and reserves capacity for
+later appends up to the original rotation target. Adjacent encoded blocks
+together contain more than one block target of framed data, so limiting total
+bytes to `floor(blockSize / 2) * (MaxBlocks - 1)` bounds the block count.
+Excessive payload growth fails before publication; preparation does not encode
+a second, discarded copy of the tail to establish this capacity.
 
 All replacements are installed and synced before metadata selection changes. On success,
 the managed handle switches to the replacement tail; the original byte accounting
@@ -63,7 +66,11 @@ Tests compare rotation boundaries with an untouched log across rewrites, payload
 shrink/growth, complete erasure, appends, and restarts. They also exercise no-op
 identity, empty-range rotation, checkpoint validation, forbidden reuse of erased
 IDs, catalog copy isolation, and old/new recovery after callback, cancellation,
-replacement installation, and metadata publication failures. Existing race tests,
+replacement installation, and metadata publication failures. Capacity tests accept
+growth exactly at the byte bound, reject one byte beyond it, consume the reserved
+append budget, and rewrite the resulting frozen tail as an immutable segment.
+An adverse packing test uses alternating 16- and 18-byte frames with a 33-byte
+block target to exercise partially filled blocks at the byte bound. Existing race tests,
 format checks, and lint remain part of validation. Filesystem power-loss testing
 and application integration are still required before production use.
 

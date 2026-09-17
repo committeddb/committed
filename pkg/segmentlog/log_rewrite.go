@@ -132,11 +132,6 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 			if e != nil {
 				return result, l.fail(e)
 			}
-			// Reject a transformed tail that could not be sealed with the current
-			// block/index limits. Verification streams; payload growth is not buffered.
-			if e = WriteSegment(io.Discard, Coverage{ref.Start, ref.Checkpoint.Last + 1}, tailRecords(newFile, ref.Checkpoint.End), l.encoding); e != nil {
-				return result, l.fail(e)
-			}
 			c.Active = &ref
 		}
 	}

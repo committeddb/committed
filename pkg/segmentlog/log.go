@@ -65,8 +65,9 @@ func checkLogEncoding(target uint64, encoding Options) error {
 	if blockSize == 0 {
 		blockSize = 256 << 10
 	}
-	// A non-final block consumes >half its target (or holds one oversized
-	// record). Ensure even adverse record packing fits the block-index limit.
+	// Adjacent encoded blocks together consume more than one block target.
+	// Bounding total bytes by half a target per available block therefore
+	// ensures even adverse record packing fits the block-index limit.
 	if blockSize < format.FrameOverhead || blockSize > format.MaxBlock || target > uint64(blockSize/2)*uint64(format.MaxBlocks-1) {
 		return ErrInvalid
 	}
