@@ -64,7 +64,7 @@ The implemented binary layouts and limits are documented in:
 
 - [Segment format and compression](../pkg/segmentlog/README.md).
 - [Active-tail format and recovery](../pkg/segmentlog/tail-format.md).
-- [Catalog format and publication](../pkg/segmentlog/catalog-format.md).
+- [Catalog metadata and publication](../pkg/segmentlog/bbolt-experiment.md).
 - [Managed lifecycle](../pkg/segmentlog/log-lifecycle.md).
 - [Sealed-range rewriting](../pkg/segmentlog/sealed-rewriting.md).
 - [Whole-log rewriting](../pkg/segmentlog/whole-log-rewriting.md).

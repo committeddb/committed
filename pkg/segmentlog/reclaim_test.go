@@ -249,18 +249,6 @@ func TestReclaimCancellation(t *testing.T) {
 	}
 }
 
-func TestCatalogClonePreservesCanonicalEmptySlice(t *testing.T) {
-	c := Catalog{History: [16]byte{1}, Revision: 1, Segments: []SegmentRef{}}
-	before, err := encodeCatalog(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := encodeCatalog(cloneCatalog(c))
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("clone changed canonical bytes", err)
-	}
-}
-
 func TestReclaimConcurrentRotation(t *testing.T) {
 	log := rotatedLog(t)
 	var wg sync.WaitGroup

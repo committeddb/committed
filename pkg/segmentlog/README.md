@@ -41,7 +41,7 @@ allocates the complete range list and does not pin the referenced files.
 For managed rollover, `segmentStorage` prepares physical files and a private,
 single-use handle. The catalog publisher consumes that handle to select the new
 layout without repeating payload verification or synchronization. Recovery and
-standalone publication establish trust from disk. See the
+rewrite publication establish trust from disk. See the
 [ownership contract](rollover-ownership.md).
 
 Segment lifecycle, catalog publication, and rewriting share one package in the
@@ -208,10 +208,7 @@ even when no records survive. See [whole-log rewriting](whole-log-rewriting.md).
 ## Local catalogs
 
 The managed engine uses a bbolt catalog; see the [metadata contract](bbolt-experiment.md).
-The standalone `CatalogStore` complete-file prototype remains available for its
-lower-level tests. It is not used by `Log` or the segmented EventLog adapter.
-Its [format](catalog-format.md) is separate from `metadata.db`; no conversion or
-format autodetection is provided.
+There is no manifest/CURRENT catalog format, conversion, or format autodetection.
 
 ## Reclamation
 

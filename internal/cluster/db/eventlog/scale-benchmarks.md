@@ -1,5 +1,9 @@
 # On-disk lifecycle scale baseline
 
+These measurements predate the bbolt catalog. The complete-catalog publisher
+described here has been removed; see the [bbolt results](../../../../pkg/segmentlog/bbolt-experiment.md#benchmarks)
+for the later measurements.
+
 Local run: macOS arm64, Apple M4 Max, Go 1.26.6. One iteration per case, run
 sequentially without concurrent test processes. These are warm-filesystem,
 synthetic measurements with no latency distribution or cold-cache eviction.
@@ -92,9 +96,9 @@ references, a separate single-iteration run measured these boundary appends:
 | Zstd | 8 | 58.51 | 43.21 |
 | Zstd | 64 | 87.00 | 46.00 |
 
-The established structural improvement is that unchanged sealed payloads are no
-longer read or synced during publication. Complete catalog metadata work remains.
-Recovery, rewrite preflight, and reclamation still verify the complete live layout.
+In that measured version, publication stopped reading and syncing unchanged
+sealed payloads. It still published complete catalogs and verified the complete
+live layout during recovery, rewrite preflight, and reclamation.
 
 That implementation still had four synchronous durable publications:
 sealed segment, new active tail, catalog, and CURRENT, followed by the new append.
@@ -117,9 +121,8 @@ not latency distributions or a controlled before/after comparison.
 | Zstd | 64 | 2,766 | 53.68 | 32.18 | 139.7 | 82.07 | 35.01 |
 
 The verified structural change is removal of rollover's converted segment write
-and publication. The old append file keeps its name, inode, and bytes. Only the
-new tail, catalog, and CURRENT are published; appending and syncing the new
-records follows. Hashing and validation of the newly immutable reference remain.
+and publication. The old append file keeps its name, inode, and bytes. That version published the
+new tail, catalog, and CURRENT before appending and syncing the new records. Hashing and validation of the newly immutable reference remain.
 The append samples do not establish a consistent latency improvement over the
 incremental-publication run, and synchronous boundary stalls remain.
 
@@ -150,11 +153,11 @@ this run; the same machine and warm-filesystem workload were used.
 | zstd | 8 | 28.06–29.87 | 28.71 |
 | zstd | 64 | 27.86–32.60 | 29.03 |
 
-The code path now omits recovery-style opening of the new empty tail, repeated
+The measured code path omitted recovery-style opening of the new empty tail, repeated
 verification and synchronization of prepared payloads, and the catalog layer's
-extra directory sync before metadata installation. The old file is still read
-once to calculate its digest. New tail, catalog, and CURRENT installations still
-synchronize their files and directories, followed by the new append's sync.
+extra directory sync before metadata installation. The old file was read
+once to calculate its digest. New tail, catalog, and CURRENT installations
+synchronized their files and directories, followed by the new append's sync.
 
 These samples establish neither production latency nor a controlled speedup over
 the earlier single samples. Boundary latency remains tens of milliseconds.

@@ -50,7 +50,7 @@ func managedArtifact(name string) bool {
 		prefix, suffix string
 		hexLength      int
 	}{
-		{"segment-", ".seg", 32}, {"tail-", ".active", 32}, {"catalog-", ".manifest", 64},
+		{"segment-", ".seg", 32}, {"tail-", ".active", 32},
 	} {
 		if !strings.HasPrefix(name, kind.prefix) || !strings.HasSuffix(name, kind.suffix) {
 			continue

@@ -62,14 +62,11 @@ Allocation measurements expose work that timing alone can obscure:
 | tidwall | zstd | 124 | 573,816 | 2,352 |
 | tidwall | zstd | 992 | 4,817,773 | 3,536 |
 
-In the recorded baseline, `CatalogStore.publish` called
-`verifyCatalogFiles` on the complete referenced layout. Publication now reuses
-verification of exact unchanged immutable references. Each sealed file is
-hashed, its frames verified, and the file synced. The current verifier shares one
-read of each stored payload block between hashing and frame validation; the
-recorded baseline used separate payload passes. Reopen also verifies all
-referenced history. That baseline work grew with stored history even when rotation added
-only one segment. The current catalog also represents the complete layout.
+The recorded baseline used the removed complete-catalog publisher. It verified
+all referenced payloads during publication and recovery, so work grew with stored
+history even when rotation added only one segment. Those measurements predate
+bbolt and do not describe the current publication or recovery path. See the
+[bbolt measurements](../../../../pkg/segmentlog/bbolt-experiment.md#benchmarks).
 
 Sparse segment reads use block indexes and do not perform full-history catalog
 verification on each seek. The benchmark's seek allocation results cover one

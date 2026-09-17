@@ -122,8 +122,8 @@ go test -race ./internal/cluster/db/wal -run '^(TestEventLogAdapter|TestEventLog
 middle-seek costs at two logical history sizes for both backends in plain/zstd
 modes. They report local timings and allocations with explicit fixture and cache
 limitations. The recorded baseline reverified full history during rotation.
-The standalone complete-catalog prototype reuses verification of unchanged immutable
-references during publication; its reopen still verifies full history. These measurements do not establish production throughput.
+Those results predate the bbolt catalog and do not describe current recovery costs
+or establish production throughput.
 
 The [on-disk lifecycle baseline](scale-benchmarks.md) measures larger histories
 through recovery, a boundary append, one-record erasure, reclamation, and a full

@@ -37,8 +37,7 @@ coverage start; selected references are validated before use. Empty ranges keep
 their original coverage. This is an experimental format. Per-value checksums do
 not protect bbolt's entire tree structure or provide repair/redundancy.
 
-Unlike a full catalog, this format has no 65,536-range or 16 MiB total-catalog
-limit. Existing record, segment encoding, and segment-size limits remain.
+Metadata has no fixed range-count or total-serialized-catalog size limit. Existing record, segment encoding, and segment-size limits remain.
 The bbolt database uses the hashmap freelist with normal synchronization and
 persisted freelist enabled. File growth, fragmentation, and long-lived readers
 still affect bbolt memory, write cost, and recovery cost.
