@@ -74,6 +74,9 @@ This is one profiled run on an uncontrolled, warm VM. It is separate from the
 [unprofiled timing measurements](full-size-churn.md), and does not establish a
 plain-versus-zstd performance advantage or production latency distribution.
 
+A separate [source-read benchmark](rewrite-reads.md) counts the bytes and reads
+used by opening, change detection, and prefix replay for each physical format.
+
 ## Reproduction
 
 On Linux, from the repository root:
