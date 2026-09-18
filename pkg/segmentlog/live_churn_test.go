@@ -18,6 +18,11 @@ type liveChurnMetrics struct {
 	payloadStart, replacements       int64
 	retired                          uint64
 	free, pending                    int
+	rounds                           []liveChurnRound
+}
+
+type liveChurnRound struct {
+	rewrite, reopen time.Duration
 }
 
 // runLiveChurn uses real managed appends and files, with eight 128-byte records
@@ -83,6 +88,7 @@ func runLiveChurnSize(t testing.TB, ranges, rounds int, codec Compression, perRa
 		m.payloadStart += fileSize(ref.File)
 	}
 	for round := range rounds {
+		var phase liveChurnRound
 		before, e := l.InspectCatalog()
 		if e != nil || len(before.Segments) != ranges {
 			t.Fatal("unexpected live fixture", len(before.Segments), e)
@@ -103,7 +109,8 @@ func runLiveChurnSize(t testing.TB, ranges, rounds int, codec Compression, perRa
 			expected[r.ID] = sha256.Sum256(r.Payload)
 			return r.Payload, true, nil
 		})
-		m.rewrite += time.Since(started)
+		phase.rewrite = time.Since(started)
+		m.rewrite += phase.rewrite
 		if e != nil || !result.Published || result.ChangedSegments != uint64((ranges+15)/16) {
 			t.Fatal(result, e)
 		}
@@ -144,7 +151,9 @@ func runLiveChurnSize(t testing.TB, ranges, rounds int, codec Compression, perRa
 		}
 		started = time.Now()
 		l, e = OpenLog(path, opts.Encoding)
-		m.reopen += time.Since(started)
+		phase.reopen = time.Since(started)
+		m.reopen += phase.reopen
+		m.rounds = append(m.rounds, phase)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -236,6 +245,10 @@ func BenchmarkLiveSegmentChurnFullSize(b *testing.B) {
 		b.Run(fmt.Sprintf("codec=%d", codec), func(b *testing.B) {
 			for b.Loop() {
 				m := runLiveChurnSize(b, 64, rounds, codec, (20<<20)/4096, 4080)
+				for i, phase := range m.rounds {
+					b.ReportMetric(float64(phase.rewrite.Nanoseconds())/1e6, fmt.Sprintf("scrub-round%d-ms", i+1))
+					b.ReportMetric(float64(phase.reopen.Nanoseconds())/1e6, fmt.Sprintf("reopen-round%d-ms", i+1))
+				}
 				b.ReportMetric(float64(m.payloadStart), "initial-payload-file-B")
 				b.ReportMetric(float64(m.replacements)/rounds, "replacement-B/round")
 				b.ReportMetric(float64(m.retired)/rounds, "retired-B/round")

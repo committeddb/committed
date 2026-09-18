@@ -37,6 +37,10 @@ churn tests also use the streaming fixture and expected digest map.
   remove files in their rewrite encoding, so these rounds can differ greatly.
 - Scrub, reclaim, and reopen timings are means of two rounds. Scrub timing includes
   the transform and its expected-digest updates. Final verification is untimed.
+- `scrub-round1-ms`, `scrub-round2-ms`, `reopen-round1-ms`, and
+  `reopen-round2-ms` also report those individual phases. The first scrub reads
+  append-format sources throughout; the second revisits four indexed replacements
+  alongside 60 unchanged append-format ranges and the rewritten active tail.
 - `boundary-ms`: one post-churn append; `metadata-end-B`: final metadata file size.
 
 The workload still scans the full history to identify affected records; stable
@@ -92,3 +96,45 @@ construction and correctness checks; use the named metrics for individual phases
 
 A [rewrite-preparation comparison](rewrite-preparation.md) measures a subsequent
 change that reuses comparison bytes and skips comparisons once a range changes.
+
+## Refresh after scan and verification optimizations
+
+On September 17, 2026, the implementation at `e39776f`, with the per-round
+reporting above added, ran three fresh histories per encoding. The six cases
+ran sequentially in three disposable Linux containers, plain then zstd in each,
+using the same Go 1.26.6/Linux arm64/Alpine 3.20/OrbStack setup. Fixture data lived
+on the container overlay filesystem. Focused churn race tests and lint passed
+before measurement. All six full-size cases passed every correctness check.
+
+Each case began with 1,363,400,480 selected payload-file bytes and finished with
+128 KiB of metadata. Every round preserved 60 closed references, replaced four
+closed files plus the active tail, and reclaimed five files. Replacement and
+retirement byte totals were identical across repetitions for each encoding.
+
+| Rewrite encoding | Replacement MiB/round | Retired MiB/round | Median scrub seconds/round (range) | Median reclaim ms/round | Median reopen ms/round | Median boundary ms (range) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain | 100.00 | 100.01 | 3.956 (3.784–4.611) | 25.31 | 41.79 | 16.82 (14.41–17.83) |
+| ZstdDefault | 20.23 | 60.12 | 4.980 (4.494–4.994) | 40.14 | 44.69 | 23.52 (13.53–39.85) |
+
+The aggregate phase values above are medians of each run's two-round mean.
+Individual-round medians follow; medians need not average to the aggregate.
+
+| Rewrite encoding | Scrub round 1 seconds (range) | Scrub round 2 seconds (range) | Reopen round 1 ms | Reopen round 2 ms |
+| --- | ---: | ---: | ---: | ---: |
+| Plain | 4.238 (3.515–5.106) | 4.053 (3.673–4.117) | 32.97 | 50.62 |
+| ZstdDefault | 6.113 (4.067–6.425) | 3.875 (3.535–4.921) | 43.63 | 44.64 |
+
+The first scrub reads append-format sources; the second reads four indexed
+replacements and the remaining append-format history. Both still examine the
+whole record stream and hold the log mutex throughout. These results do not
+isolate encoding cost from scan, transform, verification, synchronization, or
+publication cost. Reopen recovers the active tail and metadata boundaries;
+the survivor scans and final full-history verification are outside its timer.
+
+The refresh is not a paired comparison against the earlier implementation.
+Host and VM load were uncontrolled and caches were warm, so differences from
+the earlier single run cannot be attributed to particular optimizations. The
+small sample establishes neither production latency distributions nor cold
+recovery performance. It does confirm selective file preservation across all
+six histories while showing that full-history rewrite blocking still lasts
+seconds at this size. Compression results remain specific to repetitive data.
