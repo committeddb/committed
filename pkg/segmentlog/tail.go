@@ -105,6 +105,7 @@ func scanTailHashed(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start
 	}
 	header := make([]byte, groupHeaderSize)
 	var body []byte
+	var records []Record
 	for {
 		if checkpoint != nil {
 			if state.End > checkpoint.End {
@@ -123,6 +124,10 @@ func scanTailHashed(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start
 			break
 		}
 
+		// Records are delivered by value. Reuse only descriptors, clearing old
+		// payload references before a smaller group can leave unused entries.
+		clear(records)
+		records = records[:0]
 		if size-state.End < groupHeaderSize {
 			return state, ErrIncompleteTail
 		}
@@ -167,7 +172,6 @@ func scanTailHashed(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start
 			_, _ = digest.Write(body)
 		}
 		data := body[:length]
-		var records []Record
 		var decoded uint32
 		previous, has := state.Last, state.HasRecords
 		for len(data) > 0 {
@@ -184,7 +188,7 @@ func scanTailHashed(r io.ReaderAt, size int64, checkpoint *TailCheckpoint, start
 			if visit != nil {
 				// The header bounds count by the group size. Allocate once, after
 				// the first frame validates; verification needs no record list.
-				if records == nil {
+				if cap(records) < int(count) {
 					records = make([]Record, 0, int(count))
 				}
 				records = append(records, Record{id, payload})
