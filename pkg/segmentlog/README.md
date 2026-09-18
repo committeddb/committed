@@ -89,7 +89,9 @@ now uses these primitives; the public segment encoding APIs remain I/O-based.
 
 For a single segment, memory scales with block data and its block index.
 Opening a segment reads at most 3 MiB of encoded index metadata; decoded descriptors and
-record slices add bounded overhead. Rewriting can hold several block-sized
+record slices add bounded overhead. The descriptor list is allocated once using
+the bounded block count; see [metadata opening measurements](open-benchmarks.md).
+Rewriting can hold several block-sized
 buffers while copying the prefix and encoding output. No cache is implemented.
 
 ## Experimental format 1

@@ -226,7 +226,8 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 	if format.CRC(index) != format.LE.Uint32(f[20:]) {
 		return nil, ErrCorrupt
 	}
-	s := &Segment{r: r, coverage: coverage, count: format.LE.Uint64(f[12:])}
+	// The count is bounded by MaxBlocks and backed by a checksummed index.
+	s := &Segment{r: r, coverage: coverage, count: format.LE.Uint64(f[12:]), blocks: make([]block, 0, n)}
 	next := uint64(format.HeaderSize)
 	var total, previous uint64
 	for i := uint32(0); i < n; i++ {
