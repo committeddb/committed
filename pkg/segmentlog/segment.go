@@ -270,30 +270,33 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 	return s, nil
 }
 
-func (s *Segment) readBlock(b block, decoder *format.Decoder) ([]Record, error) {
+func (s *Segment) readBlock(b block, decoder *format.Decoder, records []Record) ([]Record, error) {
 	data := make([]byte, int(b.size))
 	if _, err := s.r.ReadAt(data, int64(b.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 		return nil, err
 	}
-	return decodeBlockWithDecoder(b, data, decoder)
+	return decodeBlockWithDecoder(b, data, decoder, records)
 }
 
 func decodeBlock(b block, data []byte) ([]Record, error) {
 	var decoder format.Decoder
 	defer decoder.Close()
-	return decodeBlockWithDecoder(b, data, &decoder)
+	return decodeBlockWithDecoder(b, data, &decoder, nil)
 }
 
-func decodeBlockWithDecoder(b block, data []byte, decoder *format.Decoder) ([]Record, error) {
+func decodeBlockWithDecoder(b block, data []byte, decoder *format.Decoder, records []Record) ([]Record, error) {
+	// Descriptors stay internal; yielded records copy them by value. Clear old
+	// payload references before reusing the list for a smaller block.
+	clear(records)
+	records = records[:0]
 	// Bound the descriptor allocation independently of caller-supplied metadata.
 	if b.decoded > format.MaxBlock || b.count == 0 || b.count > b.decoded/format.FrameOverhead {
 		return nil, ErrCorrupt
 	}
-	var records []Record
 	err := walkBlockWithDecoder(b, data, func(r Record) {
 		// Allocate only after decoding and the first frame check succeed. Reads
 		// still expose nothing until the entire block passes validation.
-		if records == nil {
+		if cap(records) < int(b.count) {
 			records = make([]Record, 0, int(b.count))
 		}
 		records = append(records, r)
@@ -398,12 +401,14 @@ func (s *Segment) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 	return func(yield func(Record, error) bool) {
 		var decoder format.Decoder
 		defer decoder.Close()
+		var records []Record
 		first := sort.Search(len(s.blocks), func(i int) bool { return s.blocks[i].last >= bounds.Start })
 		for _, b := range s.blocks[first:] {
 			if b.first >= bounds.End {
 				return
 			}
-			records, err := s.readBlock(b, &decoder)
+			var err error
+			records, err = s.readBlock(b, &decoder, records)
 			if err != nil {
 				yield(Record{}, err)
 				return

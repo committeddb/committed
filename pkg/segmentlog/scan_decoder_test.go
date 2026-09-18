@@ -57,35 +57,37 @@ func TestIndexedScanDecoderOwnership(t *testing.T) {
 
 func BenchmarkIndexedScan(b *testing.B) {
 	for _, codec := range []Compression{NoCompression, ZstdDefault} {
-		b.Run(fmt.Sprint(codec), func(b *testing.B) {
-			const count = 5120
-			payload := bytes.Repeat([]byte("x"), 4080)
-			input := func(yield func(Record, error) bool) {
-				for i := range count {
-					if !yield(Record{uint64(i * 3), payload}, nil) {
-						return
+		for _, size := range []int{32, 4080} {
+			b.Run(fmt.Sprintf("codec=%d/payload=%d", codec, size), func(b *testing.B) {
+				count := (20 << 20) / (size + 16)
+				payload := bytes.Repeat([]byte("x"), size)
+				input := func(yield func(Record, error) bool) {
+					for i := range count {
+						if !yield(Record{uint64(i * 3), payload}, nil) {
+							return
+						}
 					}
 				}
-			}
-			var buf bytes.Buffer
-			if err := WriteSegment(&buf, Coverage{0, count * 3}, input, Options{Compression: codec}); err != nil {
-				b.Fatal(err)
-			}
-			s := open(b, buf.Bytes())
-			b.ReportAllocs()
-			b.SetBytes(count * 4096)
-			for b.Loop() {
-				seen := 0
-				for r, err := range s.Records() {
-					if err != nil || r.ID != uint64(seen*3) || !bytes.Equal(r.Payload, payload) {
-						b.Fatal(seen, err)
+				var buf bytes.Buffer
+				if err := WriteSegment(&buf, Coverage{0, uint64(count * 3)}, input, Options{Compression: codec}); err != nil {
+					b.Fatal(err)
+				}
+				s := open(b, buf.Bytes())
+				b.ReportAllocs()
+				b.SetBytes(int64(count * (size + 16)))
+				for b.Loop() {
+					seen := 0
+					for r, err := range s.Records() {
+						if err != nil || r.ID != uint64(seen*3) || !bytes.Equal(r.Payload, payload) {
+							b.Fatal(seen, err)
+						}
+						seen++
 					}
-					seen++
+					if seen != count {
+						b.Fatal(seen)
+					}
 				}
-				if seen != count {
-					b.Fatal(seen)
-				}
-			}
-		})
+			})
+		}
 	}
 }
