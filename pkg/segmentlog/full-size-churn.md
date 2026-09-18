@@ -138,3 +138,6 @@ small sample establishes neither production latency distributions nor cold
 recovery performance. It does confirm selective file preservation across all
 six histories while showing that full-history rewrite blocking still lasts
 seconds at this size. Compression results remain specific to repetitive data.
+
+A separate [labeled CPU profile](rewrite-profile.md) distinguishes rewrite work
+from fixture construction and correctness scans, including iterator coroutines.

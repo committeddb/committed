@@ -2,11 +2,13 @@ package segmentlog
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"testing"
 	"time"
 )
@@ -94,22 +96,26 @@ func runLiveChurnSize(t testing.TB, ranges, rounds int, codec Compression, perRa
 			t.Fatal("unexpected live fixture", len(before.Segments), e)
 		}
 		stats := l.catalog.(*boltCatalog).db.Stats()
-		started := time.Now()
-		result, e := l.Rewrite(t.Context(), uint64(round+1), func(r Record) ([]byte, bool, error) {
-			ordinal := r.ID / 3
-			// Revisit the same scattered ranges to exercise metadata page reuse.
-			if (ordinal/uint64(perRange))%16 != 0 {
+		var started time.Time
+		var result RewriteResult
+		pprof.Do(t.Context(), pprof.Labels("segmentlog.phase", "rewrite", "segmentlog.round", fmt.Sprint(round+1), "segmentlog.codec", fmt.Sprint(codec)), func(ctx context.Context) {
+			started = time.Now()
+			result, e = l.Rewrite(ctx, uint64(round+1), func(r Record) ([]byte, bool, error) {
+				ordinal := r.ID / 3
+				// Revisit the same scattered ranges to exercise metadata page reuse.
+				if (ordinal/uint64(perRange))%16 != 0 {
+					return r.Payload, true, nil
+				}
+				if ordinal%uint64(perRange) == 0 {
+					delete(expected, r.ID)
+					return nil, false, nil
+				}
+				r.Payload[8]++
+				expected[r.ID] = sha256.Sum256(r.Payload)
 				return r.Payload, true, nil
-			}
-			if ordinal%uint64(perRange) == 0 {
-				delete(expected, r.ID)
-				return nil, false, nil
-			}
-			r.Payload[8]++
-			expected[r.ID] = sha256.Sum256(r.Payload)
-			return r.Payload, true, nil
+			})
+			phase.rewrite = time.Since(started)
 		})
-		phase.rewrite = time.Since(started)
 		m.rewrite += phase.rewrite
 		if e != nil || !result.Published || result.ChangedSegments != uint64((ranges+15)/16) {
 			t.Fatal(result, e)
