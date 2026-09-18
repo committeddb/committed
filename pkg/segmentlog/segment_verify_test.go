@@ -5,11 +5,44 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
 	"github.com/committeddb/committed/pkg/segmentlog/internal/format"
 )
+
+func TestSegmentDigestMetadataSizes(t *testing.T) {
+	// Empty segments, a small index, and an index larger than a copy chunk.
+	for _, count := range []int{0, 1, 700} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteSegment(&buf, Coverage{0, uint64(count*3 + 1)}, emptyPayloadRecords(count), Options{BlockSize: format.FrameOverhead}); err != nil {
+				t.Fatal(err)
+			}
+			raw := buf.Bytes()
+			ref := digestRef(t, raw)
+			reader := &countedSegmentReader{data: raw, reads: make([]int, len(raw))}
+			if err := verifySegmentDigest(reader, int64(len(raw)), ref); err != nil {
+				t.Fatal(err)
+			}
+			indexStart := format.HeaderSize + count*format.FrameOverhead
+			for off, reads := range reader.reads {
+				want := 2 // metadata is parsed, then hashed
+				if off >= format.HeaderSize && off < indexStart {
+					want = 1
+				}
+				if reads != want {
+					t.Fatalf("byte %d read %d times, want %d", off, reads, want)
+				}
+			}
+			ref.SHA256[0] ^= 1
+			if err := verifySegmentDigest(bytes.NewReader(raw), int64(len(raw)), ref); !errors.Is(err, ErrCorrupt) {
+				t.Fatal("accepted wrong digest", err)
+			}
+		})
+	}
+}
 
 type countedSegmentReader struct {
 	data    []byte

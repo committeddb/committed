@@ -58,7 +58,15 @@ func verifySegmentDigest(r io.ReaderAt, size int64, ref SegmentRef) error {
 	// OpenSegment proved that blocks partition header..index and that index/footer
 	// end exactly at size. This hashes all remaining bytes, including format-0
 	// metadata, without retaining another complete index buffer.
-	if _, err := io.Copy(digest, io.NewSectionReader(r, offset, size-offset)); err != nil {
+	// Payload validation is complete, so its stored-byte buffer is available.
+	// Keep metadata reads bounded without allocating 32 KiB for a small index.
+	bufferSize := int(min(int64(32<<10), size-offset))
+	if cap(stored) < bufferSize {
+		stored = make([]byte, bufferSize)
+	} else {
+		stored = stored[:bufferSize]
+	}
+	if _, err := io.CopyBuffer(digest, io.NewSectionReader(r, offset, size-offset), stored); err != nil {
 		return err
 	}
 	if !bytes.Equal(digest.Sum(nil), ref.SHA256[:]) {

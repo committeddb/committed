@@ -169,3 +169,43 @@ Tests exercise large/small block transitions, undersized declarations after a
 larger allocation, concatenated compressed frames, corrupt frames, intervening
 plain blocks, successful reuse after errors, and standalone output ownership.
 The complete storage race suites, Linux segmentlog suite, lint, and gosec passed.
+
+## Reusing storage for metadata hashing
+
+After indexed payload validation, digest verification reuses its stored-block
+buffer to hash the index and footer. If that buffer is too small, it allocates
+the remaining metadata size, capped at 32 KiB. Reads remain bounded to that
+size. The footer guarantees a nonempty copy buffer, including for an empty
+segment. This replaces the unconditional 32 KiB buffer allocated by `io.Copy`;
+payload validation, metadata parsing, read coverage, and SHA-256 comparison
+remain unchanged. Closed append-file verification is unaffected.
+
+Tests cover empty segments, one-block indexes, and indexes larger than a copy
+chunk. They check that every metadata byte is read twice (parsing and hashing),
+each payload byte is read once, and a wrong digest is rejected. Existing tests
+cover format-0 files, corruption, varying block sizes, and read failures. The
+segmentlog race suite, Linux segmentlog suite, lint, and gosec passed.
+
+Recorded September 17, 2026 with the same Go/Linux/OrbStack setup above. Baseline
+`8203c03` and changed binaries ran three sequential pairs, 20 iterations per
+case, reversing order in the second pair. Validation finished before measurement
+and each process finished before the next began. All runs passed; host and VM
+load were uncontrolled. Values below are medians across three runs.
+
+| Digest fixture | Before B/op | After B/op | Before allocs/op | After allocs/op | Before time | After time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain / 16 small records | 34,000 | 1,232 | 11 | 10 | 2.906 µs | 1.110 µs |
+| Plain / 4,096 small records | 229,845 | 197,077 | 11 | 10 | 137.850 µs | 186.009 µs |
+| ZstdDefault / 16 small records | 66,275 | 33,271 | 35 | 34 | 23.230 µs | 8.615 µs |
+| ZstdDefault / 4,096 small records | 411,592 | 378,708 | 25 | 24 | 297.159 µs | 146.531 µs |
+| Plain / 80 blocks, 20 MiB | 303,472 | 270,704 | 11 | 10 | 10.960 ms | 11.016 ms |
+| ZstdDefault / 80 blocks, 20 MiB | 457,227 | 428,665 | 26 | 26 | 3.762 ms | 3.791 ms |
+
+Small records have 32-byte payloads. The 80-block fixture uses 4,080-byte
+payloads. The change saves 32 KiB per plain digest pass and about 28 KiB for the
+compressed 80-block fixture, whose stored blocks are too small to hold its
+metadata copy buffer. Decoder allocation varies slightly between runs.
+Frame-only verification is unaffected. Timing is mixed, including a slower
+4,096-record plain median; these samples establish no general latency gain.
+The figures measure cumulative allocation, not peak memory, and exclude
+filesystem I/O and catalog publication.
