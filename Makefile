@@ -203,7 +203,7 @@ lint/openapi:
 # `gosec (security)` CI job wraps this with timeout-minutes as a hang backstop.
 # See .golangci.gosec.yml.
 lint/gosec:
-	golangci-lint run -c .golangci.gosec.yml $$(go list -tags 'adversarial upgrade backup' ./internal/... ./cmd/... | grep -v '/internal/cluster/backup$$' | sed "s|^$$(go list -m)/|./|")
+	golangci-lint run -c .golangci.gosec.yml $$(go list -tags 'adversarial upgrade backup' ./internal/... ./cmd/... ./pkg/... | grep -v '/internal/cluster/backup$$' | sed "s|^$$(go list -m)/|./|")
 
 # Release artifacts: arm64 + amd64 for darwin/linux, amd64-only for
 # windows. arm64 matters on both ends now — Apple Silicon dev machines

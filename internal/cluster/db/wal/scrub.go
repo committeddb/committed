@@ -656,11 +656,7 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64, eraseMax uint64) 
 // pattern as the phase-A copy — entries appended concurrently are all at index
 // > bound and excluded.
 func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error) {
-	sel := make(map[string]uint64)
-	// User-type kinds, harvested in index order from type registrations as we
-	// scan. typeType being Revision (retained) guarantees a type's registration
-	// precedes its data here.
-	userKind := make(map[string]cluster.EntityKind)
+	selection := newMetadataSelection()
 	first, err := s.firstEventSeq()
 	if err != nil {
 		return nil, err
@@ -670,7 +666,7 @@ func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error)
 		return nil, err
 	}
 	if first == 0 || last == 0 {
-		return sel, nil
+		return selection.latest, nil
 	}
 	for seq := first; seq <= last; seq++ {
 		raw, err := s.readEventAt(seq)
@@ -686,36 +682,11 @@ func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error)
 		if pe.GetIndex() > bound {
 			break
 		}
-		if pe.GetType() != pb.EntryNormal || pe.Data == nil {
-			continue
-		}
-		idx := pe.GetIndex()
-		if err := cluster.ForEachProposalEntity(pe.Data, func(typeID string, key, data []byte, isDelete bool) error {
-			// Learn each user type's declared kind from its registration.
-			if cluster.IsType(typeID) && !isDelete {
-				t := &cluster.Type{}
-				if uerr := t.Unmarshal(data); uerr != nil {
-					return uerr
-				}
-				userKind[t.ID] = t.EntityKind
-				return nil
-			}
-			// Compactable iff Snapshot: an internal Snapshot built-in, or a user
-			// type harvested as Snapshot. Everything else — Revision configs,
-			// Standalone dead-letters, Event/Command/Unspecified streams — is
-			// retained.
-			if !cluster.IsSystemTombstonable(typeID) && userKind[typeID] != cluster.EntityKindSnapshot {
-				return nil
-			}
-			if tk := string(tombstoneKey(typeID, key)); idx > sel[tk] {
-				sel[tk] = idx
-			}
-			return nil
-		}); err != nil {
+		if err := selection.observe(pe); err != nil {
 			return nil, err
 		}
 	}
-	return sel, nil
+	return selection.latest, nil
 }
 
 // recomputeEventBoundsLocked refreshes firstEventIndex/eventIndex from the
