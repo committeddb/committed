@@ -270,8 +270,18 @@ func OpenSegment(r io.ReaderAt, size int64) (*Segment, error) {
 	return s, nil
 }
 
-func (s *Segment) readBlock(b block, decoder *format.Decoder, records []Record) ([]Record, error) {
-	data := make([]byte, int(b.size))
+func (s *Segment) readBlock(b block, decoder *format.Decoder, records []Record, compressed *[]byte) ([]Record, error) {
+	var data []byte
+	if b.codec == format.Zstd {
+		// Decoding owns its output, so compressed input can be reused. Plain
+		// input becomes returned payload storage and must remain independent.
+		if cap(*compressed) < int(b.size) {
+			*compressed = make([]byte, int(b.size))
+		}
+		data = (*compressed)[:int(b.size)]
+	} else {
+		data = make([]byte, int(b.size))
+	}
 	if _, err := s.r.ReadAt(data, int64(b.offset)); err != nil { // #nosec G115 -- OpenSegment validates block offsets within the int64 file size.
 		return nil, err
 	}
@@ -402,13 +412,14 @@ func (s *Segment) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 		var decoder format.Decoder
 		defer decoder.Close()
 		var records []Record
+		var compressed []byte
 		first := sort.Search(len(s.blocks), func(i int) bool { return s.blocks[i].last >= bounds.Start })
 		for _, b := range s.blocks[first:] {
 			if b.first >= bounds.End {
 				return
 			}
 			var err error
-			records, err = s.readBlock(b, &decoder, records)
+			records, err = s.readBlock(b, &decoder, records, &compressed)
 			if err != nil {
 				yield(Record{}, err)
 				return

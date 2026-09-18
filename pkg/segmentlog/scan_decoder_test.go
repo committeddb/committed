@@ -2,10 +2,64 @@ package segmentlog
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"iter"
+	"math/rand/v2"
 	"testing"
+
+	"github.com/committeddb/committed/pkg/segmentlog/internal/format"
 )
+
+func TestIndexedScanMixedBlockOwnership(t *testing.T) {
+	random := rand.New(rand.NewPCG(1, 2))
+	noise := make([]byte, 8192)
+	for i := range noise {
+		noise[i] = byte(random.Uint32())
+	}
+	records := []Record{
+		{0, bytes.Repeat([]byte("a"), 4096)},
+		{10, noise},
+		{20, bytes.Repeat(noise, 4)},
+		{30, bytes.Repeat([]byte("b"), 4096)},
+	}
+	data := compressed(t, ZstdDefault, records...)
+	s := open(t, data)
+	if len(s.blocks) != 4 || s.blocks[0].codec != format.Zstd || s.blocks[1].codec != format.Plain ||
+		s.blocks[2].codec != format.Zstd || s.blocks[3].codec != format.Zstd ||
+		s.blocks[2].size <= s.blocks[0].size || s.blocks[3].size >= s.blocks[2].size {
+		t.Fatal("fixture must mix plain storage with growing and shrinking compressed blocks")
+	}
+	retained := collect(t, s)
+	for i, r := range retained {
+		if r.ID != records[i].ID || !bytes.Equal(r.Payload, records[i].Payload) {
+			t.Fatal("retained payload changed", i)
+		}
+	}
+	// A later failed read must expose none of that block, even after input reuse.
+	last := s.blocks[3]
+	data[int(last.offset)] ^= 0xff
+	seen := 0
+	var scanErr error
+	for r, err := range s.Records() {
+		if err != nil {
+			scanErr = err
+			break
+		}
+		if seen >= 3 || r.ID != records[seen].ID || !bytes.Equal(r.Payload, records[seen].Payload) {
+			t.Fatal("unexpected record before corrupt block", seen)
+		}
+		seen++
+	}
+	if seen != 3 || !errors.Is(scanErr, ErrCorrupt) {
+		t.Fatal(seen, scanErr)
+	}
+	for i, r := range retained {
+		if !bytes.Equal(r.Payload, records[i].Payload) {
+			t.Fatal("failed scan changed retained payload", i)
+		}
+	}
+}
 
 func TestIndexedScanDecoderOwnership(t *testing.T) {
 	records := []Record{{0, bytes.Repeat([]byte("a"), 4096)}, {10, bytes.Repeat([]byte("b"), 32)}, {20, bytes.Repeat([]byte("c"), 9000)}, {30, bytes.Repeat([]byte("d"), 16)}}

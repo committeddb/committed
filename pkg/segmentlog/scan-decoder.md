@@ -89,3 +89,35 @@ Descriptor reuse saves about 13.6 MiB of cumulative allocation per small-record
 scan, compared with about 178 KiB for the larger records. Timing remains a small
 local sample, not a production guarantee. Storage race suites, Linux segmentlog
 tests, lint, and gosec passed.
+
+## Reusing compressed input
+
+Each scan also reuses its compressed-input buffer, growing it when required.
+Compressed output still receives independent storage. Plain input uses a fresh
+buffer because its bytes become the returned payloads. The compressed-input
+allocation stays at its largest capacity until the scan ends, including across
+plain blocks. No buffers are shared between scans.
+
+A mixed-block test covers growing and shrinking compressed inputs with a plain
+block between them, retained payloads, and rejection of a later corrupt block
+without delivering its records. Storage race suites, Linux segmentlog tests,
+lint, and gosec passed.
+
+Recorded September 17, 2026 using the same benchmark and environment above.
+Baseline `c14ae47` and changed binaries ran three sequential pairs of 20
+iterations per case, reversing order in the second pair. All checks finished
+before measurement, and each benchmark process finished before the next started.
+The following are medians; host and VM load were uncontrolled.
+
+| Encoding / payload bytes | Before B/op | After B/op | Before allocs/op | After allocs/op | Before time | After time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain / 32 | 21,153,291 | 21,153,036 | 82 | 82 | 7.202 ms | 7.296 ms |
+| Plain / 4,080 | 20,973,830 | 20,973,848 | 81 | 81 | 4.626 ms | 4.693 ms |
+| ZstdDefault / 32 | 24,582,514 | 21,673,396 | 193 | 119 | 15.209 ms | 14.221 ms |
+| ZstdDefault / 4,080 | 21,183,226 | 21,134,355 | 187 | 112 | 9.202 ms | 9.628 ms |
+
+Compressed input reuse saves about 2.8 MiB of cumulative allocation for the
+small-record fixture and 48 KiB for the larger-record fixture. Plain allocation
+is effectively unchanged. Timing is mixed, including a slower median for larger
+compressed records; these measurements do not establish a general latency gain.
+This changes allocation during indexed scans, not file size or backup volume.
