@@ -88,6 +88,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 		return result, l.fail(err)
 	}
 	var changedRefs []SegmentRef
+	var retiredCacheRefs []SegmentRef
 	for ref, e := range l.catalog.ranges(Coverage{c.Start, c.Active.Start}) {
 		if e != nil {
 			return result, l.fail(e)
@@ -103,6 +104,9 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 			return result, l.fail(e)
 		}
 		if changed {
+			if l.cache != nil {
+				retiredCacheRefs = append(retiredCacheRefs, ref)
+			}
 			result.ChangedSegments++
 			if replacement.Count == 0 {
 				result.EmptiedSegments++
@@ -145,6 +149,9 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 		return result, l.fail(err)
 	}
 	result.Published = true
+	for _, ref := range retiredCacheRefs {
+		l.cache.discard(ref)
+	}
 	if newFile != nil {
 		old := l.file
 		l.file, l.tail = newFile, newTail
@@ -157,22 +164,11 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 }
 
 func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Transform) (replacement SegmentRef, changed bool, err error) {
-	f, err := openRangeFile(l.path, ref)
+	segment, release, err := l.acquireRange(ref)
 	if err != nil {
 		return replacement, false, err
 	}
-	defer func() { err = errors.Join(err, f.Close()) }()
-	info, err := f.Stat()
-	if err != nil {
-		return replacement, false, err
-	}
-	segment, err := openRangeSource(f, info.Size(), ref)
-	if err != nil {
-		return replacement, false, err
-	}
-	if segment.Coverage() != ref.Coverage || segment.Count() != ref.Count {
-		return replacement, false, ErrCorrupt
-	}
+	defer func() { err = errors.Join(err, release()) }()
 	replacement = ref
 	changed, err = prepareRewrite(ctx, segment.Records(), transform, func(records iter.Seq2[Record, error]) error {
 		// Peek at the transformed stream: an entirely erased range needs no file.

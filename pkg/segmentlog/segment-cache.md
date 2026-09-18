@@ -1,8 +1,9 @@
 # Segment cache core
 
 The package contains an internal cache core and immutable decoded segment
-representation. **Managed log operations do not use this cache.** There is no
-active-tail cache or public cache configuration in this implementation.
+representation. Managed closed-range reads and rewrites support an internally
+attached historical cache. **Normal CreateLog/OpenLog calls leave caching
+disabled.** There is no active-tail cache or public cache configuration.
 
 ## Contents and ownership
 
@@ -56,3 +57,33 @@ historical LRU at segment acquisition, separate budgets, oversized and disabled
 admission, identity changes, promotion without duplication, failed promotion,
 payload ownership, sparse seeks, source buffer reuse, corrupt/incomplete source
 rejection, and concurrent acquisition/invalidation/eviction with surviving readers.
+
+## Managed acquisition
+
+Seek, Scan, and sealed-range rewrite preparation share `acquireRange` under the
+existing log mutex. A hit supplies immutable in-memory contents without opening
+the file. A miss checks the file and catalog metadata, consumes the validating
+source into a complete cached representation, closes the file, then admits the
+entry to historical LRU. Failed loading or closing never admits a partial entry.
+A nil cache or zero historical budget retains the streaming file-backed path.
+Recent entries, if present internally, can be acquired through the same path;
+this integration does not populate recent entries or change active-tail reads.
+
+Cold cached acquisition materializes the entire selected range, including
+indexed blocks outside a requested read interval. This differs from uncached
+indexed reads, which validate only selected blocks. Frozen append files retain
+their full prevalidation pass on a miss; warm accesses use the already validated
+contents. Loading temporaries and oversized entries are outside retained-cache
+budgets. Managed operations still serialize; this change does not provide
+concurrent scan/append or scrub execution.
+
+Successful rewrite publication discards replaced cache identities while retaining
+unchanged entries. New indexed replacements load through their own catalog
+identity. Existing references to old entries remain immutable and usable after
+discard and file reclamation. Close drops the log's cache reference. Explicit
+Verify bypasses the cache and checks selected files on disk.
+
+Managed tests remove a warmed file temporarily to prove that read hits use memory
+while Verify still detects its absence. They cover payload mutation, replacement
+identity, retention of unchanged ranges, reading indexed replacements after
+reclamation, close, and rejection of a corrupt cold source before callbacks.

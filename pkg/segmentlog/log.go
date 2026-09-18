@@ -48,6 +48,7 @@ type Log struct {
 	dir      fileInstaller
 	remover  fileRemover
 	catalog  layout
+	cache    *segmentCache
 	file     *os.File
 	tail     *Tail
 	framed   uint64
@@ -363,26 +364,12 @@ func (l *Log) Seek(id uint64) (Record, error) {
 		if ref.Count == 0 {
 			continue
 		}
-		f, err := openRangeFile(l.path, ref)
+		s, release, err := l.acquireRange(ref)
 		if err != nil {
 			return Record{}, err
 		}
-		rec, readErr := func() (Record, error) {
-			info, err := f.Stat()
-			if err != nil {
-				return Record{}, err
-			}
-			s, err := openRangeSource(f, info.Size(), ref)
-			if err != nil {
-				return Record{}, err
-			}
-			if s.Coverage() != ref.Coverage || s.Count() != ref.Count {
-				return Record{}, ErrCorrupt
-			}
-			return s.Seek(id)
-		}()
-		closeErr := f.Close()
-		if closeErr != nil {
+		rec, readErr := s.Seek(id)
+		if closeErr := release(); closeErr != nil {
 			return Record{}, errors.Join(readErr, closeErr)
 		}
 		if errors.Is(readErr, ErrNotFound) {
@@ -429,5 +416,6 @@ func (l *Log) Close() error {
 		return nil
 	}
 	l.closed = true
+	l.cache = nil
 	return errors.Join(l.file.Close(), l.catalog.Close(), l.lock.Close())
 }

@@ -14,8 +14,9 @@ import (
 // until Scan returns; this is a synchronous view, not a persistent reader pin.
 // Cancellation is checked between records, not during I/O or the callback.
 // Sealed scans use block indexes; the unindexed tail prefix is scanned once.
-// Memory is bounded by decoded blocks/groups unless the caller retains payloads.
-// Unvisited files/blocks are not verified; use full verification separately.
+// Without caching, memory is bounded by decoded blocks/groups unless the caller
+// retains payloads. An internally enabled cache materializes whole closed ranges
+// on a miss. Cache hits do not inspect disk; use Verify for disk verification.
 func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -92,22 +93,11 @@ func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) erro
 }
 
 func (l *Log) scanSegment(ref SegmentRef, bounds Coverage, visit func(Record) error) (err error) {
-	f, err := openRangeFile(l.path, ref)
+	segment, release, err := l.acquireRange(ref)
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, f.Close()) }()
-	info, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	segment, err := openRangeSource(f, info.Size(), ref)
-	if err != nil {
-		return err
-	}
-	if segment.Coverage() != ref.Coverage || segment.Count() != ref.Count {
-		return ErrCorrupt
-	}
+	defer func() { err = errors.Join(err, release()) }()
 	for record, err := range segment.recordsIn(bounds) {
 		if err != nil {
 			return err

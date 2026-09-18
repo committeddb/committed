@@ -98,12 +98,12 @@ func (s *closedTail) recordsIn(bounds Coverage) iter.Seq2[Record, error] {
 // directory ownership prevents replacement between the check and open.
 func openRangeFile(dir string, ref SegmentRef) (*os.File, error) {
 	path := filepath.Join(dir, ref.File)
-	info, err := os.Lstat(path)
+	info, err := os.Lstat(path) // #nosec G703 -- ref is selected from the validated catalog; File is a validated data basename within the owned log directory.
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, ErrCorrupt
 	}
-	return os.Open(path) // #nosec G304 -- Validated range basename in the exclusively owned log directory.
+	return os.Open(path) // #nosec G304 G703 -- Validated catalog range basename in the exclusively owned log directory.
 }
