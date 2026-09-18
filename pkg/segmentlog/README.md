@@ -92,7 +92,9 @@ Opening a segment reads at most 3 MiB of encoded index metadata; decoded descrip
 record slices add bounded overhead. The descriptor list is allocated once using
 the bounded block count; see [metadata opening measurements](open-benchmarks.md).
 Rewriting can hold several block-sized
-buffers while copying the prefix and encoding output. No cache is implemented.
+buffers while copying the prefix and encoding output. Managed operations do not
+use a cache. An internal [segment cache core](segment-cache.md) implements shared
+immutable entries with separate recent and historical retention policies.
 The writer retains block descriptors before encoding its index; an
 [incremental index encoding experiment](write-index-experiment.md) did not
 justify changing that approach.
