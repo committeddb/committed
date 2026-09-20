@@ -248,6 +248,10 @@ func OpenTail(f TailFile) (*Tail, error) {
 }
 
 func openTail(f TailFile, checkpoint *TailCheckpoint) (*Tail, error) {
+	return openTailWithVisitor(f, checkpoint, nil)
+}
+
+func openTailWithVisitor(f TailFile, checkpoint *TailCheckpoint, visit func(Record) error) (*Tail, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -256,7 +260,7 @@ func openTail(f TailFile, checkpoint *TailCheckpoint) (*Tail, error) {
 		return nil, ErrInvalid
 	}
 	digest := sha256.New()
-	state, err := scanTailHashed(f, info.Size(), checkpoint, nil, nil, digest)
+	state, err := scanTailHashed(f, info.Size(), checkpoint, nil, visit, digest)
 	if err != nil {
 		return nil, err
 	}

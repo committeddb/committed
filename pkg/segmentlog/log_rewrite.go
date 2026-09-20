@@ -116,6 +116,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	}
 	var newFile *os.File
 	var newTail *Tail
+	var newResident *segmentBuilder
 	var replacementActive *TailRef
 	if includeTail {
 		ref, changed, e := l.prepareTail(ctx, *c.Active, c.SegmentBytes, transform)
@@ -133,7 +134,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 					err = errors.Join(err, newFile.Close())
 				}
 			}()
-			newTail, e = openTail(newFile, ref.Checkpoint)
+			newTail, newResident, e = recoverResidentTail(newFile, ref.Checkpoint, l.resident != nil)
 			if e != nil {
 				return result, l.fail(e)
 			}
@@ -154,7 +155,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	}
 	if newFile != nil {
 		old := l.file
-		l.file, l.tail = newFile, newTail
+		l.file, l.tail, l.resident = newFile, newTail, newResident
 		newFile = nil
 		if e := old.Close(); e != nil {
 			return result, l.fail(e)
@@ -228,7 +229,11 @@ func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, trans
 		return ref, false, err
 	}
 	replacement = ref
-	changed, err = prepareRewrite(ctx, tailRecords(l.file, state.End), transform, func(records iter.Seq2[Record, error]) error {
+	input := tailRecords(l.file, state.End)
+	if l.resident != nil {
+		input = l.resident.view(ref.Start).Records()
+	}
+	changed, err = prepareRewrite(ctx, input, transform, func(records iter.Seq2[Record, error]) error {
 		name, e := uniqueName("tail", ref.Start, ".active")
 		if e != nil {
 			return e

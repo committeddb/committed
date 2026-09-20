@@ -92,10 +92,11 @@ Opening a segment reads at most 3 MiB of encoded index metadata; decoded descrip
 record slices add bounded overhead. The descriptor list is allocated once using
 the bounded block count; see [metadata opening measurements](open-benchmarks.md).
 Rewriting can hold several block-sized
-buffers while copying the prefix and encoding output. Normal opens disable
-caching. Internally attached [segment caches](segment-cache.md) support managed
-closed-range reads and rewrites; the core has separate recent and historical
-retention policies. Active-tail caching and public configuration are absent.
+buffers while copying the prefix and encoding output. Caching defaults to disabled.
+Optional [segment caches](segment-cache.md) retain the active tail in memory and
+use separate byte budgets for recent sealed segments and historical LRU entries.
+The resident tail and caller payload copies are additional to these budgets.
+Cache options are runtime settings supplied at creation or reopening.
 The writer retains block descriptors before encoding its index; an
 [incremental index encoding experiment](write-index-experiment.md) did not
 justify changing that approach.

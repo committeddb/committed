@@ -27,6 +27,7 @@ type LogOptions struct {
 	// overhead. Zero selects 20 MiB. Maximum is 32 MiB. Oversized records stand alone.
 	SegmentBytes int
 	Encoding     Options
+	Cache        CacheOptions
 }
 
 // fileInstaller returns success only after both file contents and its directory
@@ -49,6 +50,7 @@ type Log struct {
 	remover  fileRemover
 	catalog  layout
 	cache    *segmentCache
+	resident *segmentBuilder
 	file     *os.File
 	tail     *Tail
 	framed   uint64
@@ -129,7 +131,7 @@ func CreateLog(path string, start uint64, opts LogOptions) (result *Log, retErr 
 	if err != nil {
 		return nil, err
 	}
-	result, retErr = attachLog(path, dir, store, opts.Encoding)
+	result, retErr = attachLog(path, dir, store, opts.Encoding, opts.Cache)
 	if result != nil {
 		result.lock = lock
 	} else {
@@ -142,7 +144,16 @@ func CreateLog(path string, start uint64, opts LogOptions) (result *Log, retErr 
 // checked on access or explicitly with Verify. It refuses incomplete tails
 // without truncation and leaves unselected files for ReclaimOrphans. Encoding
 // affects indexed rewrite outputs only. Missing metadata is never initialized.
-func OpenLog(path string, encoding Options) (result *Log, retErr error) {
+// At most one runtime CacheOptions value may be supplied; omission disables
+// caching. Cache budgets are not persisted and must be supplied on each open.
+func OpenLog(path string, encoding Options, cacheOptions ...CacheOptions) (result *Log, retErr error) {
+	if len(cacheOptions) > 1 {
+		return nil, ErrInvalid
+	}
+	var cacheOpts CacheOptions
+	if len(cacheOptions) == 1 {
+		cacheOpts = cacheOptions[0]
+	}
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -164,7 +175,7 @@ func OpenLog(path string, encoding Options) (result *Log, retErr error) {
 	if err != nil {
 		return nil, err
 	}
-	result, retErr = attachLog(path, dir, store, encoding)
+	result, retErr = attachLog(path, dir, store, encoding, cacheOpts)
 	if result != nil {
 		result.lock = lock
 	} else {
@@ -173,7 +184,7 @@ func OpenLog(path string, encoding Options) (result *Log, retErr error) {
 	return result, retErr
 }
 
-func attachLog(path string, dir *durablefs.Dir, store layout, encoding Options) (*Log, error) {
+func attachLog(path string, dir *durablefs.Dir, store layout, encoding Options, cacheOpts CacheOptions) (*Log, error) {
 	c, err := store.head()
 	if err != nil {
 		return nil, err
@@ -195,7 +206,8 @@ func attachLog(path string, dir *durablefs.Dir, store layout, encoding Options) 
 	if err != nil {
 		return nil, err
 	}
-	tail, err := openTail(file, c.Active.Checkpoint)
+	enabled := cacheOpts.RecentBytes != 0 || cacheOpts.HistoricalBytes != 0
+	tail, resident, err := recoverResidentTail(file, c.Active.Checkpoint, enabled)
 	if err != nil {
 		_ = file.Close()
 		return nil, err
@@ -215,7 +227,11 @@ func attachLog(path string, dir *durablefs.Dir, store layout, encoding Options) 
 		_ = file.Close()
 		return nil, ErrCorrupt
 	}
-	return &Log{path: path, dir: dir, remover: dir, catalog: store, file: file, tail: tail, framed: framed, encoding: encoding}, nil
+	var cache *segmentCache
+	if enabled {
+		cache = newSegmentCache(cacheOpts.RecentBytes, cacheOpts.HistoricalBytes)
+	}
+	return &Log{path: path, dir: dir, remover: dir, catalog: store, file: file, tail: tail, framed: framed, encoding: encoding, cache: cache, resident: resident}, nil
 }
 
 func uniqueName(prefix string, start uint64, suffix string) (string, error) {
@@ -287,6 +303,11 @@ func (l *Log) Append(records []Record) error {
 			err = l.rotate(records[i:end], bytes)
 		} else {
 			err = l.tail.Append(records[i:end])
+			if err == nil && l.resident != nil {
+				for _, r := range records[i:end] {
+					l.resident.append(r)
+				}
+			}
 		}
 		if err != nil {
 			return l.fail(err)
@@ -340,6 +361,15 @@ func (l *Log) rotate(records []Record, framed uint64) error {
 	if err = l.catalog.publishRollover(prepared); err != nil {
 		return errors.Join(err, prepared.file.Close())
 	}
+	if l.resident != nil {
+		if prepared.closed.Count > 0 {
+			l.cache.retain(l.resident.freeze(prepared.closed), true)
+		}
+		l.resident = &segmentBuilder{}
+		for _, r := range records {
+			l.resident.append(r)
+		}
+	}
 	old := l.file
 	l.file, l.tail, l.framed = prepared.file, prepared.tail, framed
 	return old.Close()
@@ -376,6 +406,9 @@ func (l *Log) Seek(id uint64) (Record, error) {
 			continue
 		}
 		return rec, readErr
+	}
+	if l.resident != nil {
+		return l.resident.view(c.Active.Start).Seek(id)
 	}
 	state, err := l.tail.State()
 	if err != nil {
@@ -417,5 +450,6 @@ func (l *Log) Close() error {
 	}
 	l.closed = true
 	l.cache = nil
+	l.resident = nil
 	return errors.Join(l.file.Close(), l.catalog.Close(), l.lock.Close())
 }

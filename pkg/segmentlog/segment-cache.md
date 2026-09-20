@@ -1,9 +1,23 @@
 # Segment cache core
 
 The package contains an internal cache core and immutable decoded segment
-representation. Managed closed-range reads and rewrites support an internally
-attached historical cache. **Normal CreateLog/OpenLog calls leave caching
-disabled.** There is no active-tail cache or public cache configuration.
+representation. `LogOptions.Cache` enables caching at creation; the optional
+third argument to `OpenLog` supplies the same `CacheOptions` on reopening.
+`RecentBytes` and `HistoricalBytes` are independent runtime budgets, never stored
+on disk. Omitting them or setting both to zero disables caching.
+
+When either budget is nonzero, the active tail is resident **in addition to**
+the sealed-segment budgets. Recovery collects its payloads during the existing
+validation scan. Successful appends copy caller payloads into resident storage;
+reads and transforms receive private copies. Rollover transfers the old tail's
+arrays into an immutable recent entry without rereading or copying its contents,
+then starts a new resident tail. Recent entries therefore warm as the log rolls
+over; reopening starts with empty sealed-segment caches.
+
+Tail rewrites build replacement resident contents before publication and swap
+them in only after successful publication. Erasure preserves the original append
+position and rollover accounting. Failed durable operations still poison the log,
+including cached reads. All resident-tail access uses the existing log mutex.
 
 ## Contents and ownership
 
@@ -66,8 +80,8 @@ the file. A miss checks the file and catalog metadata, consumes the validating
 source into a complete cached representation, closes the file, then admits the
 entry to historical LRU. Failed loading or closing never admits a partial entry.
 A nil cache or zero historical budget retains the streaming file-backed path.
-Recent entries, if present internally, can be acquired through the same path;
-this integration does not populate recent entries or change active-tail reads.
+Recent entries populated at rollover are acquired through the same path.
+Evicted recent segments enter historical LRU if subsequently loaded from disk.
 
 Cold cached acquisition materializes the entire selected range, including
 indexed blocks outside a requested read interval. This differs from uncached

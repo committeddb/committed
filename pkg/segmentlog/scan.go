@@ -15,7 +15,7 @@ import (
 // Cancellation is checked between records, not during I/O or the callback.
 // Sealed scans use block indexes; the unindexed tail prefix is scanned once.
 // Without caching, memory is bounded by decoded blocks/groups unless the caller
-// retains payloads. An internally enabled cache materializes whole closed ranges
+// retains payloads. An enabled cache materializes whole closed ranges
 // on a miss. Cache hits do not inspect disk; use Verify for disk verification.
 func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) error) error {
 	l.mu.Lock()
@@ -63,6 +63,17 @@ func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) erro
 		}
 	}
 	if c.Active.Start >= bounds.End {
+		return ctx.Err()
+	}
+	if l.resident != nil {
+		for r, err := range l.resident.view(c.Active.Start).recordsIn(bounds) {
+			if err != nil {
+				return err
+			}
+			if err := deliver(r); err != nil {
+				return err
+			}
+		}
 		return ctx.Err()
 	}
 	state, err := l.tail.State()
