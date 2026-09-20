@@ -44,6 +44,14 @@ drains committed retirement records. Explicit full verification and orphan
 sweeping are available on the underlying segment engine. See the
 [catalog contract](../../../../pkg/segmentlog/bbolt-experiment.md).
 
+Cache budgets are backend-specific runtime options: `Create` accepts
+`LogOptions.Cache`, and `Open` accepts an optional third `segmentlog.CacheOptions`
+argument. Reopening must supply the budgets again; omission disables caching.
+An enabled cache keeps the active tail resident, retains rollover contents in
+recent-segment order, and loads historical misses into strict segment-acquisition
+LRU. The active tail is additional to the two sealed-segment byte budgets.
+See [cache ownership and accounting](../../../../pkg/segmentlog/segment-cache.md).
+
 **tidwall** uses dense physical sequences internally and binary-searches their
 stable record IDs. It prepares a complete replacement generation, synchronizes it,
 then switches a checksummed CURRENT through the shared durablefs publisher. Old
@@ -109,7 +117,16 @@ reopen. Checks compare survivor bytes, exact and forward lookups, bounded scans,
 and original append progress. Invalid batches and stale generations are rejected.
 Injected callback failures after a changed record check that reopening preserves
 the old complete history and that failed preparation does not consume a generation.
-These are small correctness workloads, not throughput or backup-size benchmarks.
+The segmented conformance and history cases also run with recent-only,
+historical-only, and combined caches in both compression modes. Small byte budgets
+exercise eviction and oversized entries throughout rewrite/reopen cycles.
+
+Application tests cover cached Actual decoding, applied visibility, and protected
+reader/rewrite coordination. A streaming test runs 100 independent Actual readers
+alongside appends: 96 begin near the head and four read from the beginning, across
+repeated rollovers with bounded caches. It checks each cursor receives its expected
+indexes in order. These are correctness workloads, not throughput or backup-size
+benchmarks; managed engine operations still serialize under the log mutex.
 
 ```sh
 go test -race ./internal/cluster/db/eventlog/... ./internal/durablefs/... ./pkg/segmentlog/...

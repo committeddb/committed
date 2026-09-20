@@ -3,7 +3,10 @@ package wal
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +23,9 @@ func TestEventLogProtectedReadConcurrentReleaseAndRewrite(t *testing.T) {
 	factories := map[string]func(string) (eventlog.EventLog, error){
 		"tidwall": func(path string) (eventlog.EventLog, error) {
 			return tidwall.Create(path, 1, tidwall.Options{SegmentBytes: 128, Compress: true})
+		},
+		"segmented-cached": func(path string) (eventlog.EventLog, error) {
+			return segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}, Cache: segmentlog.CacheOptions{RecentBytes: 1024, HistoricalBytes: 1024}})
 		},
 		"segmented": func(path string) (eventlog.EventLog, error) {
 			return segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}})
@@ -127,5 +133,88 @@ func TestEventLogProtectedReadConcurrentReleaseAndRewrite(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// Followers have independent cursors over shared cached bytes. Most start near
+// the head; a few bootstrap from the beginning while appends roll the tail over.
+func TestEventLogCachedStreamingReaders(t *testing.T) {
+	log, err := segmented.Create(t.TempDir(), 1, segmentlog.LogOptions{
+		SegmentBytes: 1024,
+		Cache:        segmentlog.CacheOptions{RecentBytes: 8 << 10, HistoricalBytes: 8 << 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	adapter := &eventLogAdapter{log: log}
+	var applied atomic.Uint64
+	appendThrough := func(first, last uint64) {
+		t.Helper()
+		records := make([][]byte, 0, last-first+1)
+		for id := first; id <= last; id++ {
+			records = append(records, experimentEntry(t, id*10, pb.EntryNormal, experimentRow("key", "value")))
+		}
+		if _, err := adapter.appendCommittedRaw(records); err != nil {
+			t.Fatal(err)
+		}
+		applied.Store(last * 10)
+	}
+	appendThrough(1, 32)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	var workers sync.WaitGroup
+	// Cancel and join readers before closing their log, including on test failure.
+	defer func() { cancel(); workers.Wait() }()
+	results := make(chan error, 100)
+	ready := make(chan struct{}, 100)
+	for i := range 100 {
+		start := uint64(24)
+		if i < 4 {
+			start = 0
+		}
+		reader, err := adapter.readerAt(start*10, segmentTestResolver(segmentTestType), applied.Load)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workers.Go(func() {
+			ready <- struct{}{}
+			for want := start + 1; want <= 64; {
+				if err := ctx.Err(); err != nil {
+					results <- err
+					return
+				}
+				actual, err := reader.Read()
+				if errors.Is(err, io.EOF) {
+					select {
+					case <-ctx.Done():
+						results <- ctx.Err()
+						return
+					case <-time.After(time.Millisecond):
+					}
+					continue
+				}
+				if err != nil {
+					results <- err
+					return
+				}
+				if actual == nil || actual.Index != want*10 || reader.Position() != want*10 {
+					results <- fmt.Errorf("reader starting at %d: expected index %d, got %v", start*10, want*10, actual)
+					return
+				}
+				want++
+			}
+			results <- nil
+		})
+	}
+	for range 100 {
+		<-ready
+	}
+	for first := uint64(33); first <= 64; first += 4 {
+		appendThrough(first, first+3)
+	}
+	for range 100 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

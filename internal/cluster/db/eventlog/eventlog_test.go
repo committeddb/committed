@@ -20,7 +20,32 @@ type backend struct {
 }
 
 func backends() []backend {
-	return backendsWithSegmentBytes(128)
+	result := backendsWithSegmentBytes(128)
+	for _, codec := range []segmentlog.Compression{segmentlog.NoCompression, segmentlog.ZstdDefault} {
+		for _, policy := range []struct {
+			name  string
+			cache segmentlog.CacheOptions
+		}{
+			{"recent", segmentlog.CacheOptions{RecentBytes: 1024}},
+			{"historical", segmentlog.CacheOptions{HistoricalBytes: 1024}},
+			{"both", segmentlog.CacheOptions{RecentBytes: 1024, HistoricalBytes: 1024}},
+		} {
+			name := "plain"
+			if codec == segmentlog.ZstdDefault {
+				name = "zstd"
+			}
+			result = append(result, backend{
+				name: "segmented/" + name + "/cache=" + policy.name,
+				create: func(path string) (eventlog.EventLog, error) {
+					return segmented.Create(path, 0, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: codec}, Cache: policy.cache})
+				},
+				open: func(path string) (eventlog.EventLog, error) {
+					return segmented.Open(path, segmentlog.Options{Compression: codec}, policy.cache)
+				},
+			})
+		}
+	}
+	return result
 }
 
 func backendsWithSegmentBytes(segmentBytes int) []backend {

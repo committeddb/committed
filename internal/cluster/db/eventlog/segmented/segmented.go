@@ -25,8 +25,10 @@ func Create(path string, start uint64, opts segmentlog.LogOptions) (*Log, error)
 	return Wrap(l), nil
 }
 
-func Open(path string, opts segmentlog.Options) (*Log, error) {
-	l, e := segmentlog.OpenLog(path, opts)
+// Open accepts at most one runtime cache configuration. Omission disables caching;
+// creation-time budgets are not persisted and must be supplied again on reopen.
+func Open(path string, opts segmentlog.Options, cache ...segmentlog.CacheOptions) (*Log, error) {
+	l, e := segmentlog.OpenLog(path, opts, cache...)
 	if e != nil {
 		return nil, translate(e)
 	}
