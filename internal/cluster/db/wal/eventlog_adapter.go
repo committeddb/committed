@@ -129,6 +129,15 @@ func (l *eventLogAdapter) seekRawLocked(index uint64) (uint64, []byte, error) {
 }
 
 func checkedEventEntry(r eventlog.Record, err error) ([]byte, error) {
+	if _, err := decodeEventEntry(r, err); err != nil {
+		return nil, err
+	}
+	return r.Payload, nil
+}
+
+// decodeEventEntry validates framing errors and logical identity once, returning
+// the decoded entry for callers that also need to interpret its contents.
+func decodeEventEntry(r eventlog.Record, err error) (*pb.Entry, error) {
 	if err != nil {
 		if errors.Is(err, eventlog.ErrCorrupt) {
 			return nil, errors.Join(ErrCorruptEntry, err)
@@ -142,7 +151,7 @@ func checkedEventEntry(r eventlog.Record, err error) ([]byte, error) {
 	if r.ID == 0 || entry.GetIndex() != r.ID {
 		return nil, fmt.Errorf("event record index mismatch: %w", ErrCorruptEntry)
 	}
-	return r.Payload, nil
+	return entry, nil
 }
 
 // rewriteRaw adapts an existing raw-entry transformation such as scrubFilterEntry.

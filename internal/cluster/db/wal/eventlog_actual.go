@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	pb "go.etcd.io/raft/v3/raftpb"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
@@ -24,7 +23,7 @@ func (l *eventLogAdapter) actualAt(index uint64, resolver cluster.TypeResolver, 
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	record, err := l.log.Read(index)
-	raw, err := checkedEventEntry(record, err)
+	entry, err := decodeEventEntry(record, err)
 	if errors.Is(err, eventlog.ErrNotFound) {
 		return nil, ErrActualNotFound
 	}
@@ -33,10 +32,6 @@ func (l *eventLogAdapter) actualAt(index uint64, resolver cluster.TypeResolver, 
 	}
 	if index > applied() {
 		return nil, ErrActualNotFound
-	}
-	entry := new(pb.Entry)
-	if err := proto.Unmarshal(raw, entry); err != nil {
-		return nil, err
 	}
 	if entry.GetType() != pb.EntryNormal || entry.Data == nil {
 		return nil, ErrActualNotFound

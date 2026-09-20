@@ -90,3 +90,28 @@ segmented reader is closed after consuming its window to release retained bytes.
 | segmented | catch-up | 22.243 ms | 318,935,570 | 377,095 |
 | segmented | historical-window | 0.190 ms | 2,499,418 | 3,016 |
 | segmented | near-head-window | 0.161 ms | 2,494,604 | 2,975 |
+
+## Reusing validated entry decoding
+
+Streaming and exact Actual reads reuse the decoded Raft entry returned by the
+identity-validation helper. They previously unmarshaled those same bytes again.
+Corruption classification, logical-ID validation, applied visibility, and retry
+behavior remain in place. Raw-byte callers still receive the original bytes.
+
+The same benchmark on the same machine, three one-second samples with no
+concurrent agent-started build or lint, produced these medians:
+
+| Backend | Window | Time/op | Allocated bytes/op | Allocations/op |
+| --- | --- | ---: | ---: | ---: |
+| production-tidwall | catch-up | 22.675 ms | 237,240,444 | 294,913 |
+| production-tidwall | historical-window | 0.188 ms | 1,991,376 | 2,389 |
+| production-tidwall | near-head-window | 0.189 ms | 1,991,376 | 2,389 |
+| segmented | catch-up | 17.323 ms | 237,277,227 | 295,170 |
+| segmented | historical-window | 0.143 ms | 1,861,439 | 2,376 |
+| segmented | near-head-window | 0.140 ms | 1,856,620 | 2,335 |
+
+The full-history allocation difference is now about 36 KiB across 16,384 Actuals
+(roughly 2 bytes per Actual), compared with about 78 MiB before this change.
+Short windows allocate less than the production reader in this fixture. These
+are cumulative allocations; retained cache/cursor memory and peak RSS are not
+measured by these numbers. Exact-lookup timing was not measured here.

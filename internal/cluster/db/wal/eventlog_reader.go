@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 
 	pb "go.etcd.io/raft/v3/raftpb"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
@@ -68,7 +67,7 @@ func (r *eventActualReader) Read() (*cluster.Actual, error) {
 			return nil, io.EOF
 		}
 		record, err := r.cursor.Seek(r.index + 1)
-		raw, err := checkedEventEntry(record, err)
+		entry, err := decodeEventEntry(record, err)
 		index := record.ID
 		if errors.Is(err, eventlog.ErrNotFound) {
 			return nil, io.EOF
@@ -80,10 +79,6 @@ func (r *eventActualReader) Read() (*cluster.Actual, error) {
 		// an entry that is durable but whose application has not finished.
 		if index > r.applied() {
 			return nil, io.EOF
-		}
-		entry := new(pb.Entry)
-		if err := proto.Unmarshal(raw, entry); err != nil {
-			return nil, err
 		}
 		var entities []*cluster.Entity
 		if entry.GetType() == pb.EntryNormal && entry.Data != nil {
