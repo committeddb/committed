@@ -150,3 +150,8 @@ separately from history construction.
 The [sustained rollover comparison](rollover-benchmarks.md) detects actual
 segment creation in both plain backends and measures boundary batches separately
 from ordinary append batches, with identical logical histories and batch sizes.
+
+The [full-sized cache read benchmark](cache-benchmarks.md) compares warmed tail,
+recent-range, and historical reads with 20 MiB segment targets. It records cache
+budgets, allocation costs, and the experimental tidwall wrapper's cache and
+lookup limitations separately from production behavior.
