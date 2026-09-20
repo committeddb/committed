@@ -24,6 +24,8 @@ import (
 type eventActualReader struct {
 	mu       sync.Mutex
 	events   *eventLogAdapter
+	cursor   eventlog.Cursor
+	closed   bool
 	resolver cluster.TypeResolver
 	applied  func() uint64
 	index    uint64
@@ -40,7 +42,7 @@ func (l *eventLogAdapter) readerAt(index uint64, resolver cluster.TypeResolver, 
 	if resolver == nil || applied == nil {
 		return nil, eventlog.ErrInvalid
 	}
-	return &eventActualReader{events: l, index: index, resolver: resolver, applied: applied}, nil
+	return &eventActualReader{events: l, index: index, resolver: resolver, applied: applied, cursor: l.log.NewCursor()}, nil
 }
 
 func (r *eventActualReader) Position() uint64 { return r.pos.Load() }
@@ -48,6 +50,12 @@ func (r *eventActualReader) Position() uint64 { return r.pos.Load() }
 func (r *eventActualReader) Read() (*cluster.Actual, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		if r.ctx != nil && r.ctx.Err() != nil {
+			return nil, context.Cause(r.ctx)
+		}
+		return nil, eventlog.ErrClosed
+	}
 	r.events.mu.RLock()
 	defer r.events.mu.RUnlock()
 	for {
@@ -59,7 +67,9 @@ func (r *eventActualReader) Read() (*cluster.Actual, error) {
 		if r.index == ^uint64(0) {
 			return nil, io.EOF
 		}
-		index, raw, err := r.events.seekRawLocked(r.index + 1)
+		record, err := r.cursor.Seek(r.index + 1)
+		raw, err := checkedEventEntry(record, err)
+		index := record.ID
 		if errors.Is(err, eventlog.ErrNotFound) {
 			return nil, io.EOF
 		}
@@ -98,4 +108,13 @@ func (r *eventActualReader) Read() (*cluster.Actual, error) {
 			return &cluster.Actual{Index: index, Entities: entities}, nil
 		}
 	}
+}
+
+// Close releases this reader's retained segment contents. It does not close the
+// underlying log or affect other readers.
+func (r *eventActualReader) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+	return r.cursor.Close()
 }

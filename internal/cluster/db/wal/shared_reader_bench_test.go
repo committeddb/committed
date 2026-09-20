@@ -2,6 +2,7 @@ package wal
 
 import (
 	"fmt"
+	"io"
 	"testing"
 
 	tidwal "github.com/tidwall/wal"
@@ -122,6 +123,9 @@ func BenchmarkActualReaderEngines(b *testing.B) {
 						reader, err := store.reader(uint64(work.after * 10))
 						if err != nil {
 							return err
+						}
+						if closer, ok := reader.(io.Closer); ok {
+							defer func() { _ = closer.Close() }()
 						}
 						for i := 1; i <= work.count; i++ {
 							actual, err := reader.Read()

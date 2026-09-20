@@ -39,6 +39,17 @@ type (
 	ReclaimResult struct{ RemovedFiles, RemovedBytes, SkippedEntries uint64 }
 )
 
+// Cursor has Seek semantics with a private reusable position. Repeating or
+// moving the requested ID backwards is allowed; the caller controls progress.
+// EOF (ErrNotFound) is temporary: later appends can become visible. Rewrites
+// invalidate physical hints before the next read. Payloads remain caller-owned.
+// Cursors are concurrency-safe, do not pin a generation, and must be closed to
+// promptly release retained memory. Closing the parent invalidates its cursors.
+type Cursor interface {
+	Seek(uint64) (Record, error)
+	Close() error
+}
+
 // EventLog owns one permanent event-log directory. Methods are concurrency-safe.
 // The caller must not mutate its files or use another writer outside this owner.
 // Backends use different physical layouts; callers cannot infer coverage from
@@ -61,6 +72,7 @@ type (
 // managed payloads; publication alone does not establish physical erasure.
 // Close is idempotent. This contract does not define backup capture or migration.
 type EventLog interface {
+	NewCursor() Cursor
 	Append([]Record) error
 	LastAppended() (uint64, bool, error)
 	Read(uint64) (Record, error)

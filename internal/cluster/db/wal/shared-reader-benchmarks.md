@@ -14,8 +14,8 @@ index and entity count. Only backend setup and fixture append differ.
 - **segmented:** `eventLogAdapter` over the segmented EventLog, using its Actual
   reader, applied watermark, and the same type resolver. Cache budgets are
   160 MiB recent plus 160 MiB historical, with a 20 MiB segment target. Each
-  Actual read currently performs a new `Seek` rather than retaining a physical
-  cursor across reads.
+  Actual reader owns an EventLog cursor retaining its current segment and record
+  offset. A rewrite invalidates those hints before its next read.
 
 Both implement the small test-only `readerBenchmarkStore` fixture interface for
 append, reader construction, and close. Timed consumption uses `db.ActualReader`.
@@ -55,7 +55,7 @@ GOCACHE="$PWD/.claude-scratch/go-build" go test ./internal/cluster/db/wal \
   -run '^$' -bench '^BenchmarkActualReaderEngines$' -benchtime=1s -count=3
 ```
 
-## Results
+## Baseline before per-reader cursors
 
 Medians of three samples; each operation consumes the entire named window.
 
@@ -68,10 +68,25 @@ Medians of three samples; each operation consumes the entire named window.
 | segmented | historical-window | 1.602 ms | 3,479,848 | 11,650 |
 | segmented | near-head-window | 0.681 ms | 2,863,367 | 6,402 |
 
-The production tidwall reader is faster in every measured window. Its sequential
+In this baseline, the production tidwall reader was faster in every measured
+window. Its sequential
 cursor avoids repeating the initial physical-position lookup for every Actual.
-The segmented reader still enters managed seek and catalog lookup per Actual.
+The segmented reader entered managed seek and catalog lookup per Actual.
 These are known differences in the measured paths; the benchmark does not isolate
 how much time each accounts for. Both paths include payload copying and decoding.
 The results establish a shared application-level baseline rather than storage
 format superiority or a production-readiness claim.
+
+## Per-reader cursor results
+
+Same workload and machine, three one-second samples; medians below. Each fresh
+segmented reader is closed after consuming its window to release retained bytes.
+
+| Backend | Window | Time/op | Allocated bytes/op | Allocations/op |
+| --- | --- | ---: | ---: | ---: |
+| production-tidwall | catch-up | 25.726 ms | 237,240,444 | 294,913 |
+| production-tidwall | historical-window | 0.217 ms | 1,991,376 | 2,389 |
+| production-tidwall | near-head-window | 0.189 ms | 1,991,376 | 2,389 |
+| segmented | catch-up | 22.243 ms | 318,935,570 | 377,095 |
+| segmented | historical-window | 0.190 ms | 2,499,418 | 3,016 |
+| segmented | near-head-window | 0.161 ms | 2,494,604 | 2,975 |

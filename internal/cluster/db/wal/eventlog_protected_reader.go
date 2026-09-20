@@ -60,7 +60,7 @@ func (r *protectedEventReader) Close() error {
 	r.cancel(eventlog.ErrClosed)
 	r.stop()
 	r.release()
-	return nil
+	return r.eventActualReader.Close()
 }
 
 // protectedReadCount includes cancellation releases still waiting for an active

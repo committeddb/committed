@@ -44,20 +44,21 @@ type fileInstaller interface {
 // Rewrite publishes whole-log transformations; RewriteSealed limits their scope.
 // Reclaim cleans obsolete managed files. There are no pinned views.
 type Log struct {
-	mu       sync.Mutex
-	path     string
-	dir      fileInstaller
-	remover  fileRemover
-	catalog  layout
-	cache    *segmentCache
-	resident *segmentBuilder
-	file     *os.File
-	tail     *Tail
-	framed   uint64
-	encoding Options
-	poison   error
-	closed   bool
-	lock     *durablefs.DirectoryLock
+	mu          sync.Mutex
+	path        string
+	dir         fileInstaller
+	remover     fileRemover
+	catalog     layout
+	cache       *segmentCache
+	resident    *segmentBuilder
+	cursorEpoch *byte // unique in-memory identity replaced after each published rewrite
+	file        *os.File
+	tail        *Tail
+	framed      uint64
+	encoding    Options
+	poison      error
+	closed      bool
+	lock        *durablefs.DirectoryLock
 }
 
 func checkLogEncoding(target uint64, encoding Options) error {
@@ -380,6 +381,11 @@ func (l *Log) rotate(records []Record, framed uint64) error {
 func (l *Log) Seek(id uint64) (Record, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.seek(id, nil)
+}
+
+// seek runs under Log.mu; a cursor retains only immutable contents or the resident tail.
+func (l *Log) seek(id uint64, cursor *Cursor) (Record, error) {
 	if err := l.usable(); err != nil {
 		return Record{}, err
 	}
@@ -401,6 +407,11 @@ func (l *Log) Seek(id uint64) (Record, error) {
 			if err != nil {
 				return Record{}, err
 			}
+			if cursor != nil {
+				if cached, ok := s.(*cachedSegment); ok {
+					cursor.entry = cached
+				}
+			}
 			rec, readErr := s.Seek(id)
 			if closeErr := release(); closeErr != nil {
 				return Record{}, errors.Join(readErr, closeErr)
@@ -412,6 +423,11 @@ func (l *Log) Seek(id uint64) (Record, error) {
 		}
 	}
 	if l.resident != nil {
+		if cursor != nil {
+			cursor.entry = nil
+			cursor.tail = l.resident
+			cursor.start = c.Active.Start
+		}
 		return l.resident.view(c.Active.Start).Seek(id)
 	}
 	state, err := l.tail.State()

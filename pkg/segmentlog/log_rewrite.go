@@ -149,6 +149,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	if err = l.catalog.publishRewrite(c.Revision-1, c.Generation, changedRefs, replacementActive); err != nil {
 		return result, l.fail(err)
 	}
+	l.cursorEpoch = new(byte)
 	result.Published = true
 	for _, ref := range retiredCacheRefs {
 		l.cache.discard(ref)

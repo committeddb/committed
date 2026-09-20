@@ -101,3 +101,19 @@ Managed tests remove a warmed file temporarily to prove that read hits use memor
 while Verify still detects its absence. They cover payload mutation, replacement
 identity, retention of unchanged ranges, reading indexed replacements after
 reclamation, close, and rejection of a corrupt cold source before callbacks.
+
+## Managed cursors
+
+`Log.NewCursor` creates a private seek hint. A cursor retains an immutable closed
+entry or the current resident-tail builder and reuses a record offset between
+sequential requests. Within that source, record reads do not reacquire the segment
+or refresh LRU. Retained entries survive cache eviction; their memory is additional
+to cache-retained charges until the cursor moves on, closes, or is collected.
+
+Every cursor read holds the log mutex and checks parent usability. Successful
+rewrite publication replaces an in-memory identity token, invalidating all old
+cursor hints on their next call. Tail rollover changes the resident builder, so
+a cursor then resolves its requested ID against the current layout. Cursors do
+not retain file descriptors or bbolt transactions. Uncached sources use the
+ordinary seek path; an enabled historical cache can supply oversized entries to
+a cursor even when it cannot retain them in its LRU budget.

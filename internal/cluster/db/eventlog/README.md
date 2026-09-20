@@ -160,3 +160,22 @@ The [shared Actual-reader benchmark](../wal/shared-reader-benchmarks.md) compare
 the production tidwall reader with the new engine through `db.ActualReader`,
 using identical protobuf records. This includes production tidwall's persistent
 sequence cursor rather than the experimental wrapper's per-record binary search.
+
+## Per-reader cursors
+
+`EventLog.NewCursor` creates an independent cursor implementing `Seek` and `Close`.
+Seek accepts the desired logical ID on every call, so unapplied records and decode
+failures can be retried without committing reader progress. Backward seeks are
+also supported. EOF is temporary; subsequent appends can become visible.
+
+The segmented cursor retains immutable cached contents and a record offset, or
+references the resident active tail under the log lock. Within a retained range,
+reads avoid repeated catalog lookup and cache acquisition. With caching disabled,
+the cursor uses ordinary file-backed seeks. The experimental tidwall cursor keeps
+a dense sequence within a rewrite generation. Neither cursor pins a generation;
+successful rewrites invalidate position hints before another record is returned.
+
+The application Actual reader owns one cursor and exposes Close to release its
+retained contents. Protected-reader Close releases both generation protection and
+the cursor. Callers still own logical progress, applied visibility, and decoding.
+Cursor operations and Close are synchronized; the parent log must remain open.

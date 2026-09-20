@@ -5,7 +5,7 @@ import "errors"
 // acquireRange runs under Log.mu. A cached source owns its contents; an
 // uncached source borrows a file until release. Verify deliberately bypasses
 // this path, so a cache hit cannot conceal damage from explicit disk checking.
-// Only historical retention is connected here; normal opens leave cache nil.
+// Misses enter historical retention; rollover supplies recent entries.
 // Log.mu serializes misses, so concurrent managed reads do not duplicate loads.
 func (l *Log) acquireRange(ref SegmentRef) (rangeSource, func() error, error) {
 	if l.cache != nil {
