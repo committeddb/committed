@@ -74,3 +74,25 @@ operation despite warmup. Its two-entry cache and cross-segment binary-search
 probes make these results sensitive to the wrapper's lookup strategy and cache
 capacity. They do not demonstrate a fundamental historical-read disadvantage of
 tidwall's storage format.
+
+## Tail-only metadata shortcut
+
+Seek and Scan use the header's active-tail start to skip closed-range iteration
+when the requested interval lies entirely in the tail. Previously, that empty
+iteration opened a second bbolt read transaction and decoded the header again.
+Header validation, the managed log lock, and private result payloads remain in
+place; the shortcut also applies with caching disabled.
+
+On the same machine and fixture, a fresh two-second pre-change sample measured
+7.667 µs, 11,632 B/op, and 58 allocations for the cached active-tail seek. Three
+two-second post-change samples measured 4.100, 4.131, and 4.125 µs, each with
+7,256 B/op and 28 allocations. The median is about 46% lower latency and 38% fewer
+allocated bytes. These measurements ran without concurrent agent-started builds.
+The table above records the earlier baseline; this shortcut does not affect its
+historical or recent-sealed cases. Tail-only scan timing was not measured here.
+
+```sh
+GOCACHE="$PWD/.claude-scratch/go-build" go test ./internal/cluster/db/eventlog \
+  -run '^$' -bench '^BenchmarkEventLogCachedReads/segmented-cached/active-tail$' \
+  -benchtime=2s -count=3
+```

@@ -45,21 +45,25 @@ func (l *Log) Scan(ctx context.Context, bounds Coverage, visit func(Record) erro
 		}
 		return ctx.Err()
 	}
-	for ref, err := range l.catalog.ranges(bounds) {
-		if err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if ref.Coverage.Start >= bounds.End {
-			return nil
-		}
-		if ref.Count == 0 {
-			continue
-		}
-		if err := l.scanSegment(ref, bounds, deliver); err != nil {
-			return err
+	// The header already identifies the tail; avoid another metadata transaction
+	// when the requested interval cannot overlap any closed range.
+	if bounds.Start < c.Active.Start {
+		for ref, err := range l.catalog.ranges(bounds) {
+			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if ref.Coverage.Start >= bounds.End {
+				return nil
+			}
+			if ref.Count == 0 {
+				continue
+			}
+			if err := l.scanSegment(ref, bounds, deliver); err != nil {
+				return err
+			}
 		}
 	}
 	if c.Active.Start >= bounds.End {

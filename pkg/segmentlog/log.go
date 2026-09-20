@@ -387,25 +387,29 @@ func (l *Log) Seek(id uint64) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	for ref, err := range l.catalog.ranges(Coverage{id, ^uint64(0)}) {
-		if err != nil {
-			return Record{}, err
+	// The header already identifies the tail; avoid another metadata transaction
+	// when the requested interval cannot overlap any closed range.
+	if id < c.Active.Start {
+		for ref, err := range l.catalog.ranges(Coverage{id, ^uint64(0)}) {
+			if err != nil {
+				return Record{}, err
+			}
+			if ref.Count == 0 {
+				continue
+			}
+			s, release, err := l.acquireRange(ref)
+			if err != nil {
+				return Record{}, err
+			}
+			rec, readErr := s.Seek(id)
+			if closeErr := release(); closeErr != nil {
+				return Record{}, errors.Join(readErr, closeErr)
+			}
+			if errors.Is(readErr, ErrNotFound) {
+				continue
+			}
+			return rec, readErr
 		}
-		if ref.Count == 0 {
-			continue
-		}
-		s, release, err := l.acquireRange(ref)
-		if err != nil {
-			return Record{}, err
-		}
-		rec, readErr := s.Seek(id)
-		if closeErr := release(); closeErr != nil {
-			return Record{}, errors.Join(readErr, closeErr)
-		}
-		if errors.Is(readErr, ErrNotFound) {
-			continue
-		}
-		return rec, readErr
 	}
 	if l.resident != nil {
 		return l.resident.view(c.Active.Start).Seek(id)
