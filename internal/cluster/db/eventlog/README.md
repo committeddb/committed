@@ -155,3 +155,8 @@ The [full-sized cache read benchmark](cache-benchmarks.md) compares warmed tail,
 recent-range, and historical reads with 20 MiB segment targets. It records cache
 budgets, allocation costs, and the experimental tidwall wrapper's cache and
 lookup limitations separately from production behavior.
+
+The [shared Actual-reader benchmark](../wal/shared-reader-benchmarks.md) compares
+the production tidwall reader with the new engine through `db.ActualReader`,
+using identical protobuf records. This includes production tidwall's persistent
+sequence cursor rather than the experimental wrapper's per-record binary search.
