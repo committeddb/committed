@@ -93,6 +93,12 @@ is independent of file lifetime; no view is held between Read calls. Type
 resolution and watermark callbacks must not reenter the adapter. Reads currently
 block appends during decoding, and repeated Seek calls rescan the tail.
 
+Single-record raw `readRaw` and `seekRaw` lookups use the backend's atomic read
+without taking the adapter lock. On the segmented backend they can read the old
+generation during rewrite preparation and the new generation after publication.
+Their returned bytes are caller-owned; separate lookups do not pin a shared view.
+Actual decoding and protected multi-call readers retain adapter locking.
+
 Tests compare Actuals, positions, sparse checkpoints, metadata filtering, and
 visibility pauses against the existing tidwall-backed Reader. They also cover
 type-resolution retry, unknown system types, corruption, rewrite between reads,

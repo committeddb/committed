@@ -106,20 +106,14 @@ func (l *eventLogAdapter) appendCommittedRaw(payloads [][]byte) (uint64, error) 
 
 // readRaw and seekRaw retain ErrNotFound for absent/erased indexes. Corruption
 // must never be interpreted as a gap or EOF. Returned payloads belong to the caller.
+// Each lookup uses one atomic backend operation, so it needs no adapter read lock.
+// Separate calls may observe different rewrite generations.
 func (l *eventLogAdapter) readRaw(index uint64) ([]byte, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
 	r, err := l.log.Read(index)
 	return checkedEventEntry(r, err)
 }
 
 func (l *eventLogAdapter) seekRaw(index uint64) (uint64, []byte, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.seekRawLocked(index)
-}
-
-func (l *eventLogAdapter) seekRawLocked(index uint64) (uint64, []byte, error) {
 	r, err := l.log.Seek(index)
 	raw, err := checkedEventEntry(r, err)
 	if err != nil {
