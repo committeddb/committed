@@ -27,7 +27,7 @@ func (l *eventLogAdapter) metadataSupersessionsLocked(ctx context.Context, bound
 	if end < ^uint64(0) {
 		end++
 	}
-	err := l.scanRawLocked(ctx, eventlog.Coverage{Start: 1, End: end}, func(_ uint64, raw []byte) error {
+	err := l.scanRaw(ctx, eventlog.Coverage{Start: 1, End: end}, func(_ uint64, raw []byte) error {
 		entry := new(pb.Entry)
 		if err := proto.Unmarshal(raw, entry); err != nil {
 			return err

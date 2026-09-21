@@ -97,6 +97,9 @@ Single-record raw `readRaw` and `seekRaw` lookups use the backend's atomic read
 without taking the adapter lock. On the segmented backend they can read the old
 generation during rewrite preparation and the new generation after publication.
 Their returned bytes are caller-owned; separate lookups do not pin a shared view.
+Raw scans also bypass the adapter lock, while the backend holds one consistent
+view for the complete scan and prevents publication until it finishes. Selection
+operations retain their outer adapter lock to coordinate validation and rewriting.
 Actual decoding and protected multi-call readers retain adapter locking.
 
 Tests compare Actuals, positions, sparse checkpoints, metadata filtering, and
