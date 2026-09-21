@@ -95,8 +95,8 @@ indexed reads, which validate only selected blocks. Frozen append files retain
 their full prevalidation pass on a miss; warm accesses use the already validated
 contents. Loading temporaries and oversized entries are outside retained-cache
 budgets. Reads serialize under the log mutex, but can overlap rewrite source loading and replacement
-writing. Scans and appends do not overlap. The application scrub adapter still
-holds its own exclusive lock.
+writing. Scans and appends do not overlap. The experimental application scrub adapter permits ordinary reads during
+segmented preparation and excludes them during publication.
 
 Successful rewrite publication discards replaced cache identities while retaining
 unchanged entries. New indexed replacements load through their own catalog

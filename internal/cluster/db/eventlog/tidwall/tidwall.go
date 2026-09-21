@@ -517,6 +517,17 @@ func (l *Log) Scan(ctx context.Context, b eventlog.Coverage, visit func(eventlog
 	return ctx.Err()
 }
 
+// Tidwall retains its whole-rewrite exclusion. Acquire the caller lock before
+// entering the backend so a reader holding it can finish its backend reads.
+func (l *Log) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, publication sync.Locker) (eventlog.RewriteResult, error) {
+	if publication == nil {
+		return eventlog.RewriteResult{}, eventlog.ErrInvalid
+	}
+	publication.Lock()
+	defer publication.Unlock()
+	return l.Rewrite(ctx, generation, transform)
+}
+
 func (l *Log) Rewrite(ctx context.Context, generation uint64, transform eventlog.Transform) (result eventlog.RewriteResult, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

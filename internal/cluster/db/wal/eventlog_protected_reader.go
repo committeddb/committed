@@ -36,6 +36,8 @@ func (l *eventLogAdapter) protectedReaderAt(ctx context.Context, index uint64, r
 	if err != nil {
 		return nil, err
 	}
+	l.mutationMu.Lock()
+	defer l.mutationMu.Unlock()
 	l.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		l.mu.Unlock()

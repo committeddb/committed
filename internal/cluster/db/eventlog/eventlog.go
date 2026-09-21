@@ -7,6 +7,7 @@ package eventlog
 import (
 	"context"
 	"errors"
+	"sync"
 )
 
 var (
@@ -79,6 +80,10 @@ type EventLog interface {
 	Seek(uint64) (Record, error)
 	Scan(context.Context, Coverage, func(Record) error) error
 	Rewrite(context.Context, uint64, Transform) (RewriteResult, error)
+	// RewriteWithPublicationLock holds a non-nil caller lock across publication.
+	// Backends may acquire it earlier. Matching read lifetimes may perform reads,
+	// never mutations. Lock acquisition is not context-cancelable.
+	RewriteWithPublicationLock(context.Context, uint64, Transform, sync.Locker) (RewriteResult, error)
 	Reclaim(context.Context) (ReclaimResult, error)
 	Close() error
 }

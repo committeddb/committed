@@ -7,7 +7,7 @@ import (
 )
 
 // rewriteMetadata performs experimental snapshot compaction with one adapter
-// write lock covering bound validation, selection, and publication. The caller
+// mutation lock covering bound validation, selection, and publication. The caller
 // supplies an authorized bound and a concurrency-safe applied watermark; this
 // method checks bound <= applied <= original durable append progress. The applied
 // callback must not reenter the adapter or its log.
@@ -17,6 +17,8 @@ import (
 // BoltDB metadata updates. It preserves entries beyond bound and requires Reclaim
 // for physical cleanup. Production Storage is not wired to this operation.
 func (l *eventLogAdapter) rewriteMetadata(ctx context.Context, generation, bound uint64, applied func() uint64) (eventlog.RewriteResult, error) {
+	l.mutationMu.Lock()
+	defer l.mutationMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if ctx == nil || applied == nil {

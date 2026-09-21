@@ -134,8 +134,8 @@ func TestSegmentMetadataRewriteSerializesAppend(t *testing.T) {
 		close(proceed)
 		t.Fatal("rewrite did not start")
 	}
-	// The exclusive view starts before watermark capture and remains held through
-	// selection/publication; appending must finish after the transaction releases it.
+	// Validation holds the write lock; mutation ownership spans preparation and
+	// publication, so appending must finish after the transaction releases it.
 	unlocked := adapter.mu.TryLock()
 	if unlocked {
 		adapter.mu.Unlock()

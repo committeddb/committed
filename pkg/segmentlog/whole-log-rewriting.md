@@ -20,7 +20,8 @@ Such a read lifetime must not perform mutations: whole-log preparation retains
 mutation ownership while waiting to publish. Lock acquisition itself cannot be
 canceled; cancellation is checked before publication after the lock is acquired.
 The ordinary `Rewrite` and `RewriteSealed` methods do not acquire a caller lock.
-The application adapter does not use this optional publication lock.
+The experimental application adapter uses this lock to exclude complete Actual
+reads from publication while allowing them during segmented preparation.
 
 ## Original append accounting
 
@@ -114,7 +115,8 @@ and segments; `ReclaimOrphans` separately removes unpublished preparation files.
 Physical erasure requires cleanup. The API has no pinned readers or backup views.
 Rewrites scan records while preparing changes. Transform callbacks must not
 reenter the log; a concurrent scan callback must also avoid reentry. The
-application adapter still holds its own exclusive lock across a scrub.
+experimental application adapter excludes appends and protected-reader
+registration across a scrub; ordinary reads can proceed during preparation.
 
 ## Evidence
 
@@ -251,4 +253,5 @@ cancellation preserves acknowledged appends when the log is reopened.
 
 Whole-log `Rewrite` continues to exclude appends throughout preparation because
 its input includes the mutable tail. The application scrub adapter still uses
-whole-log rewriting and retains its exclusive lock.
+whole-log rewriting and excludes appends while allowing ordinary reads during
+segmented preparation.

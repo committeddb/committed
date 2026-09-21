@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/pkg/segmentlog"
@@ -74,17 +75,35 @@ func (l *Log) Scan(ctx context.Context, b eventlog.Coverage, visit func(eventlog
 }
 
 func (l *Log) Rewrite(ctx context.Context, generation uint64, transform eventlog.Transform) (result eventlog.RewriteResult, err error) {
+	return l.rewrite(ctx, generation, transform, nil)
+}
+
+func (l *Log) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, publication sync.Locker) (eventlog.RewriteResult, error) {
+	if publication == nil {
+		return eventlog.RewriteResult{}, eventlog.ErrInvalid
+	}
+	return l.rewrite(ctx, generation, transform, publication)
+}
+
+func (l *Log) rewrite(ctx context.Context, generation uint64, transform eventlog.Transform, publication sync.Locker) (result eventlog.RewriteResult, err error) {
 	if transform == nil {
 		return result, eventlog.ErrInvalid
 	}
-	r, e := l.log.Rewrite(ctx, generation, func(r segmentlog.Record) ([]byte, bool, error) {
+	adapt := func(r segmentlog.Record) ([]byte, bool, error) {
 		original := bytes.Clone(r.Payload)
 		payload, keep, e := transform(eventlog.Record{ID: r.ID, Payload: r.Payload})
 		if e == nil && (!keep || !bytes.Equal(original, payload)) {
 			result.ChangedRecords++
 		}
 		return payload, keep, e
-	})
+	}
+	var r segmentlog.RewriteResult
+	var e error
+	if publication == nil {
+		r, e = l.log.Rewrite(ctx, generation, adapt)
+	} else {
+		r, e = l.log.RewriteWithPublicationLock(ctx, generation, adapt, publication)
+	}
 	result.Published = r.Published
 	return result, translate(e)
 }

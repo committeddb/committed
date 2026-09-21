@@ -21,9 +21,10 @@ import (
 // The adapter must not be copied after use. Mutations must go through it while
 // readers are live; its lock protects each complete Read from rewrite publication.
 type eventLogAdapter struct {
-	// Appends serialize frontier checks and writes, but share rewrite exclusion
-	// with readers. Lock order is appendMu then mu; rewrites need only mu.
-	appendMu       sync.Mutex
+	// mutationMu serializes appends, rewrites, and protected-reader registration.
+	// mu excludes complete reads only when a rewrite publishes (or earlier when
+	// required by a backend). Lock order is mutationMu then mu.
+	mutationMu     sync.Mutex
 	mu             sync.RWMutex
 	log            eventlog.EventLog
 	protectedReads atomic.Int64
@@ -34,8 +35,8 @@ type eventLogAdapter struct {
 // durable prefix; callers must reopen and reconcile before retrying. This method
 // does not implement Storage's applied-index or replay-deduplication protocol.
 func (l *eventLogAdapter) appendRaw(payloads [][]byte) error {
-	l.appendMu.Lock()
-	defer l.appendMu.Unlock()
+	l.mutationMu.Lock()
+	defer l.mutationMu.Unlock()
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	records, err := eventEntryRecords(payloads)
@@ -86,8 +87,8 @@ func (l *eventLogAdapter) eventIndexLocked() (uint64, error) {
 // On error the returned index is unusable; reopen after storage failure before
 // retrying. Success does not apply entries to BoltDB or advance AppliedIndex.
 func (l *eventLogAdapter) appendCommittedRaw(payloads [][]byte) (uint64, error) {
-	l.appendMu.Lock()
-	defer l.appendMu.Unlock()
+	l.mutationMu.Lock()
+	defer l.mutationMu.Unlock()
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	records, err := eventEntryRecords(payloads)
@@ -161,12 +162,16 @@ func decodeEventEntry(r eventlog.Record, err error) (*pb.Entry, error) {
 // Even removal validates the original entry's identity before invoking transform;
 // surviving replacements must retain it. Callbacks may not reenter the log.
 func (l *eventLogAdapter) rewriteRaw(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (eventlog.RewriteResult, error) {
+	l.mutationMu.Lock()
+	defer l.mutationMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.rewriteRawLocked(ctx, generation, transform)
 }
 
-// rewriteRawLocked requires the adapter write lock throughout preparation and publication.
+// rewriteRawLocked requires mutationMu and mu exclusively on entry. It releases
+// mu during the backend call, which reacquires it for publication, and restores
+// it before returning. mutationMu keeps appends and new protected readers out.
 func (l *eventLogAdapter) rewriteRawLocked(ctx context.Context, generation uint64, transform func([]byte) (bool, []byte, error)) (eventlog.RewriteResult, error) {
 	if ctx == nil || transform == nil {
 		return eventlog.RewriteResult{}, eventlog.ErrInvalid
@@ -177,7 +182,9 @@ func (l *eventLogAdapter) rewriteRawLocked(ctx context.Context, generation uint6
 	if l.protectedReads.Load() > 0 {
 		return eventlog.RewriteResult{}, errEventRewriteDeferred
 	}
-	return l.log.Rewrite(ctx, generation, func(r eventlog.Record) ([]byte, bool, error) {
+	l.mu.Unlock()
+	defer l.mu.Lock()
+	return l.log.RewriteWithPublicationLock(ctx, generation, func(r eventlog.Record) ([]byte, bool, error) {
 		raw, err := checkedEventEntry(r, nil)
 		if err != nil {
 			return nil, false, err
@@ -188,5 +195,5 @@ func (l *eventLogAdapter) rewriteRawLocked(ctx context.Context, generation uint6
 		}
 		payload, err = checkedEventEntry(eventlog.Record{ID: r.ID, Payload: payload}, nil)
 		return payload, true, err
-	})
+	}, &l.mu)
 }

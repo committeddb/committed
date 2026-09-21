@@ -87,8 +87,11 @@ EOF is temporary, so a reader also observes later appends. The cursor contains n
 physical sequence number and resumes correctly after its checkpoint is erased.
 
 A complete Read holds the adapter's read lock through scanning and decoding.
-Rewrites hold the write lock. Appends use a separate append mutex and share
-the adapter read lock with readers; frontier checks and writes remain serialized.
+Appends, rewrites, and protected-reader registration share a mutation mutex.
+Appends share the adapter read lock with readers. Rewrites hold the write lock
+for validation and selection, then let the backend acquire it for publication.
+Segmented preparation permits streaming reads; tidwall acquires the lock for its
+whole rewrite. Frontier checks and writes remain serialized.
 Do not copy the adapter after use or mutate its underlying Log directly while
 readers are live. Returned data
 is independent of file lifetime; no view is held between Read calls. Type
@@ -210,8 +213,9 @@ and canceled scans. The existing scrub tests also exercise the shared helper.
 
 ## Coordinated experimental metadata rewrite
 
-`rewriteMetadata` holds the adapter write lock across watermark capture, snapshot
-selection, and whole-log publication. It validates `bound <= applied <= durable
+`rewriteMetadata` holds the mutation mutex across watermark capture, snapshot
+selection, and whole-log publication. The adapter write lock covers validation
+and selection and is reacquired by the backend for publication. It validates `bound <= applied <= durable
 append progress`; the applied callback must be concurrency-safe and must not
 reenter the adapter. Concurrent appends, rewrites, and protected-read acquisition
 cannot intervene between selection and publication. The caller still supplies
