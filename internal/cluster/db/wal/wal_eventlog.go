@@ -3,7 +3,7 @@ package wal
 import (
 	"fmt"
 
-	"github.com/tidwall/wal"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
@@ -139,6 +139,8 @@ func (s *Storage) recordCorrupt(logName string) {
 // restart replay never double-appends. Same eventMu.RLock scope as appendEvent
 // for the same scrub-swap reason.
 func (s *Storage) appendEvents(entries []*pb.Entry) error {
+	s.eventAppendMu.Lock()
+	defer s.eventAppendMu.Unlock()
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
@@ -146,7 +148,7 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 	if err != nil {
 		return fmt.Errorf("event log last index: %w", err)
 	}
-	batch := new(wal.Batch)
+	records := make([]eventlog.Record, 0, len(entries))
 	first, last := uint64(0), uint64(0)
 	wroteSeqOne := nextSeq == 0
 	for _, entry := range entries {
@@ -157,8 +159,7 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 		if err != nil {
 			return fmt.Errorf("marshal entry for event log: %w", err)
 		}
-		nextSeq++
-		batch.Write(nextSeq, frame(entryBytes))
+		records = append(records, eventlog.Record{ID: entry.GetIndex(), Payload: entryBytes})
 		if first == 0 {
 			first = entry.GetIndex()
 		}
@@ -167,7 +168,7 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 	if last == 0 {
 		return nil
 	}
-	if err := s.eventLog.WriteBatch(batch); err != nil {
+	if err := s.eventAppenderLocked().Append(records); err != nil {
 		return fmt.Errorf("event log write batch (raft indexes %d-%d): %w", first, last, err)
 	}
 	s.eventLogWriteOps.Add(1)
@@ -181,6 +182,8 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 }
 
 func (s *Storage) appendEvent(entry *pb.Entry) error {
+	s.eventAppendMu.Lock()
+	defer s.eventAppendMu.Unlock()
 	// RLock for the whole body so the seq it computes (LastIndex+1) and the
 	// Write that consumes it can't straddle a scrub swap that would replace the
 	// handle underneath them. Shared with concurrent readers; only the swap
@@ -197,7 +200,7 @@ func (s *Storage) appendEvent(entry *pb.Entry) error {
 		return fmt.Errorf("event log last index: %w", err)
 	}
 	nextSeq++
-	if err := s.eventLog.Write(nextSeq, frame(entryBytes)); err != nil {
+	if err := s.eventAppenderLocked().Append([]eventlog.Record{{ID: entry.GetIndex(), Payload: entryBytes}}); err != nil {
 		return fmt.Errorf("event log write seq %d (raft index %d): %w", nextSeq, entry.GetIndex(), err)
 	}
 	s.eventLogWriteOps.Add(1)

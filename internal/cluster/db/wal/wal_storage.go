@@ -20,6 +20,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
@@ -277,6 +278,11 @@ type Storage struct {
 	// goes through appendEvent / readEventAt / EventIndex /
 	// firstEventSeq / lastEventSeq.
 	eventLog *wal.Log
+	// Production append composition. eventAppendMu serializes a complete batch
+	// and precedes eventMu; the latter excludes native scrub/fetch handle swaps.
+	eventAppendMu       sync.Mutex
+	eventAppender       eventlog.Appender
+	eventAppenderSource *wal.Log
 	// eventLogDir is the on-disk directory for eventLog (<datadir>/events).
 	// The scrubber rewrites the event log by building a sibling directory and
 	// renaming it over this one, so it needs the path (tidwall/wal doesn't

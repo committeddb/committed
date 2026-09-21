@@ -44,9 +44,9 @@ func TestEventLogAppendDuringActualDecode(t *testing.T) {
 			unblock := sync.OnceFunc(func() { close(release) })
 			defer unblock()
 			var once sync.Once
-			resolver := segmentTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
+			resolver := eventTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
 				once.Do(func() { close(entered); <-release })
-				return segmentTestType(ref)
+				return eventTestType(ref)
 			})
 			var applied atomic.Uint64
 			applied.Store(10)

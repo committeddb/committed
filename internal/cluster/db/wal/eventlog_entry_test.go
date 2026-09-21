@@ -17,40 +17,8 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func newSegmentEventExperiment(t *testing.T) (*eventLogAdapter, string) {
-	t.Helper()
-	path := t.TempDir()
-	log, err := segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = log.Close() })
-	return &eventLogAdapter{log: log}, path
-}
-
-func experimentEntry(t testing.TB, index uint64, kind pb.EntryType, entities ...*clusterpb.LogEntity) []byte {
-	t.Helper()
-	var data []byte
-	if len(entities) > 0 {
-		var err error
-		data, err = proto.Marshal(&clusterpb.LogProposal{RequestID: 123, LogEntities: entities})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	raw, err := proto.Marshal(&pb.Entry{Index: proto.Uint64(index), Term: proto.Uint64(3), Type: kind.Enum(), Data: data})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return raw
-}
-
-func experimentRow(key, value string) *clusterpb.LogEntity {
-	return &clusterpb.LogEntity{Type: &clusterpb.TypeRef{ID: "items", Version: 1}, Body: &clusterpb.LogEntity_Row{Row: &clusterpb.LogRow{Key: []byte(key), Data: []byte(value)}}}
-}
-
-func TestSegmentEventsScrubMatchesLegacyBytes(t *testing.T) {
-	adapter, path := newSegmentEventExperiment(t)
+func TestEventLogEventsScrubMatchesLegacyBytes(t *testing.T) {
+	adapter, path := newSegmentedEventAdapter(t)
 	deleted := &clusterpb.LogEntity{Type: &clusterpb.TypeRef{ID: "items", Version: 1}, Body: &clusterpb.LogEntity_Delete{Delete: &clusterpb.LogDelete{Key: []byte("gone")}}}
 	inputs := [][]byte{
 		experimentEntry(t, 1, pb.EntryNormal),
@@ -186,9 +154,9 @@ func TestSegmentEventsScrubMatchesLegacyBytes(t *testing.T) {
 	}
 }
 
-func TestSegmentEventsRejectBadAppendBatch(t *testing.T) {
+func TestEventLogEventsRejectBadAppendBatch(t *testing.T) {
 	for _, bad := range [][]byte{{0xff}, experimentEntry(t, 0, pb.EntryNormal), experimentEntry(t, ^uint64(0), pb.EntryNormal)} {
-		adapter, _ := newSegmentEventExperiment(t)
+		adapter, _ := newSegmentedEventAdapter(t)
 		err := adapter.appendRaw([][]byte{experimentEntry(t, 1, pb.EntryNormal), bad})
 		if !errors.Is(err, eventlog.ErrInvalid) {
 			t.Fatal(err)
@@ -199,9 +167,9 @@ func TestSegmentEventsRejectBadAppendBatch(t *testing.T) {
 	}
 }
 
-func TestSegmentEventsRejectStoredIdentityMismatch(t *testing.T) {
+func TestEventLogEventsRejectStoredIdentityMismatch(t *testing.T) {
 	for _, payload := range [][]byte{{0xff}, experimentEntry(t, 2, pb.EntryNormal)} {
-		adapter, _ := newSegmentEventExperiment(t)
+		adapter, _ := newSegmentedEventAdapter(t)
 		if err := adapter.log.Append([]eventlog.Record{{ID: 1, Payload: payload}}); err != nil {
 			t.Fatal(err)
 		}
@@ -219,8 +187,8 @@ func TestSegmentEventsRejectStoredIdentityMismatch(t *testing.T) {
 	}
 }
 
-func TestSegmentEventsRejectReplacementIdentityChange(t *testing.T) {
-	adapter, path := newSegmentEventExperiment(t)
+func TestEventLogEventsRejectReplacementIdentityChange(t *testing.T) {
+	adapter, path := newSegmentedEventAdapter(t)
 	original := experimentEntry(t, 10, pb.EntryNormal)
 	if err := adapter.appendRaw([][]byte{original}); err != nil {
 		t.Fatal(err)

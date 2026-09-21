@@ -1,4 +1,7 @@
-# Experimental segment event-log adapter
+# Shared application event-log adapter (experimental)
+
+The adapter depends only on `eventlog.EventLog`; concrete backends are supplied
+by its caller. See [code boundaries](../eventlog/README.md#code-boundaries).
 
 `eventLogAdapter` connects Committed's serialized `raftpb.Entry` records to the
 shared [EventLog contract](../eventlog/README.md). The storage implementations live
@@ -166,7 +169,7 @@ no backup file capture, peer transfer, or BoltDB/Raft recovery integration.
 Run the focused checks with:
 
 ```sh
-go test -race ./internal/cluster/db/wal -run '^(TestSegment|TestEventLogAdapter)'
+go test -race ./internal/cluster/db/wal -run '^TestEventLog'
 ```
 
 ## Rewrite churn measurements

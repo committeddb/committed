@@ -51,6 +51,13 @@ type Cursor interface {
 	Close() error
 }
 
+// Appender is the logical-record write boundary shared by EventLog backends.
+// Batches retain their IDs and are validated before writing. Calls serialize;
+// an I/O failure can leave a durable prefix and requires reconciliation.
+type Appender interface {
+	Append([]Record) error
+}
+
 // EventLog owns one permanent event-log directory. Methods are concurrency-safe.
 // The caller must not mutate its files or use another writer outside this owner.
 // Backends use different physical layouts; callers cannot infer coverage from
@@ -73,8 +80,8 @@ type Cursor interface {
 // managed payloads; publication alone does not establish physical erasure.
 // Close is idempotent. This contract does not define backup capture or migration.
 type EventLog interface {
+	Appender
 	NewCursor() Cursor
-	Append([]Record) error
 	LastAppended() (uint64, bool, error)
 	Read(uint64) (Record, error)
 	Seek(uint64) (Record, error)

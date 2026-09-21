@@ -15,15 +15,15 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-func TestSegmentActualMatchesLegacy(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogActualMatchesLegacy(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	legacy, err := tidwal.Open(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = legacy.Close() })
 	storage := &Storage{eventLog: legacy}
-	typ, _ := segmentTestType(cluster.TypeRef{ID: "items", Version: 1})
+	typ, _ := eventTestType(cluster.TypeRef{ID: "items", Version: 1})
 	storage.typeCache.Store(cluster.TypeRef{ID: "items", Version: 1}, typeCacheEntry{t: typ})
 	storage.appliedIndex.Store(100)
 	meta, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: "worker", Index: 5})
@@ -87,8 +87,8 @@ func TestSegmentActualMatchesLegacy(t *testing.T) {
 	}
 }
 
-func TestSegmentActualVisibilityAndErrors(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogActualVisibilityAndErrors(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal, experimentRow("key", "data"))}); err != nil {
 		t.Fatal(err)
 	}
@@ -96,12 +96,12 @@ func TestSegmentActualVisibilityAndErrors(t *testing.T) {
 	calls := 0
 	missing := errors.New("missing type")
 	fail := true
-	resolver := segmentTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
+	resolver := eventTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
 		calls++
 		if fail {
 			return nil, missing
 		}
-		return segmentTestType(ref)
+		return eventTestType(ref)
 	})
 	if _, err := adapter.actualAt(10, resolver, applied.Load); !errors.Is(err, ErrActualNotFound) || calls != 0 {
 		t.Fatal("resolved unapplied type", err, calls)
@@ -130,25 +130,25 @@ func TestSegmentActualVisibilityAndErrors(t *testing.T) {
 	}
 }
 
-func TestSegmentActualCorruptionAndUnknownTypes(t *testing.T) {
+func TestEventLogActualCorruptionAndUnknownTypes(t *testing.T) {
 	for _, payload := range [][]byte{{0xff}, experimentEntry(t, 11, pb.EntryNormal)} {
-		adapter, _ := newSegmentEventExperiment(t)
+		adapter, _ := newSegmentedEventAdapter(t)
 		if err := adapter.log.Append([]eventlog.Record{{ID: 10, Payload: payload}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := adapter.actualAt(10, segmentTestResolver(segmentTestType), func() uint64 { return 100 }); !errors.Is(err, ErrCorruptEntry) {
+		if _, err := adapter.actualAt(10, eventTestResolver(eventTestType), func() uint64 { return 100 }); !errors.Is(err, ErrCorruptEntry) {
 			t.Fatal(err)
 		}
 	}
 	// Exact lookup returns unknown-type errors even for types a stream may skip.
 	for _, id := range []string{"c01177ed-0000-0000-0000-000000001fff", "c01177ed-0000-0000-0000-000000000fff"} {
-		adapter, _ := newSegmentEventExperiment(t)
+		adapter, _ := newSegmentedEventAdapter(t)
 		unknown := experimentRow("key", "data")
 		unknown.Type.ID = id
 		if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal, unknown)}); err != nil {
 			t.Fatal(err)
 		}
-		_, err := adapter.actualAt(10, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
+		_, err := adapter.actualAt(10, eventTestResolver(eventTestType), func() uint64 { return 100 })
 		var typed *cluster.UnknownReservedTypeError
 		if !errors.As(err, &typed) {
 			t.Fatal(err)

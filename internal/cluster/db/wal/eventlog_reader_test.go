@@ -17,16 +17,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-type segmentTestResolver func(cluster.TypeRef) (*cluster.Type, error)
-
-func (f segmentTestResolver) ResolveType(ref cluster.TypeRef) (*cluster.Type, error) { return f(ref) }
-
-func segmentTestType(ref cluster.TypeRef) (*cluster.Type, error) {
-	return &cluster.Type{ID: ref.ID, Version: ref.Version, Name: ref.ID}, nil
-}
-
-func TestSegmentReaderMatchesLegacy(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogReaderMatchesLegacy(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	legacy, err := tidwal.Open(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +27,7 @@ func TestSegmentReaderMatchesLegacy(t *testing.T) {
 	// A minimal legacy reader fixture: explicit-version resolution uses the real
 	// Storage cache; no background workers or BoltDB mutations are needed here.
 	storage := &Storage{eventLog: legacy}
-	typ, _ := segmentTestType(cluster.TypeRef{ID: "items", Version: 1})
+	typ, _ := eventTestType(cluster.TypeRef{ID: "items", Version: 1})
 	storage.typeCache.Store(cluster.TypeRef{ID: "items", Version: 1}, typeCacheEntry{t: typ})
 	metadata, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: "worker", Index: 5})
 	if err != nil {
@@ -95,8 +87,8 @@ func TestSegmentReaderMatchesLegacy(t *testing.T) {
 	}
 }
 
-func TestSegmentReaderVisibilityAndRetry(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogReaderVisibilityAndRetry(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal, experimentRow("key", "value"))}); err != nil {
 		t.Fatal(err)
 	}
@@ -104,12 +96,12 @@ func TestSegmentReaderVisibilityAndRetry(t *testing.T) {
 	calls := 0
 	missing := errors.New("type not available")
 	fail := true
-	resolver := segmentTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
+	resolver := eventTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
 		calls++
 		if fail {
 			return nil, missing
 		}
-		return segmentTestType(ref)
+		return eventTestType(ref)
 	})
 	r, err := adapter.readerAt(0, resolver, applied.Load)
 	if err != nil {
@@ -146,12 +138,12 @@ func TestSegmentReaderVisibilityAndRetry(t *testing.T) {
 	}
 }
 
-func TestSegmentReaderResumeAfterRewrite(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogReaderResumeAfterRewrite(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal, experimentRow("first", "old")), experimentEntry(t, 30, pb.EntryNormal, experimentRow("second", "old")), experimentEntry(t, 90, pb.EntryNormal, experimentRow("last", "keep"))}); err != nil {
 		t.Fatal(err)
 	}
-	r, err := adapter.readerAt(0, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
+	r, err := adapter.readerAt(0, eventTestResolver(eventTestType), func() uint64 { return 100 })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +169,7 @@ func TestSegmentReaderResumeAfterRewrite(t *testing.T) {
 	if _, err := r.Read(); !errors.Is(err, io.EOF) {
 		t.Fatal(err)
 	}
-	maxReader, err := adapter.readerAt(^uint64(0), segmentTestResolver(segmentTestType), func() uint64 { return ^uint64(0) })
+	maxReader, err := adapter.readerAt(^uint64(0), eventTestResolver(eventTestType), func() uint64 { return ^uint64(0) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,13 +178,13 @@ func TestSegmentReaderResumeAfterRewrite(t *testing.T) {
 	}
 }
 
-func TestSegmentReaderCorruptionDoesNotAdvance(t *testing.T) {
+func TestEventLogReaderCorruptionDoesNotAdvance(t *testing.T) {
 	for _, raw := range [][]byte{{0xff}, experimentEntry(t, 11, pb.EntryNormal)} {
-		adapter, _ := newSegmentEventExperiment(t)
+		adapter, _ := newSegmentedEventAdapter(t)
 		if err := adapter.log.Append([]eventlog.Record{{ID: 10, Payload: raw}}); err != nil {
 			t.Fatal(err)
 		}
-		r, err := adapter.readerAt(0, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
+		r, err := adapter.readerAt(0, eventTestResolver(eventTestType), func() uint64 { return 100 })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,16 +196,16 @@ func TestSegmentReaderCorruptionDoesNotAdvance(t *testing.T) {
 	}
 }
 
-func TestSegmentReaderProtectsDecodeFromRewrite(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogReaderProtectsDecodeFromRewrite(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal, experimentRow("key", "old"))}); err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
-	resolver := segmentTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
+	resolver := eventTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
 		close(entered)
 		<-release
-		return segmentTestType(ref)
+		return eventTestType(ref)
 	})
 	r, err := adapter.readerAt(0, resolver, func() uint64 { return 100 })
 	if err != nil {
@@ -262,15 +254,15 @@ func TestSegmentReaderProtectsDecodeFromRewrite(t *testing.T) {
 	}
 }
 
-func TestSegmentReaderUnknownSystemTypes(t *testing.T) {
+func TestEventLogReaderUnknownSystemTypes(t *testing.T) {
 	for _, id := range []string{"c01177ed-0000-0000-0000-000000001fff", "c01177ed-0000-0000-0000-000000000fff"} {
-		adapter, _ := newSegmentEventExperiment(t)
+		adapter, _ := newSegmentedEventAdapter(t)
 		unknown := experimentRow("system", "opaque")
 		unknown.Type.ID = id
 		if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal, unknown), experimentEntry(t, 20, pb.EntryNormal, experimentRow("user", "data"))}); err != nil {
 			t.Fatal(err)
 		}
-		r, err := adapter.readerAt(0, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
+		r, err := adapter.readerAt(0, eventTestResolver(eventTestType), func() uint64 { return 100 })
 		if err != nil {
 			t.Fatal(err)
 		}

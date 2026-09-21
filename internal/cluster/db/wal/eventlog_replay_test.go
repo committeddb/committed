@@ -16,8 +16,8 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func TestSegmentReplayPreservesErasureAfterReopen(t *testing.T) {
-	adapter, path := newSegmentEventExperiment(t)
+func TestEventLogReplayPreservesErasureAfterReopen(t *testing.T) {
+	adapter, path := newSegmentedEventAdapter(t)
 	if index, err := adapter.eventIndex(); err != nil || index != 0 {
 		t.Fatal(index, err)
 	}
@@ -87,8 +87,8 @@ func TestSegmentReplayPreservesErasureAfterReopen(t *testing.T) {
 	}
 }
 
-func TestSegmentReplayValidatesSkippedPrefix(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogReplayValidatesSkippedPrefix(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	first := experimentEntry(t, 10, pb.EntryNormal)
 	if _, err := adapter.appendCommittedRaw([][]byte{first}); err != nil {
 		t.Fatal(err)
@@ -119,8 +119,8 @@ func TestSegmentReplayValidatesSkippedPrefix(t *testing.T) {
 	}
 }
 
-func TestSegmentReplaySerializesConcurrentBatches(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogReplaySerializesConcurrentBatches(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	batch := [][]byte{experimentEntry(t, 1, pb.EntryNormal), experimentEntry(t, 10, pb.EntryNormal), experimentEntry(t, 100, pb.EntryNormal)}
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)

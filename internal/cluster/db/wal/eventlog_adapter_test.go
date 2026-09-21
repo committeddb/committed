@@ -11,24 +11,11 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
-	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 // The exact same application adapter/reader/selection code runs on both backends.
 func TestEventLogAdapterBackends(t *testing.T) {
-	factories := map[string]func(string) (eventlog.EventLog, error){
-		"tidwall": func(path string) (eventlog.EventLog, error) {
-			return tidwall.Create(path, 1, tidwall.Options{SegmentBytes: 128, Compress: true})
-		},
-		"segmented-cached": func(path string) (eventlog.EventLog, error) {
-			return segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}, Cache: segmentlog.CacheOptions{RecentBytes: 1024, HistoricalBytes: 1024}})
-		},
-		"segmented": func(path string) (eventlog.EventLog, error) {
-			return segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}})
-		},
-	}
+	factories := eventLogTestBackends()
 	for name, create := range factories {
 		t.Run(name, func(t *testing.T) {
 			log, e := create(t.TempDir())
@@ -49,7 +36,7 @@ func TestEventLogAdapterBackends(t *testing.T) {
 				t.Fatal(index, e)
 			}
 			applied := uint64(10)
-			reader, e := adapter.readerAt(0, segmentTestResolver(segmentTestType), func() uint64 { return applied })
+			reader, e := adapter.readerAt(0, eventTestResolver(eventTestType), func() uint64 { return applied })
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -61,13 +48,13 @@ func TestEventLogAdapterBackends(t *testing.T) {
 			if e != nil || actual.Index != 20 {
 				t.Fatal(actual, e)
 			}
-			actual, e = adapter.actualAt(20, segmentTestResolver(segmentTestType), func() uint64 { return applied })
+			actual, e = adapter.actualAt(20, eventTestResolver(eventTestType), func() uint64 { return applied })
 			if e != nil || actual.Index != 20 {
 				t.Fatal(actual, e)
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 			defer cancel()
-			protected, e := adapter.protectedReaderAt(ctx, 0, segmentTestResolver(segmentTestType), func() uint64 { return applied })
+			protected, e := adapter.protectedReaderAt(ctx, 0, eventTestResolver(eventTestType), func() uint64 { return applied })
 			if e != nil {
 				t.Fatal(e)
 			}

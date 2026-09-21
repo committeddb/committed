@@ -28,8 +28,8 @@ func selectionEntry(t *testing.T, index uint64, entities ...*cluster.Entity) []b
 	return raw
 }
 
-func TestSegmentSelectionsMatchLegacyPrefix(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogSelectionsMatchLegacyPrefix(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	legacy, err := tidwal.Open(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -124,8 +124,8 @@ func TestSegmentSelectionsMatchLegacyPrefix(t *testing.T) {
 	}
 }
 
-func TestSegmentSelectionsDiscardPartialResults(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogSelectionsDiscardPartialResults(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	meta, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: "worker", Index: 1})
 	if err != nil {
 		t.Fatal(err)

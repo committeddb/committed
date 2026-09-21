@@ -13,6 +13,39 @@ pkg/segmentlog/       Application-independent segmented engine
 internal/durablefs/   Shared publication, directory sync, and ownership primitives
 ```
 
+## Code boundaries
+
+The dependency direction is `wal` → `eventlog.EventLog` ← concrete backends.
+The segmented backend then depends on `pkg/segmentlog`. Shared experimental adapter source
+imports neither concrete backend. Fixtures choose which backend to provide.
+Production append composition explicitly chooses the legacy tidwall adapter.
+
+Inside `wal`, the experimental application layer is organized by responsibility:
+
+| Files | Responsibility |
+| --- | --- |
+| `eventlog_adapter.go` | Shared adapter state, ownership, and lock ordering |
+| `eventlog_entries.go` | Raft protobuf validation and stable record identity |
+| `eventlog_append.go` | Append progress and committed-batch replay |
+| `eventlog_lookup.go`, `eventlog_scan.go` | Raw entry lookup and consistent scans |
+| `eventlog_reader.go`, `eventlog_actual.go` | Actual decoding and applied visibility |
+| `eventlog_protected_reader.go`, `eventlog_rewrite.go` | Read lifetimes and rewrite coordination |
+| `eventlog_selection.go`, `eventlog_metadata_rewrite.go` | Application compaction policy |
+| `eventlog_copy.go` | Bridge from production Storage into an experimental backend |
+
+These files remain in `wal` because they share production policy helpers such as
+`userTopicEntities`, `newMetadataSelection`, and `scrubFilterEntry`, along with
+production error identities. Moving them into a storage backend would give that
+backend responsibility for Committed's application semantics.
+
+`eventlog_fixture_test.go` supplies backend-neutral records and type resolution.
+`eventlog_backends_test.go` supplies the common backend matrix.
+`eventlog_segmented_fixture_test.go` explicitly constructs a segmented fixture
+for legacy comparisons and application-policy integration tests. Those tests use
+`eventlog_` names; the physical churn experiments retain `segment_churn_` names.
+The adapter is experimental; production `Storage` still owns its existing tidwall
+integration. See [the adapter's current behavior](../wal/eventlog_adapter.md).
+
 ## Responsibilities
 
 | Layer | Responsibility |
@@ -32,6 +65,22 @@ false Published with an error requires reopen to resolve uncertainty.
 Callbacks hold a consistent storage view and must not reenter the log. Multi-call
 application protections live above the interface: shared adapter locks defer
 rewrites while protected readers remain. This is not a backup-capture/file-pin API.
+
+## Production append wiring
+
+Production `wal.Storage.appendEvent` and `appendEvents` submit logical Records to
+`eventlog.Appender`, the write subset embedded by `EventLog`. Composition lives
+in `wal/legacy_event_appender.go`. The default is `tidwall.LegacyAppender`, which
+wraps the existing production handle and assigns its dense physical sequences.
+The supplied codec preserves the existing checksum envelope and Raft-entry bytes;
+no CURRENT file or experimental generation directory is introduced.
+
+The writer is rebound when scrub or peer fetch replaces the native handle.
+Application replay filtering, applied progress, and metrics remain in Storage.
+Production readers, recovery, scrub swaps, and peer-copy operations still use
+native tidwall access. This is append wiring, not complete backend selection;
+there is no production option to open an existing data directory with the
+segmented backend.
 
 ## Implementations
 

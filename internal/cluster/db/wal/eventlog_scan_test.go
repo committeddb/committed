@@ -10,8 +10,8 @@ import (
 	pb "go.etcd.io/raft/v3/raftpb"
 )
 
-func TestSegmentScanRawRangeAndIdentity(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogScanRawRangeAndIdentity(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	records := [][]byte{experimentEntry(t, 10, pb.EntryNormal), experimentEntry(t, 20, pb.EntryConfChange), experimentEntry(t, 100, pb.EntryNormal, experimentRow("key", "value"))}
 	if err := adapter.appendRaw(records); err != nil {
 		t.Fatal(err)

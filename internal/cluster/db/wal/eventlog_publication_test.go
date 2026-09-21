@@ -80,9 +80,9 @@ func TestEventLogActualReadDuringRewritePreparation(t *testing.T) {
 			releaseDecode := sync.OnceFunc(func() { close(decodeRelease) })
 			defer releaseDecode()
 			var once sync.Once
-			resolver := segmentTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
+			resolver := eventTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
 				once.Do(func() { close(decoding); <-decodeRelease })
-				return segmentTestType(ref)
+				return eventTestType(ref)
 			})
 			reader, err := adapter.readerAt(0, resolver, func() uint64 { return 30 })
 			if err != nil {
@@ -105,7 +105,7 @@ func TestEventLogActualReadDuringRewritePreparation(t *testing.T) {
 			go func() {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 				defer cancel()
-				r, err := adapter.protectedReaderAt(ctx, 0, segmentTestResolver(segmentTestType), func() uint64 { return 30 })
+				r, err := adapter.protectedReaderAt(ctx, 0, eventTestResolver(eventTestType), func() uint64 { return 30 })
 				if err == nil {
 					err = r.Close()
 				}
@@ -139,7 +139,7 @@ func TestEventLogActualReadDuringRewritePreparation(t *testing.T) {
 			if err != nil || a == nil || a.Index != 20 {
 				t.Fatal(a, err)
 			}
-			fresh, err := adapter.readerAt(0, segmentTestResolver(segmentTestType), func() uint64 { return 30 })
+			fresh, err := adapter.readerAt(0, eventTestResolver(eventTestType), func() uint64 { return 30 })
 			if err != nil {
 				t.Fatal(err)
 			}

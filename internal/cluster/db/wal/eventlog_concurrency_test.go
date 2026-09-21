@@ -15,22 +15,11 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 func TestEventLogProtectedReadConcurrentReleaseAndRewrite(t *testing.T) {
-	factories := map[string]func(string) (eventlog.EventLog, error){
-		"tidwall": func(path string) (eventlog.EventLog, error) {
-			return tidwall.Create(path, 1, tidwall.Options{SegmentBytes: 128, Compress: true})
-		},
-		"segmented-cached": func(path string) (eventlog.EventLog, error) {
-			return segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}, Cache: segmentlog.CacheOptions{RecentBytes: 1024, HistoricalBytes: 1024}})
-		},
-		"segmented": func(path string) (eventlog.EventLog, error) {
-			return segmented.Create(path, 1, segmentlog.LogOptions{SegmentBytes: 128, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}})
-		},
-	}
+	factories := eventLogTestBackends()
 	for name, create := range factories {
 		t.Run(name, func(t *testing.T) {
 			log, err := create(t.TempDir())
@@ -47,10 +36,10 @@ func TestEventLogProtectedReadConcurrentReleaseAndRewrite(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
 			unblock := sync.OnceFunc(func() { close(release) })
 			defer unblock()
-			resolver := segmentTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
+			resolver := eventTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
 				close(entered)
 				<-release
-				return segmentTestType(ref)
+				return eventTestType(ref)
 			})
 			reader, err := adapter.protectedReaderAt(ctx, 0, resolver, func() uint64 { return 100 })
 			if err != nil {
@@ -172,7 +161,7 @@ func TestEventLogCachedStreamingReaders(t *testing.T) {
 		if i < 4 {
 			start = 0
 		}
-		reader, err := adapter.readerAt(start*10, segmentTestResolver(segmentTestType), applied.Load)
+		reader, err := adapter.readerAt(start*10, eventTestResolver(eventTestType), applied.Load)
 		if err != nil {
 			t.Fatal(err)
 		}

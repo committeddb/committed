@@ -68,7 +68,7 @@ func newReaderBenchmarkStore(b *testing.B, name string) readerBenchmarkStore {
 	b.Helper()
 	const target = 20 << 20
 	resolver := &Storage{}
-	typ, err := segmentTestType(cluster.TypeRef{ID: "items", Version: 1})
+	typ, err := eventTestType(cluster.TypeRef{ID: "items", Version: 1})
 	if err != nil {
 		b.Fatal(err)
 	}

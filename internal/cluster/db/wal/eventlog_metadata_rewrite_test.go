@@ -18,8 +18,8 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func TestSegmentMetadataRewriteBoundAndPartialRecord(t *testing.T) {
-	adapter, path := newSegmentEventExperiment(t)
+func TestEventLogMetadataRewriteBoundAndPartialRecord(t *testing.T) {
+	adapter, path := newSegmentedEventAdapter(t)
 	meta := func(index uint64) *cluster.Entity {
 		entity, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: "worker", Index: index})
 		if err != nil {
@@ -48,7 +48,7 @@ func TestSegmentMetadataRewriteBoundAndPartialRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	proposal := new(cluster.Proposal)
-	if err := proposal.Unmarshal(entry.Data, segmentTestResolver(segmentTestType)); err != nil {
+	if err := proposal.Unmarshal(entry.Data, eventTestResolver(eventTestType)); err != nil {
 		t.Fatal(err)
 	}
 	if len(proposal.Entities) != 1 || proposal.Entities[0].Type.ID != "items" {
@@ -81,8 +81,8 @@ func TestSegmentMetadataRewriteBoundAndPartialRecord(t *testing.T) {
 	}
 }
 
-func TestSegmentMetadataRewriteValidationAndProtection(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogMetadataRewriteValidationAndProtection(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal)}); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestSegmentMetadataRewriteValidationAndProtection(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	reader, err := adapter.protectedReaderAt(ctx, 0, segmentTestResolver(segmentTestType), func() uint64 { return 10 })
+	reader, err := adapter.protectedReaderAt(ctx, 0, eventTestResolver(eventTestType), func() uint64 { return 10 })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,8 +116,8 @@ func TestSegmentMetadataRewriteValidationAndProtection(t *testing.T) {
 	}
 }
 
-func TestSegmentMetadataRewriteSerializesAppend(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogMetadataRewriteSerializesAppend(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal)}); err != nil {
 		t.Fatal(err)
 	}

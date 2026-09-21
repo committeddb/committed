@@ -13,7 +13,7 @@ Neither the API nor the file format is stable. This package is not connected to
 the running database. The shared [EventLog
 contract](../../internal/cluster/db/eventlog/README.md) now has separate tidwall
 and segmented implementations. A [raw-entry adapter
-experiment](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
+experiment](../../internal/cluster/db/wal/eventlog_adapter.md)
 compares Committed protobuf records and existing scrub transformations with
 tidwall.
 

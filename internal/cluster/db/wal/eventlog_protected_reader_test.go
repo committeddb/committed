@@ -14,19 +14,19 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-func TestSegmentProtectedReaderDefersRewriteAllowsAppend(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogProtectedReaderDefersRewriteAllowsAppend(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal, experimentRow("old", "value"))}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	first, err := adapter.protectedReaderAt(ctx, 0, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
+	first, err := adapter.protectedReaderAt(ctx, 0, eventTestResolver(eventTestType), func() uint64 { return 100 })
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	second, err := adapter.protectedReaderAt(ctx, 0, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
+	second, err := adapter.protectedReaderAt(ctx, 0, eventTestResolver(eventTestType), func() uint64 { return 100 })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,10 +74,10 @@ func TestSegmentProtectedReaderDefersRewriteAllowsAppend(t *testing.T) {
 	}
 }
 
-func TestSegmentProtectedReaderCancellation(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogProtectedReaderCancellation(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-	r, err := adapter.protectedReaderAt(ctx, 0, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
+	r, err := adapter.protectedReaderAt(ctx, 0, eventTestResolver(eventTestType), func() uint64 { return 100 })
 	if err != nil {
 		cancel()
 		t.Fatal(err)
@@ -96,21 +96,21 @@ func TestSegmentProtectedReaderCancellation(t *testing.T) {
 		t.Fatal("leaked protection")
 	}
 	// No deadline is an invalid unbounded hold; an expired deadline cannot acquire.
-	if _, err := adapter.protectedReaderAt(context.Background(), 0, segmentTestResolver(segmentTestType), func() uint64 { return 100 }); !errors.Is(err, eventlog.ErrInvalid) {
+	if _, err := adapter.protectedReaderAt(context.Background(), 0, eventTestResolver(eventTestType), func() uint64 { return 100 }); !errors.Is(err, eventlog.ErrInvalid) {
 		t.Fatal(err)
 	}
 	expired, stop := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer stop()
-	if _, err := adapter.protectedReaderAt(expired, 0, segmentTestResolver(segmentTestType), func() uint64 { return 100 }); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := adapter.protectedReaderAt(expired, 0, eventTestResolver(eventTestType), func() uint64 { return 100 }); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
 }
 
-func TestSegmentProtectedReaderExpiryReleasesWithoutClose(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogProtectedReaderExpiryReleasesWithoutClose(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	r, err := adapter.protectedReaderAt(ctx, 0, segmentTestResolver(segmentTestType), func() uint64 { return 100 })
+	r, err := adapter.protectedReaderAt(ctx, 0, eventTestResolver(eventTestType), func() uint64 { return 100 })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,18 +133,18 @@ func TestSegmentProtectedReaderExpiryReleasesWithoutClose(t *testing.T) {
 	}
 }
 
-func TestSegmentProtectedReaderCancellationDuringDecode(t *testing.T) {
-	adapter, _ := newSegmentEventExperiment(t)
+func TestEventLogProtectedReaderCancellationDuringDecode(t *testing.T) {
+	adapter, _ := newSegmentedEventAdapter(t)
 	if err := adapter.appendRaw([][]byte{experimentEntry(t, 10, pb.EntryNormal, experimentRow("key", "value"))}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	entered, proceed := make(chan struct{}), make(chan struct{})
-	resolver := segmentTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
+	resolver := eventTestResolver(func(ref cluster.TypeRef) (*cluster.Type, error) {
 		close(entered)
 		<-proceed
-		return segmentTestType(ref)
+		return eventTestType(ref)
 	})
 	r, err := adapter.protectedReaderAt(ctx, 0, resolver, func() uint64 { return 100 })
 	if err != nil {
