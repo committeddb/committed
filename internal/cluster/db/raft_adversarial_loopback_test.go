@@ -16,18 +16,26 @@ import (
 	"github.com/committeddb/committed/internal/cluster/syncable/loopback"
 )
 
-// keyRecorder is a per-node consumer of one topic that counts how often it
-// saw each key — the observable for "every derived row arrived, and a row
-// derived after the failover arrived exactly once".
+// keyRecorder models a shared destination for one logical consumer across nodes.
+// Replaying an Actual after a checkpoint/leadership change is idempotent; the
+// same key in distinct Actuals still counts twice, exposing duplicate derivation.
 type keyRecorder struct {
-	mu    sync.Mutex
-	topic string
-	seen  map[string]int
+	mu      sync.Mutex
+	topic   string
+	seen    map[string]int
+	actuals map[uint64]struct{}
 }
 
 func (r *keyRecorder) Sync(_ context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.actuals[a.Index]; ok {
+		return true, nil
+	}
+	if r.actuals == nil {
+		r.actuals = make(map[uint64]struct{})
+	}
+	r.actuals[a.Index] = struct{}{}
 	for _, e := range a.Entities {
 		if e.Type != nil && e.Type.ID == r.topic && e.Variant() == cluster.EntityVariantRow {
 			if r.seen == nil {
@@ -63,6 +71,32 @@ func (p *keyRecorderParser) Parse(_ *cluster.ParsedConfig, _ cluster.DatabaseSto
 	return p.r, nil
 }
 
+// The destination follows worker ownership across nodes. A checkpoint replay
+// must not look like a second derivation, but duplicate log rows must remain visible.
+func TestKeyRecorderOwnershipHandoff(t *testing.T) {
+	destination := &keyRecorder{topic: "derived"}
+	first, err := (&keyRecorderParser{r: destination}).Parse(nil, nil)
+	require.NoError(t, err)
+	second, err := (&keyRecorderParser{r: destination}).Parse(nil, nil)
+	require.NoError(t, err)
+	row := func(key string) *cluster.Entity {
+		return cluster.NewUpsertEntity(&cluster.Type{ID: "derived"}, []byte(key), []byte(`{}`))
+	}
+	deliver := func(worker cluster.Syncable, index uint64, rows ...*cluster.Entity) {
+		t.Helper()
+		_, err := worker.Sync(context.Background(), &cluster.Actual{Index: index, Entities: rows})
+		require.NoError(t, err)
+	}
+	deliver(first, 10, row("before"))
+	require.NoError(t, first.Close())
+	deliver(second, 10, row("before")) // replay after an uncheckpointed delivery
+	deliver(second, 20, row("after"))
+	require.Equal(t, map[string]int{"before": 1, "after": 1}, destination.counts())
+	deliver(second, 30, row("after")) // a second derivation has a distinct index
+	deliver(second, 40, row("batch"), row("batch"))
+	require.Equal(t, map[string]int{"before": 1, "after": 2, "batch": 2}, destination.counts())
+}
+
 // -----------------------------------------------------------------------------
 // Scenario: a loopback derivation survives a leader change. The loopback
 // (leader-owned) derives raw rows into a derived topic; a consumer of the
@@ -75,18 +109,20 @@ func TestAdversarial_LoopbackDerivationSurvivesLeaderChange(t *testing.T) {
 	h, fc := newFaultyMultiDBHarness(t, 3, 50*time.Millisecond, time.Second)
 	defer h.Close()
 
-	consumers := map[uint64]*keyRecorder{}
-	audits := map[uint64]*keyRecorder{}
+	consumer := &keyRecorder{topic: "derived"}
+	audit := &keyRecorder{topic: "derived"}
 	for _, n := range h.nodes {
 		n.db.AddSyncableParser("loopback", &loopback.SyncableParser{Proposer: n.db})
-		consumers[n.id] = &keyRecorder{topic: "derived"}
-		n.db.AddSyncableParser("consumer", &keyRecorderParser{r: consumers[n.id]})
-		audits[n.id] = &keyRecorder{topic: "derived"}
-		n.db.AddSyncableParser("audit", &keyRecorderParser{r: audits[n.id]})
+		n.db.AddSyncableParser("consumer", &keyRecorderParser{r: consumer})
+		n.db.AddSyncableParser("audit", &keyRecorderParser{r: audit})
 	}
 
 	h.WaitForLeader(t)
-	leaderID := h.stableLeader()
+	var leaderID uint64
+	require.Eventually(t, func() bool {
+		leaderID = h.stableLeader()
+		return leaderID != 0
+	}, 30*time.Second, 20*time.Millisecond)
 	leader := h.dbByID(leaderID)
 	require.NotNil(t, leader)
 
@@ -111,7 +147,7 @@ func TestAdversarial_LoopbackDerivationSurvivesLeaderChange(t *testing.T) {
 	}, 20*time.Second, 100*time.Millisecond, "the consumer was never admitted")
 
 	seed := func(d *db.DB, keys []string) {
-		rawType, err := h.nodeByID(h.agreedLeaderAmong(allIDs(h))).storage.ResolveType(cluster.LatestTypeRef("raw"))
+		rawType, err := h.nodeByID(d.ID()).storage.ResolveType(cluster.LatestTypeRef("raw"))
 		require.NoError(t, err)
 		for _, k := range keys {
 			proposeRetryingLost(t, func() error {
@@ -124,11 +160,15 @@ func TestAdversarial_LoopbackDerivationSurvivesLeaderChange(t *testing.T) {
 	before := []string{"k1", "k2", "k3", "k4", "k5"}
 	seed(leader, before)
 	require.Eventually(t, func() bool {
-		return len(consumers[leaderID].counts()) >= len(before)
-	}, 30*time.Second, 20*time.Millisecond, "derived rows never reached the leader's consumer")
+		return len(consumer.counts()) >= len(before)
+	}, 30*time.Second, 20*time.Millisecond, "derived rows never reached the shared consumer destination")
 
 	// Partition the leader away; the survivors elect a new one, which takes
 	// over both workers from the replicated checkpoints.
+	require.Eventually(t, func() bool {
+		leaderID = h.agreedLeaderAmong(allIDs(h))
+		return leaderID != 0
+	}, 30*time.Second, 20*time.Millisecond, "no agreed leader before partition")
 	var survivorIDs []uint64
 	for _, n := range h.nodes {
 		if n.id != leaderID {
@@ -161,21 +201,24 @@ func TestAdversarial_LoopbackDerivationSurvivesLeaderChange(t *testing.T) {
 	}
 	seedAfter()
 	require.Eventually(t, func() bool {
-		c := consumers[newLeaderID].counts()
+		c := consumer.counts()
 		for _, k := range after {
 			if c[k] == 0 {
 				return false
 			}
 		}
 		return true
-	}, 30*time.Second, 20*time.Millisecond, "rows proposed after the failover never reached the new leader's consumer: %v", consumers[newLeaderID].counts())
+	}, 30*time.Second, 20*time.Millisecond, "rows proposed after the failover never reached the new leader's consumer: %v", consumer.counts())
 
 	// Heal, then audit the derived topic from index 0 with a fresh consumer:
 	// every key was derived, and the post-failover keys exactly once.
 	fc.Heal()
-	require.Eventually(t, func() bool { return h.agreedLeaderAmong(allIDs(h)) != 0 },
+	var auditLeaderID uint64
+	require.Eventually(t, func() bool {
+		auditLeaderID = h.agreedLeaderAmong(allIDs(h))
+		return auditLeaderID != 0
+	},
 		30*time.Second, 20*time.Millisecond, "the cluster never re-agreed on a leader after healing")
-	auditLeaderID := h.agreedLeaderAmong(allIDs(h))
 	require.Eventually(t, func() bool {
 		return h.dbByID(auditLeaderID).ProposeSyncable(testCtx(t), &cluster.Configuration{
 			ID: "derived-audit", MimeType: "text/toml",
@@ -183,9 +226,9 @@ func TestAdversarial_LoopbackDerivationSurvivesLeaderChange(t *testing.T) {
 		}) == nil
 	}, 20*time.Second, 100*time.Millisecond, "the audit consumer was never admitted")
 	require.Eventually(t, func() bool {
-		return len(audits[h.agreedLeaderAmong(allIDs(h))].counts()) >= len(before)+len(after)
-	}, 30*time.Second, 20*time.Millisecond, "the audit never saw every derived key: %v", audits[auditLeaderID].counts())
-	counts := audits[h.agreedLeaderAmong(allIDs(h))].counts()
+		return len(audit.counts()) >= len(before)+len(after)
+	}, 30*time.Second, 20*time.Millisecond, "the audit never saw every derived key: %v", audit.counts())
+	counts := audit.counts()
 	for _, k := range append(append([]string{}, before...), after...) {
 		require.GreaterOrEqual(t, counts[k], 1, "key %s was never derived", k)
 	}
