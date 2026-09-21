@@ -3,9 +3,13 @@ package segmentlog
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/committeddb/committed/internal/durablefs"
 )
 
 func TestPreparedRewriteVisibilityAndOwnership(t *testing.T) {
@@ -111,5 +115,68 @@ func TestPreparedRewriteVisibilityAndOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// Simulate a damaged replacement after installation, before tail recovery.
+type damagedReplacementTail struct {
+	fileInstaller
+	path string
+}
+
+func (d damagedReplacementTail) Install(name string, write func(io.Writer) error) (durablefs.Result, error) {
+	result, err := d.fileInstaller.Install(name, write)
+	if err == nil {
+		err = os.Truncate(filepath.Join(d.path, name), tailHeaderSize)
+	}
+	return result, err
+}
+
+func TestPreparedTailRecoveryFailurePreservesLiveState(t *testing.T) {
+	l := cachedLog(t, 1024)
+	if err := l.Append([]Record{{1, []byte("original")}}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := l.InspectCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalFile, originalResident := l.file, l.resident
+	l.dir = damagedReplacementTail{l.dir, l.path}
+	p := &preparedLogRewrite{}
+	defer func() { _ = p.close() }()
+	l.maintenanceMu.Lock()
+	l.mutationMu.Lock()
+	l.mu.Lock()
+	err = p.prepare(l, t.Context(), c, func(r Record) ([]byte, bool, error) { return []byte("replacement"), true, nil }, true)
+	l.mu.Unlock()
+	l.mutationMu.Unlock()
+	l.maintenanceMu.Unlock()
+	if err == nil || !p.result.TailChanged || p.result.Published {
+		t.Fatal(p.result, err)
+	}
+	if p.file == nil || p.tail != nil || p.resident != nil || p.active != nil {
+		t.Fatal("partial replacement escaped recovery")
+	}
+	if l.file != originalFile || l.resident != originalResident {
+		t.Fatal("recovery changed live state")
+	}
+	replacement := p.file
+	if err := p.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replacement.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatal("failed replacement handle remains open", err)
+	}
+	r, err := l.Read(1)
+	if err != nil || string(r.Payload) != "original" {
+		t.Fatal(r, err)
+	}
+	l = reopenLog(t, l)
+	if err := l.Verify(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.ReclaimOrphans(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 }

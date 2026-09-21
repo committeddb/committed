@@ -135,19 +135,3 @@ func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Trans
 	defer func() { err = errors.Join(err, release()) }()
 	return writer.sealed(ctx, ref, segment.Records(), transform)
 }
-
-func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, transform Transform) (TailRef, bool, error) {
-	state, err := l.tail.State()
-	if err != nil {
-		return ref, false, err
-	}
-	input := tailRecords(l.file, state.End)
-	if l.resident != nil {
-		input = l.resident.view(ref.Start).Records()
-	}
-	// mutationMu keeps this borrowed tail stable while readers use the old view.
-	writer := rewriteWriter{dir: l.dir, encoding: l.encoding}
-	l.mu.Unlock()
-	defer l.mu.Lock()
-	return writer.tail(ctx, ref, target, state, input, transform)
-}

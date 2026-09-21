@@ -36,8 +36,9 @@ cursor hints. Cleanup closes any replacement handle that was not transferred;
 unpublished files remain subject to orphan reclamation. Preparation and publication retain a maintenance mutex throughout, excluding
 other rewrites, reclamation, and Close. Whole-log rewrites also hold the mutation
 mutex exclusively to stabilize the active tail; sealed-only rewrites share that
-mutex with appends. Preparation releases the log mutex while acquiring sealed sources and
-transforming, writing, and verifying replacements; publication holds it. Failure and cancellation
+mutex with appends. Preparation releases the log mutex while acquiring sealed
+sources, transforming and writing replacements, recovering replacement-tail state,
+and verifying replacements. Publication holds it. Failure and cancellation
 semantics remain unchanged.
 
 Replacement encoding lives in `rewriteWriter`. It receives replayable records,
@@ -47,7 +48,9 @@ source acquisition and release. Tail inputs still borrow the active file or
 resident contents. The mutation mutex prevents append, another rewrite,
 reclamation, and Close from changing or retiring those inputs until publication
 finishes. Ordinary reads and scans can inspect the old generation during
-replacement writing. Tail source capture and catalog publication still hold the log mutex. Sealed source
+replacement writing. Tail source capture and catalog publication still hold the
+log mutex. Reopening and recovering the private replacement tail run outside it;
+the live tail and resident cache remain unchanged until publication. Sealed source
 loading and release run outside it under maintenance ownership.
 
 The tail reuses the segment transformation machinery: scan until the first change,
