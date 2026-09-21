@@ -33,9 +33,12 @@ replacement-tail handle. Preparation leaves catalog selection, the live resident
 tail, and cursor identities unchanged. Publication selects all replacements in
 one catalog transaction, then transfers the tail handle to the log and invalidates
 cursor hints. Cleanup closes any replacement handle that was not transferred;
-unpublished files remain subject to orphan reclamation. Preparation and publication retain a mutation mutex throughout. Preparation
-releases the log mutex while transforming and writing each replacement;
-publication holds it. Failure and cancellation semantics remain unchanged.
+unpublished files remain subject to orphan reclamation. Preparation and publication retain a maintenance mutex throughout, excluding
+other rewrites, reclamation, and Close. Whole-log rewrites also hold the mutation
+mutex exclusively to stabilize the active tail; sealed-only rewrites share that
+mutex with appends. Preparation releases the log mutex while transforming and
+writing each replacement; publication holds it. Failure and cancellation
+semantics remain unchanged.
 
 Replacement encoding lives in `rewriteWriter`. It receives replayable records,
 source descriptors, captured tail accounting, encoding options, and a file
@@ -206,3 +209,22 @@ group buffer, bounded by the maximum record size plus framing and group overhead
 reads while mutations remain excluded. Tests cover reused callback payload buffers, sparse IDs, erasure,
 records at and above the group target, the maximum payload size, checkpoint
 recovery, later appends, and output failures before publication.
+
+## Appends during sealed-only preparation
+
+`RewriteSealed` captures the current sealed end. It fetches one range descriptor
+at a time, closing its catalog read transaction before transforming the range.
+This bounds metadata memory and avoids a read transaction blocking bbolt mmap
+growth while a concurrent rollover holds the log mutex.
+
+Appends and rollover can proceed during sealed replacement writing. Existing
+sealed ranges cannot change because other maintenance remains excluded. At
+publication, the rewrite checks the log is still usable, reads the current
+catalog revision, and atomically replaces only its captured ranges, preserving
+newly sealed ranges and the current tail. Its returned `SealedEnd` remains the
+original boundary. An append failure poisons the log and prevents publication;
+cancellation preserves acknowledged appends when the log is reopened.
+
+Whole-log `Rewrite` continues to exclude appends throughout preparation because
+its input includes the mutable tail. The application scrub adapter still uses
+whole-log rewriting and retains its exclusive lock.

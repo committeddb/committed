@@ -28,8 +28,9 @@ type SealedRewriteResult struct {
 // a request whose scope includes active records. Generation describes this scoped
 // transaction; Committed's full scrub-generation protocol is not integrated yet.
 //
-// Replacement writing allows reads of the current generation. Appends, rotation,
-// reclamation, Close, and other rewrites wait until the transaction finishes.
+// Replacement writing allows reads, appends, and rollover. The captured sealed
+// prefix is fixed; later sealed ranges and the active tail remain unchanged by
+// this rewrite. Reclamation, Close, and other rewrites wait until it finishes.
 // Transform runs once per examined record and must not call back into this Log.
 // Old files remain until Reclaim. After preparation begins, any failure poisons
 // the handle conservatively (including callback failure/cancellation); Close and
@@ -59,8 +60,15 @@ func (l *Log) Rewrite(ctx context.Context, generation uint64, transform Transfor
 }
 
 func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transform, includeTail bool) (result RewriteResult, err error) {
-	l.mutationMu.Lock()
-	defer l.mutationMu.Unlock()
+	l.maintenanceMu.Lock()
+	defer l.maintenanceMu.Unlock()
+	if includeTail {
+		l.mutationMu.Lock()
+		defer l.mutationMu.Unlock()
+	} else {
+		l.mutationMu.RLock()
+		defer l.mutationMu.RUnlock()
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err = l.usable(); err != nil {
@@ -88,6 +96,21 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	if err = prepared.prepare(l, ctx, c, transform, includeTail); err != nil {
 		return prepared.result, l.fail(err)
 	}
+	if err = l.usable(); err != nil {
+		return prepared.result, err
+	}
+	if !includeTail {
+		// Only appends/rollovers can have changed the layout: maintenanceMu excludes
+		// competing rewrites and reclamation. Keep their new ranges and active tail.
+		latest, e := l.catalog.head()
+		if e != nil {
+			return prepared.result, l.fail(e)
+		}
+		if latest.Generation != c.Generation {
+			return prepared.result, l.fail(ErrCatalogConflict)
+		}
+		prepared.baseRevision = latest.Revision
+	}
 	if err = prepared.publish(l, ctx); err != nil {
 		return prepared.result, l.fail(err)
 	}
@@ -96,7 +119,7 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 
 // prepareSealed acquires and releases the source under Log.mu. The writer only
 // borrows the source's replayable record stream for the duration of the call.
-// mutationMu prevents reclamation/Close while replacement writing releases mu.
+// maintenanceMu prevents reclamation/Close while replacement writing releases mu.
 func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Transform) (replacement SegmentRef, changed bool, err error) {
 	segment, release, err := l.acquireRange(ref)
 	if err != nil {

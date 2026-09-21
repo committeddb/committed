@@ -11,6 +11,8 @@ import "context"
 // This is full-directory maintenance, never part of open or append. Cancellation
 // can report partial progress; other errors poison the handle until reopen.
 func (l *Log) ReclaimOrphans(ctx context.Context) (ReclaimResult, error) {
+	l.maintenanceMu.Lock()
+	defer l.maintenanceMu.Unlock()
 	l.mutationMu.Lock()
 	defer l.mutationMu.Unlock()
 	l.mu.Lock()

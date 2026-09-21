@@ -39,29 +39,32 @@ type fileInstaller interface {
 
 // Log integrates a catalog, one active tail, and immutable closed ranges.
 // It holds an advisory directory lock across processes and instances until Close.
-// Methods serialize; rollover blocks reads/appends. The caller
+// Live-state access serializes; rollover blocks reads/appends. Replacement
+// writing may overlap reads and, for sealed-only rewrites, appends. The caller
 // must not replace the directory or bypass ownership with lower-level writers.
 // Rewrite publishes whole-log transformations; RewriteSealed limits their scope.
 // Reclaim cleans obsolete managed files. There are no pinned views.
 type Log struct {
-	// Mutators take mutationMu before mu. Rewrites retain mutationMu while
-	// releasing mu for replacement writing, keeping input files and tail stable.
-	mutationMu  sync.Mutex
-	mu          sync.Mutex
-	path        string
-	dir         fileInstaller
-	remover     fileRemover
-	catalog     layout
-	cache       *segmentCache
-	resident    *segmentBuilder
-	cursorEpoch *byte // unique in-memory identity replaced after each published rewrite
-	file        *os.File
-	tail        *Tail
-	framed      uint64
-	encoding    Options
-	poison      error
-	closed      bool
-	lock        *durablefs.DirectoryLock
+	// Lock order: maintenanceMu (maintenance only), mutationMu, then mu.
+	// Appends and sealed rewrites share mutationMu; whole-log rewrites and
+	// destructive maintenance take it exclusively. mu guards all live state.
+	maintenanceMu sync.Mutex
+	mutationMu    sync.RWMutex
+	mu            sync.Mutex
+	path          string
+	dir           fileInstaller
+	remover       fileRemover
+	catalog       layout
+	cache         *segmentCache
+	resident      *segmentBuilder
+	cursorEpoch   *byte // unique in-memory identity replaced after each published rewrite
+	file          *os.File
+	tail          *Tail
+	framed        uint64
+	encoding      Options
+	poison        error
+	closed        bool
+	lock          *durablefs.DirectoryLock
 }
 
 func checkLogEncoding(target uint64, encoding Options) error {
@@ -260,8 +263,8 @@ func (l *Log) fail(err error) error { l.poison = errors.Join(ErrLogPoisoned, err
 // prefix may be durable. The handle is poisoned; reopen and reconcile stable IDs
 // before replaying. IDs must strictly increase, including across calls/restarts.
 func (l *Log) Append(records []Record) error {
-	l.mutationMu.Lock()
-	defer l.mutationMu.Unlock()
+	l.mutationMu.RLock()
+	defer l.mutationMu.RUnlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.usable(); err != nil {
@@ -468,6 +471,8 @@ func (l *Log) Read(id uint64) (Record, error) {
 // a new sealed boundary. Every
 // successfully appended group was already synced. Close is idempotent.
 func (l *Log) Close() error {
+	l.maintenanceMu.Lock()
+	defer l.maintenanceMu.Unlock()
 	l.mutationMu.Lock()
 	defer l.mutationMu.Unlock()
 	l.mu.Lock()

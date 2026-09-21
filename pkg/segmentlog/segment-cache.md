@@ -19,7 +19,9 @@ them in only after successful publication. Erasure preserves the original append
 position and rollover accounting. Failed durable operations still poison the log,
 including cached reads. Resident-tail mutations use the log mutex. Rewrite preparation can borrow
 stable contents outside that mutex while a separate mutation mutex excludes
-appends, rewriting, reclamation, and Close.
+appends during whole-log rewrites; a maintenance mutex excludes other rewrites,
+reclamation, and Close. Sealed-only preparations borrow immutable contents and
+permit concurrent append/rollover.
 
 ## Contents and ownership
 

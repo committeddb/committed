@@ -31,6 +31,8 @@ type fileRemover interface{ Remove(string) (bool, error) }
 // handle until Close/reopen; retry also handles already-removed queued names.
 // This cleans local files only, not backups, snapshots, or device cells.
 func (l *Log) Reclaim(ctx context.Context) (result ReclaimResult, err error) {
+	l.maintenanceMu.Lock()
+	defer l.maintenanceMu.Unlock()
 	l.mutationMu.Lock()
 	defer l.mutationMu.Unlock()
 	l.mu.Lock()
