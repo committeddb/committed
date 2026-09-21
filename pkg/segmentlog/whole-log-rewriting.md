@@ -7,6 +7,21 @@ retain their identity. `RewriteSealed` remains available for deliberately narrow
 scope. Neither operation implements Committed's application scrub policy or
 metadata reconciliation.
 
+## Caller-owned read lifetimes
+
+`RewriteWithPublicationLock` performs a whole-log rewrite with a caller-supplied
+`sync.Locker`. It prepares and verifies replacements before acquiring that lock.
+It releases the log mutex while waiting, allowing an existing reader to finish
+additional reads of the old generation. The caller's lock covers catalog
+publication and live-tail adoption and is released on success or failure.
+
+A caller can use an RWMutex and hold its read lock across several log reads.
+Such a read lifetime must not perform mutations: whole-log preparation retains
+mutation ownership while waiting to publish. Lock acquisition itself cannot be
+canceled; cancellation is checked before publication after the lock is acquired.
+The ordinary `Rewrite` and `RewriteSealed` methods do not acquire a caller lock.
+The application adapter does not use this optional publication lock.
+
 ## Original append accounting
 
 Erasing the most recent record must not allow its ID to be appended again.

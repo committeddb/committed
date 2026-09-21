@@ -3,6 +3,7 @@ package segmentlog
 import (
 	"context"
 	"errors"
+	"sync"
 )
 
 // SealedRewriteResult describes a sealed-only transaction. SealedEnd is the
@@ -36,7 +37,7 @@ type SealedRewriteResult struct {
 // the handle conservatively (including callback failure/cancellation); Close and
 // reopen before retrying or reclaiming unpublished replacements.
 func (l *Log) RewriteSealed(ctx context.Context, generation uint64, transform Transform) (result SealedRewriteResult, err error) {
-	resultAll, err := l.rewrite(ctx, generation, transform, false)
+	resultAll, err := l.rewrite(ctx, generation, transform, false, nil)
 	return resultAll.SealedRewriteResult, err
 }
 
@@ -56,10 +57,24 @@ type RewriteResult struct {
 // Invalid input leaves the handle usable; preparation/publication failures require
 // Close and reopen. This storage transaction does not update application metadata.
 func (l *Log) Rewrite(ctx context.Context, generation uint64, transform Transform) (RewriteResult, error) {
-	return l.rewrite(ctx, generation, transform, true)
+	return l.rewrite(ctx, generation, transform, true, nil)
 }
 
-func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transform, includeTail bool) (result RewriteResult, err error) {
+// RewriteWithPublicationLock performs Rewrite while excluding caller-owned read
+// lifetimes only during publication. Preparation and verification do not acquire
+// publication. The lock must be non-nil and must not call into this Log itself.
+// Readers may hold its matching read lock across multiple log reads, but must not
+// perform mutations while holding it: Rewrite retains mutation ownership while
+// waiting to publish. Lock acquisition is not context-cancelable; cancellation
+// is checked after it returns. Errors after preparation still poison the handle.
+func (l *Log) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform Transform, publication sync.Locker) (RewriteResult, error) {
+	if publication == nil {
+		return RewriteResult{}, ErrInvalid
+	}
+	return l.rewrite(ctx, generation, transform, true, publication)
+}
+
+func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transform, includeTail bool, publication sync.Locker) (result RewriteResult, err error) {
 	l.maintenanceMu.Lock()
 	defer l.maintenanceMu.Unlock()
 	if includeTail {
@@ -98,6 +113,14 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	}
 	if err = prepared.verify(l); err != nil {
 		return prepared.result, l.fail(err)
+	}
+	if publication != nil {
+		// A reader can hold the caller's lock while seeking under mu. Never
+		// wait for that reader with mu held, or neither side could finish.
+		l.mu.Unlock()
+		publication.Lock()
+		l.mu.Lock()
+		defer publication.Unlock()
 	}
 	if err = l.usable(); err != nil {
 		return prepared.result, err
