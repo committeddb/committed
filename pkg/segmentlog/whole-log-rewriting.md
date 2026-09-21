@@ -36,6 +36,12 @@ cursor hints. Cleanup closes any replacement handle that was not transferred;
 unpublished files remain subject to orphan reclamation. Both phases still run
 under the same log mutex, with the existing failure and cancellation semantics.
 
+Replacement encoding lives in `rewriteWriter`. It receives replayable records,
+source descriptors, captured tail accounting, encoding options, and a file
+installer; it does not access the live log or catalog. The managed wrapper owns
+source acquisition and release. Tail inputs still borrow the active file or
+resident contents, so the log mutex protects them throughout preparation.
+
 The tail reuses the segment transformation machinery: scan until the first change,
 then reread only the unchanged prefix without invoking callbacks twice. A change
 to the first record needs no prefix replay. Output streams
