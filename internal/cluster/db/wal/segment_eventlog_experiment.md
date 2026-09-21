@@ -87,11 +87,14 @@ EOF is temporary, so a reader also observes later appends. The cursor contains n
 physical sequence number and resumes correctly after its checkpoint is erased.
 
 A complete Read holds the adapter's read lock through scanning and decoding.
-Adapter appends and rewrites hold the write lock. Do not copy the adapter after
-use or mutate its underlying Log directly while readers are live. Returned data
+Rewrites hold the write lock. Appends use a separate append mutex and share
+the adapter read lock with readers; frontier checks and writes remain serialized.
+Do not copy the adapter after use or mutate its underlying Log directly while
+readers are live. Returned data
 is independent of file lifetime; no view is held between Read calls. Type
-resolution and watermark callbacks must not reenter the adapter. Reads currently
-block appends during decoding, and repeated Seek calls rescan the tail.
+resolution and watermark callbacks must not reenter the adapter. Appends can
+proceed during decoding. Backend file access still follows each engine's locking
+and cursor rules.
 
 Single-record raw `readRaw` and `seekRaw` lookups use the backend's atomic read
 without taking the adapter lock. On the segmented backend they can read the old

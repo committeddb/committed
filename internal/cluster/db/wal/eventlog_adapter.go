@@ -21,6 +21,9 @@ import (
 // The adapter must not be copied after use. Mutations must go through it while
 // readers are live; its lock protects each complete Read from rewrite publication.
 type eventLogAdapter struct {
+	// Appends serialize frontier checks and writes, but share rewrite exclusion
+	// with readers. Lock order is appendMu then mu; rewrites need only mu.
+	appendMu       sync.Mutex
 	mu             sync.RWMutex
 	log            eventlog.EventLog
 	protectedReads atomic.Int64
@@ -31,8 +34,10 @@ type eventLogAdapter struct {
 // durable prefix; callers must reopen and reconcile before retrying. This method
 // does not implement Storage's applied-index or replay-deduplication protocol.
 func (l *eventLogAdapter) appendRaw(payloads [][]byte) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	records, err := eventEntryRecords(payloads)
 	if err != nil {
 		return err
@@ -81,8 +86,10 @@ func (l *eventLogAdapter) eventIndexLocked() (uint64, error) {
 // On error the returned index is unusable; reopen after storage failure before
 // retrying. Success does not apply entries to BoltDB or advance AppliedIndex.
 func (l *eventLogAdapter) appendCommittedRaw(payloads [][]byte) (uint64, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	records, err := eventEntryRecords(payloads)
 	if err != nil {
 		return 0, err
