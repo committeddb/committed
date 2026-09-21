@@ -7,8 +7,6 @@ import (
 	"errors"
 	"io"
 	"iter"
-	"os"
-	"path/filepath"
 
 	"github.com/committeddb/committed/pkg/segmentlog/internal/format"
 )
@@ -87,82 +85,15 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	if err = l.catalog.preflight(); err != nil {
 		return result, l.fail(err)
 	}
-	var changedRefs []SegmentRef
-	var retiredCacheRefs []SegmentRef
-	for ref, e := range l.catalog.ranges(Coverage{c.Start, c.Active.Start}) {
-		if e != nil {
-			return result, l.fail(e)
-		}
-		if err = ctx.Err(); err != nil {
-			return result, l.fail(err)
-		}
-		if ref.Count == 0 {
-			continue
-		}
-		replacement, changed, e := l.prepareSealed(ctx, ref, transform)
-		if e != nil {
-			return result, l.fail(e)
-		}
-		if changed {
-			if l.cache != nil {
-				retiredCacheRefs = append(retiredCacheRefs, ref)
-			}
-			result.ChangedSegments++
-			if replacement.Count == 0 {
-				result.EmptiedSegments++
-			}
-			changedRefs = append(changedRefs, replacement)
-		}
+	prepared := &preparedLogRewrite{baseRevision: c.Revision, generation: generation, result: result}
+	defer func() { err = errors.Join(err, prepared.close()) }()
+	if err = prepared.prepare(l, ctx, c, transform, includeTail); err != nil {
+		return prepared.result, l.fail(err)
 	}
-	var newFile *os.File
-	var newTail *Tail
-	var newResident *segmentBuilder
-	var replacementActive *TailRef
-	if includeTail {
-		ref, changed, e := l.prepareTail(ctx, *c.Active, c.SegmentBytes, transform)
-		if e != nil {
-			return result, l.fail(e)
-		}
-		result.TailChanged = changed
-		if changed {
-			newFile, e = os.OpenFile(filepath.Join(l.path, ref.File), os.O_RDWR, 0)
-			if e != nil {
-				return result, l.fail(e)
-			}
-			defer func() {
-				if newFile != nil {
-					err = errors.Join(err, newFile.Close())
-				}
-			}()
-			newTail, newResident, e = recoverResidentTail(newFile, ref.Checkpoint, l.resident != nil)
-			if e != nil {
-				return result, l.fail(e)
-			}
-			replacementActive = &ref
-		}
+	if err = prepared.publish(l, ctx); err != nil {
+		return prepared.result, l.fail(err)
 	}
-	if err = ctx.Err(); err != nil {
-		return result, l.fail(err)
-	}
-	c.Revision++
-	c.Generation = generation
-	if err = l.catalog.publishRewrite(c.Revision-1, c.Generation, changedRefs, replacementActive); err != nil {
-		return result, l.fail(err)
-	}
-	l.cursorEpoch = new(byte)
-	result.Published = true
-	for _, ref := range retiredCacheRefs {
-		l.cache.discard(ref)
-	}
-	if newFile != nil {
-		old := l.file
-		l.file, l.tail, l.resident = newFile, newTail, newResident
-		newFile = nil
-		if e := old.Close(); e != nil {
-			return result, l.fail(e)
-		}
-	}
-	return result, nil
+	return prepared.result, nil
 }
 
 func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Transform) (replacement SegmentRef, changed bool, err error) {

@@ -28,6 +28,14 @@ catalogs containing the new field. No production format activation is implied.
 
 ## Preparation and publication
 
+An internal `preparedLogRewrite` owns the replacement references and any opened
+replacement-tail handle. Preparation leaves catalog selection, the live resident
+tail, and cursor identities unchanged. Publication selects all replacements in
+one catalog transaction, then transfers the tail handle to the log and invalidates
+cursor hints. Cleanup closes any replacement handle that was not transferred;
+unpublished files remain subject to orphan reclamation. Both phases still run
+under the same log mutex, with the existing failure and cancellation semantics.
+
 The tail reuses the segment transformation machinery: scan until the first change,
 then reread only the unchanged prefix without invoking callbacks twice. A change
 to the first record needs no prefix replay. Output streams
