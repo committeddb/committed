@@ -35,7 +35,8 @@ import (
 //
 // Shape: one bounded send queue + worker goroutine per peer. Send() enqueues
 // non-blocking and DROPS when a peer's queue is full — raft retransmits, and the
-// raft loop must never block on a slow peer. A failed POST reports the peer
+// raft loop must never block on a slow peer. Dropped snapshots report failure
+// so raft can resume probing instead of waiting for snapshot delivery. A failed POST reports the peer
 // unreachable so raft backs off probing it. Snapshots flow inline as ordinary
 // messages (committed never configured out-of-band snapshot streaming, and its
 // snapshot is a bounded bbolt metadata dump), so there is no streaming
@@ -375,7 +376,8 @@ func (t *HttpTransport) RemovePeer(id uint64) {
 
 // Send routes each message to its target peer's queue, non-blocking. Messages to
 // self, to id 0, or to an unknown peer are dropped, as are messages for a peer
-// whose queue is full — raft retransmits, and the raft loop must never block.
+// whose queue is full. Dropped snapshots report failure so raft can retry them;
+// ordinary messages rely on raft retransmission without marking the peer unreachable.
 func (t *HttpTransport) Send(msgs []*raftpb.Message) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -385,13 +387,19 @@ func (t *HttpTransport) Send(msgs []*raftpb.Message) {
 		}
 		pr, ok := t.peers[m.GetTo()]
 		if !ok {
+			if m.GetType() == raftpb.MsgSnap {
+				t.raft.ReportSnapshot(m.GetTo(), raft.SnapshotFailure)
+			}
 			continue
 		}
 		select {
 		case pr.msgc <- m:
 		default:
-			// Queue full: drop. raft will retransmit. Reporting unreachable here
-			// would be too aggressive (a transient burst, not a dead peer).
+			// A dropped snapshot must release raft's pending-snapshot state.
+			// Queue pressure alone does not establish that the peer is unreachable.
+			if m.GetType() == raftpb.MsgSnap {
+				t.raft.ReportSnapshot(m.GetTo(), raft.SnapshotFailure)
+			}
 		}
 	}
 }
