@@ -243,54 +243,12 @@ var ErrActualNotFound = errors.New("wal: no committed entry at raft index")
 // or scrubbed) or carries no proposal.
 //
 // Holds eventMu.RLock for the whole search so a concurrent scrub swap can't
-// re-densify the seqs mid-search; uses the lock-free accessors throughout.
+// re-densify the seqs mid-search or invalidate the returned entry during decoding.
 func (s *Storage) ActualAt(index uint64) (*cluster.Actual, error) {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
-	first, err := s.firstEventSeqLocked()
-	if err != nil {
-		return nil, err
-	}
-	last, err := s.lastEventSeqLocked()
-	if err != nil {
-		return nil, err
-	}
-	if first == 0 || last == 0 || last < first {
-		return nil, ErrActualNotFound
-	}
-
-	lo, hi := first, last
-	for lo <= hi {
-		mid := lo + (hi-lo)/2
-		bs, err := s.readEventAtLocked(mid)
-		if err != nil {
-			return nil, fmt.Errorf("event log read seq %d: %w", mid, err)
-		}
-		ent := &pb.Entry{}
-		if err := proto.Unmarshal(bs, ent); err != nil {
-			return nil, err
-		}
-		switch {
-		case ent.GetIndex() == index:
-			if ent.GetType() != pb.EntryNormal || ent.Data == nil {
-				return nil, ErrActualNotFound
-			}
-			p := &cluster.Proposal{}
-			if err := p.Unmarshal(ent.Data, s); err != nil {
-				return nil, err
-			}
-			return &cluster.Actual{Index: ent.GetIndex(), Entities: p.Entities}, nil
-		case ent.GetIndex() < index:
-			lo = mid + 1
-		default:
-			if mid == first {
-				return nil, ErrActualNotFound
-			}
-			hi = mid - 1
-		}
-	}
-	return nil, ErrActualNotFound
+	return actualFromLookup(s.legacyEventLookupLocked(), index, s)
 }
 
 func (s *Storage) Reader(id string) db.ActualReader {

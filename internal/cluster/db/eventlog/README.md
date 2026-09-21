@@ -18,7 +18,7 @@ internal/durablefs/   Shared publication, directory sync, and ownership primitiv
 The dependency direction is `wal` → `eventlog.EventLog` ← concrete backends.
 The segmented backend then depends on `pkg/segmentlog`. Shared experimental adapter source
 imports neither concrete backend. Fixtures choose which backend to provide.
-Production append composition explicitly chooses the legacy tidwall adapter.
+Production append and exact-lookup composition explicitly choose the legacy tidwall adapter.
 
 Inside `wal`, the experimental application layer is organized by responsibility:
 
@@ -66,7 +66,7 @@ Callbacks hold a consistent storage view and must not reenter the log. Multi-cal
 application protections live above the interface: shared adapter locks defer
 rewrites while protected readers remain. This is not a backup-capture/file-pin API.
 
-## Production append wiring
+## Production append and lookup wiring
 
 Production `wal.Storage.appendEvent` and `appendEvents` submit logical Records to
 `eventlog.Appender`, the write subset embedded by `EventLog`. Composition lives
@@ -77,8 +77,18 @@ no CURRENT file or experimental generation directory is introduced.
 
 The writer is rebound when scrub or peer fetch replaces the native handle.
 Application replay filtering, applied progress, and metrics remain in Storage.
-Production readers, recovery, scrub swaps, and peer-copy operations still use
-native tidwall access. This is append wiring, not complete backend selection;
+Production `Storage.ActualAt` uses `eventlog.Lookup`, the exact-read subset of
+EventLog. `wal/legacy_event_lookup.go` binds a `tidwall.LegacyLookup` to the
+current handle for each call. The backend binary-searches stable IDs; the
+application supplies checksum/protobuf decoding and interprets the result in
+`wal/actual_lookup.go`. The existing event lock spans lookup and proposal decoding.
+Exact replay still includes metadata and does not gate reads on AppliedIndex.
+The native lookup decodes search probes to discover IDs; the application then
+decodes the returned payload to interpret the matched entry. The backend copies
+the matched payload to honor caller ownership, including with native NoCopy enabled.
+
+Production streaming readers, recovery, scrub swaps, and peer-copy operations still
+use native tidwall access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
 segmented backend.
 

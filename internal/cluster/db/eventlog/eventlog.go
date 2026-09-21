@@ -58,6 +58,12 @@ type Appender interface {
 	Append([]Record) error
 }
 
+// Lookup is the exact logical-record read boundary shared by EventLog backends.
+// Missing IDs return ErrNotFound. Returned payloads are caller-owned.
+type Lookup interface {
+	Read(uint64) (Record, error)
+}
+
 // EventLog owns one permanent event-log directory. Methods are concurrency-safe.
 // The caller must not mutate its files or use another writer outside this owner.
 // Backends use different physical layouts; callers cannot infer coverage from
@@ -81,9 +87,9 @@ type Appender interface {
 // Close is idempotent. This contract does not define backup capture or migration.
 type EventLog interface {
 	Appender
+	Lookup
 	NewCursor() Cursor
 	LastAppended() (uint64, bool, error)
-	Read(uint64) (Record, error)
 	Seek(uint64) (Record, error)
 	Scan(context.Context, Coverage, func(Record) error) error
 	Rewrite(context.Context, uint64, Transform) (RewriteResult, error)
