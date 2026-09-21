@@ -37,7 +37,7 @@ unpublished files remain subject to orphan reclamation. Preparation and publicat
 other rewrites, reclamation, and Close. Whole-log rewrites also hold the mutation
 mutex exclusively to stabilize the active tail; sealed-only rewrites share that
 mutex with appends. Preparation releases the log mutex while acquiring sealed sources and
-transforming and writing each replacement; publication holds it. Failure and cancellation
+transforming, writing, and verifying replacements; publication holds it. Failure and cancellation
 semantics remain unchanged.
 
 Replacement encoding lives in `rewriteWriter`. It receives replayable records,
@@ -47,7 +47,7 @@ source acquisition and release. Tail inputs still borrow the active file or
 resident contents. The mutation mutex prevents append, another rewrite,
 reclamation, and Close from changing or retiring those inputs until publication
 finishes. Ordinary reads and scans can inspect the old generation during
-replacement writing. Tail source capture and publication still hold the log mutex. Sealed source
+replacement writing. Tail source capture and catalog publication still hold the log mutex. Sealed source
 loading and release run outside it under maintenance ownership.
 
 The tail reuses the segment transformation machinery: scan until the first change,
@@ -68,7 +68,12 @@ bytes to `floor(blockSize / 2) * (MaxBlocks - 1)` bounds the block count.
 Excessive payload growth fails before publication; preparation does not encode
 a second, discarded copy of the tail to establish this capacity.
 
-Publication verifies and syncs replacement files. It preserves an unchanged
+Preparation verifies and syncs replacement files outside the log mutex. An
+in-memory, single-use verification result belongs to that open catalog instance;
+publication consumes it to select the replacements without rereading payloads.
+Maintenance ownership keeps those files stable between verification and selection.
+Sealed rewrites refresh the catalog revision after verification to preserve any
+concurrent rollover. It preserves an unchanged
 active tail and its checkpoint without reopening or rescanning that file. A
 no-op rewrite needs only the metadata commit at publication; preparation still
 scans its requested scope. `RewriteSealed` does not validate the active tail;

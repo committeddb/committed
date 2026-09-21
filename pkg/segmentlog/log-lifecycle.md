@@ -111,8 +111,9 @@ and the installer's completed durability work. It neither reopens payload files
 nor repeats their file/directory synchronization. It commits the changed range and active-tail state in bbolt. The preparation
 handle is in memory only; recovery never trusts it.
 
-Rewrite publication verifies changed sealed files and the active tail before
-committing their new references and retirement records. Unchanged ranges retain
+Rewrite preparation verifies changed sealed files and the replacement active tail
+outside the log mutex. Publication then commits their new references and
+retirement records under the mutex without rereading payload files. Unchanged ranges retain
 their existing references. Metadata work does not serialize a complete range list.
 
 Obsolete published files remain until explicit `Reclaim(ctx)` drains retirements.

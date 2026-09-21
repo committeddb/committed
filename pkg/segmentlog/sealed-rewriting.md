@@ -38,11 +38,12 @@ This operation does not update application metadata.
 4. Publish all changed descriptors, revision, and generation through one catalog
    update and metadata commit. Old files remain available until `Reclaim`.
 
-Managed reads, appends, rotations, reclamation, and other rewrites are blocked
-throughout. Callbacks must not reenter this Log. Cancellation is checked between
+Reads, appends, and rotations may proceed during sealed source acquisition,
+replacement writing, and file verification. Reclamation, Close, and other rewrites
+wait for maintenance ownership; catalog publication holds the log mutex. Callbacks must not reenter this Log. Cancellation is checked between
 records and ranges; a callback or a full-file verification must return before
 cancellation can be observed. Preparation scans the sealed record stream;
-publication verifies changed files and the active tail.
+preparation verifies changed files without checking the unchanged active tail.
 
 Invalid arguments and cancellation before work starts leave the handle usable.
 Once preparation starts, errors conservatively poison it, including callback

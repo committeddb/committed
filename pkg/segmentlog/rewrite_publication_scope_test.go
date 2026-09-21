@@ -98,8 +98,8 @@ func TestRewritePublicationChecksReplacementTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = l.catalog.publishRewrite(before.Revision, 1, nil, &replacement)
-	if !errors.Is(err, os.ErrNotExist) || !errors.Is(err, ErrCatalogPoisoned) {
+	_, err = l.catalog.verifyRewrite(nil, &replacement)
+	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("accepted absent replacement tail", err)
 	}
 	l = reopenLog(t, l)

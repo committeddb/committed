@@ -55,8 +55,9 @@ even if the caller received an error afterward. There is no per-rollover
 catalog file or CURRENT replacement in this backend.
 
 Rewrite prepares replacement files with the existing segment and tail code.
-Publication verifies/syncs replacement files, confirms directory durability when
-references change, then uses one transaction to change selected references,
+Preparation verifies/syncs replacement files and confirms directory durability
+when references change, outside the log mutex. Publication consumes the in-memory
+verification result and uses one transaction to change selected references,
 revision/generation, the tail checkpoint, and retirement records. An unchanged
 active tail retains its reference and checkpoint without another file scan or
 sync. A no-op rewrite publishes only metadata, with no payload-file or directory

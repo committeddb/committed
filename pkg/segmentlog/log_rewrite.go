@@ -96,6 +96,9 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	if err = prepared.prepare(l, ctx, c, transform, includeTail); err != nil {
 		return prepared.result, l.fail(err)
 	}
+	if err = prepared.verify(l); err != nil {
+		return prepared.result, l.fail(err)
+	}
 	if err = l.usable(); err != nil {
 		return prepared.result, err
 	}

@@ -59,7 +59,10 @@ func TestPreparedRewriteVisibilityAndOwnership(t *testing.T) {
 			}
 			if publish {
 				l.mu.Lock()
-				err = plan.publish(l, t.Context())
+				err = plan.verify(l)
+				if err == nil {
+					err = plan.publish(l, t.Context())
+				}
 				l.mu.Unlock()
 				if err != nil || !plan.result.Published {
 					t.Fatal(plan.result, err)

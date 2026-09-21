@@ -10,8 +10,9 @@ import (
 // handle. prepare does not change the selected layout or resident tail. publish
 // commits all replacements in one catalog transaction before adopting live state.
 // The caller holds maintenanceMu, mutationMu (shared for sealed-only), and mu.
-// Preparation temporarily releases mu for sealed source acquisition and replacement writing. Whole-log
-// rewrites hold mutationMu exclusively to keep the captured tail stable.
+// Preparation releases mu for sealed source acquisition, replacement writing,
+// and replacement verification. Whole-log rewrites hold mutationMu exclusively
+// to keep the captured tail stable.
 // close releases any tail handle that publication did not transfer to the Log.
 type preparedLogRewrite struct {
 	baseRevision, generation uint64
@@ -21,6 +22,7 @@ type preparedLogRewrite struct {
 	file                     *os.File
 	tail                     *Tail
 	resident                 *segmentBuilder
+	verified                 *verifiedRewriteFiles
 }
 
 func (p *preparedLogRewrite) prepare(l *Log, ctx context.Context, c Catalog, transform Transform, includeTail bool) error {
@@ -77,11 +79,22 @@ func (p *preparedLogRewrite) prepare(l *Log, ctx context.Context, c Catalog, tra
 	return nil
 }
 
+// Verify private replacements outside mu. Maintenance ownership prevents their
+// reclamation or Close; appends can only create different files.
+func (p *preparedLogRewrite) verify(l *Log) error {
+	catalog := l.catalog
+	l.mu.Unlock()
+	defer l.mu.Lock()
+	var err error
+	p.verified, err = catalog.verifyRewrite(p.changed, p.active)
+	return err
+}
+
 func (p *preparedLogRewrite) publish(l *Log, ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := l.catalog.publishRewrite(p.baseRevision, p.generation, p.changed, p.active); err != nil {
+	if err := l.catalog.publishRewrite(p.baseRevision, p.generation, p.verified); err != nil {
 		return err
 	}
 	l.cursorEpoch = new(byte)
