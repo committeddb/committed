@@ -10,7 +10,7 @@ import (
 // handle. prepare does not change the selected layout or resident tail. publish
 // commits all replacements in one catalog transaction before adopting live state.
 // The caller holds maintenanceMu, mutationMu (shared for sealed-only), and mu.
-// Preparation temporarily releases mu for replacement writing. Whole-log
+// Preparation temporarily releases mu for sealed source acquisition and replacement writing. Whole-log
 // rewrites hold mutationMu exclusively to keep the captured tail stable.
 // close releases any tail handle that publication did not transfer to the Log.
 type preparedLogRewrite struct {

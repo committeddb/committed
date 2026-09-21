@@ -78,8 +78,10 @@ rejection, and concurrent acquisition/invalidation/eviction with surviving reade
 
 ## Managed acquisition
 
-Seek, Scan, and sealed-range rewrite preparation share `acquireRange` under the
-existing log mutex. A hit supplies immutable in-memory contents without opening
+Seek, Scan, and sealed-range rewrite preparation share the same acquisition
+helper. Reads hold the log mutex; rewrite source acquisition runs outside it
+under maintenance ownership. Concurrent read/rewrite misses may load the same
+segment twice; cache admission retains one shared immutable entry. A hit supplies immutable in-memory contents without opening
 the file. A miss checks the file and catalog metadata, consumes the validating
 source into a complete cached representation, closes the file, then admits the
 entry to historical LRU. Failed loading or closing never admits a partial entry.
@@ -92,7 +94,7 @@ indexed blocks outside a requested read interval. This differs from uncached
 indexed reads, which validate only selected blocks. Frozen append files retain
 their full prevalidation pass on a miss; warm accesses use the already validated
 contents. Loading temporaries and oversized entries are outside retained-cache
-budgets. Reads serialize under the log mutex, but can overlap rewrite replacement
+budgets. Reads serialize under the log mutex, but can overlap rewrite source loading and replacement
 writing. Scans and appends do not overlap. The application scrub adapter still
 holds its own exclusive lock.
 

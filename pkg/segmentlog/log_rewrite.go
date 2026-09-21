@@ -117,20 +117,20 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 	return prepared.result, nil
 }
 
-// prepareSealed acquires and releases the source under Log.mu. The writer only
-// borrows the source's replayable record stream for the duration of the call.
-// maintenanceMu prevents reclamation/Close while replacement writing releases mu.
+// prepareSealed borrows immutable source contents while maintenanceMu prevents
+// reclamation and Close. Acquisition, validation, writing, and release all run
+// outside mu; the cache has its own synchronization.
 func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Transform) (replacement SegmentRef, changed bool, err error) {
-	segment, release, err := l.acquireRange(ref)
+	writer := rewriteWriter{dir: l.dir, encoding: l.encoding}
+	path, cache := l.path, l.cache
+	l.mu.Unlock()
+	defer l.mu.Lock()
+	segment, release, err := acquireCachedRange(path, cache, ref)
 	if err != nil {
 		return replacement, false, err
 	}
 	defer func() { err = errors.Join(err, release()) }()
-	writer := rewriteWriter{dir: l.dir, encoding: l.encoding}
-	input := segment.Records()
-	l.mu.Unlock()
-	defer l.mu.Lock()
-	return writer.sealed(ctx, ref, input, transform)
+	return writer.sealed(ctx, ref, segment.Records(), transform)
 }
 
 func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, transform Transform) (TailRef, bool, error) {
