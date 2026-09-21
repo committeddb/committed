@@ -7,7 +7,8 @@ are sparse `uint64` values; payloads are opaque bytes.
 **Current scope: an experimental synchronous append/read/rotate lifecycle,
 immutable segments, transactional whole-log rewriting, and atomic local
 catalogs.** Explicit reclamation of obsolete managed files is implemented.
-Background sealing, concurrent rewriting, and pinned views are not implemented.
+Rewrite replacement writing permits reads; appends and other mutations still
+wait. Background sealing and pinned views are not implemented.
 Neither the API nor the file format is stable. This package is not connected to
 the running database. The shared [EventLog
 contract](../../internal/cluster/db/eventlog/README.md) now has separate tidwall

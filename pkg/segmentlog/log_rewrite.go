@@ -28,7 +28,8 @@ type SealedRewriteResult struct {
 // a request whose scope includes active records. Generation describes this scoped
 // transaction; Committed's full scrub-generation protocol is not integrated yet.
 //
-// The mutex excludes reads, appends, rotation, reclamation, and other rewrites.
+// Replacement writing allows reads of the current generation. Appends, rotation,
+// reclamation, Close, and other rewrites wait until the transaction finishes.
 // Transform runs once per examined record and must not call back into this Log.
 // Old files remain until Reclaim. After preparation begins, any failure poisons
 // the handle conservatively (including callback failure/cancellation); Close and
@@ -48,7 +49,8 @@ type RewriteResult struct {
 
 // Rewrite atomically transforms every surviving record in the captured log,
 // including the active tail. It preserves original append progress and rotation
-// accounting. All operations are serialized until publication finishes; callbacks
+// accounting. Reads may proceed during replacement writing; mutators wait until
+// publication finishes. Callbacks
 // must not reenter this Log. Old payload files remain until explicit Reclaim.
 // Invalid input leaves the handle usable; preparation/publication failures require
 // Close and reopen. This storage transaction does not update application metadata.
@@ -57,6 +59,8 @@ func (l *Log) Rewrite(ctx context.Context, generation uint64, transform Transfor
 }
 
 func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transform, includeTail bool) (result RewriteResult, err error) {
+	l.mutationMu.Lock()
+	defer l.mutationMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err = l.usable(); err != nil {
@@ -92,13 +96,18 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transfor
 
 // prepareSealed acquires and releases the source under Log.mu. The writer only
 // borrows the source's replayable record stream for the duration of the call.
+// mutationMu prevents reclamation/Close while replacement writing releases mu.
 func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Transform) (replacement SegmentRef, changed bool, err error) {
 	segment, release, err := l.acquireRange(ref)
 	if err != nil {
 		return replacement, false, err
 	}
 	defer func() { err = errors.Join(err, release()) }()
-	return (rewriteWriter{dir: l.dir, encoding: l.encoding}).sealed(ctx, ref, segment.Records(), transform)
+	writer := rewriteWriter{dir: l.dir, encoding: l.encoding}
+	input := segment.Records()
+	l.mu.Unlock()
+	defer l.mu.Lock()
+	return writer.sealed(ctx, ref, input, transform)
 }
 
 func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, transform Transform) (TailRef, bool, error) {
@@ -110,6 +119,9 @@ func (l *Log) prepareTail(ctx context.Context, ref TailRef, target uint64, trans
 	if l.resident != nil {
 		input = l.resident.view(ref.Start).Records()
 	}
-	// This captured stream still borrows live state; Log.mu protects its lifetime.
-	return (rewriteWriter{dir: l.dir, encoding: l.encoding}).tail(ctx, ref, target, state, input, transform)
+	// mutationMu keeps this borrowed tail stable while readers use the old view.
+	writer := rewriteWriter{dir: l.dir, encoding: l.encoding}
+	l.mu.Unlock()
+	defer l.mu.Lock()
+	return writer.tail(ctx, ref, target, state, input, transform)
 }

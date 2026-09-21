@@ -19,6 +19,8 @@ func TestPreparedRewriteVisibilityAndOwnership(t *testing.T) {
 			if err := l.Append([]Record{{1, []byte("value")}, {10, []byte("value")}, {20, []byte("value")}}); err != nil {
 				t.Fatal(err)
 			}
+			l.mutationMu.Lock()
+			defer l.mutationMu.Unlock()
 			cursor := l.NewCursor()
 			defer func() { _ = cursor.Close() }()
 			if _, err := cursor.Seek(1); err != nil {

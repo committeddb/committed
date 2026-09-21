@@ -17,7 +17,9 @@ over; reopening starts with empty sealed-segment caches.
 Tail rewrites build replacement resident contents before publication and swap
 them in only after successful publication. Erasure preserves the original append
 position and rollover accounting. Failed durable operations still poison the log,
-including cached reads. All resident-tail access uses the existing log mutex.
+including cached reads. Resident-tail mutations use the log mutex. Rewrite preparation can borrow
+stable contents outside that mutex while a separate mutation mutex excludes
+appends, rewriting, reclamation, and Close.
 
 ## Contents and ownership
 
@@ -88,8 +90,9 @@ indexed blocks outside a requested read interval. This differs from uncached
 indexed reads, which validate only selected blocks. Frozen append files retain
 their full prevalidation pass on a miss; warm accesses use the already validated
 contents. Loading temporaries and oversized entries are outside retained-cache
-budgets. Managed operations still serialize; this change does not provide
-concurrent scan/append or scrub execution.
+budgets. Reads serialize under the log mutex, but can overlap rewrite replacement
+writing. Scans and appends do not overlap. The application scrub adapter still
+holds its own exclusive lock.
 
 Successful rewrite publication discards replaced cache identities while retaining
 unchanged entries. New indexed replacements load through their own catalog

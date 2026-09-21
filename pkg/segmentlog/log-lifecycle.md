@@ -19,7 +19,8 @@ no lock file, and is released by process termination. Failed creation/open relea
 it; a poisoned Log retains it until Close. Close releases the active file before
 ownership and does not force a new segment boundary.
 
-Methods also serialize within a Log instance. All other maintenance/writers must
+Mutations serialize within a Log instance. Rewrite replacement writing releases
+the log mutex for readers while retaining a mutation mutex to keep inputs stable. All other maintenance/writers must
 cooperate with this ownership protocol: the lock does not prevent direct writes
 by a non-cooperating process. Do not replace/rename away the managed directory or
 separately mutate its metadata, tails, or files while the Log is open. Raw

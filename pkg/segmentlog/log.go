@@ -44,6 +44,9 @@ type fileInstaller interface {
 // Rewrite publishes whole-log transformations; RewriteSealed limits their scope.
 // Reclaim cleans obsolete managed files. There are no pinned views.
 type Log struct {
+	// Mutators take mutationMu before mu. Rewrites retain mutationMu while
+	// releasing mu for replacement writing, keeping input files and tail stable.
+	mutationMu  sync.Mutex
 	mu          sync.Mutex
 	path        string
 	dir         fileInstaller
@@ -257,6 +260,8 @@ func (l *Log) fail(err error) error { l.poison = errors.Join(ErrLogPoisoned, err
 // prefix may be durable. The handle is poisoned; reopen and reconcile stable IDs
 // before replaying. IDs must strictly increase, including across calls/restarts.
 func (l *Log) Append(records []Record) error {
+	l.mutationMu.Lock()
+	defer l.mutationMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.usable(); err != nil {
@@ -463,6 +468,8 @@ func (l *Log) Read(id uint64) (Record, error) {
 // a new sealed boundary. Every
 // successfully appended group was already synced. Close is idempotent.
 func (l *Log) Close() error {
+	l.mutationMu.Lock()
+	defer l.mutationMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed {

@@ -1,7 +1,7 @@
 # Whole-log rewriting
 
-`Log.Rewrite(ctx, generation, transform)` transforms all surviving records under
-one managed log lock. It prepares affected sealed ranges and the active tail,
+`Log.Rewrite(ctx, generation, transform)` transforms all surviving records while
+excluding other mutations. It prepares affected sealed ranges and the active tail,
 then publishes them together through one catalog update. Unchanged payload files
 retain their identity. `RewriteSealed` remains available for deliberately narrower
 scope. Neither operation implements Committed's application scrub policy or
@@ -33,14 +33,18 @@ replacement-tail handle. Preparation leaves catalog selection, the live resident
 tail, and cursor identities unchanged. Publication selects all replacements in
 one catalog transaction, then transfers the tail handle to the log and invalidates
 cursor hints. Cleanup closes any replacement handle that was not transferred;
-unpublished files remain subject to orphan reclamation. Both phases still run
-under the same log mutex, with the existing failure and cancellation semantics.
+unpublished files remain subject to orphan reclamation. Preparation and publication retain a mutation mutex throughout. Preparation
+releases the log mutex while transforming and writing each replacement;
+publication holds it. Failure and cancellation semantics remain unchanged.
 
 Replacement encoding lives in `rewriteWriter`. It receives replayable records,
 source descriptors, captured tail accounting, encoding options, and a file
 installer; it does not access the live log or catalog. The managed wrapper owns
 source acquisition and release. Tail inputs still borrow the active file or
-resident contents, so the log mutex protects them throughout preparation.
+resident contents. The mutation mutex prevents append, another rewrite,
+reclamation, and Close from changing or retiring those inputs until publication
+finishes. Ordinary reads and scans can inspect the old generation during
+replacement writing. Source acquisition and publication still hold the log mutex.
 
 The tail reuses the segment transformation machinery: scan until the first change,
 then reread only the unchanged prefix without invoking callbacks twice. A change
@@ -81,7 +85,9 @@ not interrupt callbacks, syncs, or whole-file verification.
 Logical publication retains old files. `Reclaim` removes obsolete published tails
 and segments; `ReclaimOrphans` separately removes unpublished preparation files.
 Physical erasure requires cleanup. The API has no pinned readers or backup views.
-Rewrites block all managed operations and scan records while preparing changes.
+Rewrites scan records while preparing changes. Transform callbacks must not
+reenter the log; a concurrent scan callback must also avoid reentry. The
+application adapter still holds its own exclusive lock across a scrub.
 
 ## Evidence
 
@@ -162,7 +168,7 @@ VM were not load-controlled.
 The median run time fell from 8.711 ms to 1.861 ms. Publication no longer reads
 or syncs the unchanged active file and skips the directory sync when no payload
 references change. Whole-log rewrite preparation still scans the active tail,
-and all managed rewrite operations still hold the log mutex throughout.
+with the mutation mutex excluding appends and other maintenance.
 
 ## Grouped tail-rewrite measurements
 
@@ -196,7 +202,7 @@ bound. The reduction of 241,920 bytes comes entirely from group overhead;
 payload compression is unchanged. Preparation holds a reusable encoded-group
 buffer in addition to its output buffer; a record above the target enlarges the
 group buffer, bounded by the maximum record size plus framing and group overhead
-(apart from allocator capacity rounding). The complete rewrite still holds the
-log mutex. Tests cover reused callback payload buffers, sparse IDs, erasure,
+(apart from allocator capacity rounding). Replacement writing permits engine
+reads while mutations remain excluded. Tests cover reused callback payload buffers, sparse IDs, erasure,
 records at and above the group target, the maximum payload size, checkpoint
 recovery, later appends, and output failures before publication.

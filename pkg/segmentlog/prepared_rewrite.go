@@ -9,7 +9,8 @@ import (
 // preparedLogRewrite owns unpublished replacements and the replacement tail
 // handle. prepare does not change the selected layout or resident tail. publish
 // commits all replacements in one catalog transaction before adopting live state.
-// Every operation still runs under Log.mu; this is not a concurrent snapshot.
+// The caller holds mutationMu and mu. Preparation temporarily releases mu for
+// replacement writing; mutationMu keeps the selected layout and tail stable.
 // close releases any tail handle that publication did not transfer to the Log.
 type preparedLogRewrite struct {
 	baseRevision, generation uint64
