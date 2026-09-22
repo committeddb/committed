@@ -28,7 +28,7 @@ Inside `wal`, the experimental application layer is organized by responsibility:
 | `eventlog_entries.go` | Raft protobuf validation and stable record identity |
 | `eventlog_append.go` | Append progress and committed-batch replay |
 | `eventlog_lookup.go`, `eventlog_scan.go` | Raw entry lookup and consistent scans |
-| `eventlog_reader.go`, `eventlog_actual.go` | Actual decoding and applied visibility |
+| `actual_reader.go`, `eventlog_reader.go`, `eventlog_actual.go` | Shared Actual interpretation, reader lifetimes, and applied visibility |
 | `eventlog_protected_reader.go`, `eventlog_rewrite.go` | Read lifetimes and rewrite coordination |
 | `eventlog_selection.go`, `eventlog_metadata_rewrite.go` | Application compaction policy |
 | `eventlog_copy.go` | Bridge from production Storage into an experimental backend |
@@ -109,7 +109,11 @@ streaming decodes each sequential entry once; retries reuse the decoded entry.
 Native tidwall's existing read allocation remains.
 
 The experimental reader uses the same entry-cursor contract over its raw backend
-cursor, decoding each selected record once. The existing publication gate
+cursor, decoding each selected record once. Both production Reader and the
+experimental reader use `wal/actual_reader.go` for the Actual-reading loop:
+applied visibility, proposal interpretation, internal-entity filtering, deliberate
+skips, and progress. The caller retains its existing lock and cursor binding;
+protected-reader cancellation remains part of the shared loop. The existing publication gate
 invalidates retained decoded entries before releasing readers. The application
 retains applied visibility, type resolution, filtering, and the event read lock
 through interpretation. Reader.Close releases its cursor and waits for an

@@ -2,12 +2,8 @@ package wal
 
 import (
 	"context"
-	"errors"
-	"io"
 	"sync"
 	"sync/atomic"
-
-	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
@@ -62,52 +58,10 @@ func (r *eventActualReader) Read() (*cluster.Actual, error) {
 		r.cursor.invalidate()
 		r.epoch = r.events.readEpoch
 	}
-	for {
-		if r.ctx != nil {
-			if err := context.Cause(r.ctx); err != nil {
-				return nil, err
-			}
-		}
-		if r.index == ^uint64(0) {
-			return nil, io.EOF
-		}
-		entry, err := r.cursor.Current()
-		if errors.Is(err, eventlog.ErrNotFound) {
-			return nil, io.EOF
-		}
-		if err != nil {
-			return nil, err
-		}
-		index := entry.GetIndex()
-		// Do not resolve types, advance the cursor, or report scan progress for
-		// an entry that is durable but whose application has not finished.
-		if index > r.applied() {
-			return nil, io.EOF
-		}
-		var entities []*cluster.Entity
-		if entry.GetType() == pb.EntryNormal && entry.Data != nil {
-			proposal := new(cluster.Proposal)
-			if err := proposal.Unmarshal(entry.Data, r.resolver); err != nil {
-				var unknown *cluster.UnknownReservedTypeError
-				if !errors.As(err, &unknown) || !unknown.Skippable() {
-					return nil, err
-				}
-			} else {
-				entities = userTopicEntities(proposal.Entities)
-			}
-		}
-		if r.ctx != nil {
-			if err := context.Cause(r.ctx); err != nil {
-				return nil, err
-			}
-		}
+	return readCursorActual(r.cursor, r.index, r.resolver, r.applied, func(index uint64) {
 		r.index = index
 		r.pos.Store(index)
-		r.cursor.Advance()
-		if len(entities) > 0 {
-			return &cluster.Actual{Index: index, Entities: entities}, nil
-		}
-	}
+	}, r.ctx)
 }
 
 // Close releases this reader's retained segment contents. It does not close the

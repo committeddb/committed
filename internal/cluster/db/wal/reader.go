@@ -2,11 +2,9 @@ package wal
 
 import (
 	"errors"
-	"io"
 	"sync"
 	"sync/atomic"
 
-	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -59,79 +57,10 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 	defer r.s.eventMu.RUnlock()
 	cursor := r.eventCursorLocked()
 
-	for {
-		if r.raftIndex == ^uint64(0) {
-			return nil, io.EOF
-		}
-		ent, err := cursor.Current()
-		if errors.Is(err, eventlog.ErrNotFound) {
-			return nil, io.EOF
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		// Visibility watermark: never surface an entry whose apply has not
-		// completed. appendEvents publishes a whole Ready's entries to the
-		// event log BEFORE their entities are applied to bbolt (the tolerated
-		// p>r window, and restart replay), so an entry whose raft index
-		// exceeds AppliedIndex may reference a type not yet written — resolving
-		// it would fail, and pre-watermark the cursor had already advanced, so
-		// the row was skipped forever (reader-sees-unapplied). Treat
-		// not-yet-applied as EOF WITHOUT advancing; a later Read surfaces it
-		// once AppliedIndex catches up (sub-millisecond in steady state, and
-		// as replay progresses on a restart). AppliedIndex is an atomic load,
-		// safe under the eventMu.RLock held here.
-		if ent.GetIndex() > r.s.AppliedIndex() {
-			return nil, io.EOF
-		}
-
-		if ent.GetType() != pb.EntryNormal || ent.Data == nil {
-			r.raftIndex = ent.GetIndex()
-			r.pos.Store(ent.GetIndex())
-			cursor.Advance()
-			continue
-		}
-
-		p := &cluster.Proposal{}
-		if err := p.Unmarshal(ent.Data, r.s); err != nil {
-			// A namespaced system type from a NEWER version, marked skippable
-			// (ungated): the apply path skipped it too (compat namespace), so
-			// skip it here — advance the cursor and keep scanning — rather than
-			// stalling the syncable on a coordination record it never wanted.
-			var ure *cluster.UnknownReservedTypeError
-			if errors.As(err, &ure) && ure.Skippable() {
-				r.raftIndex = ent.GetIndex()
-				r.pos.Store(ent.GetIndex())
-				cursor.Advance()
-				continue
-			}
-			// Otherwise: do not advance (as above). With the watermark, a
-			// within-AppliedIndex entry's type is guaranteed applied, so a
-			// resolution failure here is genuine corruption/bug — retry-loudly
-			// beats skip-silently.
-			return nil, err
-		}
-
-		r.raftIndex = ent.GetIndex()
-		r.pos.Store(ent.GetIndex())
-		cursor.Advance()
-
-		// Internal metadata entities — committed's own config (type / database /
-		// syncable / ingestable) and coordination (syncable index +
-		// dead-letters + stuck/skip, ingestable position, scrub, etc.) —
-		// are not topic data and must NOT be projected into a syncable: a
-		// syncable would otherwise re-Sync its own dead letters, and
-		// committed's control plane would leak out of band into every
-		// downstream sink. Skip them per-entity so a syncable sees only
-		// user-defined topic data (ingested data included — it rides under user
-		// topic types). This is the "skipping internal metadata entries" the
-		// read path documents; filtering per-entity (not by Entities[0]) makes
-		// that literally true regardless of proposal composition. Keep scanning.
-		if userEntities := userTopicEntities(p.Entities); len(userEntities) > 0 {
-			return &cluster.Actual{Index: ent.GetIndex(), Entities: userEntities}, nil
-		}
-	}
+	return readCursorActual(cursor, r.raftIndex, r.s, r.s.AppliedIndex, func(index uint64) {
+		r.raftIndex = index
+		r.pos.Store(index)
+	}, nil)
 }
 
 // userTopicEntities returns the user-topic entities of a committed proposal,
