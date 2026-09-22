@@ -288,32 +288,19 @@ func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutc
 		}
 	}()
 
-	writeSurvivor := func(payload []byte) error {
-		return newLog.Append(frame(payload))
+	transform := func(raw []byte) ([]byte, bool, error) {
+		keep, payload, err := scrubFilterEntry(raw, sel, msel, eraseMax)
+		if err != nil || !keep {
+			return nil, false, err
+		}
+		return frame(payload), true, nil
 	}
 	copyRange := func(lo, hi uint64, locked bool) error {
-		for seq := lo; seq <= hi; seq++ {
-			var raw []byte
-			var rerr error
-			if locked {
-				raw, rerr = s.readEventAtLocked(seq)
-			} else {
-				raw, rerr = s.readEventAt(seq)
-			}
-			if rerr != nil {
-				return rerr
-			}
-			keep, payload, ferr := scrubFilterEntry(raw, sel, msel, eraseMax)
-			if ferr != nil {
-				return ferr
-			}
-			if keep {
-				if werr := writeSurvivor(payload); werr != nil {
-					return werr
-				}
-			}
+		read := s.readEventAt
+		if locked {
+			read = s.readEventAtLocked
 		}
-		return nil
+		return newLog.CopyRange(lo, hi, read, transform)
 	}
 
 	// Phase A (unlocked): bulk-copy the log as it stood at the start. New commits

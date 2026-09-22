@@ -63,3 +63,33 @@ func (w *LegacyRewrite) CompressSealed() error {
 		}
 	}
 }
+
+// CopyRange rewrites an inclusive native sequence range into this private log.
+// read owns source-handle lifetime and envelope decoding; transform supplies
+// application policy and returns an already-framed survivor. Each source record
+// is read and transformed once. Failures leave an unpublished prefix for the
+// owner to discard. Empty ranges do no work. Callbacks must not mutate this writer.
+func (w *LegacyRewrite) CopyRange(lo, hi uint64, read func(uint64) ([]byte, error), transform func([]byte) ([]byte, bool, error)) error {
+	if read == nil || transform == nil {
+		return eventlog.ErrInvalid
+	}
+	for seq := lo; seq <= hi; seq++ {
+		raw, err := read(seq)
+		if err != nil {
+			return err
+		}
+		frame, keep, err := transform(raw)
+		if err != nil {
+			return err
+		}
+		if keep {
+			if err := w.Append(frame); err != nil {
+				return err
+			}
+		}
+		if seq == hi {
+			break
+		}
+	}
+	return nil
+}

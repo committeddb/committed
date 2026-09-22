@@ -153,7 +153,10 @@ The native scrub's unpublished replacement is written by
 `tidwall.LegacyRewrite`: it owns private-log creation, dense survivor numbering,
 explicit sync, and sealed-segment compression. `wal` supplies framed survivor
 bytes and retains selection, catch-up, directory publication, and cleanup.
-Creation rejects a directory with existing append history.
+Creation rejects a directory with existing append history. Its `CopyRange`
+operation owns inclusive native traversal and survivor writes; application
+callbacks supply the existing source-read lock lifetime and scrub transform.
+Bulk copy and final catch-up retain their existing lock scopes.
 
 The background sealer depends on the optional `eventlog.SealedCompressor`
 capability. `tidwall.LegacyCompression` performs one native compression step and
