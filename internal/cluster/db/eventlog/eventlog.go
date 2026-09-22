@@ -56,6 +56,9 @@ type Cursor interface {
 // an I/O failure can leave a durable prefix and requires reconciliation.
 type Appender interface {
 	Append([]Record) error
+	// LastAppended reports original append progress, including erased records.
+	// ok is false only for empty append history; ID zero is valid.
+	LastAppended() (id uint64, ok bool, err error)
 }
 
 // Lookup is the exact logical-record read boundary shared by EventLog backends.
@@ -97,7 +100,6 @@ type EventLog interface {
 	Appender
 	Lookup
 	NewCursor() Cursor
-	LastAppended() (uint64, bool, error)
 	Seek(uint64) (Record, error)
 	Scan(context.Context, Coverage, func(Record) error) error
 	Rewrite(context.Context, uint64, Transform) (RewriteResult, error)

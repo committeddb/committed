@@ -141,13 +141,14 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
-	nextSeq, err := s.eventLog.LastIndex()
+	appender := s.eventAppenderLocked()
+	_, hasHistory, err := appender.LastAppended()
 	if err != nil {
 		return fmt.Errorf("event log last index: %w", err)
 	}
 	records := make([]eventlog.Record, 0, len(entries))
 	first, last := uint64(0), uint64(0)
-	wroteSeqOne := nextSeq == 0
+	wasEmpty := !hasHistory
 	for _, entry := range entries {
 		if entry.GetIndex() <= s.eventIndex.Load() {
 			continue
@@ -165,13 +166,13 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 	if last == 0 {
 		return nil
 	}
-	if err := s.eventAppenderLocked().Append(records); err != nil {
+	if err := appender.Append(records); err != nil {
 		return fmt.Errorf("event log write batch (raft indexes %d-%d): %w", first, last, err)
 	}
 	s.eventLogWriteOps.Add(1)
-	if wroteSeqOne {
+	if wasEmpty {
 		// The log was empty before this batch: record the raft index its
-		// first record carries, as appendEvent does for seq 1.
+		// first record carries.
 		s.firstEventIndex.Store(first)
 	}
 	s.eventIndex.Store(last)
@@ -181,9 +182,8 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 func (s *Storage) appendEvent(entry *pb.Entry) error {
 	s.eventAppendMu.Lock()
 	defer s.eventAppendMu.Unlock()
-	// RLock for the whole body so the seq it computes (LastIndex+1) and the
-	// Write that consumes it can't straddle a scrub swap that would replace the
-	// handle underneath them. Shared with concurrent readers; only the swap
+	// RLock keeps backend progress and the append on the same handle across
+	// a scrub swap. Shared with concurrent readers; only the swap
 	// (eventMu.Lock) is excluded.
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
@@ -192,16 +192,16 @@ func (s *Storage) appendEvent(entry *pb.Entry) error {
 	if err != nil {
 		return fmt.Errorf("marshal entry for event log: %w", err)
 	}
-	nextSeq, err := s.eventLog.LastIndex()
+	appender := s.eventAppenderLocked()
+	_, hasHistory, err := appender.LastAppended()
 	if err != nil {
 		return fmt.Errorf("event log last index: %w", err)
 	}
-	nextSeq++
-	if err := s.eventAppenderLocked().Append([]eventlog.Record{{ID: entry.GetIndex(), Payload: entryBytes}}); err != nil {
-		return fmt.Errorf("event log write seq %d (raft index %d): %w", nextSeq, entry.GetIndex(), err)
+	if err := appender.Append([]eventlog.Record{{ID: entry.GetIndex(), Payload: entryBytes}}); err != nil {
+		return fmt.Errorf("event log write raft index %d: %w", entry.GetIndex(), err)
 	}
 	s.eventLogWriteOps.Add(1)
-	if nextSeq == 1 {
+	if !hasHistory {
 		s.firstEventIndex.Store(entry.GetIndex())
 	}
 	s.eventIndex.Store(entry.GetIndex())

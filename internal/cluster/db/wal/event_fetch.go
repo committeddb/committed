@@ -399,13 +399,14 @@ func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
-	nextSeq, err := s.eventLog.LastIndex()
+	appender := s.fetchedEventAppenderLocked()
+	_, hasHistory, err := appender.LastAppended()
 	if err != nil {
 		return fmt.Errorf("event log last index: %w", err)
 	}
 	records := make([]eventlog.Record, 0, len(raws))
 	first, last := uint64(0), uint64(0)
-	wroteSeqOne := nextSeq == 0
+	wasEmpty := !hasHistory
 	for i, raw := range raws {
 		if indexes[i] <= s.eventIndex.Load() || (last != 0 && indexes[i] <= last) {
 			continue
@@ -419,11 +420,11 @@ func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
 	if last == 0 {
 		return nil
 	}
-	if err := s.fetchedEventAppenderLocked().Append(records); err != nil {
+	if err := appender.Append(records); err != nil {
 		return fmt.Errorf("event log write batch (raft indexes %d-%d): %w", first, last, err)
 	}
 	s.eventLogWriteOps.Add(1)
-	if wroteSeqOne {
+	if wasEmpty {
 		s.firstEventIndex.Store(first)
 	}
 	s.eventIndex.Store(last)

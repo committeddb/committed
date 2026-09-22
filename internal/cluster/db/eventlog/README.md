@@ -69,7 +69,9 @@ rewrites while protected readers remain. This is not a backup-capture/file-pin A
 ## Production append and lookup wiring
 
 Production `wal.Storage.appendEvent` and `appendEvents` submit logical Records to
-`eventlog.Appender`, the write subset embedded by `EventLog`. Composition lives
+`eventlog.Appender`, the append/progress subset embedded by `EventLog`.
+Its `LastAppended` reports logical progress and distinguishes empty history
+without exposing physical sequence numbers. Composition lives
 in `wal/legacy_event_appender.go`. The default is `tidwall.LegacyAppender`, which
 wraps the existing production handle and assigns its dense physical sequences.
 The supplied codec preserves the existing checksum envelope and Raft-entry bytes;
@@ -81,6 +83,9 @@ protobuf fields. Unframed records are rejected by the existing checksum verifier
 sequence assignment and application progress updates serialize. Overlap filtering
 and write metrics remain in `wal`.
 
+The native appender shares recovered logical progress between LastAppended and
+Append, avoiding a second tail decode. It refreshes that progress when another
+writer extends the same native handle.
 The writer is rebound when scrub or peer fetch replaces the native handle.
 Application replay filtering, applied progress, and metrics remain in Storage.
 Production `Storage.ActualAt` uses a private `wal.entryCursor` for exact

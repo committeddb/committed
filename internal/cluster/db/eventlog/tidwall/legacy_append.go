@@ -38,27 +38,10 @@ func NewLegacyAppender(log *wal.Log, codec LegacyCodec) *LegacyAppender {
 func (l *LegacyAppender) Append(records []eventlog.Record) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.log == nil || l.codec.Encode == nil || l.codec.Decode == nil {
-		return eventlog.ErrInvalid
-	}
-	sequence, err := l.log.LastIndex()
-	if err != nil {
+	if err := l.refreshProgress(); err != nil {
 		return err
 	}
-	last := l.last
-	if !l.valid || sequence != l.sequence {
-		if sequence > 0 {
-			raw, err := l.log.Read(sequence)
-			if err != nil {
-				return err
-			}
-			record, err := l.codec.Decode(raw)
-			if err != nil {
-				return err
-			}
-			last = record.ID
-		}
-	}
+	sequence, last := l.sequence, l.last
 	if uint64(len(records)) > ^uint64(0)-sequence {
 		return eventlog.ErrInvalid
 	}
@@ -84,5 +67,45 @@ func (l *LegacyAppender) Append(records []eventlog.Record) error {
 		return err
 	}
 	l.sequence, l.last, l.valid = next, last, true
+	return nil
+}
+
+// LastAppended uses the same recovered progress as Append. Production native
+// scrubbing preserves the tail; the owner rewraps after swaps or resets.
+func (l *LegacyAppender) LastAppended() (uint64, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.refreshProgress(); err != nil {
+		return 0, false, err
+	}
+	return l.last, l.sequence != 0, nil
+}
+
+// refreshProgress requires mu. Native peer/adoption writes can extend the log;
+// reuse the decoded frontier only while its physical sequence is unchanged.
+func (l *LegacyAppender) refreshProgress() error {
+	if l.log == nil || l.codec.Encode == nil || l.codec.Decode == nil {
+		return eventlog.ErrInvalid
+	}
+	sequence, err := l.log.LastIndex()
+	if err != nil {
+		return err
+	}
+	if l.valid && sequence == l.sequence {
+		return nil
+	}
+	var last uint64
+	if sequence > 0 {
+		raw, err := l.log.Read(sequence)
+		if err != nil {
+			return err
+		}
+		record, err := l.codec.Decode(raw)
+		if err != nil {
+			return err
+		}
+		last = record.ID
+	}
+	l.sequence, l.last, l.valid = sequence, last, true
 	return nil
 }
