@@ -3,6 +3,7 @@ package tidwall
 import (
 	"encoding/binary"
 	"errors"
+	"slices"
 	"testing"
 
 	native "github.com/tidwall/wal"
@@ -186,5 +187,71 @@ func TestLegacyTailReadPreservesPosition(t *testing.T) {
 	}
 	if _, err := c.Last(); !errors.Is(err, eventlog.ErrClosed) {
 		t.Fatal(err)
+	}
+}
+
+func TestLegacyReverseScanBoundsAndFailures(t *testing.T) {
+	log, err := native.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	fail := false
+	errDecode := errors.New("decode failed")
+	c := NewLegacyCursor(log, func(raw []byte) (uint64, uint64, error) {
+		id := binary.BigEndian.Uint64(raw)
+		if fail && id == 30 {
+			return 0, 0, errDecode
+		}
+		return id, id, nil
+	})
+	defer func() { _ = c.Close() }()
+	scan := func(limit int, want []uint64) {
+		t.Helper()
+		var got []uint64
+		count, err := c.ScanReverse(limit, func(id uint64) (bool, error) { got = append(got, id); return true, nil })
+		if err != nil || count != len(want) || !slices.Equal(got, want) {
+			t.Fatal(count, got, err)
+		}
+	}
+	scan(10, nil)
+	for i, id := range []uint64{10, 30, 90} {
+		if err := log.Write(uint64(i+1), binary.BigEndian.AppendUint64(nil, id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scan(0, nil)
+	scan(2, []uint64{90, 30})
+	scan(10, []uint64{90, 30, 10})
+	if err := log.TruncateFront(2); err != nil {
+		t.Fatal(err)
+	}
+	scan(10, []uint64{90, 30})
+	var got []uint64
+	count, err := c.ScanReverse(10, func(id uint64) (bool, error) {
+		got = append(got, id)
+		if id == 90 {
+			if err := log.Write(4, binary.BigEndian.AppendUint64(nil, 100)); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	})
+	if err != nil || count != 2 || !slices.Equal(got, []uint64{90, 30}) {
+		t.Fatal(count, got, err)
+	}
+	count, err = c.ScanReverse(10, func(uint64) (bool, error) { return false, nil })
+	if err != nil || count != 1 {
+		t.Fatal(count, err)
+	}
+	errVisit := errors.New("callback failed")
+	count, err = c.ScanReverse(10, func(uint64) (bool, error) { return false, errVisit })
+	if !errors.Is(err, errVisit) || count != 1 {
+		t.Fatal(count, err)
+	}
+	fail = true
+	count, err = c.ScanReverse(10, func(uint64) (bool, error) { return true, nil })
+	if !errors.Is(err, errDecode) || count != 3 {
+		t.Fatal(count, err)
 	}
 }

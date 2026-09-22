@@ -1006,29 +1006,12 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	ws.appliedIndex.Store(idx)
 
-	// eventIndex (P_local) is the raft index of the last entry durably
-	// written to EventLog. EventLog's own sequence numbers are
-	// monotonic-from-1 and don't match raft index, so we recover the
-	// raft index by unmarshaling the last stored entry. Empty EventLog
-	// (fresh install or pre-Phase-1 migration) leaves eventIndex at 0.
-	evLast, err := eventLog.LastIndex()
-	if err != nil {
-		return nil, err
+	// Recover logical bounds through the native backend before restoring the
+	// persisted data head or running its bounded legacy fallback.
+	if err := ws.deriveEventBoundsLocked(); err != nil {
+		return nil, fmt.Errorf("recover event log bounds: %w", err)
 	}
-	if evLast > 0 {
-		// Verify and decode both boundaries before publishing their logical
-		// indexes. The backend owns native positioning and the application codec
-		// records checksum failures.
-		if err := ws.deriveEventBoundsLocked(); err != nil {
-			return nil, fmt.Errorf("recover event log bounds: %w", err)
-		}
-		// The legacy data-head fallback below still scans native sequences in
-		// reverse; these are not logical Raft indexes.
-		evFirst, err := eventLog.FirstIndex()
-		if err != nil {
-			return nil, err
-		}
-
+	if ws.EventIndex() > 0 {
 		// Restore the persisted data head (written in the same bbolt
 		// transaction as appliedIndex — see dataEventIndexKey). The backscan
 		// below is now only the FALLBACK for logs written before the head was
@@ -1043,49 +1026,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			ws.dataEventIndex.Store(persisted)
 		}
 
-		// Fallback derivation for pre-feature logs: scan the event log
-		// backward from the tail to the first user-topic-data entry,
-		// mirroring the reader's IsInternal filter. The trailing internal run
-		// (index bumps, dead-letters, config, positions) is normally tiny;
-		// cap the scan so a pathological tail can't make Open O(log). On the
-		// cap or any read/decode failure, the head stays 0 — under-reporting
-		// only ever makes lag look smaller — but LOUDLY: the operator must
-		// know the lag/caughtUp instrument is blind until the next data entry
-		// applies (or a re-POST after one).
-		const dataHeadBackscanCap = 4096
-		scannedOut := 0
-		for seq, scanned := evLast, 0; ws.dataEventIndex.Load() == 0 && seq >= evFirst && scanned < dataHeadBackscanCap; seq, scanned = seq-1, scanned+1 {
-			scannedOut = scanned + 1
-			raw, rerr := ws.readEventAt(seq)
-			if rerr != nil {
-				ws.logger.Warn("dataEventIndex backscan: read failed; leaving head at 0",
-					zap.Uint64("seq", seq), zap.Error(rerr))
-				break
-			}
-			e := &pb.Entry{}
-			if uerr := proto.Unmarshal(raw, e); uerr != nil {
-				ws.logger.Warn("dataEventIndex backscan: entry unmarshal failed; leaving head at 0",
-					zap.Uint64("seq", seq), zap.Error(uerr))
-				break
-			}
-			if e.GetType() != pb.EntryNormal || len(e.Data) == 0 {
-				continue
-			}
-			typeID, ok, derr := cluster.FirstEntityTypeID(e.Data)
-			if derr != nil {
-				ws.logger.Warn("dataEventIndex backscan: proposal decode failed; leaving head at 0",
-					zap.Uint64("seq", seq), zap.Uint64("index", e.GetIndex()), zap.Error(derr))
-				break
-			}
-			if ok && !cluster.IsInternal(typeID) {
-				ws.dataEventIndex.Store(e.GetIndex())
-				break
-			}
-		}
-		if ws.dataEventIndex.Load() == 0 && scannedOut >= dataHeadBackscanCap {
-			ws.logger.Warn("dataEventIndex backscan hit its cap without finding a data entry; the data head is 0 until the next data entry applies — syncable lag/caughtUp UNDER-REPORT until then (a fresh syncable may briefly read caughtUp over an empty replay range)",
-				zap.Int("scanned", scannedOut))
-		}
+		ws.recoverLegacyDataHead()
 	}
 
 	// Compile the interpretation registry from the applied restatements so readers

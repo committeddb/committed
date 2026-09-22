@@ -123,7 +123,12 @@ checks that the recovered tail matches the previous EventIndex before updating
 either bound. These native surviving-entry bounds do not represent erased
 append history in the segmented format.
 
-The reverse data-head recovery scan, scrub swaps, and peer-copy operations still use native tidwall
+The legacy data-head fallback uses the native positioner's bounded
+`ScanReverse`. Native sequence traversal and tail capture belong to the backend;
+`wal/legacy_data_head.go` retains user-data classification, the 4,096-record cap,
+and warning policy. A persisted data head bypasses this fallback.
+
+Scrub swaps and peer-copy operations still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
 segmented backend.

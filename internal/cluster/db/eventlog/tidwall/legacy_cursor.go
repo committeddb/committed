@@ -190,3 +190,43 @@ func (c *LegacyCursor[T]) Last() (T, error) {
 	_, value, err := c.at(last)
 	return value, err
 }
+
+// ScanReverse visits at most limit surviving records from the captured native
+// tail toward the head. Returning false stops before the next read. The result
+// counts attempted record reads, including a failed read/decode. Callbacks must
+// not reenter the cursor. The owner excludes truncation/replacement/close; appends
+// may continue and do not extend the captured scan.
+func (c *LegacyCursor[T]) ScanReverse(limit int, visit func(T) (bool, error)) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0, eventlog.ErrClosed
+	}
+	if c.log == nil || c.decode == nil || visit == nil || limit < 0 {
+		return 0, eventlog.ErrInvalid
+	}
+	if limit == 0 {
+		return 0, nil
+	}
+	first, err := c.log.FirstIndex()
+	if err != nil {
+		return 0, err
+	}
+	last, err := c.log.LastIndex()
+	if err != nil {
+		return 0, err
+	}
+	if first == 0 || last < first {
+		return 0, nil
+	}
+	for seq, count := last, 1; ; seq, count = seq-1, count+1 {
+		_, value, err := c.at(seq)
+		if err != nil {
+			return count, err
+		}
+		more, err := visit(value)
+		if err != nil || !more || seq == first || count == limit {
+			return count, err
+		}
+	}
+}
