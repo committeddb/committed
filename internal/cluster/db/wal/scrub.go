@@ -652,39 +652,13 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64, eraseMax uint64) 
 // Deterministic: a pure function of the log prefix <= bound, identical on every
 // replica, like tombstoneSelections. Keyed by tombstoneKey(type, key) so it
 // shares that encoding; disjoint from the RTBF selection (a user delete is
-// handled by RTBF, not here). Runs unlocked in scrub phase A, the same access
-// pattern as the phase-A copy — entries appended concurrently are all at index
-// > bound and excluded.
+// handled by RTBF, not here). Runs in scrub phase A under the event publication read lock. Appends
+// can continue; entries at index > bound are excluded.
 func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error) {
 	selection := newMetadataSelection()
-	first, err := s.firstEventSeq()
+	err := s.scanEventEntries(bound, selection.observe)
 	if err != nil {
 		return nil, err
-	}
-	last, err := s.lastEventSeq()
-	if err != nil {
-		return nil, err
-	}
-	if first == 0 || last == 0 {
-		return selection.latest, nil
-	}
-	for seq := first; seq <= last; seq++ {
-		raw, err := s.readEventAt(seq)
-		if err != nil {
-			return nil, err
-		}
-		pe := &pb.Entry{}
-		if err := proto.Unmarshal(raw, pe); err != nil {
-			return nil, err
-		}
-		// Event-log seqs are append order = raft-index order, so once an entry is
-		// past the freeze line the rest are too — stop before reading the tail.
-		if pe.GetIndex() > bound {
-			break
-		}
-		if err := selection.observe(pe); err != nil {
-			return nil, err
-		}
 	}
 	return selection.latest, nil
 }

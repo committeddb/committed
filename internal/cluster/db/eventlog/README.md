@@ -106,6 +106,13 @@ retains applied visibility, type resolution, filtering, and the event read lock
 through interpretation. Reader.Close releases its cursor and waits for an
 in-flight read.
 
+Production metadata-compaction selection and RTBF eligibility scans use
+`wal.scanEntryPrefix` over `entryCursor`. They traverse inclusive logical bounds,
+include metadata/control entries, and preserve the existing selection policies.
+The production scan owns the event publication read lock and closes its cursor;
+appends can continue during selection. Physical sequences are confined to the
+native backend adapter.
+
 Production recovery, scrub swaps, and peer-copy operations still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the

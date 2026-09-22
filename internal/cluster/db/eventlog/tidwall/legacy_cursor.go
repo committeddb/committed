@@ -82,6 +82,12 @@ func (c *LegacyCursor[T]) seek(id, last uint64) (uint64, uint64, T, error) {
 	if first == 0 || last < first {
 		return 0, 0, zero, eventlog.ErrNotFound
 	}
+	// The beginning of the logical ID space is the physical head. Prefix
+	// scans need not probe (or decode) later records to find it.
+	if id == 0 {
+		index, value, err := c.at(first)
+		return first, index, value, err
+	}
 	// Lower-bound search. Retain the best decoded candidate so the selected
 	// record is not read again after the search.
 	var candidate T
