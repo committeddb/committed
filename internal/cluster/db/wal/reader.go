@@ -2,17 +2,16 @@ package wal
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
 // Reader streams committed proposals out of the permanent event log.
@@ -26,12 +25,8 @@ import (
 // bootstrap path ("new syncable reads from the start") and for operation
 // after the raft log gets compacted.
 //
-// EventLog's internal sequence numbers (1..N, dense) are not the raft
-// indices of the entries they store — raft indices can have gaps when a
-// caller bypasses ApplyCommitted (tests do this), and they don't start
-// at 1 on a node restored by rsync. Reader therefore maintains its own
-// walSeq cursor and resolves it lazily on the first Read from the
-// syncable's raft-index position.
+// The backend cursor resolves stable Raft indexes into its physical positions.
+// Application progress advances only after a successful decode or deliberate skip.
 type Reader struct {
 	sync.Mutex
 	raftIndex uint64 // last raft index returned to caller
@@ -46,65 +41,33 @@ type Reader struct {
 	// line — none of the shared-line contention the reader-scaling work
 	// removed. 0 means nothing examined yet (also true for a reader that
 	// resolved at head and went straight to EOF — pair with caughtUp).
-	pos            atomic.Uint64
-	walSeq         uint64 // wal seq to read next; 0 until resolved
-	walSeqResolved bool
-	// lastGen is the scrub generation walSeq was resolved against. When the
-	// storage's generation moves ahead of it, a scrub re-densified the wal
-	// seqs and walSeq is stale, so we re-resolve from raftIndex (which is
-	// never renumbered). See Storage.scrubGen.
-	lastGen uint64
-	s       *Storage
+	pos    atomic.Uint64
+	cursor productionEventCursor
+	closed bool
+	s      *Storage
 }
 
 func (r *Reader) Read() (*cluster.Actual, error) {
 	r.Lock()
 	defer r.Unlock()
+	if r.closed {
+		return nil, eventlog.ErrClosed
+	}
 
-	// Hold eventMu.RLock for the whole read so a concurrent scrub swap can't
-	// re-densify the seqs mid-scan, and so the generation check + resolve +
-	// scan see one consistent log. Uses the *Locked accessors throughout to
-	// avoid re-acquiring RLock (which would deadlock against a waiting swap).
+	// Keep one generation through storage reads and proposal/type decoding.
 	r.s.eventMu.RLock()
 	defer r.s.eventMu.RUnlock()
-
-	// If a scrub completed since we last resolved, our cached walSeq points
-	// into the old (pre-densification) seq space. Re-resolve from raftIndex.
-	gen := r.s.scrubGen.Load()
-	if r.walSeqResolved && gen != r.lastGen {
-		r.walSeqResolved = false
-	}
-	r.lastGen = gen
-
-	if !r.walSeqResolved {
-		seq, err := r.resolveStartSeqLocked()
-		if err != nil {
-			return nil, err
-		}
-		r.walSeq = seq
-		r.walSeqResolved = true
-	}
+	cursor := r.eventCursorLocked()
 
 	for {
-		walLast, err := r.s.lastEventSeqLocked()
-		if err != nil {
-			return nil, err
-		}
-		if r.walSeq == 0 || r.walSeq > walLast {
+		if r.raftIndex == ^uint64(0) {
 			return nil, io.EOF
 		}
-
-		bs, err := r.s.readEventAtLocked(r.walSeq)
-		if err != nil {
-			return nil, fmt.Errorf("event log read seq %d: %w", r.walSeq, err)
+		ent, err := cursor.Current()
+		if errors.Is(err, eventlog.ErrNotFound) {
+			return nil, io.EOF
 		}
-
-		ent := &pb.Entry{}
-		if err := proto.Unmarshal(bs, ent); err != nil {
-			// A decode failure does NOT advance the cursor: a corrupt or
-			// undecodable committed entry must surface loudly and retry the
-			// same seq (the caller classifies ErrCorruptEntry as fatal),
-			// never be silently skipped by advancing past it.
+		if err != nil {
 			return nil, err
 		}
 
@@ -126,7 +89,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 		if ent.GetType() != pb.EntryNormal || ent.Data == nil {
 			r.raftIndex = ent.GetIndex()
 			r.pos.Store(ent.GetIndex())
-			r.walSeq++
+			cursor.Advance()
 			continue
 		}
 
@@ -140,7 +103,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 			if errors.As(err, &ure) && ure.Skippable() {
 				r.raftIndex = ent.GetIndex()
 				r.pos.Store(ent.GetIndex())
-				r.walSeq++
+				cursor.Advance()
 				continue
 			}
 			// Otherwise: do not advance (as above). With the watermark, a
@@ -152,7 +115,7 @@ func (r *Reader) Read() (*cluster.Actual, error) {
 
 		r.raftIndex = ent.GetIndex()
 		r.pos.Store(ent.GetIndex())
-		r.walSeq++
+		cursor.Advance()
 
 		// Internal metadata entities — committed's own config (type / database /
 		// syncable / ingestable) and coordination (syncable index +
@@ -206,27 +169,6 @@ func userTopicEntities(entities []*cluster.Entity) []*cluster.Entity {
 		}
 	}
 	return filtered
-}
-
-// resolveStartSeqLocked binary-searches the event log for the first wal seq
-// whose entry's raft index is strictly greater than r.raftIndex. Returns
-// 0 if the log is empty or every entry is at or below r.raftIndex (EOF).
-// Caller must hold r.s.eventMu (Read holds RLock), so it uses the lock-free
-// accessors.
-//
-// Binary search is safe because the raft-index column of the event log is
-// strictly ascending: appends gate on entry.Index > eventIndex.Load(), and a
-// right-to-be-forgotten scrub only *removes* entries (it never reorders or
-// renumbers them), so the column stays sorted — just sparse (gapped) after a
-// scrub. Binary search tolerates the gaps; only the arithmetic fast-path
-// would not, which is why this resolves by search, not by formula.
-func (r *Reader) resolveStartSeqLocked() (uint64, error) {
-	// The reader starts AFTER its checkpoint: the first event past raftIndex
-	// (the storage's search is shared with the peer fetch).
-	if r.raftIndex == 0 {
-		return r.s.eventSeqForIndexLocked(0)
-	}
-	return r.s.eventSeqForIndexLocked(r.raftIndex + 1)
 }
 
 // ErrActualNotFound is returned by ActualAt when no committed Actual exists
@@ -291,4 +233,15 @@ func (s *Storage) ReaderAt(index uint64) db.ActualReader {
 // See the pos field doc for semantics (0 = nothing examined yet).
 func (r *Reader) Position() uint64 {
 	return r.pos.Load()
+}
+
+// Close releases the backend cursor. It waits for an in-flight Read to finish.
+func (r *Reader) Close() error {
+	r.Lock()
+	defer r.Unlock()
+	r.closed = true
+	if r.cursor.entryCursor != nil {
+		return r.cursor.Close()
+	}
+	return nil
 }

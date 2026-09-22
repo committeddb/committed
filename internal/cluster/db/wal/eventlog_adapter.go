@@ -28,4 +28,5 @@ type eventLogAdapter struct {
 	mu             sync.RWMutex
 	log            eventlog.EventLog
 	protectedReads atomic.Int64
+	readEpoch      uint64 // guarded by mu; invalidates retained decoded entries
 }

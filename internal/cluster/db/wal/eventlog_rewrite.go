@@ -45,5 +45,15 @@ func (l *eventLogAdapter) rewriteRawLocked(ctx context.Context, generation uint6
 		}
 		payload, err = checkedEventEntry(eventlog.Record{ID: r.ID, Payload: payload}, nil)
 		return payload, true, err
-	}, &l.mu)
+	}, entryInvalidatingPublicationLock{l})
+}
+
+// Invalidate decoded entries before releasing the existing publication gate,
+// including uncertain publication failures.
+type entryInvalidatingPublicationLock struct{ events *eventLogAdapter }
+
+func (g entryInvalidatingPublicationLock) Lock() { g.events.mu.Lock() }
+func (g entryInvalidatingPublicationLock) Unlock() {
+	g.events.readEpoch++
+	g.events.mu.Unlock()
 }

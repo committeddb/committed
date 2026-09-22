@@ -87,8 +87,27 @@ The native lookup decodes search probes to discover IDs; the application then
 decodes the returned payload to interpret the matched entry. The backend copies
 the matched payload to honor caller ownership, including with native NoCopy enabled.
 
-Production streaming readers, recovery, scrub swaps, and peer-copy operations still
-use native tidwall access. These are partial boundaries, not complete backend selection;
+Production streaming `Reader` uses the application-side `wal.entryCursor`:
+`SeekGE`, `Current`, `Advance`, and `Close`. Seeking is lazy; Current reports
+storage errors and retains the decoded entry until consumption. Repeated Current
+calls reuse that entry. EOF remains temporary.
+
+Composition in `wal/legacy_event_cursor.go` binds native tidwall positioning to
+the current handle and scrub generation. The generic `tidwall.LegacyCursor`
+carries the application codec's decoded result through binary search and sequential
+positioning without copying the payload or interpreting protobuf. Production
+streaming decodes each sequential entry once; retries reuse the decoded entry.
+Native tidwall's existing read allocation remains.
+
+The experimental reader uses the same entry-cursor contract over its raw backend
+cursor, decoding each selected record once. The existing publication gate
+invalidates retained decoded entries before releasing readers. The application
+retains applied visibility, type resolution, filtering, and the event read lock
+through interpretation. Reader.Close releases its cursor and waits for an
+in-flight read.
+
+Production recovery, scrub swaps, and peer-copy operations still use native tidwall
+access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
 segmented backend.
 

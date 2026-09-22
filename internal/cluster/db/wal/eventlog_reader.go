@@ -23,7 +23,8 @@ import (
 type eventActualReader struct {
 	mu       sync.Mutex
 	events   *eventLogAdapter
-	cursor   eventlog.Cursor
+	cursor   *decodedEntryCursor
+	epoch    uint64
 	closed   bool
 	resolver cluster.TypeResolver
 	applied  func() uint64
@@ -41,7 +42,7 @@ func (l *eventLogAdapter) readerAt(index uint64, resolver cluster.TypeResolver, 
 	if resolver == nil || applied == nil {
 		return nil, eventlog.ErrInvalid
 	}
-	return &eventActualReader{events: l, index: index, resolver: resolver, applied: applied, cursor: l.log.NewCursor()}, nil
+	return &eventActualReader{events: l, index: index, resolver: resolver, applied: applied, cursor: newEventEntryCursor(l.log.NewCursor(), index+1)}, nil
 }
 
 func (r *eventActualReader) Position() uint64 { return r.pos.Load() }
@@ -57,6 +58,10 @@ func (r *eventActualReader) Read() (*cluster.Actual, error) {
 	}
 	r.events.mu.RLock()
 	defer r.events.mu.RUnlock()
+	if r.epoch != r.events.readEpoch {
+		r.cursor.invalidate()
+		r.epoch = r.events.readEpoch
+	}
 	for {
 		if r.ctx != nil {
 			if err := context.Cause(r.ctx); err != nil {
@@ -66,15 +71,14 @@ func (r *eventActualReader) Read() (*cluster.Actual, error) {
 		if r.index == ^uint64(0) {
 			return nil, io.EOF
 		}
-		record, err := r.cursor.Seek(r.index + 1)
-		entry, err := decodeEventEntry(record, err)
-		index := record.ID
+		entry, err := r.cursor.Current()
 		if errors.Is(err, eventlog.ErrNotFound) {
 			return nil, io.EOF
 		}
 		if err != nil {
 			return nil, err
 		}
+		index := entry.GetIndex()
 		// Do not resolve types, advance the cursor, or report scan progress for
 		// an entry that is durable but whose application has not finished.
 		if index > r.applied() {
@@ -99,6 +103,7 @@ func (r *eventActualReader) Read() (*cluster.Actual, error) {
 		}
 		r.index = index
 		r.pos.Store(index)
+		r.cursor.Advance()
 		if len(entities) > 0 {
 			return &cluster.Actual{Index: index, Entities: entities}, nil
 		}
