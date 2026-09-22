@@ -134,7 +134,13 @@ The legacy data-head fallback uses the native positioner's bounded
 `wal/legacy_data_head.go` retains user-data classification, the 4,096-record cap,
 and warning policy. A persisted data head bypasses this fallback.
 
-Scrub swaps and peer-copy operations still use native tidwall
+Native layout snapshots, verified frame reads, and length-prefixed record
+batches are implemented by `tidwall.LegacyTransfer`. `wal` supplies checksum
+verification and retains layout freezes, generation policy, transfer budgets,
+and the choice between whole files and records. These APIs describe the native
+format; they do not imply interchangeability with segmented files.
+
+Scrub swaps and peer file adoption still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
 segmented backend.

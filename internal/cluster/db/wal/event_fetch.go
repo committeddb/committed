@@ -21,6 +21,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 // The event-log fetch: how a node hands its permanent event log to a peer
@@ -44,22 +45,12 @@ import (
 // could pair up.
 
 // EventSegment is one event-log segment file as a peer would ship it.
-type EventSegment struct {
-	Path       string // on the serving node, the file to stream; on the receiving node, the staged copy
-	FirstSeq   uint64
-	Compressed bool
-}
+type EventSegment = tidwall.LegacySegment
 
 // EventLayout is the serving node's event log as of a FreezeLayout: the
 // sealed segments, and the tail's first sequence, committed length, and last
 // sequence. Valid only while the freeze that produced it stands.
-type EventLayout struct {
-	Sealed       []EventSegment
-	TailPath     string
-	TailFirstSeq uint64
-	TailLen      int64
-	LastSeq      uint64
-}
+type EventLayout = tidwall.LegacyLayout
 
 // ErrSegmentsMisaligned refuses an adoption whose first file does not start
 // exactly where this node's event log ends: the receiver (db/catchup.go)
@@ -200,15 +191,11 @@ func (s *Storage) EventLayout() (EventLayout, error) {
 	}
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
-	lay, err := s.eventLog.LayoutSnapshot()
+	layout, err := s.nativeEventTransferLocked().Layout()
 	if err != nil {
 		return EventLayout{}, fmt.Errorf("event log layout: %w", err)
 	}
-	out := EventLayout{TailPath: lay.Tail.Path, TailFirstSeq: lay.Tail.Index, TailLen: lay.TailLen, LastSeq: lay.LastIndex}
-	for _, sg := range lay.Sealed {
-		out.Sealed = append(out.Sealed, EventSegment{Path: sg.Path, FirstSeq: sg.Index, Compressed: wal.IsCompressedSegmentPath(sg.Path)})
-	}
-	return out, nil
+	return layout, nil
 }
 
 // EventSeqForIndex returns the sequence of the first event whose raft index
@@ -231,14 +218,7 @@ func (s *Storage) eventSeqForIndexLocked(raftIndex uint64) (uint64, error) {
 func (s *Storage) ReadEventRaw(seq uint64) ([]byte, error) {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
-	raw, err := s.eventLog.Read(seq)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.unframe(raw, "event_log"); err != nil {
-		return nil, err
-	}
-	return raw, nil
+	return s.nativeEventTransferLocked().Read(seq)
 }
 
 // EventRaftIndexAt returns the raft index of the event at seq.
@@ -376,21 +356,9 @@ func (s *Storage) sendSegment(sink db.EventSink, sg EventSegment) error {
 // on-disk encoding, stopping early once maxBytes is reached; last is the
 // sequence of the last record included.
 func (s *Storage) encodeRecords(lo, hi uint64, maxBytes int) (data []byte, last uint64, err error) {
-	var prefix [binary.MaxVarintLen64]byte
-	for seq := lo; seq <= hi; seq++ {
-		raw, err := s.ReadEventRaw(seq)
-		if err != nil {
-			return nil, 0, fmt.Errorf("event log read seq %d to serve: %w", seq, err)
-		}
-		n := binary.PutUvarint(prefix[:], uint64(len(raw)))
-		data = append(data, prefix[:n]...)
-		data = append(data, raw...)
-		last = seq
-		if len(data) >= maxBytes {
-			break
-		}
-	}
-	return data, last, nil
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	return s.nativeEventTransferLocked().EncodeRecords(lo, hi, maxBytes)
 }
 
 // AppendFetchedRecords appends a run of records fetched from a peer — the
