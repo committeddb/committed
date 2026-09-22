@@ -24,7 +24,7 @@ func productionEntryTestBackends() map[string]func(string) (*eventLogBinding, er
 			if err != nil {
 				return nil, err
 			}
-			return &eventLogBinding{entries: bindEventEntries(log)}, nil
+			return bindEventLog(log), nil
 		}
 	}
 	return backends

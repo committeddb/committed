@@ -35,7 +35,7 @@ func bindLegacyEventLog(log *tidwall.LegacyLog, m *metrics.Metrics) *eventLogBin
 			return records[0], nil
 		},
 	})
-	return &eventLogBinding{native: log, entries: &boundEntryStore{
+	return &eventLogBinding{native: log, compressor: log, entries: &boundEntryStore{
 		Appender: writer,
 		cursor: func(index uint64) entryCursor {
 			raw := legacyPositioner(log, decodeFrame)

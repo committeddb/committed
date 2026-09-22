@@ -176,8 +176,11 @@ callbacks supply the existing source-read lock lifetime and scrub transform.
 Bulk copy and final catch-up retain their existing lock scopes.
 
 The background sealer depends on the optional `eventlog.SealedCompressor`
-capability. `tidwall.LegacyCompression` performs one native compression step and
-maps retired-handle errors to `eventlog.ErrClosed`. Composition captures the handle
+capability carried by the published binding. `tidwall.LegacyLog` supplies it
+through `LegacyCompression`, mapping retired-handle errors to `eventlog.ErrClosed`.
+Shared EventLog binding discovers the optional capability by interface. The worker
+idles when it is absent and checks the current binding again on the next pass.
+Composition captures the capability
 under the existing event lock; compression runs outside it, with the existing
 layout exclusion. Pacing, retry policy, logging, and shutdown remain in `wal`.
 The segmented backend encodes segments when writing and does not expose this

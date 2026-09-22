@@ -68,7 +68,7 @@ func TestEventRecoveryRetainsErasedAppendProgress(t *testing.T) {
 					log, err = segmented.Open(path, segmentlog.Options{})
 				}
 				require.NoError(t, err)
-				s := &Storage{eventLog: &eventLogBinding{entries: bindEventEntries(log)}}
+				s := &Storage{eventLog: bindEventLog(log)}
 				require.NoError(t, s.recoverEventIndex())
 				require.Equal(t, uint64(90), s.EventIndex())
 				require.NoError(t, s.deriveEventBoundsLocked())

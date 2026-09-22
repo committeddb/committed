@@ -73,8 +73,19 @@ func (s *Storage) sealerWorker() {
 		}
 
 		s.eventMu.RLock()
-		compressor := s.eventCompressorLocked()
+		compressor := s.eventLog.compressor
 		s.eventMu.RUnlock()
+
+		// Some backends compress when writing immutable segments and have no
+		// background step. Keep checking the binding: replacement can change
+		// capabilities, and shutdown must still join this worker.
+		if compressor == nil {
+			release()
+			if !wait(s.sealerIdle) {
+				return
+			}
+			continue
+		}
 
 		did, err := compressor.CompressNextSealed()
 		release()
