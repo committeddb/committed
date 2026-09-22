@@ -224,8 +224,13 @@ close. The binding keeps native maintenance capabilities separately. The same
 production methods are tested against the native owner and both shared EventLog
 backends, including replay, applied visibility, temporary EOF, sparse lookup,
 prefix bounds, and reader rebinding after replacement. These fixtures exercise
-those methods directly; they do not run segmented storage through node startup,
-native maintenance, or peer catch-up.
+those methods directly. An internal opening hook also runs the real Storage startup,
+Raft Save, committed apply, and reopen paths against each backend. These startup
+tests use safe mode to hold native background maintenance; they cover replay of an
+event batch made durable before applied progress was saved. Failed startup closes
+all opened logs, including releasing the segmented backend's directory lock.
+Public Open still selects tidwall. Segmented native maintenance and peer catch-up
+are not exercised by these startup tests.
 
 Production composition and adoption coordination still select the native backend.
 These are partial boundaries, not complete backend selection;

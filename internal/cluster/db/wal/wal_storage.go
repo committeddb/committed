@@ -682,6 +682,13 @@ func logOpenError(dir, logName string, m *metrics.Metrics, err error) error {
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
 func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, opts ...Option) (*Storage, error) {
+	return openStorage(dir, p, sync, ingest, openEventLog, opts...)
+}
+
+// openStorage shares the node startup path with backend integration tests.
+// Public Open always supplies the native factory; this is not format detection
+// or a runtime backend-selection option.
+func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, openEvents eventLogOpener, opts ...Option) (*Storage, error) {
 	var cfg options
 	for _, opt := range opts {
 		opt(&cfg)
@@ -709,6 +716,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
+	var ws *Storage
 	keyValueStorage, err := bolt.Open(datadir.BoltPath(keyValueStorageDir), 0o600, boltOpts)
 	if err != nil {
 		return nil, err
@@ -719,7 +727,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	opened := false
 	defer func() {
 		if !opened {
-			_ = keyValueStorage.Close()
+			if ws != nil {
+				_ = ws.keyValueStorage.Close()
+			} else {
+				_ = keyValueStorage.Close()
+			}
 		}
 	}()
 
@@ -755,10 +767,30 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if !opened {
+			if ws != nil {
+				_ = ws.EntryLog.Close()
+			} else {
+				_ = entryLog.Close()
+			}
+		}
+	}()
+
 	stateLog, err := openLog(stateLogDir, "state_log", cfg.metrics, nil)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if !opened {
+			if ws != nil {
+				_ = ws.StateLog.Close()
+			} else {
+				_ = stateLog.Close()
+			}
+		}
+	}()
+
 	// The event log gets a configurable segment cache (its readers — syncables
 	// replaying history — are concurrent, one resident segment each; see
 	// WithEventCacheSegments). The entry/state logs keep the library default:
@@ -778,10 +810,20 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		SegmentCacheSize: cacheSegments,
 		SegmentSize:      cfg.eventSegmentSize,
 	}
-	eventLog, err := openEventLog(eventLogDir, cfg.metrics, eventOpenOptions)
+	eventLog, err := openEvents(eventLogDir, cfg.metrics, eventOpenOptions)
 	if err != nil {
 		return nil, err
 	}
+
+	defer func() {
+		if !opened {
+			if ws != nil {
+				_ = ws.eventLog.Close()
+			} else {
+				_ = eventLog.Close()
+			}
+		}
+	}()
 
 	// Sweep any bbolt.db.restore.* / bbolt.db.compact.* temp file a crash left
 	// between a full-DB write and its atomic rename (RestoreSnapshot /
@@ -823,7 +865,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 
 	dbs := make(map[string]cluster.Database)
-	ws := &Storage{
+	ws = &Storage{
 		eventLayout:      layoutLock{name: "event log", logger: logger},
 		raftLayout:       layoutLock{name: "raft entry log", logger: logger},
 		raftLogDir:       entryLogDir,
@@ -1013,8 +1055,8 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	ws.appliedIndex.Store(idx)
 
-	// Recover logical bounds through the native backend before restoring the
-	// persisted data head or running its bounded legacy fallback.
+	// Recover logical bounds through the shared binding before restoring the
+	// persisted data head or running its bounded fallback.
 	if err := ws.deriveEventBoundsLocked(); err != nil {
 		return nil, fmt.Errorf("recover event log bounds: %w", err)
 	}

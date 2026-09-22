@@ -3,6 +3,7 @@ package wal
 import (
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // eventLogBinding identifies one published storage lifetime. Logical operations
@@ -23,3 +24,7 @@ func bindEventLog(log eventlog.EventLog) *eventLogBinding {
 	compressor, _ := log.(eventlog.SealedCompressor)
 	return &eventLogBinding{entries: bindEventEntries(log), compressor: compressor}
 }
+
+// eventLogOpener constructs the event binding after the node's metadata lock is
+// acquired. The default factory applies the native cache and segment options.
+type eventLogOpener func(string, *metrics.Metrics, tidwall.LegacyOptions) (*eventLogBinding, error)
