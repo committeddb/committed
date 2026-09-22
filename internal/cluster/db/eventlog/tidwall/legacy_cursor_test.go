@@ -85,3 +85,67 @@ func TestLegacyCursorSeekRetryAndAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLegacySequenceForNativeTransfer(t *testing.T) {
+	log, err := native.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	calls := 0
+	errDecode := errors.New("decode failed")
+	fail := false
+	positioner := NewLegacyCursor(log, func(raw []byte) (uint64, uint64, error) {
+		calls++
+		if fail {
+			return 0, 0, errDecode
+		}
+		id := binary.BigEndian.Uint64(raw)
+		return id, id, nil
+	})
+	defer func() { _ = positioner.Close() }()
+	for _, id := range []uint64{0, 10, ^uint64(0)} {
+		if seq, err := positioner.SequenceFor(id); err != nil || seq != 1 {
+			t.Fatal(id, seq, err)
+		}
+	}
+	for i, id := range []uint64{10, 30, 90} {
+		if err := log.Write(uint64(i+1), binary.BigEndian.AppendUint64(nil, id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct{ id, seq uint64 }{
+		{0, 1}, {1, 1}, {10, 1}, {11, 2}, {30, 2}, {31, 3}, {90, 3}, {91, 4}, {^uint64(0), 4},
+	} {
+		if seq, err := positioner.SequenceFor(tc.id); err != nil || seq != tc.seq {
+			t.Fatal(tc, seq, err)
+		}
+	}
+	if err := log.TruncateFront(2); err != nil {
+		t.Fatal(err)
+	}
+	calls = 0
+	fail = true
+	if seq, err := positioner.SequenceFor(0); err != nil || seq != 2 || calls != 0 {
+		t.Fatal("head resolution decoded payload", seq, calls, err)
+	}
+	if _, err := positioner.SequenceFor(30); !errors.Is(err, errDecode) {
+		t.Fatal("hidden decode failure", err)
+	}
+	fail = false
+	if seq, err := positioner.SequenceFor(10); err != nil || seq != 2 {
+		t.Fatal(seq, err)
+	}
+	if err := log.Write(4, binary.BigEndian.AppendUint64(nil, 100)); err != nil {
+		t.Fatal(err)
+	}
+	if seq, err := positioner.SequenceFor(91); err != nil || seq != 4 {
+		t.Fatal(seq, err)
+	}
+	if err := positioner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := positioner.SequenceFor(0); !errors.Is(err, eventlog.ErrClosed) {
+		t.Fatal(err)
+	}
+}

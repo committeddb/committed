@@ -32,7 +32,14 @@ func (r *Reader) eventCursorLocked() entryCursor {
 }
 
 func newLegacyEntryCursor(s *Storage, index uint64) entryCursor {
-	raw := tidwall.NewLegacyCursor(s.eventLog, func(raw []byte) (uint64, *pb.Entry, error) {
+	raw := newLegacyPositioner(s)
+	return &decodedEntryCursor{target: index, seek: raw.Seek, close: raw.Close}
+}
+
+// newLegacyPositioner binds native positioning to the application-owned codec.
+// The caller excludes replacement and close throughout its use.
+func newLegacyPositioner(s *Storage) *tidwall.LegacyCursor[*pb.Entry] {
+	return tidwall.NewLegacyCursor(s.eventLog, func(raw []byte) (uint64, *pb.Entry, error) {
 		payload, err := s.unframe(raw, "event_log")
 		if err != nil {
 			return 0, nil, err
@@ -43,5 +50,4 @@ func newLegacyEntryCursor(s *Storage, index uint64) entryCursor {
 		}
 		return entry.GetIndex(), entry, nil
 	})
-	return &decodedEntryCursor{target: index, seek: raw.Seek, close: raw.Close}
 }

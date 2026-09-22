@@ -111,6 +111,11 @@ The production scan owns the event publication read lock and closes its cursor;
 appends can continue during selection. Physical sequences are confined to the
 native backend adapter.
 
+The native peer-transfer resolver also uses the tidwall positioner's
+`SequenceFor` operation. Physical sequence numbers remain part of that native
+protocol: empty logs resolve to 1 and requests beyond the tail resolve to
+last-sequence + 1. This operation is separate from the application entry cursor.
+
 Production recovery, scrub swaps, and peer-copy operations still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the

@@ -220,38 +220,9 @@ func (s *Storage) EventSeqForIndex(raftIndex uint64) (uint64, error) {
 }
 
 func (s *Storage) eventSeqForIndexLocked(raftIndex uint64) (uint64, error) {
-	first, err := s.firstEventSeqLocked()
-	if err != nil {
-		return 0, err
-	}
-	last, err := s.lastEventSeqLocked()
-	if err != nil {
-		return 0, err
-	}
-	if first == 0 || last == 0 || last < first {
-		return last + 1, nil
-	}
-	if raftIndex == 0 {
-		return first, nil
-	}
-	lo, hi := first, last+1
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		bs, err := s.readEventAtLocked(mid)
-		if err != nil {
-			return 0, fmt.Errorf("event log read seq %d during resolve: %w", mid, err)
-		}
-		ent := &pb.Entry{}
-		if err := proto.Unmarshal(bs, ent); err != nil {
-			return 0, err
-		}
-		if ent.GetIndex() >= raftIndex {
-			hi = mid
-		} else {
-			lo = mid + 1
-		}
-	}
-	return lo, nil
+	positioner := newLegacyPositioner(s)
+	defer func() { _ = positioner.Close() }()
+	return positioner.SequenceFor(raftIndex)
 }
 
 // ReadEventRaw returns the framed record at seq exactly as stored, after

@@ -1,6 +1,7 @@
 package tidwall
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -126,4 +127,42 @@ func (c *LegacyCursor[T]) Close() error {
 	c.closed, c.valid = true, false
 	c.log, c.decode = nil, nil
 	return nil
+}
+
+// SequenceFor resolves the native peer-transfer starting sequence. Unlike Seek,
+// absence returns the sequence immediately after the current tail (1 when empty).
+// This physical position is only for the native-format transfer protocol; it is
+// not an application checkpoint. The owner holds its read lifetime as for Seek.
+func (c *LegacyCursor[T]) SequenceFor(id uint64) (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0, eventlog.ErrClosed
+	}
+	if c.log == nil || c.decode == nil {
+		return 0, eventlog.ErrInvalid
+	}
+	last, err := c.log.LastIndex()
+	if err != nil {
+		return 0, err
+	}
+	// A head request has never required decoding any record in the native
+	// transfer protocol; payload validation happens when records are served.
+	if id == 0 {
+		first, err := c.log.FirstIndex()
+		if err != nil {
+			return 0, err
+		}
+		if first != 0 {
+			return first, nil
+		}
+	}
+	sequence, _, _, err := c.seek(id, last)
+	if errors.Is(err, eventlog.ErrNotFound) {
+		if last == ^uint64(0) {
+			return 0, eventlog.ErrInvalid
+		}
+		return last + 1, nil
+	}
+	return sequence, err
 }
