@@ -145,6 +145,10 @@ parsing, zstd decoding, and complete length-prefixed record validation.
 `wal` supplies the checksum verifier and owns adoption alignment, layout
 exclusion, rollback, and generation policy. Inspection does not modify files.
 
+Native segment move/copy helpers live in `eventlog/tidwall` as well. Adoption
+uses rename with a copy/sync/remove fallback. The caller retains directory sync,
+adoption ordering, rollback, and handle replacement.
+
 Scrub swaps and peer file adoption still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
