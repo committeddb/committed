@@ -189,6 +189,11 @@ installation, and moved-file rollback tracking to `eventlog/tidwall`.
 The attempt is in-memory bookkeeping only. `wal` retains handle close/reopen,
 directory sync, post-install boundary verification, and recovery/fatal policy.
 
+A whole-log catch-up reset delegates native directory removal/recreation to
+`tidwall.ResetLegacyDirectory`. Its error distinguishes removal failure from
+failure to recreate the removed directory. `wal` retains authorization, layout
+exclusion, close/reopen, generation invalidation, and fatal-error policy.
+
 Live handle ownership and adoption coordination still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the

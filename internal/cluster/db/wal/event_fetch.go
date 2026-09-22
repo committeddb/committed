@@ -165,12 +165,13 @@ func (s *Storage) ResetEventLog() error {
 	if err := s.eventLog.Close(); err != nil {
 		return fmt.Errorf("close event log for reset: %w", err)
 	}
-	if err := os.RemoveAll(s.eventLogDir); err != nil {
+	if err := tidwall.ResetLegacyDirectory(s.eventLogDir); err != nil {
+		var resetErr *tidwall.LegacyResetError
+		if errors.As(err, &resetErr) && resetErr.Removed {
+			s.logger.Fatal("event log removed for reset but its directory could not be recreated", zap.Error(resetErr.Cause))
+		}
 		s.reopenEventLogAfterSwapOrFatal("event log reset aborted")
-		return fmt.Errorf("remove event log for reset: %w", err)
-	}
-	if err := os.MkdirAll(s.eventLogDir, 0o700); err != nil {
-		s.logger.Fatal("event log removed for reset but its directory could not be recreated", zap.Error(err))
+		return err
 	}
 	s.reopenEventLogAfterSwapOrFatal("reopen event log after reset")
 	s.eventIndex.Store(0)
