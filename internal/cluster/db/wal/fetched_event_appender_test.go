@@ -29,7 +29,7 @@ func TestFetchedAppenderPreservesNativeBytesAndLocalProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
+	s := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)}
 	if err := s.appendEvent(&pb.Entry{Index: proto.Uint64(10), Type: pb.EntryNormal.Enum()}); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestFetchedAndLocalAppendSerialize(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
+		s := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)}
 		entries := []*pb.Entry{
 			{Index: proto.Uint64(10), Type: pb.EntryNormal.Enum()},
 			{Index: proto.Uint64(30), Type: pb.EntryNormal.Enum()},

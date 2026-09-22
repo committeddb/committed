@@ -27,7 +27,7 @@ func TestEventLogReaderMatchesLegacy(t *testing.T) {
 	t.Cleanup(func() { _ = legacy.Close() })
 	// A minimal legacy reader fixture: explicit-version resolution uses the real
 	// Storage cache; no background workers or BoltDB mutations are needed here.
-	storage := &Storage{eventLog: tidwallbackend.OwnLegacy(legacy)}
+	storage := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(legacy), nil)}
 	typ, _ := eventTestType(cluster.TypeRef{ID: "items", Version: 1})
 	storage.typeCache.Store(cluster.TypeRef{ID: "items", Version: 1}, typeCacheEntry{t: typ})
 	metadata, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: "worker", Index: 5})

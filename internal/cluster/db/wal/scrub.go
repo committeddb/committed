@@ -503,7 +503,7 @@ func (s *Storage) reopenEventLogAfterSwapOrFatal(what string) {
 		s.logger.Fatal("event-log swap could not reopen storage; the node cannot continue (restart to recover via recoverScrubDirs)",
 			zap.String("op", what), zap.Error(err))
 	}
-	s.eventLog = reopened
+	s.eventLog = bindLegacyEventLog(reopened, s.metrics)
 }
 
 // recomputeEventBoundsAfterSwapOrFatal recomputes the in-memory event bounds

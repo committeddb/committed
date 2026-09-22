@@ -119,7 +119,7 @@ func (s *Storage) ActualAt(index uint64) (*cluster.Actual, error) {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
-	cursor := newLegacyEntryCursor(s, index)
+	cursor := s.eventLog.entries.NewEntryCursor(index)
 	defer func() { _ = cursor.Close() }()
 	entry, err := exactEntry(cursor, index)
 	if err != nil {

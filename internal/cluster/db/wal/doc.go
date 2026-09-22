@@ -10,8 +10,10 @@
 // Physical backend implementations live in db/eventlog/tidwall and
 // db/eventlog/segmented. The latter delegates to pkg/segmentlog, which owns opaque
 // records, immutable segments, the active tail, caching, and atomic publication.
-// Production append, lookup, and cursor composition is in legacy_event_*.go;
-// experimental backend construction lives in test fixtures. Production holds a
-// tidwall.LegacyLog owner; the raw event handle stays inside that backend.
+// Production logical operations use entryStore; native codec composition is in
+// legacy_event_*.go. The eventLogBinding keeps logical operations and native
+// maintenance capabilities separate. Experimental backend construction lives
+// in test fixtures. Production holds a
+// binding with a tidwall.LegacyLog owner; the raw handle stays in that backend.
 // Replacement coordination still uses the native-format lifecycle.
 package wal

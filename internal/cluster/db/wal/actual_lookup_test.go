@@ -42,7 +42,7 @@ func TestActualLookupSharedBackends(t *testing.T) {
 }
 
 func TestProductionActualLookupRebindsAfterSwap(t *testing.T) {
-	open := func(ids ...uint64) *tidwallbackend.LegacyLog {
+	open := func(ids ...uint64) *eventLogBinding {
 		t.Helper()
 		log, err := native.Open(t.TempDir(), nil)
 		if err != nil {
@@ -55,7 +55,7 @@ func TestProductionActualLookupRebindsAfterSwap(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return tidwallbackend.OwnLegacy(log)
+		return bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)
 	}
 	s := &Storage{eventLog: open(10, 30)}
 	ref := cluster.TypeRef{ID: "items", Version: 1}

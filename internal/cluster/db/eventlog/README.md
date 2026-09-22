@@ -72,7 +72,7 @@ Production `wal.Storage.appendEvent` and `appendEvents` submit logical Records t
 `eventlog.Appender`, the append/progress subset embedded by `EventLog`.
 Its `LastAppended` reports logical progress and distinguishes empty history
 without exposing physical sequence numbers. Composition lives
-in `wal/legacy_event_appender.go`. The default is `tidwall.LegacyAppender`, which
+in `wal/legacy_event_binding.go`. The default is `tidwall.LegacyAppender`, which
 wraps the existing production handle and assigns its dense physical sequences.
 The supplied codec preserves the existing checksum envelope and Raft-entry bytes;
 no CURRENT file or experimental generation directory is introduced.
@@ -86,7 +86,8 @@ and write metrics remain in `wal`.
 The native appender shares recovered logical progress between LastAppended and
 Append, avoiding a second tail decode. It refreshes that progress when another
 writer extends the same native handle.
-The writer is rebound when scrub or peer fetch replaces the native handle.
+The writer and cursor factory belong to one `wal.eventLogBinding`; scrub or peer
+fetch replaces that complete binding. Storage has no separate writer cache.
 Application replay filtering, applied progress, and metrics remain in Storage.
 Production `Storage.ActualAt` uses a private `wal.entryCursor` for exact
 lookup. `wal/actual_lookup.go` verifies that the seek result matches the requested
@@ -101,8 +102,9 @@ Production streaming `Reader` uses the application-side `wal.entryCursor`:
 storage errors and retains the decoded entry until consumption. Repeated Current
 calls reuse that entry. EOF remains temporary.
 
-Composition in `wal/legacy_event_cursor.go` binds native tidwall positioning to
-the current handle and scrub generation. The generic `tidwall.LegacyCursor`
+Composition in `wal/legacy_event_binding.go` and `wal/legacy_event_cursor.go` binds
+native tidwall positioning to the application codec. `wal/production_event_cursor.go`
+tracks the published binding and scrub generation independently of the backend. The generic `tidwall.LegacyCursor`
 carries the application codec's decoded result through binary search and sequential
 positioning without copying the payload or interpreting protobuf. Production
 streaming decodes each sequential entry once; retries reuse the decoded entry.
@@ -202,9 +204,18 @@ native files without introducing a CURRENT file or an ID envelope.
 
 `tidwall.LegacyLog` owns the production native handle and supplies its append,
 positioning, transfer, and compression capabilities. The native pointer stays
-inside the backend; `wal.Storage` holds the owner. Replacement creates a new owner,
+inside the backend; `wal.Storage` holds a binding containing the owner. Replacement creates a new owner,
 and existing capabilities remain attached to the retired handle. Live backup
 uses the owner's transfer layout under the existing layout freeze.
+
+Production append, streaming, exact lookup, and prefix scans use the application-side
+`entryStore` contract: a logical appender, independent decoded entry cursors, and
+close. The binding keeps native maintenance capabilities separately. The same
+production methods are tested against the native owner and both shared EventLog
+backends, including replay, applied visibility, temporary EOF, sparse lookup,
+prefix bounds, and reader rebinding after replacement. These fixtures exercise
+those methods directly; they do not run segmented storage through node startup,
+native maintenance, or peer catch-up.
 
 Production composition and adoption coordination still select the native backend.
 These are partial boundaries, not complete backend selection;

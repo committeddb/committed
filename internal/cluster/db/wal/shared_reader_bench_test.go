@@ -80,7 +80,7 @@ func newReaderBenchmarkStore(b *testing.B, name string) readerBenchmarkStore {
 		if err != nil {
 			b.Fatal(err)
 		}
-		resolver.eventLog = tidwallbackend.OwnLegacy(log)
+		resolver.eventLog = bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)
 		return &legacyReaderBenchmark{storage: resolver, fixture: log}
 	}
 	log, err := segmented.Create(b.TempDir(), 1, segmentlog.LogOptions{SegmentBytes: target, Cache: segmentlog.CacheOptions{RecentBytes: 160 << 20, HistoricalBytes: 160 << 20}})

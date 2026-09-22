@@ -278,12 +278,10 @@ type Storage struct {
 	// can't be bypassed by an outside caller writing directly. Access
 	// goes through appendEvent / readEventAt / EventIndex /
 	// firstEventSeq / lastEventSeq.
-	eventLog *tidwall.LegacyLog
+	eventLog *eventLogBinding
 	// Production append composition. eventAppendMu serializes a complete batch
 	// and precedes eventMu; the latter excludes native scrub/fetch handle swaps.
-	eventAppendMu       sync.Mutex
-	eventAppender       eventlog.Appender
-	eventAppenderSource *tidwall.LegacyLog
+	eventAppendMu sync.Mutex
 	// eventLogDir is the on-disk directory for eventLog (<datadir>/events).
 	// The scrubber rewrites the event log by building a sibling directory and
 	// renaming it over this one, so it needs the path (tidwall/wal doesn't
@@ -658,9 +656,12 @@ func openLog(dir, logName string, m *metrics.Metrics, walOpts *wal.Options) (*wa
 	return lg, logOpenError(dir, logName, m, err)
 }
 
-func openEventLog(dir string, m *metrics.Metrics, opts tidwall.LegacyOptions) (*tidwall.LegacyLog, error) {
+func openEventLog(dir string, m *metrics.Metrics, opts tidwall.LegacyOptions) (*eventLogBinding, error) {
 	lg, err := tidwall.OpenLegacy(dir, opts)
-	return lg, logOpenError(dir, "event_log", m, err)
+	if err != nil {
+		return nil, logOpenError(dir, "event_log", m, err)
+	}
+	return bindLegacyEventLog(lg, m), nil
 }
 
 // logOpenError keeps operator diagnostics and metrics above the backend.

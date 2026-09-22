@@ -496,7 +496,7 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	if err != nil {
 		return rollback(fmt.Errorf("reopen event log over adopted segments: %w", err))
 	}
-	s.eventLog = reopened
+	s.eventLog = bindLegacyEventLog(reopened, s.metrics)
 	// The adopted files must be readable at their boundaries; a file the
 	// log cannot read at its first sequence is not one to keep.
 	for _, f := range files {

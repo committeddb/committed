@@ -26,16 +26,26 @@ func (o *productionAppendObserver) Append(records []eventlog.Record) error {
 	return o.Appender.Append(records)
 }
 
+type observedEntryStore struct {
+	entryStore
+	appender eventlog.Appender
+}
+
+func (s *observedEntryStore) Append(records []eventlog.Record) error {
+	return s.appender.Append(records)
+}
+func (s *observedEntryStore) LastAppended() (uint64, bool, error) { return s.appender.LastAppended() }
+
 func TestProductionEventAppendUsesLogicalBackend(t *testing.T) {
 	path := t.TempDir()
 	log, err := native.Open(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
+	s := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)}
 	t.Cleanup(func() { _ = s.eventLog.Close() })
 	observer := &productionAppendObserver{Appender: s.eventAppenderLocked()}
-	s.eventAppender = observer
+	s.eventLog.entries = &observedEntryStore{entryStore: s.eventLog.entries, appender: observer}
 	entries := []*pb.Entry{
 		{Index: proto.Uint64(10), Term: proto.Uint64(2), Type: pb.EntryNormal.Enum(), Data: []byte("first")},
 		{Index: proto.Uint64(20), Term: proto.Uint64(2), Type: pb.EntryNormal.Enum(), Data: []byte("second")},
@@ -70,7 +80,7 @@ func TestProductionEventAppendUsesLogicalBackend(t *testing.T) {
 	s.eventMu.Lock()
 	err = log.Close()
 	if err == nil {
-		s.eventLog, err = tidwallbackend.OpenLegacy(path, tidwallbackend.LegacyOptions{})
+		s.eventLog, err = openEventLog(path, nil, tidwallbackend.LegacyOptions{})
 	}
 	s.eventMu.Unlock()
 	if err != nil {

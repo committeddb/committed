@@ -119,7 +119,7 @@ func (s *Storage) CaptureBackup(visit func(name string, size int64, write func(i
 		s.eventMu.RLock()
 		log := s.eventLog
 		s.eventMu.RUnlock()
-		return s.captureEventLog(log, root, visit)
+		return s.captureEventLog(log.native, root, visit)
 	}(); err != nil {
 		return info, fmt.Errorf("live backup: event log: %w", err)
 	}

@@ -8,5 +8,5 @@ import (
 // A step runs outside eventMu, as before; a concurrently retired handle reports
 // ErrClosed, and the worker binds to the current handle on its next iteration.
 func (s *Storage) eventCompressorLocked() eventlog.SealedCompressor {
-	return s.eventLog
+	return s.eventLog.native
 }

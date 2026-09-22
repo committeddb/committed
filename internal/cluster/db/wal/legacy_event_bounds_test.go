@@ -32,7 +32,7 @@ func TestLegacyEventBoundsPreserveProgressOnFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
+			s := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)}
 			s.firstEventIndex.Store(7)
 			s.eventIndex.Store(100)
 			err = s.deriveEventBoundsLocked()
@@ -49,7 +49,7 @@ func TestLegacyScrubBoundsRejectChangedTailBeforePublishing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
+	s := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)}
 	s.eventIndex.Store(100)
 	s.firstEventIndex.Store(7)
 	checkRejected := func() {

@@ -36,7 +36,7 @@ func TestEventLogSelectionsMatchLegacyPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = legacy.Close() })
-	storage := &Storage{eventLog: tidwallbackend.OwnLegacy(legacy)}
+	storage := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(legacy), nil)}
 	snapshot := &cluster.Type{ID: "snapshot", Name: "snapshot", Version: 1, EntityKind: cluster.EntityKindSnapshot}
 	revision := &cluster.Type{ID: "revision", Name: "revision", Version: 1, EntityKind: cluster.EntityKindRevision}
 	snapshotReg, err := cluster.NewUpsertTypeEntity(snapshot)

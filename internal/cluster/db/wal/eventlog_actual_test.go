@@ -23,7 +23,7 @@ func TestEventLogActualMatchesLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = legacy.Close() })
-	storage := &Storage{eventLog: tidwallbackend.OwnLegacy(legacy)}
+	storage := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(legacy), nil)}
 	typ, _ := eventTestType(cluster.TypeRef{ID: "items", Version: 1})
 	storage.typeCache.Store(cluster.TypeRef{ID: "items", Version: 1}, typeCacheEntry{t: typ})
 	storage.appliedIndex.Store(100)

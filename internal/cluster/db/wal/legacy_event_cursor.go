@@ -7,39 +7,15 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
-// productionEventCursor binds a logical cursor to one native handle/generation.
-// The caller holds the reader lock and eventMu throughout binding and seeking.
-type productionEventCursor struct {
-	entryCursor
-	source     *tidwall.LegacyLog
-	generation uint64
-}
-
-func (r *Reader) eventCursorLocked() entryCursor {
-	generation := r.s.scrubGen.Load()
-	if r.cursor.entryCursor == nil || r.cursor.source != r.s.eventLog || r.cursor.generation != generation {
-		if r.cursor.entryCursor != nil {
-			_ = r.cursor.Close()
-		}
-		r.cursor = productionEventCursor{
-			entryCursor: newLegacyEntryCursor(r.s, r.raftIndex+1),
-			source:      r.s.eventLog,
-			generation:  generation,
-		}
-	}
-	return r.cursor.entryCursor
-}
-
-func newLegacyEntryCursor(s *Storage, index uint64) entryCursor {
-	raw := newLegacyPositioner(s)
-	return &decodedEntryCursor{target: index, seek: raw.Seek, close: raw.Close}
-}
-
 // newLegacyPositioner binds native positioning to the application-owned codec.
 // The caller excludes replacement and close throughout its use.
 func newLegacyPositioner(s *Storage) *tidwall.LegacyCursor[*pb.Entry] {
-	return tidwall.NewLegacyLogCursor(s.eventLog, func(raw []byte) (uint64, *pb.Entry, error) {
-		payload, err := s.unframe(raw, "event_log")
+	return legacyPositioner(s.eventLog.native, func(raw []byte) ([]byte, error) { return s.unframe(raw, "event_log") })
+}
+
+func legacyPositioner(log *tidwall.LegacyLog, decodeFrame func([]byte) ([]byte, error)) *tidwall.LegacyCursor[*pb.Entry] {
+	return tidwall.NewLegacyLogCursor(log, func(raw []byte) (uint64, *pb.Entry, error) {
+		payload, err := decodeFrame(raw)
 		if err != nil {
 			return 0, nil, err
 		}

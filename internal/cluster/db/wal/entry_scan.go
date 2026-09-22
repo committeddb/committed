@@ -16,7 +16,7 @@ import (
 func (s *Storage) scanEventEntries(bound uint64, visit func(*pb.Entry) error) error {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
-	cursor := newLegacyEntryCursor(s, 0)
+	cursor := s.eventLog.entries.NewEntryCursor(0)
 	defer func() { _ = cursor.Close() }()
 	return scanEntryPrefix(cursor, bound, visit)
 }

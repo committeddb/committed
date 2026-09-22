@@ -28,7 +28,7 @@ func compressOldestSealed(t *testing.T, s *Storage) {
 	s.eventMu.RLock()
 	log := s.eventLog
 	s.eventMu.RUnlock()
-	did, err := log.CompressNextSealed()
+	did, err := log.native.CompressNextSealed()
 	require.NoError(t, err)
 	require.True(t, did, "the seeded log must hold a plain sealed segment to compress")
 }
