@@ -149,6 +149,12 @@ Native segment move/copy helpers live in `eventlog/tidwall` as well. Adoption
 uses rename with a copy/sync/remove fallback. The caller retains directory sync,
 adoption ordering, rollback, and handle replacement.
 
+The native scrub's unpublished replacement is written by
+`tidwall.LegacyRewrite`: it owns private-log creation, dense survivor numbering,
+explicit sync, and sealed-segment compression. `wal` supplies framed survivor
+bytes and retains selection, catch-up, directory publication, and cleanup.
+Creation rejects a directory with existing append history.
+
 Scrub swaps and peer file adoption still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the

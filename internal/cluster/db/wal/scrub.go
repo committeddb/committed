@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
+
 	"github.com/tidwall/wal"
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
@@ -260,7 +262,7 @@ func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutc
 	// the swap lock) compresses everything this rewrite sealed, so the swap
 	// installs an already-compressed log instead of leaving the whole rewrite
 	// as backlog for the sealer.
-	newLog, err := wal.Open(tmpDir, &wal.Options{NoSync: true, SealedSegmentCompression: wal.CompressionZstd})
+	newLog, err := tidwallbackend.CreateLegacyRewrite(tmpDir)
 	if err != nil {
 		return nil, err
 	}
@@ -286,10 +288,8 @@ func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutc
 		}
 	}()
 
-	var nextSeq uint64
 	writeSurvivor := func(payload []byte) error {
-		nextSeq++
-		return newLog.Write(nextSeq, frame(payload))
+		return newLog.Append(frame(payload))
 	}
 	copyRange := func(lo, hi uint64, locked bool) error {
 		for seq := lo; seq <= hi; seq++ {
@@ -381,14 +381,8 @@ func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutc
 	// this is O(surviving log) work that must not stall appendEvents. The
 	// locked delta below may seal a few more segments; those trickle through
 	// the background sealer after the swap.
-	for {
-		did, cerr := newLog.CompressNextSealed()
-		if cerr != nil {
-			return nil, cerr
-		}
-		if !did {
-			break
-		}
+	if err := newLog.CompressSealed(); err != nil {
+		return nil, err
 	}
 
 	// Before the swap: wait out any in-flight from-0 log reads, so no such
@@ -499,7 +493,7 @@ func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutc
 	s.logger.Info("scrubbed permanent event log",
 		zap.Uint64("bound", bound),
 		zap.Int("tombstonedKeys", len(sel)),
-		zap.Uint64("survivorEntries", nextSeq))
+		zap.Uint64("survivorEntries", newLog.Count()))
 	return erase, nil
 }
 
