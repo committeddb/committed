@@ -1033,7 +1033,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			ws.dataEventIndex.Store(persisted)
 		}
 
-		ws.recoverLegacyDataHead()
+		ws.recoverDataHead()
 	}
 
 	// Compile the interpretation registry from the applied restatements so readers

@@ -1,6 +1,8 @@
 package wal
 
 import (
+	pb "go.etcd.io/raft/v3/raftpb"
+
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/metrics"
@@ -40,6 +42,11 @@ func bindLegacyEventLog(log *tidwall.LegacyLog, m *metrics.Metrics) *eventLogBin
 		cursor: func(index uint64) entryCursor {
 			raw := legacyPositioner(log, decodeFrame)
 			return &decodedEntryCursor{target: index, seek: raw.Seek, close: raw.Close}
+		},
+		reverse: func(limit int, visit func(*pb.Entry) (bool, error)) (int, error) {
+			raw := legacyPositioner(log, decodeFrame)
+			defer func() { _ = raw.Close() }()
+			return raw.ScanReverse(limit, visit)
 		},
 		close: log.Close,
 	}}

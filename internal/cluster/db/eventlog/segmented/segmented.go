@@ -113,3 +113,13 @@ func (l *Log) Reclaim(ctx context.Context) (eventlog.ReclaimResult, error) {
 	return eventlog.ReclaimResult{RemovedFiles: r.RemovedFiles, RemovedBytes: r.RemovedBytes, SkippedEntries: r.SkippedEntries}, translate(e)
 }
 func (l *Log) Close() error { return translate(l.log.Close()) }
+
+func (l *Log) ScanReverse(ctx context.Context, limit int, visit func(eventlog.Record) (bool, error)) (int, error) {
+	if visit == nil {
+		return 0, eventlog.ErrInvalid
+	}
+	count, err := l.log.ScanReverse(ctx, limit, func(r segmentlog.Record) (bool, error) {
+		return visit(eventlog.Record{ID: r.ID, Payload: r.Payload})
+	})
+	return count, translate(err)
+}

@@ -102,6 +102,11 @@ type EventLog interface {
 	NewCursor() Cursor
 	Seek(uint64) (Record, error)
 	Scan(context.Context, Coverage, func(Record) error) error
+	// ScanReverse visits at most limit survivors, newest first, in one storage
+	// view. False stops successfully. The count includes callbacks that fail.
+	// limit must be nonnegative; callbacks must not reenter the log. The limit
+	// bounds delivery, not physical I/O within a selected append file.
+	ScanReverse(context.Context, int, func(Record) (bool, error)) (int, error)
 	Rewrite(context.Context, uint64, Transform) (RewriteResult, error)
 	// RewriteWithPublicationLock holds a non-nil caller lock across publication.
 	// Backends may acquire it earlier. Matching read lifetimes may perform reads,

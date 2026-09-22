@@ -44,7 +44,7 @@ func TestLegacyDataHeadFallback(t *testing.T) {
 			}
 			s := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil), logger: zap.NewNop()}
 			s.dataEventIndex.Store(tc.persisted)
-			s.recoverLegacyDataHead()
+			s.recoverDataHead()
 			if s.DataEventIndex() != tc.want {
 				t.Fatal(s.DataEventIndex(), tc.want)
 			}

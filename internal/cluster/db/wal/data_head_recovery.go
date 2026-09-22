@@ -7,19 +7,17 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-// recoverLegacyDataHead is the bounded fallback for directories without a
+// recoverDataHead is the bounded fallback for directories without a
 // persisted data head. Classification and failure reporting are application
-// policy; reverse physical traversal belongs to the native backend.
-func (s *Storage) recoverLegacyDataHead() {
+// policy; reverse physical traversal belongs to the selected backend.
+func (s *Storage) recoverDataHead() {
 	if s.dataEventIndex.Load() != 0 {
 		return
 	}
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
-	positioner := newLegacyPositioner(s)
-	defer func() { _ = positioner.Close() }()
 	const dataHeadBackscanCap = 4096
-	scanned, err := positioner.ScanReverse(dataHeadBackscanCap, func(entry *pb.Entry) (bool, error) {
+	scanned, err := s.eventLog.entries.ScanReverse(dataHeadBackscanCap, func(entry *pb.Entry) (bool, error) {
 		if entry.GetType() != pb.EntryNormal || len(entry.Data) == 0 {
 			return true, nil
 		}

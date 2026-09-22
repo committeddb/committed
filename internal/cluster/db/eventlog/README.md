@@ -143,10 +143,14 @@ the previous EventIndex and refuses an empty native history before publishing.
 Tests cover sparse history and failures, plus reopening shared backends after
 removing their tail or all records without rewinding recovered progress.
 
-The legacy data-head fallback uses the native positioner's bounded
-`ScanReverse`. Native sequence traversal and tail capture belong to the backend;
-`wal/legacy_data_head.go` retains user-data classification, the 4,096-record cap,
-and warning policy. A persisted data head bypasses this fallback.
+Data-head recovery uses the shared entry binding's bounded `ScanReverse`.
+`wal/data_head_recovery.go` retains user-data classification, the 4,096-record cap,
+and warning policy. A persisted data head bypasses this fallback. Native production
+binding uses its decoded positioner's reverse scan; shared EventLog binding decodes
+each delivered record once. Both engines implement reverse scanning; the segmented
+adapter delegates to `pkg/segmentlog`, including its bounded suffix handling for
+unindexed files. Common tests cover ordering, early stop, cancellation, rewrite,
+and reopen. Application tests cover the exact recovery cap and corruption stops.
 
 Native layout snapshots, verified frame reads, and length-prefixed record
 batches are implemented by `tidwall.LegacyTransfer`. It also supplies native
