@@ -8,8 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/tidwall/wal"
@@ -452,14 +450,14 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	}
 	files := make([]EventSegment, 0, len(paths))
 	for _, p := range paths {
-		seq, compressed, err := parseSegmentName(filepath.Base(p))
+		segment, err := tidwall.InspectLegacySegment(p, func(raw []byte) error {
+			_, err := unframe(raw)
+			return err
+		})
 		if err != nil {
 			return err
 		}
-		if _, err := scanSealedSegment(p, compressed); err != nil {
-			return fmt.Errorf("refusing to adopt %s: %w", filepath.Base(p), err)
-		}
-		files = append(files, EventSegment{Path: p, FirstSeq: seq, Compressed: compressed})
+		files = append(files, segment)
 	}
 	release, ok := s.eventLayout.move()
 	if !ok {
@@ -585,55 +583,4 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
-}
-
-// parseSegmentName reads a segment file name: twenty digits naming its first
-// sequence, optionally followed by the compressed suffix.
-func parseSegmentName(name string) (seq uint64, compressed bool, err error) {
-	base := name
-	if wal.IsCompressedSegmentPath(base) {
-		compressed = true
-		base = strings.TrimSuffix(base, ".zst")
-	}
-	if len(base) != 20 {
-		return 0, false, fmt.Errorf("%q is not a segment file name", name)
-	}
-	seq, err = strconv.ParseUint(base, 10, 64)
-	if err != nil || seq == 0 {
-		return 0, false, fmt.Errorf("%q is not a segment file name", name)
-	}
-	return seq, compressed, nil
-}
-
-// scanSealedSegment reads a staged segment file end to end: a compressed one
-// must decode, and every record must be complete and pass its frame check.
-// A sealed segment has no torn tail to forgive. Returns the record count.
-func scanSealedSegment(path string, compressed bool) (int, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: a staged fetch file this node wrote
-	if err != nil {
-		return 0, err
-	}
-	if compressed {
-		if data, err = decodeZstd(data); err != nil {
-			return 0, fmt.Errorf("compressed segment fails its zstd frame: %w", err)
-		}
-	}
-	var bad error
-	records, incompleteAt := walkSegmentRecords(data, func(ordinal, off, _ int, rec []byte) bool {
-		if _, uerr := unframe(rec); uerr != nil {
-			bad = fmt.Errorf("record %d at offset %d: %w", ordinal, off, uerr)
-			return false
-		}
-		return true
-	})
-	if bad != nil {
-		return records, bad
-	}
-	if incompleteAt >= 0 {
-		return records, fmt.Errorf("incomplete record at offset %d", incompleteAt)
-	}
-	if records == 0 {
-		return 0, errors.New("empty segment")
-	}
-	return records, nil
 }

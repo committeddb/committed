@@ -140,6 +140,11 @@ verification and retains layout freezes, generation policy, transfer budgets,
 and the choice between whole files and records. These APIs describe the native
 format; they do not imply interchangeability with segmented files.
 
+Staged peer-segment inspection also lives in `eventlog/tidwall`: native filename
+parsing, zstd decoding, and complete length-prefixed record validation.
+`wal` supplies the checksum verifier and owns adoption alignment, layout
+exclusion, rollback, and generation policy. Inspection does not modify files.
+
 Scrub swaps and peer file adoption still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
