@@ -75,6 +75,12 @@ wraps the existing production handle and assigns its dense physical sequences.
 The supplied codec preserves the existing checksum envelope and Raft-entry bytes;
 no CURRENT file or experimental generation directory is introduced.
 
+Fetched record batches also use `eventlog.Appender` through a native identity
+codec: the already-validated peer frames are written verbatim, including unknown
+protobuf fields. Unframed records are rejected by the existing checksum verifier. Local and fetched appends share `eventAppendMu`, so native
+sequence assignment and application progress updates serialize. Overlap filtering
+and write metrics remain in `wal`.
+
 The writer is rebound when scrub or peer fetch replaces the native handle.
 Application replay filtering, applied progress, and metrics remain in Storage.
 Production `Storage.ActualAt` uses a private `wal.entryCursor` for exact

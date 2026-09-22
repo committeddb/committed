@@ -20,6 +20,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
 // The event-log fetch: how a node hands its permanent event log to a peer
@@ -428,6 +429,8 @@ func (s *Storage) AppendFetchedRecords(data []byte) error {
 // appendRawEvents is appendEvents for records already framed: the bytes go
 // into the log as they are.
 func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
+	s.eventAppendMu.Lock()
+	defer s.eventAppendMu.Unlock()
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
@@ -435,15 +438,14 @@ func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
 	if err != nil {
 		return fmt.Errorf("event log last index: %w", err)
 	}
-	batch := new(wal.Batch)
+	records := make([]eventlog.Record, 0, len(raws))
 	first, last := uint64(0), uint64(0)
 	wroteSeqOne := nextSeq == 0
 	for i, raw := range raws {
 		if indexes[i] <= s.eventIndex.Load() || (last != 0 && indexes[i] <= last) {
 			continue
 		}
-		nextSeq++
-		batch.Write(nextSeq, raw)
+		records = append(records, eventlog.Record{ID: indexes[i], Payload: raw})
 		if first == 0 {
 			first = indexes[i]
 		}
@@ -452,7 +454,7 @@ func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
 	if last == 0 {
 		return nil
 	}
-	if err := s.eventLog.WriteBatch(batch); err != nil {
+	if err := s.fetchedEventAppenderLocked().Append(records); err != nil {
 		return fmt.Errorf("event log write batch (raft indexes %d-%d): %w", first, last, err)
 	}
 	s.eventLogWriteOps.Add(1)

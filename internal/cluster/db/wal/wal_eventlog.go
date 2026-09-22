@@ -103,8 +103,8 @@ func (s *Storage) readEventAtLocked(seq uint64) ([]byte, error) {
 
 // unframe verifies and strips the checksum frame from a raw log read,
 // recording a corruption-counter sample (attributed to logName) before
-// returning ErrCorruptEntry on a CRC mismatch. The metrics handle is
-// nil-safe. Legacy un-checksummed entries pass through unchanged.
+// returning ErrCorruptEntry on invalid framing or a CRC mismatch. The metrics
+// handle is nil-safe. Unframed entries are rejected.
 func (s *Storage) unframe(raw []byte, logName string) ([]byte, error) {
 	payload, err := unframe(raw)
 	if err != nil {
