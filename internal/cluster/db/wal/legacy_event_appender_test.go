@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 type productionAppendObserver struct {
@@ -31,7 +32,7 @@ func TestProductionEventAppendUsesLogicalBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Storage{eventLog: log}
+	s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
 	t.Cleanup(func() { _ = s.eventLog.Close() })
 	observer := &productionAppendObserver{Appender: s.eventAppenderLocked()}
 	s.eventAppender = observer
@@ -69,7 +70,7 @@ func TestProductionEventAppendUsesLogicalBackend(t *testing.T) {
 	s.eventMu.Lock()
 	err = log.Close()
 	if err == nil {
-		s.eventLog, err = native.Open(path, nil)
+		s.eventLog, err = tidwallbackend.OpenLegacy(path, tidwallbackend.LegacyOptions{})
 	}
 	s.eventMu.Unlock()
 	if err != nil {
@@ -82,7 +83,7 @@ func TestProductionEventAppendUsesLogicalBackend(t *testing.T) {
 	if observer.calls != 1 {
 		t.Fatal("old backend used after handle replacement")
 	}
-	stored, err := s.eventLog.Read(3)
+	stored, err := s.nativeEventTransferLocked().Read(3)
 	raw, marshalErr := proto.Marshal(last)
 	if err != nil || marshalErr != nil || !bytes.Equal(stored, frame(raw)) {
 		t.Fatal("single-entry append changed legacy encoding", err, marshalErr)

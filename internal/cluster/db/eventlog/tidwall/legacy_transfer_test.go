@@ -26,7 +26,7 @@ func TestLegacyTransferPreservesFramesAndBudget(t *testing.T) {
 	errVerify := errors.New("bad frame")
 	fail := false
 	reads := 0
-	transfer := LegacyTransfer{Log: log, DecodeFrame: func(raw []byte) ([]byte, error) {
+	transfer := LegacyTransfer{log: log, DecodeFrame: func(raw []byte) ([]byte, error) {
 		reads++
 		if fail && bytes.Equal(raw, frames[1]) {
 			return nil, errVerify
@@ -81,7 +81,7 @@ func TestLegacyTransferLayoutMatchesNative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	layout, err := (LegacyTransfer{Log: log}).Layout()
+	layout, err := (LegacyTransfer{log: log}).Layout()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestLegacyTransferPayloadAndNativeBounds(t *testing.T) {
 	defer func() { _ = log.Close() }()
 	calls := 0
 	errFrame := errors.New("bad envelope")
-	access := LegacyTransfer{Log: log, DecodeFrame: func(raw []byte) ([]byte, error) {
+	access := LegacyTransfer{log: log, DecodeFrame: func(raw []byte) ([]byte, error) {
 		calls++
 		if len(raw) == 0 || raw[0] != '!' {
 			return nil, errFrame

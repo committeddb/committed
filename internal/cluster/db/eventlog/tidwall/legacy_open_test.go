@@ -28,9 +28,9 @@ func TestOpenLegacyPreservesNativeFormatAndReopenOptions(t *testing.T) {
 		t.Cleanup(func() { _ = log.Close() })
 		require.Equal(t, 5, log.SegmentCacheSize())
 		for id := uint64(2 + round*4); id <= uint64(5+round*4); id++ {
-			require.NoError(t, log.Write(id, payload))
+			require.NoError(t, log.log.Write(id, payload))
 		}
-		layout, err := log.LayoutSnapshot()
+		layout, err := log.log.LayoutSnapshot()
 		require.NoError(t, err)
 		require.NotEmpty(t, layout.Sealed, "configured segment size must cause rollover")
 		for {
@@ -40,14 +40,14 @@ func TestOpenLegacyPreservesNativeFormatAndReopenOptions(t *testing.T) {
 				break
 			}
 		}
-		layout, err = log.LayoutSnapshot()
+		layout, err = log.log.LayoutSnapshot()
 		require.NoError(t, err)
 		for _, segment := range layout.Sealed {
 			require.True(t, native.IsCompressedSegmentPath(segment.Path))
 		}
 		require.False(t, native.IsCompressedSegmentPath(layout.Tail.Path))
 		for id := uint64(1); id <= layout.LastIndex; id++ {
-			got, err := log.Read(id)
+			got, err := log.log.Read(id)
 			require.NoError(t, err)
 			require.Equal(t, payload, got)
 		}

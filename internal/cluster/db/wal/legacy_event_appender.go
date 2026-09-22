@@ -11,7 +11,7 @@ import (
 // The caller holds eventAppendMu and eventMu (read or write).
 func (s *Storage) eventAppenderLocked() eventlog.Appender {
 	if s.eventAppenderSource != s.eventLog || s.eventAppender == nil {
-		s.eventAppender = tidwall.NewLegacyAppender(s.eventLog, tidwall.LegacyCodec{
+		s.eventAppender = s.eventLog.NewAppender(tidwall.LegacyCodec{
 			Encode: func(r eventlog.Record) ([]byte, error) {
 				if _, err := decodeEventEntry(r, nil); err != nil {
 					return nil, err
@@ -30,7 +30,7 @@ func (s *Storage) eventAppenderLocked() eventlog.Appender {
 // checksum envelope and protobuf bytes verbatim, including unknown fields.
 // The caller holds eventAppendMu and eventMu and has checked payload/index pairs.
 func (s *Storage) fetchedEventAppenderLocked() eventlog.Appender {
-	return tidwall.NewLegacyAppender(s.eventLog, tidwall.LegacyCodec{
+	return s.eventLog.NewAppender(tidwall.LegacyCodec{
 		Encode: func(r eventlog.Record) ([]byte, error) { return r.Payload, nil },
 		Decode: s.decodeLegacyAppendRecord,
 	})

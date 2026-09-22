@@ -79,7 +79,7 @@ func copySource(t *testing.T, frames [][]byte, head uint64, compressed bool) *St
 	if compressed {
 		drainChurnCompression(t, log)
 	}
-	source := &Storage{eventLog: log}
+	source := &Storage{eventLog: tidwall.OwnLegacy(log)}
 	source.eventIndex.Store(head)
 	return source
 }

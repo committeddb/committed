@@ -9,6 +9,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 func TestActualLookupSharedBackends(t *testing.T) {
@@ -41,7 +42,7 @@ func TestActualLookupSharedBackends(t *testing.T) {
 }
 
 func TestProductionActualLookupRebindsAfterSwap(t *testing.T) {
-	open := func(ids ...uint64) *native.Log {
+	open := func(ids ...uint64) *tidwallbackend.LegacyLog {
 		t.Helper()
 		log, err := native.Open(t.TempDir(), nil)
 		if err != nil {
@@ -54,7 +55,7 @@ func TestProductionActualLookupRebindsAfterSwap(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return log
+		return tidwallbackend.OwnLegacy(log)
 	}
 	s := &Storage{eventLog: open(10, 30)}
 	ref := cluster.TypeRef{ID: "items", Version: 1}

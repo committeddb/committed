@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 
 	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
@@ -22,7 +23,7 @@ func TestEventLogActualMatchesLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = legacy.Close() })
-	storage := &Storage{eventLog: legacy}
+	storage := &Storage{eventLog: tidwallbackend.OwnLegacy(legacy)}
 	typ, _ := eventTestType(cluster.TypeRef{ID: "items", Version: 1})
 	storage.typeCache.Store(cluster.TypeRef{ID: "items", Version: 1}, typeCacheEntry{t: typ})
 	storage.appliedIndex.Store(100)

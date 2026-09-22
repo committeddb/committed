@@ -20,7 +20,7 @@ type LegacyOptions struct {
 // OpenLegacy opens the existing production format, without a CURRENT file or
 // logical-ID envelope. The caller owns the returned handle and coordinates its
 // lifetime with readers, writers, and directory replacement.
-func OpenLegacy(path string, opts LegacyOptions) (*native.Log, error) {
+func OpenLegacy(path string, opts LegacyOptions) (*LegacyLog, error) {
 	log, err := native.Open(path, &native.Options{
 		SegmentCacheSize:         opts.SegmentCacheSize,
 		SegmentSize:              opts.SegmentSize,
@@ -29,5 +29,8 @@ func OpenLegacy(path string, opts LegacyOptions) (*native.Log, error) {
 	if errors.Is(err, native.ErrCorrupt) {
 		return nil, errors.Join(eventlog.ErrCorrupt, err)
 	}
-	return log, err
+	if err != nil {
+		return nil, err
+	}
+	return OwnLegacy(log), nil
 }

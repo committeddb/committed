@@ -5,6 +5,8 @@ import (
 
 	native "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
+
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 func TestLegacyEventBoundsPreserveProgressOnFailure(t *testing.T) {
@@ -30,7 +32,7 @@ func TestLegacyEventBoundsPreserveProgressOnFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s := &Storage{eventLog: log}
+			s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
 			s.firstEventIndex.Store(7)
 			s.eventIndex.Store(100)
 			err = s.deriveEventBoundsLocked()
@@ -47,7 +49,7 @@ func TestLegacyScrubBoundsRejectChangedTailBeforePublishing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	s := &Storage{eventLog: log}
+	s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
 	s.eventIndex.Store(100)
 	s.firstEventIndex.Store(7)
 	checkRejected := func() {

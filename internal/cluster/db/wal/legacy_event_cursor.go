@@ -1,7 +1,6 @@
 package wal
 
 import (
-	native "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
@@ -12,7 +11,7 @@ import (
 // The caller holds the reader lock and eventMu throughout binding and seeking.
 type productionEventCursor struct {
 	entryCursor
-	source     *native.Log
+	source     *tidwall.LegacyLog
 	generation uint64
 }
 
@@ -39,7 +38,7 @@ func newLegacyEntryCursor(s *Storage, index uint64) entryCursor {
 // newLegacyPositioner binds native positioning to the application-owned codec.
 // The caller excludes replacement and close throughout its use.
 func newLegacyPositioner(s *Storage) *tidwall.LegacyCursor[*pb.Entry] {
-	return tidwall.NewLegacyCursor(s.eventLog, func(raw []byte) (uint64, *pb.Entry, error) {
+	return tidwall.NewLegacyLogCursor(s.eventLog, func(raw []byte) (uint64, *pb.Entry, error) {
 		payload, err := s.unframe(raw, "event_log")
 		if err != nil {
 			return 0, nil, err

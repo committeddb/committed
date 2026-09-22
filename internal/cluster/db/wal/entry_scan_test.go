@@ -9,6 +9,7 @@ import (
 	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 func TestEntryPrefixScanBackends(t *testing.T) {
@@ -24,7 +25,7 @@ func TestEntryPrefixScanBackends(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			return newLegacyEntryCursor(&Storage{eventLog: log}, 0)
+			return newLegacyEntryCursor(&Storage{eventLog: tidwallbackend.OwnLegacy(log)}, 0)
 		},
 	}
 	for name, open := range eventLogTestBackends() {
@@ -98,7 +99,7 @@ func TestEntryPrefixScanSurfacesCorruption(t *testing.T) {
 	if err := log.Write(3, frame(experimentEntry(t, 90, pb.EntryNormal))); err != nil {
 		t.Fatal(err)
 	}
-	s := &Storage{eventLog: log}
+	s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
 	var got []uint64
 	err = s.scanEventEntries(90, func(e *pb.Entry) error {
 		got = append(got, e.GetIndex())

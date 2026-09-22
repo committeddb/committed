@@ -10,6 +10,8 @@ import (
 	native "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
+
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 func fetchedStream(raws ...[]byte) []byte {
@@ -27,7 +29,7 @@ func TestFetchedAppenderPreservesNativeBytesAndLocalProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = log.Close() })
-	s := &Storage{eventLog: log}
+	s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
 	if err := s.appendEvent(&pb.Entry{Index: proto.Uint64(10), Type: pb.EntryNormal.Enum()}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +71,7 @@ func TestFetchedAndLocalAppendSerialize(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := &Storage{eventLog: log}
+		s := &Storage{eventLog: tidwallbackend.OwnLegacy(log)}
 		entries := []*pb.Entry{
 			{Index: proto.Uint64(10), Type: pb.EntryNormal.Enum()},
 			{Index: proto.Uint64(30), Type: pb.EntryNormal.Enum()},

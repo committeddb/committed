@@ -200,8 +200,14 @@ configured cache/segment sizes, startup corruption metrics and repair guidance,
 and each replacement path's rollback/fatal policy. Opening preserves the existing
 native files without introducing a CURRENT file or an ID envelope.
 
-Live handle ownership and adoption coordination still use native tidwall
-access. These are partial boundaries, not complete backend selection;
+`tidwall.LegacyLog` owns the production native handle and supplies its append,
+positioning, transfer, and compression capabilities. The native pointer stays
+inside the backend; `wal.Storage` holds the owner. Replacement creates a new owner,
+and existing capabilities remain attached to the retired handle. Live backup
+uses the owner's transfer layout under the existing layout freeze.
+
+Production composition and adoption coordination still select the native backend.
+These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
 segmented backend.
 

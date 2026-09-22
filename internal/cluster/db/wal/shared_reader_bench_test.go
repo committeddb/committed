@@ -11,6 +11,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
@@ -25,6 +26,7 @@ type readerBenchmarkStore interface {
 
 type legacyReaderBenchmark struct {
 	storage *Storage
+	fixture *tidwal.Log // Untimed fixture construction only; Storage owns its lifetime.
 	next    uint64
 }
 
@@ -34,7 +36,7 @@ func (s *legacyReaderBenchmark) append(records [][]byte, last uint64) error {
 		s.next++
 		batch.Write(s.next, frame(raw))
 	}
-	if err := s.storage.eventLog.WriteBatch(batch); err != nil {
+	if err := s.fixture.WriteBatch(batch); err != nil {
 		return err
 	}
 	s.storage.appliedIndex.Store(last)
@@ -78,8 +80,8 @@ func newReaderBenchmarkStore(b *testing.B, name string) readerBenchmarkStore {
 		if err != nil {
 			b.Fatal(err)
 		}
-		resolver.eventLog = log
-		return &legacyReaderBenchmark{storage: resolver}
+		resolver.eventLog = tidwallbackend.OwnLegacy(log)
+		return &legacyReaderBenchmark{storage: resolver, fixture: log}
 	}
 	log, err := segmented.Create(b.TempDir(), 1, segmentlog.LogOptions{SegmentBytes: target, Cache: segmentlog.CacheOptions{RecentBytes: 160 << 20, HistoricalBytes: 160 << 20}})
 	if err != nil {

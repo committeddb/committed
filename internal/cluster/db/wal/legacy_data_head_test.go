@@ -6,6 +6,8 @@ import (
 	native "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 func TestLegacyDataHeadFallback(t *testing.T) {
@@ -40,7 +42,7 @@ func TestLegacyDataHeadFallback(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			s := &Storage{eventLog: log, logger: zap.NewNop()}
+			s := &Storage{eventLog: tidwallbackend.OwnLegacy(log), logger: zap.NewNop()}
 			s.dataEventIndex.Store(tc.persisted)
 			s.recoverLegacyDataHead()
 			if s.DataEventIndex() != tc.want {

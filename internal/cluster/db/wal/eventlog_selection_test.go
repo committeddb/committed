@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 
 	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
@@ -35,7 +36,7 @@ func TestEventLogSelectionsMatchLegacyPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = legacy.Close() })
-	storage := &Storage{eventLog: legacy}
+	storage := &Storage{eventLog: tidwallbackend.OwnLegacy(legacy)}
 	snapshot := &cluster.Type{ID: "snapshot", Name: "snapshot", Version: 1, EntityKind: cluster.EntityKindSnapshot}
 	revision := &cluster.Type{ID: "revision", Name: "revision", Version: 1, EntityKind: cluster.EntityKindRevision}
 	snapshotReg, err := cluster.NewUpsertTypeEntity(snapshot)
