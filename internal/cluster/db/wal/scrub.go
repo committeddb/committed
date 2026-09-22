@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -425,26 +426,16 @@ func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutc
 	// mis-attributed ErrClosed crash. (The newLog.Close above is the temp log, not
 	// the live handle, so it correctly returns instead of fataling.)
 	s.closeEventLogBeforeSwapOrFatal("close event log before scrub swap")
-	if err := os.Rename(s.eventLogDir, retired); err != nil {
-		// eventLog is already closed but this rename failed, so s.eventLogDir is
-		// untouched (still the original log). Reopen it so the node survives; fatal
-		// only if that also fails, so a closed handle never reaches appendEvent.
-		s.reopenEventLogAfterSwapOrFatal("event-log scrub aborted before swap")
-		return nil, fmt.Errorf("move events aside for scrub swap: %w", err)
-	}
-	if err := os.Rename(tmpDir, s.eventLogDir); err != nil {
-		// eventLog is closed and the original was already moved to `retired`, so
-		// s.eventLogDir is now missing. Roll the first rename back to restore the
-		// original, then reopen it (mirroring recoverScrubDirs). If the rollback
-		// fails we cannot restore the log and must NOT reopen a missing dir — that
-		// would create an empty log (silent event loss) — so fatal. swapped stays
-		// false, so the defer drops tmpDir.
-		if rbErr := os.Rename(retired, s.eventLogDir); rbErr != nil {
+	if err := tidwallbackend.SwapLegacyDirectories(s.eventLogDir, tmpDir, retired); err != nil {
+		var swapErr *tidwallbackend.LegacySwapError
+		if errors.As(err, &swapErr) && swapErr.Rollback != nil {
+			// The original live directory could not be restored. Reopening the
+			// missing path would silently create an empty log.
 			s.logger.Fatal("event-log scrub swap failed and rollback failed; the node cannot continue (restart to recover via recoverScrubDirs)",
-				zap.Error(err), zap.NamedError("rollback", rbErr))
+				zap.Error(swapErr.Cause), zap.NamedError("rollback", swapErr.Rollback))
 		}
-		s.reopenEventLogAfterSwapOrFatal("event-log scrub swap rolled back")
-		return nil, fmt.Errorf("rename scrubbed event log into place: %w", err)
+		s.reopenEventLogAfterSwapOrFatal("event-log scrub swap aborted")
+		return nil, err
 	}
 	swapped = true
 	// The bytes on disk are now the rewrite's: the log's generation moves with

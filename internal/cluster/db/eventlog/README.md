@@ -174,7 +174,13 @@ layout exclusion. Pacing, retry policy, logging, and shutdown remain in `wal`.
 The segmented backend encodes segments when writing and does not expose this
 background capability.
 
-Scrub swaps and peer file adoption still use native tidwall
+Native scrub directory publication uses `tidwall.SwapLegacyDirectories` for the
+two renames and restoration of the original live directory on failure. A typed
+failure distinguishes an unsuccessful rollback. `wal` retains handle closing,
+layout exclusion, directory sync, generation updates, cleanup, and the fatal
+policy that prevents reopening a missing live directory after rollback failure.
+
+Live handle ownership and peer file adoption still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
 segmented backend.
