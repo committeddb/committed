@@ -210,6 +210,15 @@ Cancellation and callback errors stop delivery without poisoning the log. Errors
 can follow a delivered prefix. Selected blocks/groups are fully checked before
 delivery, but unrelated payloads are not verified by a bounded scan.
 
+`Log.ScanReverse(ctx, limit, visit)` visits the newest surviving records first.
+The callback can stop successfully by returning false; the result counts invoked
+callbacks, including one that fails. Catalog seeks walk ranges backward without
+loading the full catalog. Cached records and indexed blocks are traversed backward.
+Unindexed append files require a forward scan of the selected file, retaining only
+the requested suffix in reusable buffers. The limit bounds delivered records and
+suffix retention, not I/O within an append file. The scan holds the managed log
+lock and stops before opening older ranges once its limit or callback stops it.
+
 ## Sealed rewriting
 
 `Log.RewriteSealed(ctx, generation, transform)` prepares only changed sealed
