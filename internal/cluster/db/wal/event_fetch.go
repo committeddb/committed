@@ -492,7 +492,7 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 		return rollback(installErr)
 	}
 	s.syncDirBestEffort(s.eventLogDir, "event-log adoption")
-	reopened, err := wal.Open(s.eventLogDir, s.eventWalOpts)
+	reopened, err := tidwall.OpenLegacy(s.eventLogDir, s.eventOpenOptions)
 	if err != nil {
 		return rollback(fmt.Errorf("reopen event log over adopted segments: %w", err))
 	}

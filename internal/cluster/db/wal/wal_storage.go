@@ -21,6 +21,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
@@ -288,12 +289,9 @@ type Storage struct {
 	// renaming it over this one, so it needs the path (tidwall/wal doesn't
 	// expose it). Set once in Open and never changed.
 	eventLogDir string
-	// eventWalOpts is the tidwall options the event log was opened with
-	// (segment-cache size — see WithEventCacheSegments). Stored so every
-	// event-log (re)open uses them: the scrub swap reopens the log in-process,
-	// and without this that reopen would silently revert the configured cache
-	// to the library default until the next restart. Set once in Open.
-	eventWalOpts *wal.Options
+	// eventOpenOptions preserves backend configuration across startup, scrub,
+	// reset, and peer adoption. Set once in Open.
+	eventOpenOptions tidwall.LegacyOptions
 	// eventMu guards the s.eventLog handle pointer and the on-disk events/
 	// directory identity against the scrubber's swap (close → rename → reopen),
 	// exactly mirroring how kvMu guards the bbolt handle against RestoreSnapshot.
@@ -649,26 +647,35 @@ type Storage struct {
 // COMMITTED_EVENT_CACHE_SEGMENTS to fit their RAM.
 const DefaultEventCacheSegments = 16
 
-// openLog opens one of a node's tidwall logs, turning tidwall's opaque
+// openLog opens one of a node's Raft logs, turning tidwall's opaque
 // ErrCorrupt ("log corrupt") into an actionable ErrCorruptEntry: it records the
 // corruption metric and points the operator at the offline repair CLI and the
 // rebuild runbook, so a torn tail or bit-flip fails startup with a message they
 // can act on instead of a bare "log corrupt". Other open errors pass through.
-// walOpts may be nil (the library defaults); the event log passes its
-// configured segment-cache size.
+// walOpts may be nil (the library defaults).
 func openLog(dir, logName string, m *metrics.Metrics, walOpts *wal.Options) (*wal.Log, error) {
 	lg, err := wal.Open(dir, walOpts)
+	return lg, logOpenError(dir, logName, m, err)
+}
+
+func openEventLog(dir string, m *metrics.Metrics, opts tidwall.LegacyOptions) (*wal.Log, error) {
+	lg, err := tidwall.OpenLegacy(dir, opts)
+	return lg, logOpenError(dir, "event_log", m, err)
+}
+
+// logOpenError keeps operator diagnostics and metrics above the backend.
+func logOpenError(dir, logName string, m *metrics.Metrics, err error) error {
 	if err == nil {
-		return lg, nil
+		return nil
 	}
-	if errors.Is(err, wal.ErrCorrupt) {
+	if errors.Is(err, wal.ErrCorrupt) || errors.Is(err, eventlog.ErrCorrupt) {
 		if m != nil {
 			m.WalCorruptEntry(logName)
 		}
-		return nil, fmt.Errorf("%w: the %s at %q will not open (%v) — stop the node and run `committed wal repair --data <node-data-dir>` to truncate a torn tail, or rebuild this node from a healthy replica; see docs/operations/rebuild.md",
+		return fmt.Errorf("%w: the %s at %q will not open (%v) — stop the node and run `committed wal repair --data <node-data-dir>` to truncate a torn tail, or rebuild this node from a healthy replica; see docs/operations/rebuild.md",
 			ErrCorruptEntry, logName, dir, err)
 	}
-	return nil, fmt.Errorf("open %s: %w", logName, err)
+	return fmt.Errorf("open %s: %w", logName, err)
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
@@ -766,12 +773,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// still holds decompressed tables and its RAM sizing is unchanged.
 	// Downgrade door: `committed wal decompress` (offline) rewrites the
 	// plain format for pre-0.8.0 binaries.
-	eventWalOpts := &wal.Options{
-		SegmentCacheSize:         cacheSegments,
-		SegmentSize:              cfg.eventSegmentSize,
-		SealedSegmentCompression: wal.CompressionZstd,
+	eventOpenOptions := tidwall.LegacyOptions{
+		SegmentCacheSize: cacheSegments,
+		SegmentSize:      cfg.eventSegmentSize,
 	}
-	eventLog, err := openLog(eventLogDir, "event_log", cfg.metrics, eventWalOpts)
+	eventLog, err := openEventLog(eventLogDir, cfg.metrics, eventOpenOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -817,32 +823,32 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 	dbs := make(map[string]cluster.Database)
 	ws := &Storage{
-		eventLayout:     layoutLock{name: "event log", logger: logger},
-		raftLayout:      layoutLock{name: "raft entry log", logger: logger},
-		raftLogDir:      entryLogDir,
-		EntryLog:        entryLog,
-		eventLog:        eventLog,
-		eventLogDir:     eventLogDir,
-		eventWalOpts:    eventWalOpts,
-		StateLog:        stateLog,
-		keyValueStorage: keyValueStorage,
-		databases:       dbs,
-		parser:          p,
-		sync:            sync,
-		ingest:          ingest,
-		logger:          logger,
-		fsyncDisabled:   cfg.fsyncDisabled,
-		safeMode:        cfg.safeMode,
-		configErrors:    make(map[string]configErr),
-		metrics:         cfg.metrics,
-		lostCallback:    cfg.lostCallback,
-		scrubSignal:     make(chan struct{}, 1),
-		scrubStop:       make(chan struct{}),
-		scrubDone:       make(chan struct{}),
-		sealerStop:      make(chan struct{}),
-		sealerDone:      make(chan struct{}),
-		sealerIdle:      cfg.sealerIdleInterval,
-		closeC:          make(chan struct{}),
+		eventLayout:      layoutLock{name: "event log", logger: logger},
+		raftLayout:       layoutLock{name: "raft entry log", logger: logger},
+		raftLogDir:       entryLogDir,
+		EntryLog:         entryLog,
+		eventLog:         eventLog,
+		eventLogDir:      eventLogDir,
+		eventOpenOptions: eventOpenOptions,
+		StateLog:         stateLog,
+		keyValueStorage:  keyValueStorage,
+		databases:        dbs,
+		parser:           p,
+		sync:             sync,
+		ingest:           ingest,
+		logger:           logger,
+		fsyncDisabled:    cfg.fsyncDisabled,
+		safeMode:         cfg.safeMode,
+		configErrors:     make(map[string]configErr),
+		metrics:          cfg.metrics,
+		lostCallback:     cfg.lostCallback,
+		scrubSignal:      make(chan struct{}, 1),
+		scrubStop:        make(chan struct{}),
+		scrubDone:        make(chan struct{}),
+		sealerStop:       make(chan struct{}),
+		sealerDone:       make(chan struct{}),
+		sealerIdle:       cfg.sealerIdleInterval,
+		closeC:           make(chan struct{}),
 	}
 	if ws.sealerIdle <= 0 {
 		ws.sealerIdle = sealerIdleInterval

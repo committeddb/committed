@@ -12,7 +12,7 @@ import (
 // handle, the raft entry log deliberately keeps the library default (its
 // reader is the single sequential Ready loop — not a tunable anyone needs),
 // and — the regression that matters — the scrub-swap REOPEN carries the
-// configured size. Without eventWalOpts on the reopen, a scrub swap silently
+// configured size. Without retained backend options on the reopen, a scrub swap silently
 // reverted the cache to the library default until the next restart.
 func TestEventCacheSegments(t *testing.T) {
 	// Default when unconfigured.

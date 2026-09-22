@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	twal "github.com/tidwall/wal"
+
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 // encodeRecord returns the exact on-disk shape of one committed WAL record:
@@ -199,9 +201,15 @@ func TestOpenLog_WrapsTornTailWithActionableError(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	_, err = openLog(dir, "event_log", nil, nil)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrCorruptEntry, "a corrupt Open must surface as ErrCorruptEntry")
-	require.Contains(t, err.Error(), "committed wal repair", "must point at the repair CLI")
-	require.Contains(t, err.Error(), "event_log")
+	for name, open := range map[string]func() error{
+		"raft":  func() error { _, err := openLog(dir, "entry_log", nil, nil); return err },
+		"event": func() error { _, err := openEventLog(dir, nil, tidwall.LegacyOptions{}); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := open()
+			require.ErrorIs(t, err, ErrCorruptEntry, "a corrupt Open must surface as ErrCorruptEntry")
+			require.Contains(t, err.Error(), "committed wal repair", "must point at the repair CLI")
+			require.Contains(t, err.Error(), dir)
+		})
+	}
 }

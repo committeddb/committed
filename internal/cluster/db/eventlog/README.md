@@ -194,6 +194,12 @@ A whole-log catch-up reset delegates native directory removal/recreation to
 failure to recreate the removed directory. `wal` retains authorization, layout
 exclusion, close/reopen, generation invalidation, and fatal-error policy.
 
+Production startup and all event-log reopens use `tidwall.OpenLegacy`. The
+backend owns native option construction and zstd selection; `wal` retains the
+configured cache/segment sizes, startup corruption metrics and repair guidance,
+and each replacement path's rollback/fatal policy. Opening preserves the existing
+native files without introducing a CURRENT file or an ID envelope.
+
 Live handle ownership and adoption coordination still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
