@@ -155,6 +155,14 @@ explicit sync, and sealed-segment compression. `wal` supplies framed survivor
 bytes and retains selection, catch-up, directory publication, and cleanup.
 Creation rejects a directory with existing append history.
 
+The background sealer depends on the optional `eventlog.SealedCompressor`
+capability. `tidwall.LegacyCompression` performs one native compression step and
+maps retired-handle errors to `eventlog.ErrClosed`. Composition captures the handle
+under the existing event lock; compression runs outside it, with the existing
+layout exclusion. Pacing, retry policy, logging, and shutdown remain in `wal`.
+The segmented backend encodes segments when writing and does not expose this
+background capability.
+
 Scrub swaps and peer file adoption still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the

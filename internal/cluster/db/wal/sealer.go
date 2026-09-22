@@ -4,8 +4,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/tidwall/wal"
 	"go.uber.org/zap"
+
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
 // The background sealer drives sealed-segment compression on the permanent
@@ -72,10 +73,10 @@ func (s *Storage) sealerWorker() {
 		}
 
 		s.eventMu.RLock()
-		log := s.eventLog
+		compressor := s.eventCompressorLocked()
 		s.eventMu.RUnlock()
 
-		did, err := log.CompressNextSealed()
+		did, err := compressor.CompressNextSealed()
 		release()
 		switch {
 		case err != nil:
@@ -83,7 +84,7 @@ func (s *Storage) sealerWorker() {
 			// retired) — benign, re-fetch after a backoff. Anything else is
 			// logged and retried on the same cadence: compression is a
 			// bytes-at-rest concern and must never wedge the node.
-			if !errors.Is(err, wal.ErrClosed) {
+			if !errors.Is(err, eventlog.ErrClosed) {
 				s.logger.Warn("event-log sealer: compression attempt failed; will retry",
 					zap.Error(err))
 			}

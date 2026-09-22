@@ -64,6 +64,14 @@ type Lookup interface {
 	Read(uint64) (Record, error)
 }
 
+// SealedCompressor is an optional background-storage capability. One call
+// compresses at most one sealed segment and reports whether work was done.
+// Backends that encode segments at creation need not expose this capability.
+// The owner coordinates file-layout readers and backend replacement.
+type SealedCompressor interface {
+	CompressNextSealed() (bool, error)
+}
+
 // EventLog owns one permanent event-log directory. Methods are concurrency-safe.
 // The caller must not mutate its files or use another writer outside this owner.
 // Backends use different physical layouts; callers cannot infer coverage from
