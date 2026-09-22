@@ -180,7 +180,12 @@ failure distinguishes an unsuccessful rollback. `wal` retains handle closing,
 layout exclusion, directory sync, generation updates, cleanup, and the fatal
 policy that prevents reopening a missing live directory after rollback failure.
 
-Live handle ownership and peer file adoption still use native tidwall
+Native peer adoption delegates sequence alignment, empty-tail removal, file
+installation, and moved-file rollback tracking to `eventlog/tidwall`.
+The attempt is in-memory bookkeeping only. `wal` retains handle close/reopen,
+directory sync, post-install boundary verification, and recovery/fatal policy.
+
+Live handle ownership and adoption coordination still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
 segmented backend.

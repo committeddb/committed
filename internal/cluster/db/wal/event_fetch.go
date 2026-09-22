@@ -471,13 +471,8 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	if err != nil {
 		return err
 	}
-	if files[0].FirstSeq != last+1 {
-		return fmt.Errorf("%w: this log ends at seq %d, the first file starts at %d", ErrSegmentsMisaligned, last, files[0].FirstSeq)
-	}
-	for i := 1; i < len(files); i++ {
-		if files[i].FirstSeq <= files[i-1].FirstSeq {
-			return fmt.Errorf("%w: files out of order at %d", ErrSegmentsMisaligned, i)
-		}
+	if err := tidwall.CheckLegacyAdoption(last, files); err != nil {
+		return fmt.Errorf("%w: %v", ErrSegmentsMisaligned, err)
 	}
 	tail, err := s.nativeEventTransferLocked().Layout()
 	if err != nil {
@@ -486,31 +481,14 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	if err := s.eventLog.Close(); err != nil {
 		return fmt.Errorf("close event log for adoption: %w", err)
 	}
-	// An empty tail file bears the name of the next sequence — the very name
-	// the first adopted file carries (an empty log's tail is named 1; a log
-	// that ended exactly at a segment boundary has an empty tail named
-	// last+1). Remove it; a tail with committed bytes stays and becomes a
-	// sealed segment, whatever its size.
-	if tail.TailLen == 0 {
-		if err := os.Remove(tail.TailPath); err != nil && !os.IsNotExist(err) {
-			s.reopenEventLogAfterSwapOrFatal("adoption aborted before moving files")
-			return fmt.Errorf("remove empty tail: %w", err)
-		}
-	}
-	var moved []string
+	attempt, installErr := tidwall.InstallLegacySegments(s.eventLogDir, tail, files)
 	rollback := func(cause error) error {
-		for _, p := range moved {
-			_ = os.Remove(p)
-		}
+		_ = attempt.Rollback()
 		s.reopenEventLogAfterSwapOrFatal("adoption rolled back")
 		return cause
 	}
-	for _, f := range files {
-		dst := filepath.Join(s.eventLogDir, filepath.Base(f.Path))
-		if err := tidwall.MoveLegacySegment(f.Path, dst); err != nil {
-			return rollback(fmt.Errorf("adopt %s: %w", filepath.Base(f.Path), err))
-		}
-		moved = append(moved, dst)
+	if installErr != nil {
+		return rollback(installErr)
 	}
 	s.syncDirBestEffort(s.eventLogDir, "event-log adoption")
 	reopened, err := wal.Open(s.eventLogDir, s.eventWalOpts)
