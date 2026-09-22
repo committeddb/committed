@@ -26,12 +26,12 @@ type LegacyLayout struct {
 	LastSeq      uint64
 }
 
-// LegacyTransfer preserves native framing. The application supplies integrity
-// verification, which must not mutate bytes. The owner excludes truncation,
+// LegacyTransfer preserves native framing. The application supplies checksum
+// and envelope decoding, which must not mutate bytes. The owner excludes truncation,
 // replacement, and close during calls and owns any longer file-read lifetime.
 type LegacyTransfer struct {
-	Log    *native.Log
-	Verify func([]byte) error
+	Log         *native.Log
+	DecodeFrame func([]byte) ([]byte, error)
 }
 
 func (t LegacyTransfer) Layout() (LegacyLayout, error) {
@@ -52,14 +52,14 @@ func (t LegacyTransfer) Layout() (LegacyLayout, error) {
 // Read verifies and returns one native frame. Byte ownership follows the native
 // handle's options; callers using NoCopy must consume it before invalidation.
 func (t LegacyTransfer) Read(sequence uint64) ([]byte, error) {
-	if t.Log == nil || t.Verify == nil {
+	if t.Log == nil || t.DecodeFrame == nil {
 		return nil, eventlog.ErrInvalid
 	}
 	raw, err := t.Log.Read(sequence)
 	if err != nil {
 		return nil, err
 	}
-	if err := t.Verify(raw); err != nil {
+	if _, err := t.DecodeFrame(raw); err != nil {
 		return nil, err
 	}
 	return raw, nil
@@ -82,4 +82,33 @@ func (t LegacyTransfer) EncodeRecords(lo, hi uint64, maxBytes int) (data []byte,
 		}
 	}
 	return data, last, nil
+}
+
+// ReadPayload verifies and strips the application envelope once. The returned
+// payload may alias native bytes; the owner consumes it within its read lifetime.
+func (t LegacyTransfer) ReadPayload(sequence uint64) ([]byte, error) {
+	if t.Log == nil || t.DecodeFrame == nil {
+		return nil, eventlog.ErrInvalid
+	}
+	raw, err := t.Log.Read(sequence)
+	if err != nil {
+		return nil, err
+	}
+	return t.DecodeFrame(raw)
+}
+
+// FirstSequence and LastSequence expose native positions only to native-format
+// maintenance and transfer operations. Zero denotes an empty log.
+func (t LegacyTransfer) FirstSequence() (uint64, error) {
+	if t.Log == nil {
+		return 0, eventlog.ErrInvalid
+	}
+	return t.Log.FirstIndex()
+}
+
+func (t LegacyTransfer) LastSequence() (uint64, error) {
+	if t.Log == nil {
+		return 0, eventlog.ErrInvalid
+	}
+	return t.Log.LastIndex()
 }

@@ -53,11 +53,11 @@ func (s *Storage) copyEventLog(ctx context.Context, destination eventlog.EventLo
 	} else if has {
 		return fmt.Errorf("event copy requires empty append history: %w", eventlog.ErrInvalid)
 	}
-	first, err := s.eventLog.FirstIndex()
+	first, err := s.firstEventSeqLocked()
 	if err != nil {
 		return err
 	}
-	last, err := s.eventLog.LastIndex()
+	last, err := s.lastEventSeqLocked()
 	if err != nil {
 		return err
 	}

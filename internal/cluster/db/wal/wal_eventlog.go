@@ -65,7 +65,7 @@ func (s *Storage) firstEventSeq() (uint64, error) {
 // eventMu (R or W). Used by the scrub swap, which already holds eventMu.Lock
 // and would deadlock re-acquiring RLock.
 func (s *Storage) firstEventSeqLocked() (uint64, error) {
-	return s.eventLog.FirstIndex()
+	return s.nativeEventTransferLocked().FirstSequence()
 }
 
 // lastEventSeq returns the wal sequence of the last entry in the
@@ -78,7 +78,7 @@ func (s *Storage) lastEventSeq() (uint64, error) {
 
 // lastEventSeqLocked is lastEventSeq without the lock; caller must hold eventMu.
 func (s *Storage) lastEventSeqLocked() (uint64, error) {
-	return s.eventLog.LastIndex()
+	return s.nativeEventTransferLocked().LastSequence()
 }
 
 // readEventAt reads the pb.Entry bytes at the given wal sequence from the
@@ -94,11 +94,7 @@ func (s *Storage) readEventAt(seq uint64) ([]byte, error) {
 
 // readEventAtLocked is readEventAt without the lock; caller must hold eventMu.
 func (s *Storage) readEventAtLocked(seq uint64) ([]byte, error) {
-	raw, err := s.eventLog.Read(seq)
-	if err != nil {
-		return nil, err
-	}
-	return s.unframe(raw, "event_log")
+	return s.nativeEventTransferLocked().ReadPayload(seq)
 }
 
 // unframe verifies and strips the checksum frame from a raw log read,

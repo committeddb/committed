@@ -479,7 +479,7 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 			return fmt.Errorf("%w: files out of order at %d", ErrSegmentsMisaligned, i)
 		}
 	}
-	tail, err := s.eventLog.LayoutSnapshot()
+	tail, err := s.nativeEventTransferLocked().Layout()
 	if err != nil {
 		return err
 	}
@@ -492,7 +492,7 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	// last+1). Remove it; a tail with committed bytes stays and becomes a
 	// sealed segment, whatever its size.
 	if tail.TailLen == 0 {
-		if err := os.Remove(tail.Tail.Path); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(tail.TailPath); err != nil && !os.IsNotExist(err) {
 			s.reopenEventLogAfterSwapOrFatal("adoption aborted before moving files")
 			return fmt.Errorf("remove empty tail: %w", err)
 		}

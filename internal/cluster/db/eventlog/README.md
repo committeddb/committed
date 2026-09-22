@@ -140,7 +140,10 @@ The legacy data-head fallback uses the native positioner's bounded
 and warning policy. A persisted data head bypasses this fallback.
 
 Native layout snapshots, verified frame reads, and length-prefixed record
-batches are implemented by `tidwall.LegacyTransfer`. `wal` supplies checksum
+batches are implemented by `tidwall.LegacyTransfer`. It also supplies native
+sequence bounds and verified payload reads for maintenance and copy operations.
+The application envelope decoder runs once per read; peer reads preserve the
+frame, while payload reads return its verified contents. `wal` supplies checksum
 verification and retains layout freezes, generation policy, transfer budgets,
 and the choice between whole files and records. These APIs describe the native
 format; they do not imply interchangeability with segmented files.

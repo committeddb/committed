@@ -26,12 +26,12 @@ func TestLegacyTransferPreservesFramesAndBudget(t *testing.T) {
 	errVerify := errors.New("bad frame")
 	fail := false
 	reads := 0
-	transfer := LegacyTransfer{Log: log, Verify: func(raw []byte) error {
+	transfer := LegacyTransfer{Log: log, DecodeFrame: func(raw []byte) ([]byte, error) {
 		reads++
 		if fail && bytes.Equal(raw, frames[1]) {
-			return errVerify
+			return nil, errVerify
 		}
-		return nil
+		return raw, nil
 	}}
 	data, last, err := transfer.EncodeRecords(1, 3, 1)
 	want := binary.AppendUvarint(nil, uint64(len(frames[0])))
@@ -93,5 +93,68 @@ func TestLegacyTransferLayoutMatchesNative(t *testing.T) {
 		if s.Path != want.Path || s.FirstSeq != want.Index || s.Compressed != native.IsCompressedSegmentPath(want.Path) {
 			t.Fatal(s, want)
 		}
+	}
+}
+
+func TestLegacyTransferPayloadAndNativeBounds(t *testing.T) {
+	log, err := native.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = log.Close() }()
+	calls := 0
+	errFrame := errors.New("bad envelope")
+	access := LegacyTransfer{Log: log, DecodeFrame: func(raw []byte) ([]byte, error) {
+		calls++
+		if len(raw) == 0 || raw[0] != '!' {
+			return nil, errFrame
+		}
+		return raw[1:], nil
+	}}
+	checkBounds := func(wantFirst, wantLast uint64) {
+		t.Helper()
+		first, err := access.FirstSequence()
+		if err != nil || first != wantFirst {
+			t.Fatal(first, err)
+		}
+		last, err := access.LastSequence()
+		if err != nil || last != wantLast {
+			t.Fatal(last, err)
+		}
+	}
+	checkBounds(0, 0)
+	if err := log.Write(1, []byte("!payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Write(2, []byte("!next")); err != nil {
+		t.Fatal(err)
+	}
+	checkBounds(1, 2)
+	payload, err := access.ReadPayload(1)
+	if err != nil || string(payload) != "payload" || calls != 1 {
+		t.Fatal(payload, calls, err)
+	}
+	frame, err := access.Read(1)
+	if err != nil || string(frame) != "!payload" || calls != 2 {
+		t.Fatal(frame, calls, err)
+	}
+	if err := log.TruncateFront(2); err != nil {
+		t.Fatal(err)
+	}
+	checkBounds(2, 2)
+	if err := log.Write(3, []byte("invalid")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := access.ReadPayload(3); !errors.Is(err, errFrame) || calls != 3 {
+		t.Fatal(calls, err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := access.FirstSequence(); err == nil {
+		t.Fatal("closed bounds accepted")
+	}
+	if _, err := access.LastSequence(); err == nil {
+		t.Fatal("closed bounds accepted")
 	}
 }
