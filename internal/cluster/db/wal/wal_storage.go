@@ -1016,34 +1016,18 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 	if evLast > 0 {
-		// Reads go through ws.readEventAt so the checksum verify happens at
-		// the single chokepoint; a corrupt boundary entry fails Open here
-		// (node fatal-exits with the ErrCorruptEntry message → rebuild.md).
-		data, err := ws.readEventAt(evLast)
-		if err != nil {
-			return nil, fmt.Errorf("event log read last entry: %w", err)
+		// Verify and decode both boundaries before publishing their logical
+		// indexes. The backend owns native positioning and the application codec
+		// records checksum failures.
+		if err := ws.deriveEventBoundsLocked(); err != nil {
+			return nil, fmt.Errorf("recover event log bounds: %w", err)
 		}
-		last := &pb.Entry{}
-		if err := proto.Unmarshal(data, last); err != nil {
-			return nil, fmt.Errorf("event log unmarshal last entry: %w", err)
-		}
-		ws.eventIndex.Store(last.GetIndex())
-
-		// Read the first entry to initialize firstEventIndex so
-		// Reader.Read can map raft index ↔ wal seq.
+		// The legacy data-head fallback below still scans native sequences in
+		// reverse; these are not logical Raft indexes.
 		evFirst, err := eventLog.FirstIndex()
 		if err != nil {
 			return nil, err
 		}
-		firstData, err := ws.readEventAt(evFirst)
-		if err != nil {
-			return nil, fmt.Errorf("event log read first entry: %w", err)
-		}
-		first := &pb.Entry{}
-		if err := proto.Unmarshal(firstData, first); err != nil {
-			return nil, fmt.Errorf("event log unmarshal first entry: %w", err)
-		}
-		ws.firstEventIndex.Store(first.GetIndex())
 
 		// Restore the persisted data head (written in the same bbolt
 		// transaction as appliedIndex — see dataEventIndexKey). The backscan

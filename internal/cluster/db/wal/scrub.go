@@ -669,7 +669,7 @@ func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error)
 // equals the existing one and refuses to lower it (a lower value would trip the
 // Ready loop's P==R invariant check and fatal-exit the node).
 func (s *Storage) recomputeEventBoundsLocked() error {
-	last, err := s.lastEventSeqLocked()
+	first, last, err := s.legacyEventBoundsLocked()
 	if err != nil {
 		return err
 	}
@@ -677,12 +677,11 @@ func (s *Storage) recomputeEventBoundsLocked() error {
 		return fmt.Errorf("scrub emptied the event log: the tail must always survive")
 	}
 	prev := s.eventIndex.Load()
-	if err := s.deriveEventBoundsLocked(); err != nil {
-		return err
+	if last != prev {
+		return fmt.Errorf("scrub changed EventIndex from %d to %d; the tail must be preserved", prev, last)
 	}
-	if got := s.eventIndex.Load(); got != prev {
-		return fmt.Errorf("scrub changed EventIndex from %d to %d; the tail must be preserved", prev, got)
-	}
+	s.firstEventIndex.Store(first)
+	s.eventIndex.Store(last)
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
@@ -24,22 +25,18 @@ func (s *Storage) EventIndex() uint64 {
 // idempotent with the fuller event-log recovery later in Open, which re-derives
 // the same value alongside firstEventIndex/dataEventIndex.
 func (s *Storage) recoverEventIndex() error {
-	last, err := s.eventLog.LastIndex()
-	if err != nil {
-		return err
-	}
-	if last == 0 {
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	positioner := newLegacyPositioner(s)
+	defer func() { _ = positioner.Close() }()
+	entry, err := positioner.Last()
+	if errors.Is(err, eventlog.ErrNotFound) {
 		return nil
 	}
-	data, err := s.readEventAt(last)
 	if err != nil {
 		return fmt.Errorf("event log read last entry: %w", err)
 	}
-	e := &pb.Entry{}
-	if err := proto.Unmarshal(data, e); err != nil {
-		return fmt.Errorf("event log unmarshal last entry: %w", err)
-	}
-	s.eventIndex.Store(e.GetIndex())
+	s.eventIndex.Store(entry.GetIndex())
 	return nil
 }
 

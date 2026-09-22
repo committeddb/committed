@@ -570,37 +570,12 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 // deriveEventBoundsLocked sets firstEventIndex/eventIndex from the log as it
 // is, after its files changed under the event lock (an adoption, a reset).
 func (s *Storage) deriveEventBoundsLocked() error {
-	last, err := s.lastEventSeqLocked()
+	first, last, err := s.legacyEventBoundsLocked()
 	if err != nil {
 		return err
 	}
-	if last == 0 {
-		s.eventIndex.Store(0)
-		s.firstEventIndex.Store(0)
-		return nil
-	}
-	lb, err := s.readEventAtLocked(last)
-	if err != nil {
-		return err
-	}
-	le := &pb.Entry{}
-	if err := proto.Unmarshal(lb, le); err != nil {
-		return err
-	}
-	s.eventIndex.Store(le.GetIndex())
-	first, err := s.firstEventSeqLocked()
-	if err != nil {
-		return err
-	}
-	bs, err := s.readEventAtLocked(first)
-	if err != nil {
-		return err
-	}
-	fe := &pb.Entry{}
-	if err := proto.Unmarshal(bs, fe); err != nil {
-		return err
-	}
-	s.firstEventIndex.Store(fe.GetIndex())
+	s.eventIndex.Store(last)
+	s.firstEventIndex.Store(first)
 	return nil
 }
 

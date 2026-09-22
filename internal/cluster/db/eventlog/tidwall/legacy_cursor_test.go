@@ -149,3 +149,42 @@ func TestLegacySequenceForNativeTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLegacyTailReadPreservesPosition(t *testing.T) {
+	log, err := native.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = log.Close() })
+	calls := 0
+	c := NewLegacyCursor(log, func(raw []byte) (uint64, uint64, error) {
+		calls++
+		id := binary.BigEndian.Uint64(raw)
+		return id, id, nil
+	})
+	defer func() { _ = c.Close() }()
+	if _, err := c.Last(); !errors.Is(err, eventlog.ErrNotFound) {
+		t.Fatal(err)
+	}
+	for i, id := range []uint64{10, 30, 90} {
+		if err := log.Write(uint64(i+1), binary.BigEndian.AppendUint64(nil, id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if id, err := c.Seek(10); err != nil || id != 10 {
+		t.Fatal(id, err)
+	}
+	before := calls
+	if id, err := c.Last(); err != nil || id != 90 || calls != before+1 {
+		t.Fatal(id, calls, err)
+	}
+	if id, err := c.Seek(11); err != nil || id != 30 || calls != before+2 {
+		t.Fatal("tail read changed sequential hints", id, calls, err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Last(); !errors.Is(err, eventlog.ErrClosed) {
+		t.Fatal(err)
+	}
+}

@@ -166,3 +166,27 @@ func (c *LegacyCursor[T]) SequenceFor(id uint64) (uint64, error) {
 	}
 	return sequence, err
 }
+
+// Last decodes the native tail without searching by logical ID. It leaves the
+// seek hints untouched. This describes a surviving record, not erased append
+// history. The owner excludes replacement/truncation/close as for Seek.
+func (c *LegacyCursor[T]) Last() (T, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var zero T
+	if c.closed {
+		return zero, eventlog.ErrClosed
+	}
+	if c.log == nil || c.decode == nil {
+		return zero, eventlog.ErrInvalid
+	}
+	last, err := c.log.LastIndex()
+	if err != nil {
+		return zero, err
+	}
+	if last == 0 {
+		return zero, eventlog.ErrNotFound
+	}
+	_, value, err := c.at(last)
+	return value, err
+}

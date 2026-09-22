@@ -116,7 +116,14 @@ The native peer-transfer resolver also uses the tidwall positioner's
 protocol: empty logs resolve to 1 and requests beyond the tail resolve to
 last-sequence + 1. This operation is separate from the application entry cursor.
 
-Production recovery, scrub swaps, and peer-copy operations still use native tidwall
+Startup and post-swap logical boundary recovery use the native positioner's
+head and tail reads through `wal/legacy_event_bounds.go`. The application
+publishes recovered bounds only after both decode successfully. Scrub also
+checks that the recovered tail matches the previous EventIndex before updating
+either bound. These native surviving-entry bounds do not represent erased
+append history in the segmented format.
+
+The reverse data-head recovery scan, scrub swaps, and peer-copy operations still use native tidwall
 access. These are partial boundaries, not complete backend selection;
 there is no production option to open an existing data directory with the
 segmented backend.
