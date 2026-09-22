@@ -12,7 +12,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
-func TestProductionEntryBindingBackends(t *testing.T) {
+func productionEntryTestBackends() map[string]func(string) (*eventLogBinding, error) {
 	backends := map[string]func(string) (*eventLogBinding, error){
 		"production-tidwall": func(path string) (*eventLogBinding, error) {
 			return openEventLog(path, nil, tidwall.LegacyOptions{})
@@ -27,7 +27,11 @@ func TestProductionEntryBindingBackends(t *testing.T) {
 			return &eventLogBinding{entries: bindEventEntries(log)}, nil
 		}
 	}
-	for name, open := range backends {
+	return backends
+}
+
+func TestProductionEntryBindingBackends(t *testing.T) {
+	for name, open := range productionEntryTestBackends() {
 		t.Run(name, func(t *testing.T) {
 			binding, err := open(t.TempDir())
 			require.NoError(t, err)

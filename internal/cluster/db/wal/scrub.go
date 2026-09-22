@@ -637,7 +637,7 @@ func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error)
 // equals the existing one and refuses to lower it (a lower value would trip the
 // Ready loop's P==R invariant check and fatal-exit the node).
 func (s *Storage) recomputeEventBoundsLocked() error {
-	first, last, err := s.legacyEventBoundsLocked()
+	first, last, err := s.eventBoundsLocked()
 	if err != nil {
 		return err
 	}

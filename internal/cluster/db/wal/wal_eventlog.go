@@ -1,7 +1,6 @@
 package wal
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
@@ -19,24 +18,19 @@ func (s *Storage) EventIndex() uint64 {
 	return s.eventIndex.Load()
 }
 
-// recoverEventIndex sets eventIndex from the last durable event-log entry's raft
-// index. Open calls it early so reconcileBboltWithSnapshot can apply the same
-// snapIdx <= eventIndex guard RestoreSnapshot uses before any bbolt swap. It is
-// idempotent with the fuller event-log recovery later in Open, which re-derives
-// the same value alongside firstEventIndex/dataEventIndex.
+// recoverEventIndex restores durable append progress, including indexes whose
+// records have been erased. Open calls it before bbolt reconciliation so the
+// snapshot guard uses storage progress rather than the last surviving record.
 func (s *Storage) recoverEventIndex() error {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
-	positioner := newLegacyPositioner(s)
-	defer func() { _ = positioner.Close() }()
-	entry, err := positioner.Last()
-	if errors.Is(err, eventlog.ErrNotFound) {
-		return nil
-	}
+	last, ok, err := s.eventLog.entries.LastAppended()
 	if err != nil {
-		return fmt.Errorf("event log read last entry: %w", err)
+		return fmt.Errorf("event log recover append progress: %w", err)
 	}
-	s.eventIndex.Store(entry.GetIndex())
+	if ok {
+		s.eventIndex.Store(last)
+	}
 	return nil
 }
 

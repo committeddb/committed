@@ -133,12 +133,15 @@ The native peer-transfer resolver also uses the tidwall positioner's
 protocol: empty logs resolve to 1 and requests beyond the tail resolve to
 last-sequence + 1. This operation is separate from the application entry cursor.
 
-Startup and post-swap logical boundary recovery use the native positioner's
-head and tail reads through `wal/legacy_event_bounds.go`. The application
-publishes recovered bounds only after both decode successfully. Scrub also
-checks that the recovered tail matches the previous EventIndex before updating
-either bound. These native surviving-entry bounds do not represent erased
-append history in the segmented format.
+Startup and post-swap logical boundary recovery use the shared entry binding's
+`LastAppended` and a cursor for the first survivor, in `wal/event_bounds.go`.
+Recovered progress includes erased records; an entirely erased history has no
+first survivor but keeps its append frontier. Both bounds are read successfully
+before either is published. Early startup recovery restores only append progress
+for the snapshot guard. Native scrub still requires recovered progress to equal
+the previous EventIndex and refuses an empty native history before publishing.
+Tests cover sparse history and failures, plus reopening shared backends after
+removing their tail or all records without rewinding recovered progress.
 
 The legacy data-head fallback uses the native positioner's bounded
 `ScanReverse`. Native sequence traversal and tail capture belong to the backend;

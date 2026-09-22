@@ -517,7 +517,7 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 // deriveEventBoundsLocked sets firstEventIndex/eventIndex from the log as it
 // is, after its files changed under the event lock (an adoption, a reset).
 func (s *Storage) deriveEventBoundsLocked() error {
-	first, last, err := s.legacyEventBoundsLocked()
+	first, last, err := s.eventBoundsLocked()
 	if err != nil {
 		return err
 	}
