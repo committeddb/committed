@@ -9,17 +9,28 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
-// actualFromLookup interprets one exact logical lookup. Replay includes metadata
-// and has no streaming-reader applied watermark or system-type skip policy.
-func actualFromLookup(log eventlog.Lookup, index uint64, resolver cluster.TypeResolver) (*cluster.Actual, error) {
-	record, err := log.Read(index)
+// exactEntry positions a private cursor and preserves its decoded search result.
+// SeekGE may select a later survivor, which is absence for an exact lookup.
+// The caller owns the cursor and its read lifetime.
+func exactEntry(cursor entryCursor, index uint64) (*pb.Entry, error) {
+	if err := cursor.SeekGE(index); err != nil {
+		return nil, err
+	}
+	entry, err := cursor.Current()
 	if errors.Is(err, eventlog.ErrNotFound) {
 		return nil, ErrActualNotFound
 	}
-	entry, err := decodeEventEntry(record, err)
 	if err != nil {
 		return nil, err
 	}
+	if entry.GetIndex() != index {
+		return nil, ErrActualNotFound
+	}
+	return entry, nil
+}
+
+// actualFromEntry includes metadata and has no streaming-reader type skip policy.
+func actualFromEntry(entry *pb.Entry, resolver cluster.TypeResolver) (*cluster.Actual, error) {
 	if entry.GetType() != pb.EntryNormal || entry.Data == nil {
 		return nil, ErrActualNotFound
 	}

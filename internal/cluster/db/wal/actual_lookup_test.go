@@ -23,11 +23,17 @@ func TestActualLookupSharedBackends(t *testing.T) {
 			if err := log.Append([]eventlog.Record{{ID: 30, Payload: raw}}); err != nil {
 				t.Fatal(err)
 			}
-			actual, err := actualFromLookup(log, 30, eventTestResolver(eventTestType))
+			cursor := newEventEntryCursor(log.NewCursor(), 0)
+			defer func() { _ = cursor.Close() }()
+			entry, err := exactEntry(cursor, 30)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual, err := actualFromEntry(entry, eventTestResolver(eventTestType))
 			if err != nil || actual.Index != 30 || len(actual.Entities) != 1 {
 				t.Fatal(actual, err)
 			}
-			if _, err := actualFromLookup(log, 29, eventTestResolver(eventTestType)); !errors.Is(err, ErrActualNotFound) {
+			if _, err := exactEntry(cursor, 29); !errors.Is(err, ErrActualNotFound) {
 				t.Fatal(err)
 			}
 		})

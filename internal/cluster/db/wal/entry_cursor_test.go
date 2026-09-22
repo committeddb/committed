@@ -70,6 +70,13 @@ func TestEntryCursorRetainsLegacyDecode(t *testing.T) {
 	if next, err := c.Current(); err != nil || next.GetIndex() != 100 {
 		t.Fatal(next, err)
 	}
+	exact, err := exactEntry(c, 30)
+	if err != nil || exact != decoded[30] {
+		t.Fatal("exact lookup discarded the decoded search result", exact, err)
+	}
+	if _, err := exactEntry(c, 29); !errors.Is(err, ErrActualNotFound) {
+		t.Fatal("exact lookup returned the next surviving entry", err)
+	}
 	if err := c.SeekGE(10); err != nil {
 		t.Fatal(err)
 	}

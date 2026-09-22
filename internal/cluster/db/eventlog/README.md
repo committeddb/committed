@@ -77,15 +77,13 @@ no CURRENT file or experimental generation directory is introduced.
 
 The writer is rebound when scrub or peer fetch replaces the native handle.
 Application replay filtering, applied progress, and metrics remain in Storage.
-Production `Storage.ActualAt` uses `eventlog.Lookup`, the exact-read subset of
-EventLog. `wal/legacy_event_lookup.go` binds a `tidwall.LegacyLookup` to the
-current handle for each call. The backend binary-searches stable IDs; the
-application supplies checksum/protobuf decoding and interprets the result in
-`wal/actual_lookup.go`. The existing event lock spans lookup and proposal decoding.
-Exact replay still includes metadata and does not gate reads on AppliedIndex.
-The native lookup decodes search probes to discover IDs; the application then
-decodes the returned payload to interpret the matched entry. The backend copies
-the matched payload to honor caller ownership, including with native NoCopy enabled.
+Production `Storage.ActualAt` uses a private `wal.entryCursor` for exact
+lookup. `wal/actual_lookup.go` verifies that the seek result matches the requested
+index and interprets the decoded entry. The existing event lock spans positioning
+and proposal decoding. Exact replay includes metadata and does not gate reads on
+AppliedIndex. The experimental adapter uses the same exact-entry and proposal
+helpers, retaining its applied-watermark check. Native lookup preserves the entry
+decoded during positioning without an additional payload copy or protobuf decode.
 
 Production streaming `Reader` uses the application-side `wal.entryCursor`:
 `SeekGE`, `Current`, `Advance`, and `Close`. Seeking is lazy; Current reports

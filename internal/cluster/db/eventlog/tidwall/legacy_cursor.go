@@ -98,6 +98,9 @@ func (c *LegacyCursor[T]) seek(id, last uint64) (uint64, uint64, T, error) {
 		if err != nil {
 			return 0, 0, zero, err
 		}
+		if index == id {
+			return mid, index, record, nil
+		}
 		if index < id {
 			if mid == last {
 				break

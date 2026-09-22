@@ -190,7 +190,13 @@ func (s *Storage) ActualAt(index uint64) (*cluster.Actual, error) {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
-	return actualFromLookup(s.legacyEventLookupLocked(), index, s)
+	cursor := newLegacyEntryCursor(s, index)
+	defer func() { _ = cursor.Close() }()
+	entry, err := exactEntry(cursor, index)
+	if err != nil {
+		return nil, err
+	}
+	return actualFromEntry(entry, s)
 }
 
 func (s *Storage) Reader(id string) db.ActualReader {

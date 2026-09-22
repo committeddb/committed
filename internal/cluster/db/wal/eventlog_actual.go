@@ -1,10 +1,6 @@
 package wal
 
 import (
-	"errors"
-
-	pb "go.etcd.io/raft/v3/raftpb"
-
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
@@ -22,23 +18,14 @@ func (l *eventLogAdapter) actualAt(index uint64, resolver cluster.TypeResolver, 
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	record, err := l.log.Read(index)
-	entry, err := decodeEventEntry(record, err)
-	if errors.Is(err, eventlog.ErrNotFound) {
-		return nil, ErrActualNotFound
-	}
+	cursor := newEventEntryCursor(l.log.NewCursor(), index)
+	defer func() { _ = cursor.Close() }()
+	entry, err := exactEntry(cursor, index)
 	if err != nil {
 		return nil, err
 	}
 	if index > applied() {
 		return nil, ErrActualNotFound
 	}
-	if entry.GetType() != pb.EntryNormal || entry.Data == nil {
-		return nil, ErrActualNotFound
-	}
-	proposal := new(cluster.Proposal)
-	if err := proposal.Unmarshal(entry.Data, resolver); err != nil {
-		return nil, err
-	}
-	return &cluster.Actual{Index: index, Entities: proposal.Entities}, nil
+	return actualFromEntry(entry, resolver)
 }
