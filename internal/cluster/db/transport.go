@@ -48,7 +48,7 @@ type EventSink interface {
 	// (its first sequence, .zst for a compressed one). r yields exactly
 	// size bytes.
 	Segment(name string, size int64, r io.Reader) error
-	// Records delivers a run of records in the event log's on-disk encoding
+	// Records delivers a run of records in the peer wire encoding
 	// (each a uvarint length prefix and a framed record), in order.
 	Records(data []byte) error
 	// End closes a complete stream with what it covered.

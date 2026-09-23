@@ -318,9 +318,9 @@ segmented backend.
 
 Native peer-transfer APIs explicitly require the native binding. Shared backends
 return `eventlog.ErrUnsupported` for physical sequence reads, native layouts and
-record serving, segment adoption, directory reset, and peer generation assignment.
+segment adoption, directory reset, and peer generation assignment.
 The guard runs before reset closes or removes the log, before adoption inspects
-or consumes staged files, and before serving invokes the transport. Rejection
+or consumes staged files. Rejection
 leaves logical reads/appends and reopening usable. This also applies to the
 experimental tidwall wrapper: its CURRENT/generation layout is not the native
 peer-transfer format. Native transfer conformance tests retain their existing
@@ -333,6 +333,21 @@ protobuf payload, including unknown fields. Overlap skipping, append serializati
 and event-progress accounting retain the existing receiver behavior. This supports
 the record-receive step; shared segment adoption, generation assignment, and the
 complete catch-up lifecycle remain separate from it.
+
+`Storage.ServeEvents` serves shared backends through the existing framed-record
+wire format. It captures generation and original append progress under the event
+layout freeze, then streams a bounded batch through a logical cursor. Native
+serving retains its whole-segment path. Shared serving preserves protobuf bytes
+and adds wire framing directly to the output buffer, without re-marshalling or
+allocating a separate frame for each record. Appends can continue during callbacks;
+records beyond the captured frontier are excluded.
+
+The existing `LastIndex` field still means the last delivered record. An erased
+suffix therefore does not advance receiver progress through that suffix; serving
+reports no more surviving records. This path does not install erased append
+progress or complete shared-backend generation adoption and snapshot recovery.
+Tests cover source/receiver backend combinations, bounded ranges, oversized records,
+sparse histories, generation reporting, cancellation, and interrupted streams.
 
 `Storage.appendFetchedEntries` is an internal logical-record receive experiment
 shared by native tidwall and both shared backends. It accepts unframed protobuf

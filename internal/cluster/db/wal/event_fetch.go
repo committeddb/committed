@@ -27,10 +27,10 @@ import (
 // whose event log is behind the snapshot raft wants to install cannot fill
 // the gap from raft — the entries between were compacted — so it fills it
 // from a peer instead of exiting (db/catchup.go). Whole sealed segments
-// travel as files (plain or .zst, as on disk); the edges travel as records
-// in the log's own on-disk encoding, so every byte the receiver writes is
-// the byte the peer holds. The receiving side is idempotent by raft index,
-// so a retried or overlapping fetch is harmless.
+// travel as files for native tidwall (plain or .zst, as on disk); the edges
+// and shared-backend records use the existing framed-record wire encoding.
+// Protobuf payloads retain the peer's exact bytes. The receiving side is
+// idempotent by raft index, so a retried or overlapping fetch is harmless.
 //
 // A log's GENERATION is the scrub bound its bytes reflect (EventLogGeneration).
 // Every replica's rewrite is deterministic, so two logs at one generation
@@ -261,15 +261,19 @@ const (
 
 // ServeEvents streams to sink every event with raft index in (after, to]
 // that this node holds, a bounded amount per call, under one layout freeze.
-// Sealed segments whose records all lie in the range go whole, as files;
-// the edges — the segment holding the first wanted record, one extending
-// past the last, and the tail — go as records. Implements db.EventServer.
+// Native sealed segments wholly inside the range go as files; partial
+// segments and the tail go as framed records. Shared backends send framed
+// records throughout. Implements db.EventServer.
 func (s *Storage) ServeEvents(ctx context.Context, after, to uint64, sink db.EventSink) (db.EventServeResult, error) {
-	if err := s.requireNativeEventLog(); err != nil {
-		return db.EventServeResult{}, err
-	}
 	release := s.FreezeEventLayout()
 	defer release()
+
+	s.eventMu.RLock()
+	shared := s.eventLog.managed != nil
+	s.eventMu.RUnlock()
+	if shared {
+		return s.serveRecordEvents(ctx, after, to, sink, serveMaxRecordBytes)
+	}
 
 	res := db.EventServeResult{Generation: s.EventLogGeneration(), EventIndex: s.eventIndex.Load()}
 	if err := sink.Begin(res.Generation, res.EventIndex); err != nil {
