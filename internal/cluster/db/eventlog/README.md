@@ -337,6 +337,18 @@ recheck the catch-up fence under append exclusion after policy preparation.
 This method has no public transport route and does not implement cross-generation
 adoption or whole-file transfer.
 
+`Storage.initializeFetchedGeneration` initializes an empty shared receiver's
+storage generation while a catch-up fence is held. It uses the existing atomic
+empty-rewrite publication protocol. Changing generations requires no append
+history and no application progress; an entirely erased log still has append
+history and is rejected. Same-generation retries are no-ops, including after a
+partial receive. The operation does not update applied progress or scrub-completion
+metadata. Tests reopen after failures before publication and after lost publication
+acknowledgments, then resume without repeating an already-published initialization.
+These experimental receivers are reopened in safe mode; automatic application
+catch-up recovery and snapshot installation are not integrated. The native format
+continues to use its existing generation-assignment protocol.
+
 The matching internal `Storage.fetchEntries` returns bounded batches of original
 protobuf payloads, with the selected generation, captured append frontier, resume
 index, and an explicit completion flag. One publication read lock covers the
