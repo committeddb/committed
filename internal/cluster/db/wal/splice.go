@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/backup"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
+	"github.com/committeddb/committed/pkg/segmentlog"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -206,6 +208,10 @@ func SpliceNode(baseDir string, archive io.Reader, commit bool) ([]*SpliceReport
 		if d.Status != LogCorrupt {
 			continue
 		}
+		if d.segmentedSegment != nil {
+			targets = append(targets, &spliceTarget{rel: strings.Join(parts, "/"), dir: dir, d: d, rep: rep})
+			continue
+		}
 		if d.corruptShape == corruptNone {
 			rep.Refused = "not a shape a backup can repair (ambiguous framing or a mid-compaction directory): rebuild"
 			continue
@@ -234,6 +240,9 @@ func SpliceNode(baseDir string, archive io.Reader, commit bool) ([]*SpliceReport
 		if !ok {
 			return "", false
 		}
+		if ref := t.d.segmentedSegment; ref != nil {
+			return dir, file == ref.File
+		}
 		idx, ok := segmentIndexOf(file)
 		if !ok || idx > t.seq {
 			return "", false
@@ -248,7 +257,30 @@ func SpliceNode(baseDir string, archive io.Reader, commit bool) ([]*SpliceReport
 	for _, t := range targets {
 		x, ok := kept[t.rel]
 		if !ok {
+			if ref := t.d.segmentedSegment; ref != nil {
+				t.rep.Refused = fmt.Sprintf("the backup does not contain the selected segment %s", ref.File)
+				continue
+			}
 			t.rep.Refused = fmt.Sprintf("the backup holds no %s segment at or below sequence %d — it predates the corrupt record; rebuild", t.rel, t.seq)
+			continue
+		}
+		if ref := t.d.segmentedSegment; ref != nil {
+			if err := segmentlog.RestoreSegment(context.Background(), t.dir, *ref, x.Data, false); err != nil {
+				message, _ := cluster.RedactedMessage(err)
+				t.rep.Refused = "backup segment does not match the selected immutable revision: " + message
+				continue
+			}
+			t.rep.Plan = fmt.Sprintf("restore immutable segment %s from its catalog-verified backup copy", ref.File)
+			if commit {
+				if err := segmentlog.RestoreSegment(context.Background(), t.dir, *ref, x.Data, true); err != nil {
+					return reports, fmt.Errorf("%s: %w", t.dir, err)
+				}
+				t.rep.Applied = true
+				t.rep.After, err = DiagnoseLog(t.dir)
+				if err != nil {
+					return reports, err
+				}
+			}
 			continue
 		}
 		bdata := x.Data

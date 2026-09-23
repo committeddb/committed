@@ -17,7 +17,7 @@ func diagnoseSegmentedLog(dir string) (*Diagnosis, error) {
 	if inspected.Records > math.MaxInt {
 		return nil, fmt.Errorf("segmented record count exceeds diagnostic capacity")
 	}
-	d := &Diagnosis{Dir: dir, Records: int(inspected.Records)}
+	d := &Diagnosis{Dir: dir, Records: int(inspected.Records), segmentedSegment: inspected.DamagedSegment}
 	switch {
 	case err == nil:
 		d.Status = LogClean

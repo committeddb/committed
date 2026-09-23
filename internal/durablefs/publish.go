@@ -96,9 +96,10 @@ func (d *Dir) Install(name string, write func(io.Writer) error) (Result, error) 
 	return d.publish(name, write, false)
 }
 
-// Replace atomically replaces a small pointer file (such as CURRENT) after its
-// new content is synced. The caller must first durably install all referenced
-// files. This is one namespace operation, not a multi-file transaction.
+// Replace atomically replaces a file after its new content is synced. When
+// publishing a pointer file (such as CURRENT), the caller must first durably
+// install all referenced files. This is one namespace operation, not a multi-file
+// transaction.
 func (d *Dir) Replace(name string, write func(io.Writer) error) (Result, error) {
 	return d.publish(name, write, true)
 }

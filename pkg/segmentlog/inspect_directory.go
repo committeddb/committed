@@ -20,7 +20,10 @@ import (
 // the application must establish its durability requirements before repair.
 type Inspection struct {
 	Records uint64
-	Tail    TailState
+	// DamagedSegment identifies a selected immutable file that failed validation.
+	// It is nil for catalog and active-tail failures.
+	DamagedSegment *SegmentRef
+	Tail           TailState
 }
 
 // InspectDirectory verifies a stopped managed log without recovery or writes.
@@ -66,6 +69,7 @@ func InspectDirectory(ctx context.Context, path string) (result Inspection, retE
 			return result, err
 		}
 		if err := checkCatalogFiles(path, Catalog{Segments: []SegmentRef{ref}}, false); err != nil {
+			result.DamagedSegment = &ref
 			return result, err
 		}
 		result.Records += ref.Count
