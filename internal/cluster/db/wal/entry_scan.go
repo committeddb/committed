@@ -12,13 +12,29 @@ import (
 // metadata and control entries without an applied watermark. The publication
 // read lock keeps one generation throughout selection; appends can continue.
 // Callbacks must not reenter Storage. The cursor and its decoded entry are local
-// to this scan and are released on every exit.
+// to this scan and are released on every exit. Shutdown stops policy and
+// reconciliation scans between records before Storage closes their backend.
 func (s *Storage) scanEventEntries(bound uint64, visit func(*pb.Entry) error) error {
+	if visit == nil {
+		return eventlog.ErrInvalid
+	}
+	select {
+	case <-s.scrubStop:
+		return errScrubStopped
+	default:
+	}
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 	cursor := s.eventLog.entries.NewEntryCursor(0)
 	defer func() { _ = cursor.Close() }()
-	return scanEntryPrefix(cursor, bound, visit)
+	return scanEntryPrefix(cursor, bound, func(entry *pb.Entry) error {
+		select {
+		case <-s.scrubStop:
+			return errScrubStopped
+		default:
+			return visit(entry)
+		}
+	})
 }
 
 // scanEntryPrefix is independent of the physical backend. The owner supplies

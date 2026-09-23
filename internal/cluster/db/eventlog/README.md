@@ -225,6 +225,16 @@ this retry wait even with a reader still pinned. Backend failures do not trigger
 this timer; their reopen requirement remains intact. Tests also cover automatic
 pending-scrub recovery on normal open.
 
+Active shared scrub rewrites and reclamation receive cancellation from Storage's
+shutdown signal. Policy and survivor-reconciliation scans check shutdown between
+records. The cancellation watcher is joined before each scrub attempt returns;
+Storage still joins its worker before closing the backend. Cancellation does not
+interrupt a file I/O or atomic publication already in progress. Interrupted work
+keeps its pending request, and restart recovery uses the selected generation to
+resume. Tests stop real backends during rewrite and reclamation, then reopen and
+finish the scrub.
+
+
 Publication can also precede the enclosing apply batch's saved watermark. Recovery
 recognizes matching durable scrub history ahead of that watermark and waits for
 Raft replay before completing the selected generation. Missing history remains

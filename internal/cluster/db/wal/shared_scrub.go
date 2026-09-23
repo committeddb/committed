@@ -18,7 +18,25 @@ var errScrubApplyPending = errors.New("scrub command is waiting for its apply wa
 // A published bound is finished before preparing a newer pending command. This
 // preserves recovery identity even when the pending record has been superseded.
 // Like the native worker, it has one caller and excludes Close/replacement.
-func (s *Storage) runPendingSharedScrub() error {
+func (s *Storage) runPendingSharedScrub() (err error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		select {
+		case <-s.scrubStop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() {
+		stopping := ctx.Err() != nil
+		cancel()
+		<-stopped
+		if stopping && err != nil {
+			err = errors.Join(errScrubStopped, err)
+		}
+	}()
 	if err := s.runOwedCompaction(); err != nil {
 		return err
 	}
@@ -72,7 +90,7 @@ func (s *Storage) runPendingSharedScrub() error {
 				}
 				return fmt.Errorf("scrub generation %d has no applied authorization: %w", selected, eventlog.ErrInvalid)
 			}
-			if err := s.finishSharedScrub(selected); err != nil {
+			if err := s.finishSharedScrub(ctx, selected); err != nil {
 				return err
 			}
 			continue
@@ -107,7 +125,7 @@ func (s *Storage) runPendingSharedScrub() error {
 		if err != nil {
 			return err
 		}
-		if _, err := s.rewriteSharedPlan(context.Background(), bound, plan); err != nil {
+		if _, err := s.rewriteSharedPlan(ctx, bound, plan); err != nil {
 			return err
 		}
 	}
@@ -116,7 +134,7 @@ func (s *Storage) runPendingSharedScrub() error {
 // finishSharedScrub derives cadence bookkeeping from the selected survivors,
 // not by rerunning the erasure gate against already-scrubbed metadata. It needs
 // no persisted subject keys, saved transform, or separate completion receipt.
-func (s *Storage) finishSharedScrub(bound uint64) error {
+func (s *Storage) finishSharedScrub(ctx context.Context, bound uint64) error {
 	s.eventMu.Lock()
 	first, last, err := s.eventBoundsLocked()
 	if err == nil && last != s.EventIndex() {
@@ -130,7 +148,7 @@ func (s *Storage) finishSharedScrub(bound uint64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.reclaimSharedGeneration(context.Background(), bound); err != nil {
+	if _, err := s.reclaimSharedGeneration(ctx, bound); err != nil {
 		return err
 	}
 	var raws []rawDelete
@@ -146,6 +164,9 @@ func (s *Storage) finishSharedScrub(bound uint64) error {
 		})
 	})
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := s.reconcileUnhashedDeletes(bound, 0, raws, nil); err != nil {
