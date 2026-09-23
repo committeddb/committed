@@ -170,6 +170,13 @@ Native segment move/copy helpers live in `eventlog/tidwall` as well. Adoption
 uses rename with a copy/sync/remove fallback. The caller retains directory sync,
 adoption ordering, rollback, and handle replacement.
 
+Production scrub preparation lives in `wal/scrub_plan.go`: it captures RTBF and
+metadata selections plus the authorized delete-key erasure threshold in one plan.
+The plan supplies the record transform and retains the erasure outcome needed
+after completion. `wal/legacy_event_rewrite.go` executes that plan using the native
+bulk copy, catch-up, publication, and recovery sequence. `runScrub` coordinates
+preparation and execution; completion bookkeeping remains in its caller.
+
 The native scrub's unpublished replacement is written by
 `tidwall.LegacyRewrite`: it owns private-log creation, dense survivor numbering,
 explicit sync, and sealed-segment compression. `wal` supplies framed survivor
