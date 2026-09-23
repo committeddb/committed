@@ -348,6 +348,11 @@ the decoded streaming-reader interface unchanged. Tests transfer records across
 all native/shared backend pairs and reopen receivers to verify byte preservation.
 The batch reports erased-tail append progress, but receiving an empty batch does
 not install that accounting or application snapshots.
+Concurrency tests pause serving between records to verify that new appends remain
+outside the captured frontier and rewrite publication waits for the entire batch.
+Returned payloads remain intact after publication and reclamation. Concurrent
+retries of an identical receive batch serialize into one backend append.
+
 
 
 ## Implementations
