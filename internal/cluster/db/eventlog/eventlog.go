@@ -117,6 +117,10 @@ type EventLog interface {
 	// reclamation do not advance it. After publication failure, reopen before
 	// consulting it. It identifies a selection, not scrub completion or a plan.
 	Generation() (uint64, error)
+	// Reset selects an empty history, clearing original append progress while
+	// preserving generation and configuration. Cursors invalidate old positions.
+	// Retired files remain for Reclaim; after failure reopen before retrying.
+	Reset() error
 	Reclaim(context.Context) (ReclaimResult, error)
 	Close() error
 }

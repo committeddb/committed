@@ -31,7 +31,6 @@ func TestSharedBackendsRejectNativeTransfer(t *testing.T) {
 				name string
 				call func() error
 			}{
-				{"reset", s.ResetEventLog},
 				{"adopt", func() error { return s.AdoptEventSegments([]string{staged}) }},
 				{"sequence", func() error { _, err := s.EventSeqForIndex(10); return err }},
 				{"first-sequence", func() error { _, err := s.firstEventSeq(); return err }},
@@ -66,7 +65,7 @@ func TestSharedBackendsRejectNativeTransfer(t *testing.T) {
 			require.NoError(t, s.appendEvents([]*pb.Entry{entry}), "logical appends still work")
 			require.NoError(t, s.Close())
 			reopened, err := openStorage(path, nil, nil, nil, opener, WithSafeMode())
-			require.NoError(t, err, "rejected reset must not replace the on-disk format")
+			require.NoError(t, err, "rejected native transfer must not replace the on-disk format")
 			t.Cleanup(func() { _ = reopened.Close() })
 			require.Equal(t, uint64(20), reopened.EventIndex())
 			record, err := reopened.eventLog.managed.Read(10)

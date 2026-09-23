@@ -20,6 +20,7 @@ type layout interface {
 	Current() (Catalog, error)
 	preflight() error
 	publishRollover(*preparedRollover) error
+	publishReset(Catalog) error
 	// A nil tail reference preserves the current active tail without revalidation.
 	verifyRewrite([]SegmentRef, *TailRef) (*verifiedRewriteFiles, error)
 	publishRewrite(uint64, uint64, *verifiedRewriteFiles) error

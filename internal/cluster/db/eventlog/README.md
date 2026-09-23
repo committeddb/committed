@@ -318,9 +318,8 @@ segmented backend.
 
 Native peer-transfer APIs explicitly require the native binding. Shared backends
 return `eventlog.ErrUnsupported` for physical sequence reads, native layouts and
-segment adoption and directory reset.
-The guard runs before reset closes or removes the log, before adoption inspects
-or consumes staged files. Rejection
+segment adoption.
+The guard runs before adoption inspects or consumes staged files. Rejection
 leaves logical reads/appends and reopening usable. This also applies to the
 experimental tidwall wrapper: its CURRENT/generation layout is not the native
 peer-transfer format. Native transfer conformance tests retain their existing
@@ -384,7 +383,7 @@ Imported completion may be ahead of this node's pending scrub request, as in
 native catch-up. Shared scrub maintenance accepts the matching selected generation
 without requiring a locally applied scrub command. Tests cover normal reopen after
 partial receipt, interruptions on either side of publication, and retries. Shared
-reset, erased-suffix progress, and the complete snapshot-install lifecycle are not
+erased-suffix progress and the complete snapshot-install lifecycle are not
 integrated by this generation-adoption path.
 
 The matching internal `Storage.fetchEntries` returns bounded batches of original
@@ -572,3 +571,24 @@ the production native owner permits appends under the application's layout freez
 Tests round-trip live and offline node archives through restore and the same
 backend opener. Segmentlog tests also cover rollover during capture, sparse and
 fully erased histories, preserved append progress, and visitor failure cleanup.
+
+## Reset and refetch
+
+`EventLog.Reset` selects an empty history, clearing surviving records and original
+append progress, including fully erased history. Generation and configuration
+are preserved. It differs from rewrite, which retains original append progress.
+The segmented backend publishes an empty tail and retires old references in one
+bbolt transaction. The dense tidwall wrapper publishes an empty directory through
+CURRENT. Neither operation decodes the old payloads. Retired files remain for
+explicit reclamation. Cursors invalidate positions from the previous selection.
+
+`Storage.ResetEventLog` dispatches shared reset through this capability and keeps
+the native directory-reset implementation. Both serialize with appends, respect
+the existing event layout freeze, and clear event bounds while retaining applied
+progress and generation metadata. Shared reset reclaims retired payloads before
+returning. Generation adoption also drains retirements, covering an interruption
+after reset publication but before cleanup. A receiver can reopen after reset, adopt its
+peer's newer generation, and receive entries below its former append frontier.
+Tests cover these transitions, cached cursors, erased histories, and interruption
+before/after publication. The segmented crash test also exits inside the catalog
+transaction and verifies that reopening retains the old selection.

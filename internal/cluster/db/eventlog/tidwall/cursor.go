@@ -2,12 +2,13 @@ package tidwall
 
 import "github.com/committeddb/committed/internal/cluster/db/eventlog"
 
-// cursor keeps a dense sequence only within its current rewrite generation.
+// cursor keeps a dense sequence only within its current selected directory.
 // The caller still supplies logical IDs, including retries and backwards seeks.
 type cursor struct {
-	log                                    *Log
-	generation, sequence, requested, found uint64
-	valid, closed                          bool
+	log                        *Log
+	directory                  string
+	sequence, requested, found uint64
+	valid, closed              bool
 }
 
 func (l *Log) NewCursor() eventlog.Cursor { return &cursor{log: l} }
@@ -23,7 +24,7 @@ func (c *cursor) Seek(id uint64) (eventlog.Record, error) {
 	}
 	seq := c.sequence
 	direct := false
-	if c.valid && c.generation == l.state.Generation {
+	if c.valid && c.directory == l.state.Directory {
 		if id >= c.requested && id <= c.found {
 			direct = true
 		}
@@ -50,7 +51,7 @@ func (c *cursor) Seek(id uint64) (eventlog.Record, error) {
 		c.valid = false
 		return r, err
 	}
-	c.sequence, c.requested, c.found, c.generation = seq, id, r.ID, l.state.Generation
+	c.sequence, c.requested, c.found, c.directory = seq, id, r.ID, l.state.Directory
 	c.valid = true
 	return r, nil
 }

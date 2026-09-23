@@ -53,6 +53,8 @@ func TestBoltLogCrashHelper(t *testing.T) {
 	switch operation {
 	case "rollover":
 		err = l.Append([]Record{{20, nil}, {30, nil}})
+	case "reset":
+		err = l.Reset()
 	case "rewrite":
 		_, err = l.Rewrite(t.Context(), 1, eraseEvenTens)
 	case "reclaim":

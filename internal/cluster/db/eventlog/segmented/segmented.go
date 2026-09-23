@@ -133,3 +133,5 @@ func (l *Log) Generation() (uint64, error) {
 func (l *Log) CaptureBackup(visit func(string, int64, func(io.Writer) error) error) error {
 	return translate(l.log.CaptureBackup(visit))
 }
+
+func (l *Log) Reset() error { return translate(l.log.Reset()) }

@@ -339,3 +339,13 @@ continue without a live bbolt transaction held across receiver I/O. Rewrites,
 reclamation and close wait until streaming finishes. Catalog references are
 iterated without loading the full list into memory. Retired payloads are excluded;
 retirement metadata may remain and reclamation tolerates already-absent files.
+
+## Reset
+
+`Log.Reset` atomically selects a fresh empty history while preserving its start,
+segment size, runtime encoding/cache settings, and generation. It clears original
+append progress even when all prior records were erased. Catalog publication
+queues the previous selected files for `Reclaim`; reset itself does not read or
+rewrite their payloads. Metadata work scales with the number of selected ranges.
+Existing cursors invalidate their old positions. On an I/O failure, close and reopen
+to determine which selection is authoritative before retrying.

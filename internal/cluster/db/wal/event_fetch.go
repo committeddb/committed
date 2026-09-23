@@ -106,6 +106,10 @@ func (s *Storage) SetEventLogGeneration(gen uint64) error {
 		if err := s.initializeFetchedGenerationWith(context.Background(), gen, persist); err != nil {
 			return err
 		}
+		// Also drains reset retirement left by an interruption before refetch.
+		if _, err := s.reclaimSharedGeneration(context.Background(), gen); err != nil {
+			return err
+		}
 	} else if err := persist(); err != nil {
 		return err
 	}
@@ -164,6 +168,8 @@ func (s *Storage) putScrubCompleted(bound uint64) error {
 // their cursors by raft index, as across a scrub swap. Refused while a layout
 // freeze stands.
 func (s *Storage) ResetEventLog() error {
+	s.eventAppendMu.Lock()
+	defer s.eventAppendMu.Unlock()
 	release, ok := s.eventLayout.move()
 	if !ok {
 		return ErrLayoutFrozen
@@ -171,24 +177,33 @@ func (s *Storage) ResetEventLog() error {
 	defer release()
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
-	if err := s.requireNativeEventLogLocked(); err != nil {
-		return err
-	}
-	if err := s.eventLog.Close(); err != nil {
-		return fmt.Errorf("close event log for reset: %w", err)
-	}
-	if err := tidwall.ResetLegacyDirectory(s.eventLogDir); err != nil {
-		var resetErr *tidwall.LegacyResetError
-		if errors.As(err, &resetErr) && resetErr.Removed {
-			s.logger.Fatal("event log removed for reset but its directory could not be recreated", zap.Error(resetErr.Cause))
+	if s.eventLog.managed != nil {
+		if err := s.eventLog.managed.Reset(); err != nil {
+			s.scrubGen.Add(1)
+			return err
 		}
-		s.reopenEventLogAfterSwapOrFatal("event log reset aborted")
-		return err
+	} else {
+		if err := s.eventLog.Close(); err != nil {
+			return fmt.Errorf("close event log for reset: %w", err)
+		}
+		if err := tidwall.ResetLegacyDirectory(s.eventLogDir); err != nil {
+			var resetErr *tidwall.LegacyResetError
+			if errors.As(err, &resetErr) && resetErr.Removed {
+				s.logger.Fatal("event log removed for reset but its directory could not be recreated", zap.Error(resetErr.Cause))
+			}
+			s.reopenEventLogAfterSwapOrFatal("event log reset aborted")
+			return err
+		}
+		s.reopenEventLogAfterSwapOrFatal("reopen event log after reset")
 	}
-	s.reopenEventLogAfterSwapOrFatal("reopen event log after reset")
 	s.eventIndex.Store(0)
 	s.firstEventIndex.Store(0)
 	s.scrubGen.Add(1)
+	if s.eventLog.managed != nil {
+		if _, err := s.eventLog.managed.Reclaim(context.Background()); err != nil {
+			return err
+		}
+	}
 	s.logger.Warn("event log reset: this node's content was at an older generation than its peers'; it is fetched again whole")
 	return nil
 }
