@@ -252,16 +252,23 @@ func (s *Storage) reconcileUnhashedDeletes(bound, eligibleMax uint64, raws []raw
 			return ErrBucketMissing
 		}
 		c := b.Cursor()
-		var stale [][]byte
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
-			if len(k) == 8 && binary.BigEndian.Uint64(k) <= bound {
-				stale = append(stale, append([]byte(nil), k...))
+		// Delete in place without retaining a copy of every key. Seek back
+		// to the removed key after each deletion: Next can skip a neighbor
+		// when deleting shifts entries within a bbolt leaf page.
+		var removed [8]byte
+		for k, _ := c.First(); k != nil; {
+			if len(k) != 8 {
+				k, _ = c.Next()
+				continue
 			}
-		}
-		for _, k := range stale {
-			if err := b.Delete(k); err != nil {
+			if binary.BigEndian.Uint64(k) > bound {
+				break
+			}
+			copy(removed[:], k)
+			if err := c.Delete(); err != nil {
 				return err
 			}
+			k, _ = c.Seek(removed[:])
 		}
 		for _, rd := range raws {
 			if rd.index <= eligibleMax {
