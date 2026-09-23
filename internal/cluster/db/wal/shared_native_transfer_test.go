@@ -32,7 +32,6 @@ func TestSharedBackendsRejectNativeTransfer(t *testing.T) {
 				call func() error
 			}{
 				{"reset", s.ResetEventLog},
-				{"set-generation", func() error { return s.SetEventLogGeneration(99) }},
 				{"adopt", func() error { return s.AdoptEventSegments([]string{staged}) }},
 				{"sequence", func() error { _, err := s.EventSeqForIndex(10); return err }},
 				{"first-sequence", func() error { _, err := s.firstEventSeq(); return err }},

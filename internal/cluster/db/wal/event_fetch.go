@@ -98,12 +98,18 @@ func (s *Storage) EventLogGeneration() uint64 {
 // no-op here (its rewrite is already in the bytes), a pending one beyond it
 // re-runs, and a restart mid-fetch resumes at this generation.
 func (s *Storage) SetEventLogGeneration(gen uint64) error {
-	if err := s.requireNativeEventLog(); err != nil {
+	s.eventMu.RLock()
+	shared := s.eventLog.managed != nil
+	s.eventMu.RUnlock()
+	persist := func() error { return s.putScrubCompleted(gen) }
+	if shared {
+		if err := s.initializeFetchedGenerationWith(context.Background(), gen, persist); err != nil {
+			return err
+		}
+	} else if err := persist(); err != nil {
 		return err
 	}
-	if err := s.putScrubCompleted(gen); err != nil {
-		return err
-	}
+
 	s.lastScrubbedBound.Store(gen)
 	s.swappedBound.Store(gen)
 	return nil

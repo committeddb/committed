@@ -60,7 +60,9 @@ func (s *Storage) runPendingSharedScrub() (err error) {
 			return err
 		}
 		completed := s.lastScrubbedBound.Load()
-		if selected < completed || selected > bound {
+		// A fetched generation may be completed without a local scrub request.
+		// Selection above completion still requires pending authorization below.
+		if selected < completed || selected > max(bound, completed) {
 			return fmt.Errorf("scrub generation %d outside completed/pending bounds %d/%d: %w", selected, completed, bound, eventlog.ErrInvalid)
 		}
 		if selected > completed {

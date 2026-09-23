@@ -1094,6 +1094,9 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 	if err != nil {
 		return nil, err
 	}
+	if err := ws.recoverFetchedGeneration(completed); err != nil {
+		return nil, fmt.Errorf("recover fetched event generation: %w", err)
+	}
 	ws.lastScrubbedBound.Store(completed)
 	if ws.safeMode {
 		// Safe mode (see WithSafeMode): no background scrub — a pending bound

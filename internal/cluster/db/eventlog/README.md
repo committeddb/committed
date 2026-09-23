@@ -318,7 +318,7 @@ segmented backend.
 
 Native peer-transfer APIs explicitly require the native binding. Shared backends
 return `eventlog.ErrUnsupported` for physical sequence reads, native layouts and
-segment adoption, directory reset, and peer generation assignment.
+segment adoption and directory reset.
 The guard runs before reset closes or removes the log, before adoption inspects
 or consumes staged files. Rejection
 leaves logical reads/appends and reopening usable. This also applies to the
@@ -331,7 +331,7 @@ for every backend. It verifies framing and decodes each entry once before any
 append. Native storage keeps the original frame; shared backends keep the original
 protobuf payload, including unknown fields. Overlap skipping, append serialization,
 and event-progress accounting retain the existing receiver behavior. This supports
-the record-receive step; shared segment adoption, generation assignment, and the
+the record-receive step; shared segment adoption and the
 complete catch-up lifecycle remain separate from it.
 
 `Storage.ServeEvents` serves shared backends through the existing framed-record
@@ -345,7 +345,7 @@ records beyond the captured frontier are excluded.
 The existing `LastIndex` field still means the last delivered record. An erased
 suffix therefore does not advance receiver progress through that suffix; serving
 reports no more surviving records. This path does not install erased append
-progress or complete shared-backend generation adoption and snapshot recovery.
+progress or complete shared-backend snapshot recovery.
 Tests cover source/receiver backend combinations, bounded ranges, oversized records,
 sparse histories, generation reporting, cancellation, and interrupted streams.
 
@@ -363,14 +363,29 @@ adoption or whole-file transfer.
 `Storage.initializeFetchedGeneration` initializes an empty shared receiver's
 storage generation while a catch-up fence is held. It uses the existing atomic
 empty-rewrite publication protocol. Changing generations requires no append
-history and no application progress; an entirely erased log still has append
+history; an entirely erased log still has append
 history and is rejected. Same-generation retries are no-ops, including after a
 partial receive. The operation does not update applied progress or scrub-completion
 metadata. Tests reopen after failures before publication and after lost publication
 acknowledgments, then resume without repeating an already-published initialization.
-These experimental receivers are reopened in safe mode; automatic application
-catch-up recovery and snapshot installation are not integrated. The native format
-continues to use its existing generation-assignment protocol.
+The private storage-only experiment does not publish application completion and
+is reopened in safe mode.
+
+The public `SetEventLogGeneration` path supports shared backends through the
+existing catch-up generation convention. Under the catch-up fence, it checks that
+the backend can adopt the generation, persists that generation in the existing
+scrub-completion metadata, and then initializes storage. No additional receipt or
+metadata file is created. Startup completes interrupted initialization only for
+an empty backend whose selected generation trails that metadata. Existing append
+history, including wholly erased history, cannot be relabeled. Applied progress
+is preserved independently of the empty event log.
+
+Imported completion may be ahead of this node's pending scrub request, as in
+native catch-up. Shared scrub maintenance accepts the matching selected generation
+without requiring a locally applied scrub command. Tests cover normal reopen after
+partial receipt, interruptions on either side of publication, and retries. Shared
+reset, erased-suffix progress, and the complete snapshot-install lifecycle are not
+integrated by this generation-adoption path.
 
 The matching internal `Storage.fetchEntries` returns bounded batches of original
 protobuf payloads, with the selected generation, captured append frontier, resume

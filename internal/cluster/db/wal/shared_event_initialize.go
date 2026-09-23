@@ -9,10 +9,16 @@ import (
 // initializeFetchedGeneration assigns the source generation to an empty shared
 // receiver. Same-generation retries are no-ops, including after partial receive.
 // No history (even fully erased history) may be relabeled. The caller holds a
-// catch-up fence and excludes Close/replacement. This internal experiment does
-// not install snapshots or mark scrubs complete; interrupted transfers must be
-// resumed in safe mode until application catch-up recovery is integrated.
+// catch-up fence and excludes Close/replacement. This storage-only helper does
+// not install snapshots or record application completion; its tests reopen in
+// safe mode. SetEventLogGeneration supplies the application persistence step.
 func (s *Storage) initializeFetchedGeneration(ctx context.Context, generation uint64) error {
+	return s.initializeFetchedGenerationWith(ctx, generation, nil)
+}
+
+// beforePublish persists the existing application generation after eligibility
+// checks but before storage publication. It also runs on same-generation retry.
+func (s *Storage) initializeFetchedGenerationWith(ctx context.Context, generation uint64, beforePublish func() error) error {
 	if ctx == nil {
 		return eventlog.ErrInvalid
 	}
@@ -45,6 +51,9 @@ func (s *Storage) initializeFetchedGeneration(ctx context.Context, generation ui
 		return err
 	}
 	if selected == generation {
+		if beforePublish != nil {
+			return beforePublish()
+		}
 		return nil
 	}
 	if generation < selected {
@@ -54,8 +63,13 @@ func (s *Storage) initializeFetchedGeneration(ctx context.Context, generation ui
 	if err != nil {
 		return err
 	}
-	if hasHistory || s.EventIndex() != 0 || s.AppliedIndex() != 0 {
+	if hasHistory || s.EventIndex() != 0 {
 		return eventlog.ErrInvalid
+	}
+	if beforePublish != nil {
+		if err := beforePublish(); err != nil {
+			return err
+		}
 	}
 	// An empty rewrite publishes only storage generation metadata. Encountering
 	// any record contradicts the empty-history check and must abort publication.
