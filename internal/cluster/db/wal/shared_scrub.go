@@ -46,18 +46,30 @@ func (s *Storage) runPendingSharedScrub() error {
 		if selected > completed {
 			// History survives metadata GC and pending-request replacement. Do
 			// not interpret an arbitrary experimental rewrite as an applied scrub.
-			history, err := s.loadScrubHistory(s.AppliedIndex())
+			// Applied progress is saved after the batch; history and a rewrite
+			// may already be durable when that save is interrupted. Include
+			// durable events ahead of apply so recovery can wait for replay.
+			applied := s.AppliedIndex()
+			history, err := s.loadScrubHistory(s.EventIndex())
 			if err != nil {
 				return err
 			}
 			authorized := false
+			awaitingApply := false
 			for _, row := range history {
 				if row.bound == selected && row.cmdIndex > selected {
+					if row.cmdIndex > applied {
+						awaitingApply = true
+						continue
+					}
 					authorized = true
 					break
 				}
 			}
 			if !authorized {
+				if awaitingApply {
+					return errScrubApplyPending
+				}
 				return fmt.Errorf("scrub generation %d has no applied authorization: %w", selected, eventlog.ErrInvalid)
 			}
 			if err := s.finishSharedScrub(selected); err != nil {

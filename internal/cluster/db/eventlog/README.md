@@ -211,7 +211,8 @@ it does not rerun the erasure gate on metadata that has already been scrubbed.
 On restart, an unfinished selected generation is checked against applied scrub
 history and completed before a newer pending request is prepared. No additional
 receipt or persisted subject-key list is used. Tests apply real scrub commands,
-interrupt reclamation before and after removal, supersede pending requests,
+interrupt calls before publication, after publication with a lost acknowledgment,
+and before and after reclamation, supersede pending requests,
 and reopen both shared backends. They verify that the older publication is not
 rewritten and that retained versus erased delete keys have the correct cadence
 bookkeeping. Public `wal.Open` continues to select the native backend.
@@ -223,6 +224,13 @@ avoid repeated selection scans while those blockers remain. Closing Storage stop
 this retry wait even with a reader still pinned. Backend failures do not trigger
 this timer; their reopen requirement remains intact. Tests also cover automatic
 pending-scrub recovery on normal open.
+
+Publication can also precede the enclosing apply batch's saved watermark. Recovery
+recognizes matching durable scrub history ahead of that watermark and waits for
+Raft replay before completing the selected generation. Missing history remains
+an error. A restart regression test covers this window and verifies that replay
+finishes the existing publication without another rewrite.
+
 
 
 The native scrub's unpublished replacement is written by
