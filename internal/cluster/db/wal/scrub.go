@@ -2,7 +2,9 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"time"
 
 	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 
@@ -116,25 +118,30 @@ func (s *Storage) stopScrubWorker() {
 // on each signal.
 func (s *Storage) scrubWorker() {
 	defer close(s.scrubDone)
-	if err := s.runPendingScrub(); err != nil {
-		s.logger.Error("resume pending scrub", zap.Error(err))
-	}
+	// Only temporary admission failures are retried automatically. Backend
+	// failures may require reopen and must not become a tight retry loop.
+	retry := time.NewTimer(time.Hour)
+	retry.Stop()
+	defer retry.Stop()
 	for {
+		if err := s.runOwedCompaction(); err != nil {
+			s.logger.Error("run owed compaction", zap.Error(err))
+		}
+		err := s.runPendingScrub()
+		switch {
+		case errors.Is(err, errScrubStopped):
+			return
+		case errors.Is(err, errEventRewriteDeferred), errors.Is(err, ErrLayoutFrozen), errors.Is(err, errScrubApplyPending):
+			retry.Reset(50 * time.Millisecond)
+		case err != nil:
+			s.logger.Error("run pending scrub", zap.Error(err))
+		}
 		select {
 		case <-s.scrubStop:
 			return
 		case <-s.scrubSignal:
-			// Finish any physical erasure a prior scrub pruned but couldn't
-			// compact (crash/ENOSPC) before processing new bounds — the completed
-			// bound wouldn't otherwise re-drive it. See runOwedCompaction.
-			if err := s.runOwedCompaction(); err != nil {
-				s.logger.Error("run owed compaction", zap.Error(err))
-			}
-			if err := s.runPendingScrub(); err != nil {
-				// Leave the pending bound set; a later signal or a restart
-				// retries. The rewrite is idempotent, so a retry is safe.
-				s.logger.Error("run pending scrub", zap.Error(err))
-			}
+			retry.Stop()
+		case <-retry.C:
 		}
 	}
 }

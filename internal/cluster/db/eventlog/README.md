@@ -216,6 +216,15 @@ and reopen both shared backends. They verify that the older publication is not
 rewritten and that retained versus erased delete keys have the correct cadence
 bookkeeping. Public `wal.Open` continues to select the native backend.
 
+The background worker also runs against both shared backends in integration tests.
+Temporary blockers (protected readers, layout freezes, and a scrub command whose
+apply watermark has not advanced yet) trigger a 50 ms retry. Admission checks
+avoid repeated selection scans while those blockers remain. Closing Storage stops
+this retry wait even with a reader still pinned. Backend failures do not trigger
+this timer; their reopen requirement remains intact. Tests also cover automatic
+pending-scrub recovery on normal open.
+
+
 The native scrub's unpublished replacement is written by
 `tidwall.LegacyRewrite`: it owns private-log creation, dense survivor numbering,
 explicit sync, and sealed-segment compression. `wal` supplies framed survivor
@@ -272,7 +281,7 @@ backends, including replay, applied visibility, temporary EOF, sparse lookup,
 prefix bounds, and reader rebinding after replacement. These fixtures exercise
 those methods directly. An internal opening hook also runs the real Storage startup,
 Raft Save, committed apply, and reopen paths against each backend. These startup
-tests use safe mode to hold native background maintenance; they cover replay of an
+tests use safe mode to hold background maintenance; they cover replay of an
 event batch made durable before applied progress was saved. Failed startup closes
 all opened logs, including releasing the segmented backend's directory lock.
 Public Open still selects tidwall. Segmented native maintenance and peer catch-up

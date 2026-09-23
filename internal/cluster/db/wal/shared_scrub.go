@@ -2,6 +2,7 @@ package wal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	pb "go.etcd.io/raft/v3/raftpb"
@@ -9,6 +10,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
+
+var errScrubApplyPending = errors.New("scrub command is waiting for its apply watermark")
 
 // runPendingSharedScrub owns generation assignment for application scrubs:
 // generation is the authorized upper bound, never a rewrite attempt counter.
@@ -66,9 +69,28 @@ func (s *Storage) runPendingSharedScrub() error {
 			return nil
 		}
 		// The mirrored command beyond the bound must be durable and applied.
-		if cmdIndex <= bound || cmdIndex > s.AppliedIndex() || s.AppliedIndex() > s.EventIndex() {
+		if cmdIndex <= bound || s.AppliedIndex() > s.EventIndex() {
 			return eventlog.ErrInvalid
 		}
+		// handleScrub signals before the enclosing apply finishes. Wait for
+		// its watermark; no later traffic is required to wake the worker.
+		if cmdIndex > s.AppliedIndex() {
+			return errScrubApplyPending
+		}
+		// Avoid rescanning the log on every retry while a long-lived reader
+		// or file listing blocks publication. rewriteSharedPlan checks again
+		// under its mutation locks after preparation.
+		s.fromZeroMu.Lock()
+		pinned := s.fromZeroReads != 0
+		s.fromZeroMu.Unlock()
+		if pinned {
+			return errEventRewriteDeferred
+		}
+		release, ok := s.eventLayout.move()
+		if !ok {
+			return ErrLayoutFrozen
+		}
+		release()
 		plan, err := s.prepareScrubPlan(bound, hash, cmdIndex)
 		if err != nil {
 			return err
