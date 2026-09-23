@@ -362,6 +362,18 @@ func DecompressNode(baseDir string) (map[string]int, error) {
 	if lock != nil {
 		defer func() { _ = lock.Close() }()
 	}
+	// Preflight every log before rewriting any of them. Decompression only
+	// reverses tidwall compression; it cannot convert another storage format.
+	for _, parts := range walLogSubdirs {
+		dir := filepath.Join(append([]string{baseDir}, parts...)...)
+		segmented, err := segmentlog.RecognizeDirectory(dir)
+		if err != nil {
+			return nil, err
+		}
+		if segmented {
+			return nil, fmt.Errorf("%s: segmented storage cannot be made compatible with pre-0.8.0 binaries by decompression", dir)
+		}
+	}
 	out := map[string]int{}
 	for _, parts := range walLogSubdirs {
 		dir := filepath.Join(append([]string{baseDir}, parts...)...)

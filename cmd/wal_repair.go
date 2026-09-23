@@ -162,7 +162,11 @@ running is refused via its lock), and only when downgrading to a binary
 older than 0.8.0 — those binaries do not recognize compressed segments and
 would open a partial log. Upgrades need nothing: mixed logs read
 transparently, and the background sealer re-compresses after the next start
-on a 0.8.0+ binary.`,
+on a 0.8.0+ binary.
+
+This command applies to tidwall storage. Segmented storage uses a different
+on-disk format and is refused before any log is rewritten; decompression
+cannot make that format readable by pre-0.8.0 binaries.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if walDecompressData == "" {

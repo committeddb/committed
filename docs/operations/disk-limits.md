@@ -35,9 +35,13 @@ transparently, and memory sizing is unchanged (see operations/memory.md).
 recognize compressed (`.zst`) segments. Before starting an old binary
 against a data dir that ran 0.8.0+, stop the node and run
 `committed wal decompress --data <datadir>` — it rewrites every compressed
-segment back to the plain format. Upgrades need nothing.
+tidwall segment back to the plain format. Upgrades need nothing.
 
-`committed wal repair` understands both formats. A checksum failure inside a
+This downgrade command applies to tidwall storage. It refuses segmented storage
+before rewriting any log: decompressing its contents would not make its on-disk
+format readable by pre-0.8.0 binaries.
+
+`committed wal repair` understands both plain and compressed tidwall segments. A checksum failure inside a
 compressed segment is data corruption (rebuild from a healthy replica),
 never a torn tail — torn tails only occur in the plain active tail, exactly
 as before. Backups copy segment files as-is, so backups of a compressed log
