@@ -150,7 +150,10 @@ func (s *Storage) scrubWorker() {
 // completed, looping so a bound raised during a rewrite is picked up
 // immediately.
 func (s *Storage) runPendingScrub() error {
-	if s.eventLog.managed != nil {
+	s.eventMu.RLock()
+	shared := s.eventLog.managed != nil
+	s.eventMu.RUnlock()
+	if shared {
 		return s.runPendingSharedScrub()
 	}
 	for {

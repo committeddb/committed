@@ -98,6 +98,9 @@ func (s *Storage) EventLogGeneration() uint64 {
 // no-op here (its rewrite is already in the bytes), a pending one beyond it
 // re-runs, and a restart mid-fetch resumes at this generation.
 func (s *Storage) SetEventLogGeneration(gen uint64) error {
+	if err := s.requireNativeEventLog(); err != nil {
+		return err
+	}
 	if err := s.putScrubCompleted(gen); err != nil {
 		return err
 	}
@@ -162,6 +165,9 @@ func (s *Storage) ResetEventLog() error {
 	defer release()
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
+	if err := s.requireNativeEventLogLocked(); err != nil {
+		return err
+	}
 	if err := s.eventLog.Close(); err != nil {
 		return fmt.Errorf("close event log for reset: %w", err)
 	}
@@ -189,6 +195,9 @@ func (s *Storage) EventLayout() (EventLayout, error) {
 	}
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
+	if err := s.requireNativeEventLogLocked(); err != nil {
+		return EventLayout{}, err
+	}
 	layout, err := s.nativeEventTransferLocked().Layout()
 	if err != nil {
 		return EventLayout{}, fmt.Errorf("event log layout: %w", err)
@@ -206,6 +215,9 @@ func (s *Storage) EventSeqForIndex(raftIndex uint64) (uint64, error) {
 }
 
 func (s *Storage) eventSeqForIndexLocked(raftIndex uint64) (uint64, error) {
+	if err := s.requireNativeEventLogLocked(); err != nil {
+		return 0, err
+	}
 	positioner := newLegacyPositioner(s)
 	defer func() { _ = positioner.Close() }()
 	return positioner.SequenceFor(raftIndex)
@@ -216,6 +228,9 @@ func (s *Storage) eventSeqForIndexLocked(raftIndex uint64) (uint64, error) {
 func (s *Storage) ReadEventRaw(seq uint64) ([]byte, error) {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
+	if err := s.requireNativeEventLogLocked(); err != nil {
+		return nil, err
+	}
 	return s.nativeEventTransferLocked().Read(seq)
 }
 
@@ -250,6 +265,9 @@ const (
 // the edges — the segment holding the first wanted record, one extending
 // past the last, and the tail — go as records. Implements db.EventServer.
 func (s *Storage) ServeEvents(ctx context.Context, after, to uint64, sink db.EventSink) (db.EventServeResult, error) {
+	if err := s.requireNativeEventLog(); err != nil {
+		return db.EventServeResult{}, err
+	}
 	release := s.FreezeEventLayout()
 	defer release()
 
@@ -356,6 +374,9 @@ func (s *Storage) sendSegment(sink db.EventSink, sg EventSegment) error {
 func (s *Storage) encodeRecords(lo, hi uint64, maxBytes int) (data []byte, last uint64, err error) {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
+	if err := s.requireNativeEventLogLocked(); err != nil {
+		return nil, 0, err
+	}
 	return s.nativeEventTransferLocked().EncodeRecords(lo, hi, maxBytes)
 }
 
@@ -365,6 +386,9 @@ func (s *Storage) encodeRecords(lo, hi uint64, maxBytes int) (data []byte, last 
 // or below this node's event index are skipped, so overlap at a fetch
 // boundary is harmless.
 func (s *Storage) AppendFetchedRecords(data []byte) error {
+	if err := s.requireNativeEventLog(); err != nil {
+		return err
+	}
 	var raws [][]byte
 	var indexes []uint64
 	var bad error
@@ -399,6 +423,9 @@ func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
 	defer s.eventAppendMu.Unlock()
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
+	if err := s.requireNativeEventLogLocked(); err != nil {
+		return err
+	}
 
 	appender := s.fetchedEventAppenderLocked()
 	_, hasHistory, err := appender.LastAppended()
@@ -446,6 +473,9 @@ func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
 // it was. A compressed last file is fine: the log starts a fresh plain tail
 // past it. Refused while a layout freeze stands.
 func (s *Storage) AdoptEventSegments(paths []string) error {
+	if err := s.requireNativeEventLog(); err != nil {
+		return err
+	}
 	if len(paths) == 0 {
 		return nil
 	}
