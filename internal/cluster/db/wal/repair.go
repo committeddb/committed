@@ -14,6 +14,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
+	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 // Offline WAL repair. A node's tidwall-backed logs store records as
@@ -40,6 +41,9 @@ const (
 	// LogTornTail: the final record is an unacknowledged partial write, safe to
 	// truncate.
 	LogTornTail LogStatus = "torn-tail"
+	// LogIncompleteTail identifies a partial append group whose safety to
+	// truncate has not been established by offline inspection.
+	LogIncompleteTail LogStatus = "incomplete-tail"
 	// LogCorrupt: a complete record fails its checksum, or the log is
 	// mid-compaction — not auto-repairable, rebuild from a healthy replica.
 	LogCorrupt LogStatus = "corrupt"
@@ -82,7 +86,7 @@ type segFile struct {
 	name  string
 }
 
-// walLogSubdirs are the three tidwall-backed logs under a node's data dir,
+// walLogSubdirs are the three log locations under a node's data dir,
 // matching Open() in wal_storage.go. (metadata/ is bbolt, which page-checksums
 // itself, and is not scanned here.)
 var walLogSubdirs = [][]string{
@@ -133,6 +137,14 @@ func listSegments(dir string) ([]segFile, bool, error) {
 // distinguishing a torn trailing record (safe to truncate) from mid-log
 // corruption (must rebuild). It never modifies the log.
 func DiagnoseLog(dir string) (*Diagnosis, error) {
+	segmented, err := segmentlog.RecognizeDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	if segmented {
+		return diagnoseSegmentedLog(dir)
+	}
+
 	d := &Diagnosis{Dir: dir}
 	segs, marker, err := listSegments(dir)
 	if err != nil {

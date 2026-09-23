@@ -65,10 +65,12 @@ func runWalRepair() error {
 		return err
 	}
 
-	corrupt, torn := false, false
+	corrupt, torn, incomplete := false, false, false
 	for _, d := range results {
 		_, _ = fmt.Fprintf(os.Stdout, "%s: %s — %s\n", d.Dir, d.Status, d.Detail)
 		switch d.Status {
+		case wal.LogIncompleteTail:
+			incomplete = true
 		case wal.LogCorrupt:
 			corrupt = true
 		case wal.LogTornTail:
@@ -77,6 +79,8 @@ func runWalRepair() error {
 	}
 
 	switch {
+	case incomplete:
+		return fmt.Errorf("wal repair: incomplete segmented tail left unchanged; safe truncation requires establishing the durable event boundary")
 	case corrupt:
 		_, _ = fmt.Fprintln(os.Stdout, "\nnon-recoverable corruption (checksum failure or mid-compaction): rebuild this node from a healthy replica; see docs/operations/rebuild.md")
 		return fmt.Errorf("wal repair: corruption that is not a torn tail; rebuild required")

@@ -93,3 +93,25 @@ func InspectDirectory(ctx context.Context, path string) (result Inspection, retE
 	}
 	return result, nil
 }
+
+// RecognizeDirectory identifies existing segmented storage artifacts for offline
+// tooling. Recognition does not establish validity: a missing or damaged catalog
+// must still be diagnosed by InspectDirectory. It does not select a live backend.
+func RecognizeDirectory(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.Name() == boltCatalogName {
+			return true, nil
+		}
+		if _, ok := dataFileStart(entry.Name()); ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
