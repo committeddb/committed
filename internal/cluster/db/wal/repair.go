@@ -335,6 +335,11 @@ func RepairNode(baseDir string, commit bool) ([]*Diagnosis, error) {
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", dir, err)
 		}
+		if d.Status == LogIncompleteTail && dir == datadir.EventsDir(baseDir) {
+			if err := repairSegmentedNodeTail(baseDir, dir, lock, d, commit); err != nil {
+				return out, err
+			}
+		}
 		out = append(out, d)
 	}
 	return out, nil
