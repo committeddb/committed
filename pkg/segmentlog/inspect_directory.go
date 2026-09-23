@@ -19,7 +19,9 @@ import (
 // An incomplete tail is evidence of a partial group, not permission to truncate;
 // the application must establish its durability requirements before repair.
 type Inspection struct {
-	Records uint64
+	tailFile      string
+	checkpointEnd int64
+	Records       uint64
 	// DamagedSegment identifies a selected immutable file that failed validation.
 	// It is nil for catalog and active-tail failures.
 	DamagedSegment *SegmentRef
@@ -43,6 +45,11 @@ func InspectDirectory(ctx context.Context, path string) (result Inspection, retE
 		return result, err
 	}
 	defer func() { retErr = errors.Join(retErr, lock.Close()) }()
+	return inspectDirectoryLocked(ctx, path)
+}
+
+// Caller holds the directory lock for the entire inspection and any repair.
+func inspectDirectoryLocked(ctx context.Context, path string) (result Inspection, retErr error) {
 	catalogPath := filepath.Join(path, boltCatalogName)
 	info, err := os.Lstat(catalogPath) // #nosec G703 -- Fixed metadata basename in the caller-selected log directory.
 	if err != nil {
@@ -76,6 +83,10 @@ func InspectDirectory(ctx context.Context, path string) (result Inspection, retE
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
+	}
+	result.tailFile = head.Active.File
+	if head.Active.Checkpoint != nil {
+		result.checkpointEnd = head.Active.Checkpoint.End
 	}
 	tailPath := filepath.Join(path, head.Active.File)
 	info, err = os.Lstat(tailPath) // #nosec G703 -- Catalog validation checks the selected tail basename.
