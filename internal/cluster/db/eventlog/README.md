@@ -326,6 +326,17 @@ experimental tidwall wrapper: its CURRENT/generation layout is not the native
 peer-transfer format. Native transfer conformance tests retain their existing
 byte-for-byte behavior.
 
+`Storage.appendFetchedEntries` is an internal logical-record receive experiment
+shared by native tidwall and both shared backends. It accepts unframed protobuf
+bytes only while a catch-up fence is held, validates the entire ordered batch,
+and requires the sender's generation to match the selected backend generation.
+It preserves payload bytes, skips overlap using original append progress (including
+erased records), and updates event progress only after a successful append. It
+does not advance applied progress or install snapshot metadata. Shared rewrites
+recheck the catch-up fence under append exclusion after policy preparation.
+This method has no public transport route and does not implement cross-generation
+adoption or whole-file transfer.
+
 
 ## Implementations
 

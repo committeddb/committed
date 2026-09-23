@@ -23,6 +23,11 @@ func (s *Storage) rewriteSharedPlan(ctx context.Context, generation uint64, plan
 	}
 	s.eventAppendMu.Lock()
 	defer s.eventAppendMu.Unlock()
+	// A catch-up may begin after the worker prepared its plan. Check again
+	// under append exclusion before publishing over an incoming history.
+	if s.catchingUp.Load() {
+		return eventlog.RewriteResult{}, errEventRewriteDeferred
+	}
 	s.fromZeroMu.Lock()
 	defer s.fromZeroMu.Unlock()
 	if s.fromZeroReads != 0 {

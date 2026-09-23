@@ -40,6 +40,10 @@ func TestStorageSharedRewritePublication(t *testing.T) {
 			// A prepared selection removes the old subject row. Policy derivation
 			// is covered by the scrub tests; this test exercises its publication.
 			plan := &scrubPlan{bound: 30, selections: map[string]uint64{string(tombstoneKey("items", []byte("removed"))): 30}}
+			endCatchUp := s.BeginCatchUp()
+			_, err = s.rewriteSharedPlan(t.Context(), 1, plan)
+			require.ErrorIs(t, err, errEventRewriteDeferred, "catch-up can start after plan preparation")
+			endCatchUp()
 			unpin := s.BeginFromZeroRead()
 			_, err = s.rewriteSharedPlan(t.Context(), 1, plan)
 			require.ErrorIs(t, err, errEventRewriteDeferred)
