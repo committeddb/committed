@@ -143,6 +143,9 @@ func (s *Storage) scrubWorker() {
 // completed, looping so a bound raised during a rewrite is picked up
 // immediately.
 func (s *Storage) runPendingScrub() error {
+	if s.eventLog.managed != nil {
+		return s.runPendingSharedScrub()
+	}
 	for {
 		bound, hash, cmdIndex, err := s.loadPendingScrub()
 		if err != nil {

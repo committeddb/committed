@@ -200,6 +200,22 @@ completion bookkeeping untouched. Tests reopen Storage after injected failures
 before and after reclamation, then finish reclamation without another rewrite.
 This is a reclamation step; the production scrub worker still uses native execution.
 
+For Storage opened with an experimental shared backend, `runPendingScrub`
+dispatches to the shared lifecycle in `wal/shared_scrub.go`. It assigns each
+rewrite the authorized scrub upper bound as its generation. After publication,
+it refreshes event bounds, reclaims retired managed files, reconciles the
+delete-key cadence index from surviving records, and runs the existing scrub
+completion/tombstone-compaction path. Reconciliation reads actual survivors;
+it does not rerun the erasure gate on metadata that has already been scrubbed.
+
+On restart, an unfinished selected generation is checked against applied scrub
+history and completed before a newer pending request is prepared. No additional
+receipt or persisted subject-key list is used. Tests apply real scrub commands,
+interrupt reclamation before and after removal, supersede pending requests,
+and reopen both shared backends. They verify that the older publication is not
+rewritten and that retained versus erased delete keys have the correct cadence
+bookkeeping. Public `wal.Open` continues to select the native backend.
+
 The native scrub's unpublished replacement is written by
 `tidwall.LegacyRewrite`: it owns private-log creation, dense survivor numbering,
 explicit sync, and sealed-segment compression. `wal` supplies framed survivor
