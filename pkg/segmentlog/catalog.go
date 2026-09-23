@@ -104,6 +104,12 @@ func validateCatalog(c Catalog) error {
 }
 
 func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
+	return checkCatalogFiles(dir, c, true)
+}
+
+// Publication verifies and syncs candidates before selecting them. Offline
+// inspection uses the same checks without flushing any files.
+func checkCatalogFiles(dir string, c Catalog, syncFiles bool) (retErr error) {
 	for _, ref := range c.Segments {
 		if ref.Count == 0 {
 			continue
@@ -125,7 +131,10 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 			if err := verifySegmentDigest(f, info.Size(), ref); err != nil {
 				return err
 			}
-			return f.Sync()
+			if syncFiles {
+				return f.Sync()
+			}
+			return nil
 		}()
 		if err != nil {
 			return fmt.Errorf("segmentlog: segment %s: %w", ref.File, err)
@@ -149,7 +158,9 @@ func verifyCatalogFiles(dir string, c Catalog) (retErr error) {
 		if err != nil {
 			return err
 		}
-		return f.Sync()
+		if syncFiles {
+			return f.Sync()
+		}
 	}
 	return nil
 }
