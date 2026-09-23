@@ -381,16 +381,13 @@ func (s *Storage) encodeRecords(lo, hi uint64, maxBytes int) (data []byte, last 
 }
 
 // AppendFetchedRecords appends a run of records fetched from a peer — the
-// log's on-disk encoding, as ServeEvents produced it — verbatim: each
-// frame is verified and the bytes written are the peer's bytes. Records at
+// existing framed wire encoding, as ServeEvents produced it. Each frame is
+// verified; native storage retains the frame and shared storage retains its
+// original protobuf payload without re-encoding. Records at
 // or below this node's event index are skipped, so overlap at a fetch
 // boundary is harmless.
 func (s *Storage) AppendFetchedRecords(data []byte) error {
-	if err := s.requireNativeEventLog(); err != nil {
-		return err
-	}
-	var raws [][]byte
-	var indexes []uint64
+	var received []fetchedRecord
 	var bad error
 	_, incompleteAt := walkSegmentRecords(data, func(ordinal, off, _ int, rec []byte) bool {
 		payload, err := unframe(rec)
@@ -403,8 +400,7 @@ func (s *Storage) AppendFetchedRecords(data []byte) error {
 			bad = fmt.Errorf("fetched record %d: %w", ordinal, err)
 			return false
 		}
-		raws = append(raws, rec)
-		indexes = append(indexes, ent.GetIndex())
+		received = append(received, fetchedRecord{frame: rec, Record: eventlog.Record{ID: ent.GetIndex(), Payload: payload}})
 		return true
 	})
 	if bad != nil {
@@ -413,37 +409,50 @@ func (s *Storage) AppendFetchedRecords(data []byte) error {
 	if incompleteAt >= 0 {
 		return fmt.Errorf("fetched records end inside a record at offset %d", incompleteAt)
 	}
-	return s.appendRawEvents(raws, indexes)
+	return s.appendPeerRecords(received)
 }
 
-// appendRawEvents is appendEvents for records already framed: the bytes go
-// into the log as they are.
-func (s *Storage) appendRawEvents(raws [][]byte, indexes []uint64) error {
+// fetchedRecord retains both wire framing and validated logical identity. Both
+// slices refer to the incoming batch; receiving adds no payload copy or decode.
+type fetchedRecord struct {
+	frame []byte
+	eventlog.Record
+}
+
+// appendPeerRecords preserves native frames for the legacy owner and writes
+// logical records to shared backends. Overlap and ordering follow the existing
+// fetch behavior; generation selection remains the catch-up coordinator's job.
+func (s *Storage) appendPeerRecords(received []fetchedRecord) error {
 	s.eventAppendMu.Lock()
 	defer s.eventAppendMu.Unlock()
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
-	if err := s.requireNativeEventLogLocked(); err != nil {
-		return err
+	appender := s.eventAppenderLocked()
+	native := s.eventLog.native != nil
+	if native {
+		appender = s.fetchedEventAppenderLocked()
 	}
 
-	appender := s.fetchedEventAppenderLocked()
 	_, hasHistory, err := appender.LastAppended()
 	if err != nil {
 		return fmt.Errorf("event log last index: %w", err)
 	}
-	records := make([]eventlog.Record, 0, len(raws))
+	records := make([]eventlog.Record, 0, len(received))
 	first, last := uint64(0), uint64(0)
 	wasEmpty := !hasHistory
-	for i, raw := range raws {
-		if indexes[i] <= s.eventIndex.Load() || (last != 0 && indexes[i] <= last) {
+	for _, record := range received {
+		if record.ID <= s.eventIndex.Load() || (last != 0 && record.ID <= last) {
 			continue
 		}
-		records = append(records, eventlog.Record{ID: indexes[i], Payload: raw})
-		if first == 0 {
-			first = indexes[i]
+		payload := record.Payload
+		if native {
+			payload = record.frame
 		}
-		last = indexes[i]
+		records = append(records, eventlog.Record{ID: record.ID, Payload: payload})
+		if first == 0 {
+			first = record.ID
+		}
+		last = record.ID
 	}
 	if last == 0 {
 		return nil

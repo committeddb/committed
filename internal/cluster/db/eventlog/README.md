@@ -318,13 +318,21 @@ segmented backend.
 
 Native peer-transfer APIs explicitly require the native binding. Shared backends
 return `eventlog.ErrUnsupported` for physical sequence reads, native layouts and
-record streams, segment adoption, directory reset, and peer generation assignment.
+record serving, segment adoption, directory reset, and peer generation assignment.
 The guard runs before reset closes or removes the log, before adoption inspects
 or consumes staged files, and before serving invokes the transport. Rejection
 leaves logical reads/appends and reopening usable. This also applies to the
 experimental tidwall wrapper: its CURRENT/generation layout is not the native
 peer-transfer format. Native transfer conformance tests retain their existing
 byte-for-byte behavior.
+
+`Storage.AppendFetchedRecords` accepts the existing framed peer-record batches
+for every backend. It verifies framing and decodes each entry once before any
+append. Native storage keeps the original frame; shared backends keep the original
+protobuf payload, including unknown fields. Overlap skipping, append serialization,
+and event-progress accounting retain the existing receiver behavior. This supports
+the record-receive step; shared segment adoption, generation assignment, and the
+complete catch-up lifecycle remain separate from it.
 
 `Storage.appendFetchedEntries` is an internal logical-record receive experiment
 shared by native tidwall and both shared backends. It accepts unframed protobuf

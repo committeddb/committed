@@ -34,7 +34,6 @@ func TestSharedBackendsRejectNativeTransfer(t *testing.T) {
 				{"reset", s.ResetEventLog},
 				{"set-generation", func() error { return s.SetEventLogGeneration(99) }},
 				{"adopt", func() error { return s.AdoptEventSegments([]string{staged}) }},
-				{"append-framed-records", func() error { return s.AppendFetchedRecords([]byte("native wire bytes")) }},
 				{"serve", func() error { _, err := s.ServeEvents(t.Context(), 0, 10, nil); return err }},
 				{"sequence", func() error { _, err := s.EventSeqForIndex(10); return err }},
 				{"first-sequence", func() error { _, err := s.firstEventSeq(); return err }},
