@@ -337,6 +337,18 @@ recheck the catch-up fence under append exclusion after policy preparation.
 This method has no public transport route and does not implement cross-generation
 adoption or whole-file transfer.
 
+The matching internal `Storage.fetchEntries` returns bounded batches of original
+protobuf payloads, with the selected generation, captured append frontier, resume
+index, and an explicit completion flag. One publication read lock covers the
+batch; concurrent appends cannot extend its captured upper bound. Sparse gaps
+advance coverage without inventing records. Record count is a hard bound; the
+first record may exceed the byte budget so an oversized record still makes
+progress. A separate validated record cursor preserves original bytes and leaves
+the decoded streaming-reader interface unchanged. Tests transfer records across
+all native/shared backend pairs and reopen receivers to verify byte preservation.
+The batch reports erased-tail append progress, but receiving an empty batch does
+not install that accounting or application snapshots.
+
 
 ## Implementations
 

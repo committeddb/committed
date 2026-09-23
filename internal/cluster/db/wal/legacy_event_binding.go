@@ -2,6 +2,7 @@ package wal
 
 import (
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
@@ -37,7 +38,22 @@ func bindLegacyEventLog(log *tidwall.LegacyLog, m *metrics.Metrics) *eventLogBin
 			return records[0], nil
 		},
 	})
-	return &eventLogBinding{native: log, compressor: log, entries: &boundEntryStore{
+	return &eventLogBinding{native: log, compressor: log, records: func() eventlog.Cursor {
+		return tidwall.NewLegacyLogCursor(log, func(raw []byte) (uint64, eventlog.Record, error) {
+			payload, err := decodeFrame(raw)
+			if err != nil {
+				return 0, eventlog.Record{}, err
+			}
+			entry := new(pb.Entry)
+			if err := proto.Unmarshal(payload, entry); err != nil {
+				return 0, eventlog.Record{}, err
+			}
+			if entry.GetIndex() == 0 || entry.GetIndex() == ^uint64(0) {
+				return 0, eventlog.Record{}, ErrCorruptEntry
+			}
+			return entry.GetIndex(), eventlog.Record{ID: entry.GetIndex(), Payload: payload}, nil
+		})
+	}, entries: &boundEntryStore{
 		Appender: writer,
 		cursor: func(index uint64) entryCursor {
 			raw := legacyPositioner(log, decodeFrame)
