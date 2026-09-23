@@ -2,9 +2,11 @@ package wal
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 
+	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -151,18 +153,7 @@ func (s *Storage) finishSharedScrub(ctx context.Context, bound uint64) error {
 	if _, err := s.reclaimSharedGeneration(ctx, bound); err != nil {
 		return err
 	}
-	var raws []rawDelete
-	err = s.scanEventEntries(bound, func(entry *pb.Entry) error {
-		if entry.GetType() != pb.EntryNormal || entry.Data == nil {
-			return nil
-		}
-		return cluster.ForEachProposalEntity(entry.Data, func(typeID string, key, _ []byte, isDelete bool) error {
-			if isUserDefinedType(typeID) && isDelete && !cluster.IsErasedKey(key) {
-				raws = append(raws, rawDelete{index: entry.GetIndex()})
-			}
-			return nil
-		})
-	})
+	raws, err := s.sharedScrubDeleteSurvivors(ctx, bound)
 	if err != nil {
 		return err
 	}
@@ -173,4 +164,82 @@ func (s *Storage) finishSharedScrub(ctx context.Context, bound uint64) error {
 		return err
 	}
 	return s.markScrubComplete(bound)
+}
+
+// sharedScrubDeleteSurvivors inspects only the durable pending-delete IDs.
+// Apply records each raw user delete before advancing its watermark, and a
+// scrub can only remove or erase deletes. Thus this index is a superset of
+// survivors, including after interrupted publication or reconciliation. New
+// appends lie above bound and are left for a later scrub.
+func (s *Storage) sharedScrubDeleteSurvivors(ctx context.Context, bound uint64) ([]rawDelete, error) {
+	var candidates []uint64
+	err := s.view(func(tx *bolt.Tx) error {
+		b := tx.Bucket(unhashedDeleteBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		cursor := b.Cursor()
+		for k, _ := cursor.First(); k != nil; k, _ = cursor.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if len(k) != 8 {
+				return eventlog.ErrInvalid
+			}
+			index := binary.BigEndian.Uint64(k)
+			if index > bound {
+				break
+			}
+			candidates = append(candidates, index)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, ctx.Err()
+	}
+	// Release the metadata transaction before acquiring the publication lock.
+	// One cursor keeps segment caching and decoding on the application boundary.
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	cursor := s.eventLog.entries.NewEntryCursor(candidates[0])
+	defer func() { _ = cursor.Close() }()
+	raws := make([]rawDelete, 0, len(candidates))
+	for _, index := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := cursor.SeekGE(index); err != nil {
+			return nil, err
+		}
+		entry, err := cursor.Current()
+		if errors.Is(err, eventlog.ErrNotFound) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if entry.GetIndex() != index {
+			continue // Metadata GC removed this record.
+		}
+		if entry.GetType() != pb.EntryNormal || entry.Data == nil {
+			continue
+		}
+		retained := false
+		err = cluster.ForEachProposalEntity(entry.Data, func(typeID string, key, _ []byte, isDelete bool) error {
+			if isUserDefinedType(typeID) && isDelete && !cluster.IsErasedKey(key) {
+				retained = true
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if retained {
+			raws = append(raws, rawDelete{index: index})
+		}
+	}
+	return raws, nil
 }

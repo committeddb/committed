@@ -205,8 +205,15 @@ dispatches to the shared lifecycle in `wal/shared_scrub.go`. It assigns each
 rewrite the authorized scrub upper bound as its generation. After publication,
 it refreshes event bounds, reclaims retired managed files, reconciles the
 delete-key cadence index from surviving records, and runs the existing scrub
-completion/tombstone-compaction path. Reconciliation reads actual survivors;
-it does not rerun the erasure gate on metadata that has already been scrubbed.
+completion/tombstone-compaction path. Reconciliation reads actual survivors at
+IDs from the durable pending-delete index, using one shared entry cursor. Apply
+records those IDs before advancing its watermark; rewriting only removes or
+erases deletes, so the index remains a superset of the survivors across restart.
+Completion does not walk the full event prefix or rerun the erasure gate on
+already-scrubbed metadata. Reconciliation with an empty pending-delete index
+requires no event reads.
+Missing records and erased keys leave the cadence index; a mixed record remains
+if any raw user delete survives. IDs above the scrub bound remain untouched.
 
 On restart, an unfinished selected generation is checked against applied scrub
 history and completed before a newer pending request is prepared. No additional
@@ -233,7 +240,6 @@ interrupt a file I/O or atomic publication already in progress. Interrupted work
 keeps its pending request, and restart recovery uses the selected generation to
 resume. Tests stop real backends during rewrite and reclamation, then reopen and
 finish the scrub.
-
 
 Publication can also precede the enclosing apply batch's saved watermark. Recovery
 recognizes matching durable scrub history ahead of that watermark and waits for
