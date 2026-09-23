@@ -12,3 +12,16 @@ func (l *Log) InspectCatalog() (Catalog, error) {
 	}
 	return l.catalog.Current()
 }
+
+// Generation reads the selected logical rewrite generation from catalog header
+// metadata without materializing the range list. Appends and reclamation do not
+// advance it; poisoned handles must be reopened before consulting this value.
+func (l *Log) Generation() (uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.usable(); err != nil {
+		return 0, err
+	}
+	c, err := l.catalog.head()
+	return c.Generation, err
+}

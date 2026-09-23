@@ -187,6 +187,19 @@ wrapper and segmented publication with actual Storage readers. This internal
 experimental step does not reclaim old files or mark scrub completion, and
 `runScrub` still uses native execution.
 
+The shared `Generation` query reports the selected rewrite generation after
+reopen. Segmented storage reads only the catalog header, without loading the
+range list. Appends and reclamation leave this generation unchanged; it is not
+proof of scrub authorization or completion. The caller must know which plan it
+assigned to that generation.
+
+`Storage.reclaimSharedGeneration` checks that selection before removing retired
+managed files under the layout and event locks. It rejects a mismatched generation
+and invalidates retained decoded entries on backend errors. Failure leaves
+completion bookkeeping untouched. Tests reopen Storage after injected failures
+before and after reclamation, then finish reclamation without another rewrite.
+This is a reclamation step; the production scrub worker still uses native execution.
+
 The native scrub's unpublished replacement is written by
 `tidwall.LegacyRewrite`: it owns private-log creation, dense survivor numbering,
 explicit sync, and sealed-segment compression. `wal` supplies framed survivor

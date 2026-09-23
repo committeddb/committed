@@ -112,6 +112,10 @@ type EventLog interface {
 	// Backends may acquire it earlier. Matching read lifetimes may perform reads,
 	// never mutations. Lock acquisition is not context-cancelable.
 	RewriteWithPublicationLock(context.Context, uint64, Transform, sync.Locker) (RewriteResult, error)
+	// Generation reports the selected logical rewrite generation. Appends and
+	// reclamation do not advance it. After publication failure, reopen before
+	// consulting it. It identifies a selection, not scrub completion or a plan.
+	Generation() (uint64, error)
 	Reclaim(context.Context) (ReclaimResult, error)
 	Close() error
 }

@@ -123,3 +123,8 @@ func (l *Log) ScanReverse(ctx context.Context, limit int, visit func(eventlog.Re
 	})
 	return count, translate(err)
 }
+
+func (l *Log) Generation() (uint64, error) {
+	generation, err := l.log.Generation()
+	return generation, translate(err)
+}

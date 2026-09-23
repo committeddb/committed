@@ -30,6 +30,10 @@ func modelPayload(rng *rand.Rand) []byte {
 
 func checkHistory(t *testing.T, log eventlog.EventLog, m historyModel, rng *rand.Rand) {
 	t.Helper()
+	generation, err := log.Generation()
+	if err != nil || generation != m.generation {
+		t.Fatalf("generation: got %d, want %d: %v", generation, m.generation, err)
+	}
 	head, has, err := log.LastAppended()
 	if err != nil || head != m.head || has != m.has {
 		t.Fatalf("append progress: got %d/%t, want %d/%t: %v", head, has, m.head, m.has, err)

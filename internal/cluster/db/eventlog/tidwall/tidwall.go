@@ -630,3 +630,12 @@ func (l *Log) Close() error {
 	l.closed = true
 	return errors.Join(l.data.Close(), l.lock.Close())
 }
+
+func (l *Log) Generation() (uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.usable(); err != nil {
+		return 0, err
+	}
+	return l.state.Generation, nil
+}

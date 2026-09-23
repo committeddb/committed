@@ -29,6 +29,10 @@ See the [catalog contract and experimental evidence](bbolt-experiment.md).
 `Log.InspectCatalog` returns a detached metadata snapshot for diagnostics. It
 allocates the complete range list and does not pin the referenced files.
 
+`Log.Generation()` reads the selected logical rewrite generation from catalog
+header metadata. It does not materialize the range list. Appends and reclamation
+leave it unchanged; a poisoned handle must be reopened before querying selection.
+
 ## Boundaries
 
 | Layer | Responsibility | Status |

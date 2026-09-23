@@ -48,6 +48,13 @@ func TestPublicationFailureSelectsCompleteGeneration(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
+		wantGeneration := uint64(0)
+		if after {
+			wantGeneration = 1
+		}
+		if generation, err := log.Generation(); err != nil || generation != wantGeneration {
+			t.Fatal("recovered generation", generation, wantGeneration, err)
+		}
 		want := "old"
 		if after {
 			want = "new"
