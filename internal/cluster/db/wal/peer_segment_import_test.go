@@ -1,6 +1,8 @@
 package wal
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
 )
+
+// Interrupt after one segment has been imported. The next exchange must use
+// the receiver's durable prefix even though the first stream never reached End.
+type interruptedSegmentSink struct {
+	*receiverSink
+	segments int
+	failure  error
+}
+
+func (s *interruptedSegmentSink) Segment(name string, size int64, r io.Reader) error {
+	s.segments++
+	if s.segments == 2 {
+		return s.failure
+	}
+	return s.receiverSink.Segment(name, size, r)
+}
 
 func TestNativePeerServesSharedReceivers(t *testing.T) {
 	peer := openFetchPeer(t, t.TempDir(), time.Hour)
@@ -28,6 +46,20 @@ func TestNativePeerServesSharedReceivers(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = target.Close() })
 			release := target.BeginCatchUp()
+			defer release()
+			failure := errors.New("peer stream interrupted")
+			sink := &interruptedSegmentSink{receiverSink: &receiverSink{recv: target}, failure: failure}
+			_, err = peer.ServeEvents(t.Context(), 0, peer.EventIndex(), sink)
+			require.ErrorIs(t, err, failure)
+			prefix := target.EventIndex()
+			require.Positive(t, prefix)
+			require.Less(t, prefix, peer.EventIndex())
+			release()
+			require.NoError(t, target.Close())
+			target, err = openStorage(path, nil, nil, nil, opener, WithSafeMode())
+			require.NoError(t, err)
+			require.Equal(t, prefix, target.EventIndex(), "failed exchange still leaves a durable prefix")
+			release = target.BeginCatchUp()
 			defer release()
 			catchUp(t, peer, target, peer.EventIndex())
 			// Re-delivery of complete files overlaps all existing records.
