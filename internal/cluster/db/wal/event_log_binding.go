@@ -12,6 +12,7 @@ import (
 // the entire binding under eventMu, invalidating reader source identities.
 type eventLogBinding struct {
 	entries    entryStore
+	managed    eventlog.EventLog
 	compressor eventlog.SealedCompressor
 	native     *tidwall.LegacyLog
 }
@@ -22,7 +23,7 @@ func (b *eventLogBinding) Close() error { return b.entries.Close() }
 // A backend that compresses while writing segments has no sealer work.
 func bindEventLog(log eventlog.EventLog) *eventLogBinding {
 	compressor, _ := log.(eventlog.SealedCompressor)
-	return &eventLogBinding{entries: bindEventEntries(log), compressor: compressor}
+	return &eventLogBinding{entries: bindEventEntries(log), compressor: compressor, managed: log}
 }
 
 // eventLogOpener constructs the event binding after the node's metadata lock is

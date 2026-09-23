@@ -34,18 +34,7 @@ func (l *eventLogAdapter) rewriteRawLocked(ctx context.Context, generation uint6
 	}
 	l.mu.Unlock()
 	defer l.mu.Lock()
-	return l.log.RewriteWithPublicationLock(ctx, generation, func(r eventlog.Record) ([]byte, bool, error) {
-		raw, err := checkedEventEntry(r, nil)
-		if err != nil {
-			return nil, false, err
-		}
-		keep, payload, err := transform(raw)
-		if err != nil || !keep {
-			return nil, false, err
-		}
-		payload, err = checkedEventEntry(eventlog.Record{ID: r.ID, Payload: payload}, nil)
-		return payload, true, err
-	}, entryInvalidatingPublicationLock{l})
+	return l.log.RewriteWithPublicationLock(ctx, generation, checkedEntryTransform(transform), entryInvalidatingPublicationLock{l})
 }
 
 // Invalidate decoded entries before releasing the existing publication gate,
@@ -56,4 +45,21 @@ func (g entryInvalidatingPublicationLock) Lock() { g.events.mu.Lock() }
 func (g entryInvalidatingPublicationLock) Unlock() {
 	g.events.readEpoch++
 	g.events.mu.Unlock()
+}
+
+// checkedEntryTransform validates identity before removal and after replacement.
+// It is shared by experimental adapter rewrites and Storage publication tests.
+func checkedEntryTransform(transform func([]byte) (bool, []byte, error)) eventlog.Transform {
+	return func(r eventlog.Record) ([]byte, bool, error) {
+		raw, err := checkedEventEntry(r, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		keep, payload, err := transform(raw)
+		if err != nil || !keep {
+			return nil, false, err
+		}
+		payload, err = checkedEventEntry(eventlog.Record{ID: r.ID, Payload: payload}, nil)
+		return payload, true, err
+	}
 }

@@ -177,6 +177,16 @@ after completion. `wal/legacy_event_rewrite.go` executes that plan using the nat
 bulk copy, catch-up, publication, and recovery sequence. `runScrub` coordinates
 preparation and execution; completion bookkeeping remains in its caller.
 
+`Storage.rewriteSharedPlan` exercises shared-backend publication of a prepared
+plan using the production reader lock and cursor generation. It serializes
+appends, defers for existing protected reads or layout freezes, and holds new
+protected-read registration until the step returns. Publication invalidates
+retained decoded entries before releasing readers; preparation failures also
+invalidate them so a poisoned backend cannot be bypassed. Tests cover native
+wrapper and segmented publication with actual Storage readers. This internal
+experimental step does not reclaim old files or mark scrub completion, and
+`runScrub` still uses native execution.
+
 The native scrub's unpublished replacement is written by
 `tidwall.LegacyRewrite`: it owns private-log creation, dense survivor numbering,
 explicit sync, and sealed-segment compression. `wal` supplies framed survivor
