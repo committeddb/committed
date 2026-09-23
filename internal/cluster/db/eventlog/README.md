@@ -295,7 +295,7 @@ native files without introducing a CURRENT file or an ID envelope.
 positioning, transfer, and compression capabilities. The native pointer stays
 inside the backend; `wal.Storage` holds a binding containing the owner. Replacement creates a new owner,
 and existing capabilities remain attached to the retired handle. Live backup
-uses the owner's transfer layout under the existing layout freeze.
+uses the owner's `BackupSource` capability under the existing layout freeze.
 
 Production append, streaming, exact lookup, and prefix scans use the application-side
 `entryStore` contract: a logical appender, independent decoded entry cursors, and
@@ -513,3 +513,24 @@ The application Actual reader owns one cursor and exposes Close to release its
 retained contents. Protected-reader Close releases both generation protection and
 the cursor. Callers still own logical progress, applied visibility, and decoding.
 Cursor operations and Close are synchronized; the parent log must remain open.
+
+## Backup capture and restore
+
+`BackupSource` streams backend-relative filenames, exact lengths, and file bytes.
+Both shared backends and the production native owner implement it. `wal.Storage`
+retains node-wide capture ordering: application metadata, Raft state, event log,
+then Raft entries. The event layout freeze covers the event-log capture step.
+Archive checksums, staging, and restore use the existing backup package. Restore
+preserves the source backend's format; reopening uses that same backend. Production startup still selects native tidwall.
+
+Segmented capture spools its bbolt catalog and captures the active tail length
+under the log mutex. It streams selected files from the private catalog, excluding
+retired payloads. Maintenance waits throughout capture, while appends and rollover
+can continue after spooling. Memory does not grow with the number of references,
+and the live catalog has no read transaction held across archive streaming.
+The experimental dense tidwall wrapper serializes capture with its other operations;
+the production native owner permits appends under the application's layout freeze.
+
+Tests round-trip live and offline node archives through restore and the same
+backend opener. Segmentlog tests also cover rollover during capture, sparse and
+fully erased histories, preserved append progress, and visitor failure cleanup.

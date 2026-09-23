@@ -38,7 +38,7 @@ func bindLegacyEventLog(log *tidwall.LegacyLog, m *metrics.Metrics) *eventLogBin
 			return records[0], nil
 		},
 	})
-	return &eventLogBinding{native: log, compressor: log, records: func() eventlog.Cursor {
+	return &eventLogBinding{backup: log, native: log, compressor: log, records: func() eventlog.Cursor {
 		return tidwall.NewLegacyLogCursor(log, func(raw []byte) (uint64, eventlog.Record, error) {
 			payload, err := decodeFrame(raw)
 			if err != nil {

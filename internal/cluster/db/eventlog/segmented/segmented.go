@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"sync"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
@@ -127,4 +128,8 @@ func (l *Log) ScanReverse(ctx context.Context, limit int, visit func(eventlog.Re
 func (l *Log) Generation() (uint64, error) {
 	generation, err := l.log.Generation()
 	return generation, translate(err)
+}
+
+func (l *Log) CaptureBackup(visit func(string, int64, func(io.Writer) error) error) error {
+	return translate(l.log.CaptureBackup(visit))
 }

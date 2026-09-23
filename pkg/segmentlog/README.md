@@ -325,3 +325,17 @@ The lookup still decodes and validates the entire selected block before returnin
 preallocating the record-descriptor slice using a bounded block record count.
 Scans retain all descriptors for the selected block and validate the whole block
 before delivering records.
+
+## Backup capture
+
+`Log.CaptureBackup` supplies a consistent catalog and its selected payload files
+through synchronous file-writer callbacks. Restoring those files into an empty
+directory produces a log that `OpenLog` can reopen, including its rewrite generation
+and original append progress after erasure. Capture preserves file encodings.
+
+The catalog is spooled locally under the log mutex together with the exact active
+tail length. Streaming uses this private catalog, so appends and rollover can
+continue without a live bbolt transaction held across receiver I/O. Rewrites,
+reclamation and close wait until streaming finishes. Catalog references are
+iterated without loading the full list into memory. Retired payloads are excluded;
+retirement metadata may remain and reclamation tolerates already-absent files.

@@ -95,8 +95,9 @@ type SealedCompressor interface {
 // may publish metadata. Physical reuse is backend-specific. After preparation or
 // publication failure, close/reopen before retry. Reclaim explicitly removes old
 // managed payloads; publication alone does not establish physical erasure.
-// Close is idempotent. This contract does not define backup capture or migration.
+// Close is idempotent. Migration between formats is outside this contract.
 type EventLog interface {
+	BackupSource
 	Appender
 	Lookup
 	NewCursor() Cursor

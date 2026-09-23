@@ -13,7 +13,6 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster/backup"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 // A live backup reads a running node's four stores one after another, and
@@ -119,7 +118,9 @@ func (s *Storage) CaptureBackup(visit func(name string, size int64, write func(i
 		s.eventMu.RLock()
 		log := s.eventLog
 		s.eventMu.RUnlock()
-		return s.captureEventLog(log.native, root, visit)
+		return backupEventError(log.backup.CaptureBackup(func(name string, size int64, write func(io.Writer) error) error {
+			return visit(filepath.ToSlash(filepath.Join("events", name)), size, write)
+		}))
 	}(); err != nil {
 		return info, fmt.Errorf("live backup: event log: %w", err)
 	}
@@ -150,28 +151,6 @@ func (s *Storage) CaptureBackup(visit func(name string, size int64, write func(i
 		return info, ErrLiveBackupEventsAhead
 	}
 	return info, nil
-}
-
-// captureEventLog uses the backend's native transfer layout. The caller holds
-// the event layout freeze for the entire capture, including file streaming.
-func (s *Storage) captureEventLog(log *tidwall.LegacyLog, root string, visit func(string, int64, func(io.Writer) error) error) error {
-	lay, err := log.Transfer(nil).Layout()
-	if err != nil {
-		if errors.Is(err, wal.ErrClosed) {
-			return fmt.Errorf("%w: the log was replaced under the read", ErrLiveBackupRaced)
-		}
-		return err
-	}
-	for _, sg := range lay.Sealed {
-		fi, err := os.Stat(sg.Path)
-		if err != nil {
-			return raced(err)
-		}
-		if err := s.captureFile(root, sg.Path, fi.Size(), visit); err != nil {
-			return err
-		}
-	}
-	return s.captureFile(root, lay.TailPath, lay.TailLen, visit)
 }
 
 // captureLog hands visit a log's sealed segment files whole and its tail to
@@ -222,4 +201,13 @@ func raced(err error) error {
 		return fmt.Errorf("%w: %v", ErrLiveBackupRaced, err)
 	}
 	return err
+}
+
+// A backend capture can race external native truncation or replacement. Keep
+// the archive retry behavior independent of the backend's file enumeration.
+func backupEventError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, wal.ErrClosed) {
+		return fmt.Errorf("%w: %v", ErrLiveBackupRaced, err)
+	}
+	return raced(err)
 }

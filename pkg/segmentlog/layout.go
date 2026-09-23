@@ -2,6 +2,7 @@ package segmentlog
 
 import (
 	"context"
+	"io"
 	"iter"
 )
 
@@ -12,6 +13,7 @@ import (
 // verifyRewrite only accesses private files and may run outside the mutex
 // while the caller retains maintenance ownership.
 type layout interface {
+	backup(io.Writer) error
 	head() (Catalog, error)
 	verifyMetadata(context.Context) (Catalog, error)
 	ranges(Coverage) iter.Seq2[SegmentRef, error]
