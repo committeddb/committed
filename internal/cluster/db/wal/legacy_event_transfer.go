@@ -5,14 +5,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
-// Native transfer uses physical sequences, framed records, and native files.
-// A shared logical log does not imply support for that on-disk protocol.
-func (s *Storage) requireNativeEventLog() error {
-	s.eventMu.RLock()
-	defer s.eventMu.RUnlock()
-	return s.requireNativeEventLogLocked()
-}
-
+// Direct native storage access uses physical sequences and native files.
+// Shared backends receive those files by importing their logical records.
 func (s *Storage) requireNativeEventLogLocked() error {
 	if s.eventLog.native == nil {
 		return eventlog.ErrUnsupported

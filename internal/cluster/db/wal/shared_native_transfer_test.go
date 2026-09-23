@@ -31,7 +31,6 @@ func TestSharedBackendsRejectNativeTransfer(t *testing.T) {
 				name string
 				call func() error
 			}{
-				{"adopt", func() error { return s.AdoptEventSegments([]string{staged}) }},
 				{"sequence", func() error { _, err := s.EventSeqForIndex(10); return err }},
 				{"first-sequence", func() error { _, err := s.firstEventSeq(); return err }},
 				{"last-sequence", func() error { _, err := s.LastEventSeq(); return err }},
@@ -58,6 +57,7 @@ func TestSharedBackendsRejectNativeTransfer(t *testing.T) {
 					require.Zero(t, completed)
 				})
 			}
+			require.Error(t, s.AdoptEventSegments([]string{staged}), "invalid segment must be rejected")
 			bytes, err := os.ReadFile(staged)
 			require.NoError(t, err)
 			require.Equal(t, stagedBytes, bytes, "rejected adoption must not consume staged files")

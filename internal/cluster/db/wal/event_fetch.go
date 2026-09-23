@@ -494,7 +494,11 @@ func (s *Storage) appendPeerRecords(received []fetchedRecord) error {
 }
 
 // AdoptEventSegments takes whole segment files fetched from a peer into this
-// node's event log, in order, consuming them. Each path is a staged copy
+// node's event log, in order, consuming them. Shared backends validate and
+// import one complete file at a time as logical records; an error can leave
+// an imported prefix, which the existing record overlap handling makes retryable.
+// Native receivers install the files directly as described below.
+// Each path is a staged copy
 // whose base name is the segment's own (its first sequence, plus .zst for a
 // compressed one); the name is the only thing the caller asserts, and every
 // file is scanned completely — every record framed and valid, a compressed
@@ -507,8 +511,11 @@ func (s *Storage) appendPeerRecords(received []fetchedRecord) error {
 // it was. A compressed last file is fine: the log starts a fresh plain tail
 // past it. Refused while a layout freeze stands.
 func (s *Storage) AdoptEventSegments(paths []string) error {
-	if err := s.requireNativeEventLog(); err != nil {
-		return err
+	s.eventMu.RLock()
+	shared := s.eventLog.managed != nil
+	s.eventMu.RUnlock()
+	if shared {
+		return s.importPeerSegments(paths)
 	}
 	if len(paths) == 0 {
 		return nil
@@ -575,6 +582,45 @@ func (s *Storage) AdoptEventSegments(paths []string) error {
 	}
 	s.logger.Info("adopted event-log segments from a peer",
 		zap.Int("segments", len(files)), zap.Uint64("fromSeq", files[0].FirstSeq), zap.Uint64("eventIndex", s.eventIndex.Load()))
+	return nil
+}
+
+// importPeerSegments keeps native filename, compression, and record-boundary
+// interpretation in tidwall. WAL owns frame/protobuf validation and logical
+// append ordering, just as it does for a Records part of the same peer stream.
+func (s *Storage) importPeerSegments(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	release, ok := s.eventLayout.move()
+	if !ok {
+		return ErrLayoutFrozen
+	}
+	defer release()
+	for _, path := range paths {
+		var records []fetchedRecord
+		_, err := tidwall.InspectLegacySegment(path, func(raw []byte) error {
+			payload, err := unframe(raw)
+			if err != nil {
+				return err
+			}
+			entry := new(pb.Entry)
+			if err := proto.Unmarshal(payload, entry); err != nil {
+				return err
+			}
+			records = append(records, fetchedRecord{Record: eventlog.Record{ID: entry.GetIndex(), Payload: payload}})
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if err := s.appendPeerRecords(records); err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove imported peer segment: %w", err)
+		}
+	}
 	return nil
 }
 
