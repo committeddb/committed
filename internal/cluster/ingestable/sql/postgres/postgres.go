@@ -132,14 +132,16 @@ func buildPgConfig(config *sql.Config) (*pgConfig, error) {
 	cfg.slotName = config.Options.SlotName
 	cfg.publication = config.Options.Publication
 
+	// Encode spaces as %20: pgx follows libpq URI semantics, where a plus
+	// is literal rather than the form-encoded space produced by q.Encode.
 	// Build the SQL connection string (no replication param).
 	q.Del("replication")
-	u.RawQuery = q.Encode()
+	u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
 	cfg.sqlConnString = u.String()
 
 	// Build the replication connection string.
 	q.Set("replication", "database")
-	u.RawQuery = q.Encode()
+	u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
 	cfg.connString = u.String()
 
 	if cfg.slotName == "" {

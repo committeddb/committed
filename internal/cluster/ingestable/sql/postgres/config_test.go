@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql"
@@ -243,6 +244,26 @@ func TestEncodeDecodePositionRoundtrip(t *testing.T) {
 				require.NotNil(t, gotProgress)
 				require.Equal(t, tt.progress.LastPkByTable, gotProgress.LastPkByTable)
 				require.Equal(t, tt.progress.CompletedTables, gotProgress.CompletedTables)
+			}
+		})
+	}
+}
+
+func TestBuildPgConfig_StartupParameterEscaping(t *testing.T) {
+	cfg, err := buildPgConfig(&sql.Config{ConnectionString: "postgres://u:p@localhost/db?application_name=worker%20one%2Btwo"})
+	require.NoError(t, err)
+	for name, cs := range map[string]string{"sql": cfg.sqlConnString, "replication": cfg.connString} {
+		t.Run(name, func(t *testing.T) {
+			parsed, err := pgconn.ParseConfig(cs)
+			require.NoError(t, err)
+			require.Equal(t, "ISO, MDY", parsed.RuntimeParams["datestyle"])
+			require.Equal(t, "worker one+two", parsed.RuntimeParams["application_name"])
+			require.Equal(t, "UTC", parsed.RuntimeParams["timezone"])
+			require.Equal(t, "hex", parsed.RuntimeParams["bytea_output"])
+			if name == "replication" {
+				require.Equal(t, "database", parsed.RuntimeParams["replication"])
+			} else {
+				require.NotContains(t, parsed.RuntimeParams, "replication")
 			}
 		})
 	}
