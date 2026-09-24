@@ -163,10 +163,19 @@ test/upgrade:
 # without updating COMMITTED_PEERS). No Docker. See e2e/multinode.
 # Hot-path micro-benchmarks with REAL fsyncs — the numbers behind
 # docs/operations/performance.md. Run before/after a write/apply/read-path
-# change and compare with benchstat; CI runs this on every push/PR so each
-# commit's log carries its numbers.
+# change and compare with benchstat; CI runs this on PRs, main pushes, and
+# manual dispatch. Whole-workload comparisons run once per case by default.
+WORKLOAD_BENCHMARKS := ^Benchmark(BackupWorkload|StreamingWorkload|StreamingCachePressure)$$
+BENCH_WORKLOAD_COUNT ?= 1
+
+.PHONY: bench bench/workloads
 bench:
-	go test -bench=. -benchtime=1s -run='^$$' ./internal/cluster/db/wal/ ./internal/cluster/db/ ./internal/cluster/ ./internal/cluster/interpretation/
+	go test -bench=. -skip='$(WORKLOAD_BENCHMARKS)' -benchtime=1s -run='^$$' ./internal/cluster/db/wal/ ./internal/cluster/db/ ./internal/cluster/ ./internal/cluster/interpretation/
+	$(MAKE) bench/workloads
+
+# Each iteration creates and validates a complete durable workload.
+bench/workloads:
+	go test -bench='$(WORKLOAD_BENCHMARKS)' -benchtime=1x -count=$(BENCH_WORKLOAD_COUNT) -run='^$$' ./internal/cluster/db/wal/
 
 test/multinode:
 	go test -tags multinode -p=1 -timeout 600s ./e2e/multinode/...

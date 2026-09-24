@@ -115,9 +115,9 @@ jobs:
   # for the PR gate.
   # Hot-path benchmarks (real fsyncs): propose→apply round-trip, apply
   # per-entry vs batched, reader catch-up, ingest shape. No thresholds — the
-  # log IS the artifact (see docs/operations/performance.md for why
-  # percent-level gates flake on shared runners); compare two runs' logs
-  # with benchstat.
+  # output and toolchain/commit metadata are saved as a downloadable artifact.
+  # Compare runs with benchstat; shared-runner timing has no regression gate.
+  # See docs/operations/performance.md.
   bench:
     name: bench
     runs-on: ubuntu-latest
@@ -128,7 +128,30 @@ jobs:
         with:
           go-version: "1.26.x"
           check-latest: true
-      - run: make bench
+      - name: Record benchmark environment
+        shell: bash
+        run: |
+          mkdir -p .claude-scratch
+          {
+            git rev-parse HEAD
+            go version
+            go env GOOS GOARCH
+            uname -a
+          } > .claude-scratch/bench-environment.txt
+      - name: Run benchmarks
+        shell: bash
+        run: |
+          set -o pipefail
+          make bench 2>&1 | tee .claude-scratch/bench-results.txt
+      - name: Save benchmark results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .claude-scratch/bench-results.txt
+            .claude-scratch/bench-environment.txt
+          include-hidden-files: true
 
   # Multi-node crash-recovery e2e: real binaries, real WAL on disk, real
   # process crashes. Guards WAL-replay-then-catch-up (SIGKILL a follower,
