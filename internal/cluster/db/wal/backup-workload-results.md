@@ -78,3 +78,7 @@ whether the hosting backup system reuses unchanged files. Independent full
 archives store the entire backup each time. This workload supplies no evidence
 about 100 TB scale, long retention histories, network transfer costs, or
 performance with many concurrent streaming readers.
+
+[The concurrent reader workload](streaming-workload-results.md) separately
+measures durable appends with live readers, historical readers, and background
+compression.

@@ -41,7 +41,7 @@ func captureWorkloadBackup(b *testing.B, s *Storage) map[string]workloadBackupFi
 	return files
 }
 
-func workloadEntityEntry(b *testing.B, index uint64, entity *cluster.Entity) *pb.Entry {
+func workloadEntityEntry(b testing.TB, index uint64, entity *cluster.Entity) *pb.Entry {
 	b.Helper()
 	data, err := (&cluster.Proposal{Entities: []*cluster.Entity{entity}}).Marshal()
 	require.NoError(b, err)
@@ -55,25 +55,7 @@ func workloadEntityEntry(b *testing.B, index uint64, entity *cluster.Entity) *pb
 func BenchmarkBackupWorkload(b *testing.B) {
 	const records = 32768
 	const deleted = 128
-	typ := &cluster.Type{ID: "items", Name: "items", Version: 1}
-	registration, err := cluster.NewUpsertTypeEntity(typ)
-	require.NoError(b, err)
-	entries := make([]*pb.Entry, 0, records+1)
-	entries = append(entries, workloadEntityEntry(b, 1, registration))
-	rng := rand.New(rand.NewSource(42)) // deterministic synthetic data, not security material
-	var entropy [1024]byte
-	var inputBytes int
-	for i := range records {
-		_, err := rng.Read(entropy[:])
-		require.NoError(b, err)
-		payload := fmt.Sprintf(`{"order":%d,"customer":%d,"status":"paid","trace":"%s","description":"%s"}`,
-			i, i%1000, hex.EncodeToString(entropy[:]), strings.Repeat("standard order line item;", 80))
-		raw := experimentEntry(b, uint64(i+2), pb.EntryNormal, experimentRow(fmt.Sprint(i), payload))
-		entry := new(pb.Entry)
-		require.NoError(b, proto.Unmarshal(raw, entry))
-		entries = append(entries, entry)
-		inputBytes += len(raw)
-	}
+	entries, typ, inputBytes := workloadEntries(b, records)
 	for _, pattern := range []string{"localized", "distributed"} {
 		for _, backend := range []string{"tidwall", "segmented"} {
 			b.Run(pattern+"/"+backend, func(b *testing.B) {
@@ -168,4 +150,29 @@ func BenchmarkBackupWorkload(b *testing.B) {
 			})
 		}
 	}
+}
+
+// workloadEntries supplies identical deterministic input for storage workloads.
+func workloadEntries(b testing.TB, records int) ([]*pb.Entry, *cluster.Type, int) {
+	b.Helper()
+	typ := &cluster.Type{ID: "items", Name: "items", Version: 1}
+	registration, err := cluster.NewUpsertTypeEntity(typ)
+	require.NoError(b, err)
+	entries := make([]*pb.Entry, 0, records+1)
+	entries = append(entries, workloadEntityEntry(b, 1, registration))
+	rng := rand.New(rand.NewSource(42)) // deterministic synthetic data, not security material
+	var entropy [1024]byte
+	var inputBytes int
+	for i := range records {
+		_, err := rng.Read(entropy[:])
+		require.NoError(b, err)
+		payload := fmt.Sprintf(`{"order":%d,"customer":%d,"status":"paid","trace":"%s","description":"%s"}`,
+			i, i%1000, hex.EncodeToString(entropy[:]), strings.Repeat("standard order line item;", 80))
+		raw := experimentEntry(b, uint64(i+2), pb.EntryNormal, experimentRow(fmt.Sprint(i), payload))
+		entry := new(pb.Entry)
+		require.NoError(b, proto.Unmarshal(raw, entry))
+		entries = append(entries, entry)
+		inputBytes += len(raw)
+	}
+	return entries, typ, inputBytes
 }
