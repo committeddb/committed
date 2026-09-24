@@ -38,7 +38,7 @@ func (c *workloadCompressor) CompressNextSealed() (bool, error) {
 	return did, err
 }
 
-func streamingWorkloadStore(t testing.TB, backend string) (*Storage, *workloadCompressor) {
+func streamingWorkloadStore(t testing.TB, backend string, extra ...Option) (*Storage, *workloadCompressor) {
 	t.Helper()
 	options := []Option{WithSealerIdleInterval(time.Millisecond)}
 	if backend == "segmented" {
@@ -47,7 +47,7 @@ func streamingWorkloadStore(t testing.TB, backend string) (*Storage, *workloadCo
 			Cache:    segmentlog.CacheOptions{RecentBytes: 160 << 20, HistoricalBytes: 160 << 20},
 		}))
 	}
-	s, err := Open(t.TempDir(), nil, nil, nil, options...)
+	s, err := Open(t.TempDir(), nil, nil, nil, append(options, extra...)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	s.eventMu.Lock()
@@ -80,8 +80,17 @@ type streamingReaderResult struct {
 
 // runStreamingWorkload starts all readers before writing the suffix. Readers
 // independently follow the applied watermark; the writer never waits for them.
-// prefix is a slice position, including the registration entry at position zero.
-func runStreamingWorkload(ctx context.Context, s *Storage, entries []*pb.Entry, expected []*clusterpb.LogRow, prefix, liveReaders, catchupReaders int) (result streamingMeasurement, err error) {
+// prefix and catchupStarts are slice positions, including registration at zero.
+// Omitted historical starts default to the first user record for every reader.
+func runStreamingWorkload(ctx context.Context, s *Storage, entries []*pb.Entry, expected []*clusterpb.LogRow, prefix, liveReaders, catchupReaders int, catchupStarts ...int) (result streamingMeasurement, err error) {
+	if len(catchupStarts) != 0 && len(catchupStarts) != catchupReaders {
+		return result, errors.New("historical starting positions must match reader count")
+	}
+	for _, first := range catchupStarts {
+		if first < 1 || first > prefix {
+			return result, errors.New("historical starting position outside preloaded history")
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
@@ -94,6 +103,9 @@ func runStreamingWorkload(ctx context.Context, s *Storage, entries []*pb.Entry, 
 		first := prefix
 		if catchup {
 			first = 1
+			if len(catchupStarts) != 0 {
+				first = catchupStarts[i]
+			}
 		}
 		reader := s.ReaderAt(entries[first-1].GetIndex())
 		workers.Go(func() {
@@ -178,16 +190,25 @@ func TestStreamingWorkload(t *testing.T) {
 	entries, _, _ := workloadEntries(t, 1024)
 	expected := streamingExpectedRows(t, entries)
 	for _, backend := range []string{"tidwall", "segmented"} {
-		t.Run(backend, func(t *testing.T) {
-			s, _ := streamingWorkloadStore(t, backend)
-			require.NoError(t, applyWorkloadBatch(s, entries[:513]))
-			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-			defer cancel()
-			result, err := runStreamingWorkload(ctx, s, entries, expected, 513, 8, 2)
-			require.NoError(t, err)
-			require.Equal(t, uint64(8*512+2*1024), result.actuals)
-			require.Len(t, result.batches, 2)
-		})
+		for _, scenario := range []struct {
+			name    string
+			starts  []int
+			actuals uint64
+		}{
+			{"same-start", []int{1, 1}, 8*512 + 2*1024},
+			{"staggered", []int{1, 257}, 8*512 + 1024 + 768},
+		} {
+			t.Run(backend+"/"+scenario.name, func(t *testing.T) {
+				s, _ := streamingWorkloadStore(t, backend)
+				require.NoError(t, applyWorkloadBatch(s, entries[:513]))
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+				defer cancel()
+				result, err := runStreamingWorkload(ctx, s, entries, expected, 513, 8, 2, scenario.starts...)
+				require.NoError(t, err)
+				require.Equal(t, scenario.actuals, result.actuals)
+				require.Len(t, result.batches, 2)
+			})
+		}
 	}
 }
 
@@ -195,27 +216,61 @@ func TestStreamingWorkload(t *testing.T) {
 // four historical readers and the production background compression worker.
 // Run with -benchtime=1x. Setup/preloading and shutdown are excluded.
 func BenchmarkStreamingWorkload(b *testing.B) {
-	const records, prefix = 16384, 8193
+	benchmarkStreamingWorkload(b, 16384, 8193, false)
+}
+
+// BenchmarkStreamingCachePressure compares default caches with budgets smaller
+// than the history, using historical readers at different starting positions.
+func BenchmarkStreamingCachePressure(b *testing.B) {
+	for _, cache := range []struct {
+		name        string
+		constrained bool
+	}{{"default", false}, {"constrained", true}} {
+		b.Run(cache.name, func(b *testing.B) {
+			benchmarkStreamingWorkload(b, 32768, 24577, cache.constrained, 1, 8193, 16385, 20481)
+		})
+	}
+}
+
+func benchmarkStreamingWorkload(b *testing.B, records, prefix int, constrained bool, catchupStarts ...int) {
 	entries, _, _ := workloadEntries(b, records)
 	expected := streamingExpectedRows(b, entries)
+	if len(catchupStarts) == 0 {
+		catchupStarts = []int{1, 1, 1, 1}
+	}
+	wantActuals := 128 * (len(entries) - prefix)
+	for _, first := range catchupStarts {
+		wantActuals += len(entries) - first
+	}
 	for _, backend := range []string{"tidwall", "segmented"} {
 		b.Run(backend, func(b *testing.B) {
 			totals := map[string]float64{}
 			b.ReportAllocs()
 			for range b.N {
 				b.StopTimer()
-				s, compressor := streamingWorkloadStore(b, backend)
+				var options []Option
+				if constrained {
+					if backend == "tidwall" {
+						options = append(options, WithEventCacheSegments(2))
+					} else {
+						options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
+							Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault},
+							Cache:    segmentlog.CacheOptions{RecentBytes: 32 << 20, HistoricalBytes: 32 << 20},
+						}))
+					}
+				}
+				s, compressor := streamingWorkloadStore(b, backend, options...)
 				for first := 0; first < prefix; first += 256 {
 					require.NoError(b, applyWorkloadBatch(s, entries[first:min(first+256, prefix)]))
 				}
 				before := compressor.completed.Load()
 				ctx, cancel := context.WithTimeout(b.Context(), 3*time.Minute)
 				b.StartTimer()
-				result, err := runStreamingWorkload(ctx, s, entries, expected, prefix, 128, 4)
+				result, err := runStreamingWorkload(ctx, s, entries, expected, prefix, 128, 4, catchupStarts...)
 				b.StopTimer()
 				cancel()
 				require.NoError(b, err)
-				require.Equal(b, uint64(128*8192+4*records), result.actuals)
+				require.Equal(b, uint64(wantActuals), result.actuals)
 				completed := compressor.completed.Load() - before
 				require.Positive(b, completed, "workload must overlap background compression")
 				totals["compressed-segments"] += float64(completed)

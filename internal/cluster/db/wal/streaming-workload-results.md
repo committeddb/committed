@@ -114,10 +114,15 @@ It also does not establish performance under cache pressure or at production sca
 ## Automated coverage
 
 `TestStreamingWorkload` runs the same harness with 1,024 records, eight live
-readers, and two historical readers against both backends. It is untagged, so
+readers, and two historical readers against both backends. It checks both common
+and staggered historical starting positions. It is untagged, so
 normal CI test and race jobs include it. It checks record contents and counts,
 without timing thresholds. Its smaller history does not roll over default
 20 MiB segments.
 
 The full benchmark exercises concurrent compression and can also be run with
 `-race`. Benchmark measurements are opt-in; normal CI does not run them.
+
+[The constrained-cache comparison](cache-pressure-results.md) runs the same
+harness on a larger history with staggered historical readers, using both default
+and smaller cache configurations.
