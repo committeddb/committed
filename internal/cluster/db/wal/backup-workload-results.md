@@ -93,8 +93,11 @@ to be compressed before capturing the archive.
 
 Eight cases cover both engines, live/offline backups, and histories before/after
 scrub. Each verifies exact surviving keys and payloads, absence of erased
-original records, and restored event/applied/Raft progress. The restored node
+original records, the scrub generation, and restored event/applied/Raft progress. The restored node
 accepts another committed write, closes, reopens, and verifies both that write
-and the original history again. This untagged test is included in normal CI
+and the original history again. It then deletes another archived row, completes
+a new scrub and compression pass, and reopens again. The test checks the new
+generation, all surviving archived payloads, all erased original records, and the
+post-restore write. This untagged test is included in normal CI
 and race jobs, without performance thresholds. The live cases keep the source
 open but do not append concurrently with capture.

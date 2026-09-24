@@ -36,15 +36,19 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 					// compression capability the production sealer uses.
 					require.Positive(t, compressWorkload(t, s), "fixture must contain compressed sealed segments")
 					last := uint64(len(entries))
+					var generation uint64
+					erased := make(map[int]bool)
 					if scrubbed {
 						deletes := make([]*pb.Entry, 0, deleted)
 						for i := range deleted {
+							erased[i] = true
 							last++
 							deletes = append(deletes, workloadEntityEntry(t, last, cluster.NewDeleteEntity(typ, []byte(fmt.Sprint(i)))))
 						}
 						require.NoError(t, applyWorkloadBatch(s, deletes))
 						command, err := cluster.NewScrubEntity(last, false)
 						require.NoError(t, err)
+						generation = last
 						last++
 						require.NoError(t, applyWorkloadBatch(s, []*pb.Entry{workloadEntityEntry(t, last, command)}))
 						require.NoError(t, s.runPendingScrub())
@@ -54,6 +58,7 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 						t.Helper()
 						require.Equal(t, frontier, store.EventIndex())
 						require.Equal(t, frontier, store.AppliedIndex())
+						require.Equal(t, generation, store.EventLogGeneration())
 						raftLast, err := store.LastIndex()
 						require.NoError(t, err)
 						require.Equal(t, frontier, raftLast)
@@ -62,7 +67,7 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 						require.Equal(t, frontier, hs.GetCommit())
 						for i := range records {
 							actual, err := store.ActualAt(uint64(i + 2))
-							if scrubbed && i < deleted {
+							if erased[i] {
 								require.ErrorIs(t, err, ErrActualNotFound)
 								continue
 							}
@@ -100,6 +105,33 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 					t.Cleanup(func() { _ = reopened.Close() })
 					verify(reopened, last+1)
 					actual, err := reopened.ActualAt(last + 1)
+					require.NoError(t, err)
+					require.Len(t, actual.Entities, 1)
+					require.Equal(t, []byte("after-restore"), actual.Entities[0].Key)
+					require.Equal(t, []byte("new value"), actual.Entities[0].Data)
+
+					// Restored metadata and event storage must also support a new
+					// scrub, including when the archive already contained one.
+					// Delete a previously retained row from the archived history.
+					last = next.GetIndex() + 1
+					require.NoError(t, applyWorkloadBatch(reopened, []*pb.Entry{
+						workloadEntityEntry(t, last, cluster.NewDeleteEntity(typ, []byte(fmt.Sprint(deleted)))),
+					}))
+					command, err := cluster.NewScrubEntity(last, false)
+					require.NoError(t, err)
+					generation = last
+					last++
+					require.NoError(t, applyWorkloadBatch(reopened, []*pb.Entry{workloadEntityEntry(t, last, command)}))
+					require.NoError(t, reopened.runPendingScrub())
+					compressWorkload(t, reopened)
+					erased[deleted] = true
+					verify(reopened, last)
+					require.NoError(t, reopened.Close())
+					afterScrub, err := Open(target, nil, nil, nil, options...)
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = afterScrub.Close() })
+					verify(afterScrub, last)
+					actual, err = afterScrub.ActualAt(next.GetIndex())
 					require.NoError(t, err)
 					require.Len(t, actual.Entities, 1)
 					require.Equal(t, []byte("after-restore"), actual.Entities[0].Key)
