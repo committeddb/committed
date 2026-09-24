@@ -16,6 +16,7 @@ import (
 func TestCompressedScrubbedPeerSnapshotBackends(t *testing.T) {
 	const records, deleted = 256, 4
 	entries, typ, _ := workloadEntries(t, records)
+	expected := streamingExpectedRows(t, entries)
 	for _, backend := range []string{"tidwall", "segmented"} {
 		t.Run(backend, func(t *testing.T) {
 			options := compressedStorageOptions(backend)
@@ -102,6 +103,47 @@ func TestCompressedScrubbedPeerSnapshotBackends(t *testing.T) {
 						_, err := reopened.ActualAt(uint64(i + 2))
 						require.ErrorIs(t, err, ErrActualNotFound)
 					}
+
+					// Snapshot installation must leave the receiver able to scrub
+					// its fetched history using the installed application metadata.
+					newBound := next.GetIndex() + 1
+					require.NoError(t, applyWorkloadBatch(reopened, []*pb.Entry{
+						workloadEntityEntry(t, newBound, cluster.NewDeleteEntity(typ, []byte(fmt.Sprint(deleted)))),
+					}))
+					command, err := cluster.NewScrubEntity(newBound, false)
+					require.NoError(t, err)
+					require.NoError(t, applyWorkloadBatch(reopened, []*pb.Entry{workloadEntityEntry(t, newBound+1, command)}))
+					require.NoError(t, reopened.runPendingScrub())
+					compressWorkload(t, reopened)
+					verify := func(store *Storage) {
+						t.Helper()
+						require.Equal(t, newBound, store.EventLogGeneration())
+						require.Equal(t, newBound+1, store.EventIndex())
+						require.Equal(t, newBound+1, store.AppliedIndex())
+						for i := range records {
+							row, err := store.ActualAt(uint64(i + 2))
+							if i <= deleted {
+								require.ErrorIs(t, err, ErrActualNotFound)
+								continue
+							}
+							require.NoError(t, err)
+							require.Equal(t, uint64(i+2), row.Index)
+							require.Len(t, row.Entities, 1)
+							require.Equal(t, expected[i+1].Key, row.Entities[0].Key)
+							require.Equal(t, expected[i+1].Data, row.Entities[0].Data)
+						}
+						row, err := store.ActualAt(next.GetIndex())
+						require.NoError(t, err)
+						require.Len(t, row.Entities, 1)
+						require.Equal(t, []byte("after-catchup"), row.Entities[0].Key)
+						require.Equal(t, []byte("new value"), row.Entities[0].Data)
+					}
+					verify(reopened)
+					require.NoError(t, reopened.Close())
+					afterScrub, err := Open(path, nil, nil, nil, options...)
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = afterScrub.Close() })
+					verify(afterScrub)
 				})
 			}
 		})

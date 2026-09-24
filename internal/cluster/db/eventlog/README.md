@@ -472,6 +472,13 @@ both backends. Shared workload measurements cover
 [cache pressure](../wal/cache-pressure-results.md). These use small synthetic
 histories; they do not establish performance at 100 TB or under cold-disk load.
 
+`TestCompressedScrubbedPeerSnapshotBackends` covers normal snapshot installation
+and reopening after the snapshot was saved but not yet installed. In both cases,
+the receiver verifies fetched history, appends, reopens, and scrubs another fetched
+record. A further reopen checks the new generation, erased records, all surviving
+user payloads, and the post-catch-up write. These four same-backend cases run in
+the untagged test suite, including CI's race job.
+
 ### Legacy copy experiment
 
 `wal.Storage.copyEventLog` copies an opened production-layout permanent log into
