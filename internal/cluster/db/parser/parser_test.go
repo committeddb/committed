@@ -380,3 +380,35 @@ name = "db2"`)
 	require.Equal(t, 1, fakeParser1.ParseCallCount())
 	require.Equal(t, 1, fakeParser2.ParseCallCount())
 }
+
+// Both admission validation and normal parsing reject infrastructure secrets
+// before any plugin can receive or send the resolved header.
+func TestParseRejectsInfrastructureCredentials(t *testing.T) {
+	for _, name := range []string{"COMMITTED_MEMBERSHIP_TOKEN", "COMMITTED_PEER_TOKEN"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "infrastructure-secret")
+			p := parser.New()
+			plugin := &clusterfakes.FakeSyncableParser{}
+			p.AddSyncableParser("http", plugin)
+			for contentType, data := range map[string]string{
+				"text/toml": fmt.Sprintf(`[syncable]
+type = "http"
+name = "example"
+[http]
+topic = "example"
+url = "https://example.com"
+[[http.headers]]
+name = "Authorization"
+value = "Bearer ${%s}"`, name),
+				"application/json": fmt.Sprintf(`{"syncable":{"type":"http","name":"example"},"http":{"topic":"example","url":"https://example.com","headers":[{"name":"Authorization","value":"Bearer ${%s}"}]}}`, name),
+			} {
+				var restricted *config.RestrictedVarError
+				require.ErrorAs(t, p.Validate(contentType, []byte(data)), &restricted)
+				_, _, _, err := p.ParseSyncable(contentType, []byte(data), nil)
+				require.ErrorAs(t, err, &restricted)
+				require.NotContains(t, err.Error(), "infrastructure-secret")
+				require.Zero(t, plugin.ParseCallCount())
+			}
+		})
+	}
+}

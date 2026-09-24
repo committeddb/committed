@@ -26,6 +26,16 @@ type MissingVarError struct {
 	Name string
 }
 
+// RestrictedVarError rejects infrastructure credentials in application configs.
+// Rejection is independent of whether the variable exists or has a value.
+type RestrictedVarError struct {
+	Name string
+}
+
+func (e *RestrictedVarError) Error() string {
+	return fmt.Sprintf("environment variable %q is reserved for cluster authentication and cannot be referenced in application config", e.Name)
+}
+
 func (e *MissingVarError) Error() string {
 	// Interpolation runs on every string value, so this same error fires
 	// whether the ${...} is a real secret reference or a literal that
@@ -137,6 +147,11 @@ func expand(s string, lookup lookupFunc) (string, error) {
 			name := s[i+2 : i+2+rel]
 			if name == "" {
 				return "", fmt.Errorf("empty ${} reference at position %d", i)
+			}
+			// Match case-insensitively because environment names on Windows are
+			// case-insensitive. Never resolve the value, even to report an error.
+			if strings.EqualFold(name, "COMMITTED_MEMBERSHIP_TOKEN") || strings.EqualFold(name, "COMMITTED_PEER_TOKEN") {
+				return "", &RestrictedVarError{Name: name}
 			}
 			val, ok := lookup(name)
 			if !ok {

@@ -48,6 +48,18 @@ demand-driven.
 
 ## The mechanism: `${VAR}` templates
 
+`COMMITTED_MEMBERSHIP_TOKEN` and `COMMITTED_PEER_TOKEN` are reserved for
+cluster authentication and cannot be expanded in application configs. References
+are rejected before their values are read, including in nested webhook headers.
+The restriction also applies during validation and reparsing of stored configs.
+Name matching is case-insensitive, including on Windows. Escaped references such
+as `$${COMMITTED_PEER_TOKEN}` remain literal text and do not read the credential.
+
+Other environment-variable references retain their existing behavior; there is
+no application-secret allowlist. Do not copy infrastructure credentials into
+other environment variables accessible to application configs: the restriction
+protects the reserved names, not operator-created aliases.
+
 Any string value in a database, ingestable, or syncable config may
 contain `${VAR}` references. Each node expands them **at parse time**
 against its own process environment. The expansion never leaves the
