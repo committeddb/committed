@@ -15,10 +15,14 @@ internal/durablefs/   Shared publication, directory sync, and ownership primitiv
 
 ## Code boundaries
 
-The dependency direction is `wal` → `eventlog.EventLog` ← concrete backends.
-The segmented backend then depends on `pkg/segmentlog`. Shared experimental adapter source
-imports neither concrete backend. Fixtures choose which backend to provide.
-Production append and exact-lookup composition explicitly choose the legacy tidwall adapter.
+Production `wal.Storage` selects its backend through `eventLogBinding`. The
+binding supplies shared entry cursors and backend capabilities while keeping
+native tidwall's physical operations in `eventlog/tidwall.LegacyLog`. The segmented
+binding uses `eventlog.EventLog`, implemented by `eventlog/segmented` over
+`pkg/segmentlog`. Application visibility, replay, and scrub policy stay in `wal`.
+
+The separate private `eventLogAdapter` experiment depends only on
+`eventlog.EventLog`. Its test fixtures supply either concrete implementation.
 
 Inside `wal`, the experimental application layer is organized by responsibility:
 
@@ -43,8 +47,8 @@ backend responsibility for Committed's application semantics.
 `eventlog_segmented_fixture_test.go` explicitly constructs a segmented fixture
 for legacy comparisons and application-policy integration tests. Those tests use
 `eventlog_` names; the physical churn experiments retain `segment_churn_` names.
-The adapter is experimental; production `Storage` still owns its existing tidwall
-integration. See [the adapter's current behavior](../wal/eventlog_adapter.md).
+This private adapter remains experimental; production `Storage` uses the binding
+described above. See [the adapter's current behavior](../wal/eventlog_adapter.md).
 
 ## Responsibilities
 
@@ -200,7 +204,7 @@ completion bookkeeping untouched. Tests reopen Storage after injected failures
 before and after reclamation, then finish reclamation without another rewrite.
 This is a reclamation step; the production scrub worker still uses native execution.
 
-For Storage opened with an experimental shared backend, `runPendingScrub`
+For Storage opened with a managed backend, `runPendingScrub`
 dispatches to the shared lifecycle in `wal/shared_scrub.go`. It assigns each
 rewrite the authorized scrub upper bound as its generation. After publication,
 it refreshes event bounds, reclaims retired managed files, reconciles the
@@ -438,20 +442,40 @@ interpret protobuf to translate a tidwall sequence. See [its format](tidwall/REA
 
 ## Integration status
 
-The experimental `wal/eventLogAdapter` now consumes EventLog, and the same Actual
-reader, exact lookup, committed replay, snapshot selection/rewrite, and protected
-read logic runs with either implementation. Existing segment-specific experiments
-still use the segmented factory where they measure its particular file layout.
+The node selects native tidwall by default or with
+`COMMITTED_EVENT_LOG_BACKEND=tidwall`. Setting it to `segmented` selects the
+segmented engine through `wal.WithSegmentedEventLog`. Unknown names fail startup.
+The supported setup uses one backend per cluster, and existing data is reopened with that same
+backend. Their on-disk formats are not interchangeable. Raft's own logs are outside
+this contract.
 
-Production `wal.Storage` has not switched to this interface. Its legacy directory
-swap, Raft/BoltDB recovery, backups, catch-up, and format gates remain unchanged.
-There is no backend setting or automatic experimental format activation at
-startup. Raft's own logs are outside this contract.
+Production `wal.Storage` uses `eventLogBinding` for append/replay, application
+reads, scrub, backup/restore, peer catch-up, and maintenance capabilities. Native
+tidwall retains its production layout through `tidwall.LegacyLog`; the separate
+CURRENT-based tidwall `EventLog` wrapper is an experimental helper, not the
+node's tidwall backend. The private `wal/eventLogAdapter` is also a test helper,
+not the production binding.
+
+The node configures segmented storage with zstd compression and separate recent
+and historical cache budgets, each defaulting to 160 MiB. Configure them with
+`COMMITTED_EVENT_CACHE_RECENT_BYTES` and
+`COMMITTED_EVENT_CACHE_HISTORICAL_BYTES`; zero disables the corresponding budget.
+Native tidwall uses `COMMITTED_EVENT_CACHE_SEGMENTS`. These are cache budgets,
+not total process-memory limits. The database's background sealer drives closed
+segment compression; physical compression preserves the logical scrub generation.
+
+Validation includes homogeneous cluster lifecycle tests for replication, restart,
+scrub, and catch-up, plus compressed backup/restore and peer catch-up tests against
+both backends. Shared workload measurements cover
+[backup bytes and unchanged files](../wal/backup-workload-results.md),
+[streaming runtime](../wal/streaming-workload-results.md), and
+[cache pressure](../wal/cache-pressure-results.md). These use small synthetic
+histories; they do not establish performance at 100 TB or under cold-disk load.
 
 ### Legacy copy experiment
 
-`wal.Storage.copyEventLog` provides the first conversion primitive: copy an opened
-production-layout permanent log into a privately owned, fresh EventLog. The
+`wal.Storage.copyEventLog` copies an opened production-layout permanent log into
+a privately owned, fresh EventLog for adapter experiments. The
 application layer verifies legacy checksums, protobuf indexes, strict ordering,
 and agreement with the source's original append frontier. It preserves exact
 protobuf bytes (including unknown fields) while the selected backend supplies its
@@ -558,7 +582,7 @@ Both shared backends and the production native owner implement it. `wal.Storage`
 retains node-wide capture ordering: application metadata, Raft state, event log,
 then Raft entries. The event layout freeze covers the event-log capture step.
 Archive checksums, staging, and restore use the existing backup package. Restore
-preserves the source backend's format; reopening uses that same backend. Production startup still selects native tidwall.
+preserves the source backend's format; reopening uses that same backend.
 
 Segmented capture spools its bbolt catalog and captures the active tail length
 under the log mutex. It streams selected files from the private catalog, excluding

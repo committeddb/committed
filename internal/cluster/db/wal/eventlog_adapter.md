@@ -7,9 +7,10 @@ by its caller. See [code boundaries](../eventlog/README.md#code-boundaries).
 shared [EventLog contract](../eventlog/README.md). The storage implementations live
 in `eventlog/tidwall` and `eventlog/segmented`; application readers, visibility,
 selection, replay, and protected-read coordination remain shared here.
-The adapter is package-private and exercised only by tests. `Storage`
-continues to use tidwall; there is no configuration switch, conversion command,
-or automatic format activation.
+The adapter is package-private and exercised only by tests. Production `Storage`
+selects native tidwall or segmented storage through `eventLogBinding`, rather
+than constructing this adapter. See the
+[current integration status](../eventlog/README.md#integration-status).
 
 ## Boundary
 
@@ -42,7 +43,8 @@ partial removal, supplied metadata-supersession selections, delete-key erasure,
 retained request metadata, and idempotent repeated scrubs. Negative tests cover
 invalid batches, mismatched source IDs, and attempted replacement-ID changes.
 
-This remains an isolated adapter experiment, not a completed production scrub.
+These tests exercise isolated adapter rewriting. Production scrub coordination
+is implemented separately in `Storage`.
 The selections supplied to the filter must already be bounded and authorized.
 The raw rewrite requires caller-supplied selections. It does not check consumer
 progress, update BoltDB, or declare erasure complete. The metadata selection
@@ -250,7 +252,8 @@ from engine-specific tests and filesystem inventories.
 `TestEventLogAdapterBackends` exercises the same adapter code with both concrete
 backends. `eventlog` also has a shared storage conformance suite, including
 reopen, complete erasure, replay frontier, failure recovery, and ownership. The
-original production Storage still owns its legacy layout and protocols; the new
-tidwall wrapper has an explicit experimental CURRENT/generation layout, not
-automatic compatibility with production directories. See the contract README for
-the current integration status.
+production tidwall binding retains its native layout through `tidwall.LegacyLog`.
+The tidwall `EventLog` wrapper has a separate experimental CURRENT/generation
+layout and is not the node's tidwall backend. Production segmented storage uses
+the managed binding. See the
+[current integration status](../eventlog/README.md#integration-status).

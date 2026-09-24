@@ -1,21 +1,23 @@
-# segmentlog (experimental)
+# segmentlog
 
 An ordered segmented log being developed within the Committed repository and Go
 module. It has no dependencies on Committed's application packages. Record IDs
 are sparse `uint64` values; payloads are opaque bytes.
 
-**Current scope: an experimental synchronous append/read/rotate lifecycle,
-immutable segments, transactional whole-log rewriting, and atomic local
-catalogs.** Explicit reclamation of obsolete managed files is implemented.
+The engine provides synchronous append/read/rollover, immutable segments,
+transactional whole-log rewriting, and a bbolt catalog. Explicit reclamation of
+obsolete managed files is implemented.
 Rewrite replacement writing permits reads. Sealed-only preparation also permits
-appends and rollover; whole-log rewriting still excludes appends. Background sealing and pinned views are not implemented.
-Neither the API nor the file format is stable. This package is not connected to
-the running database. The shared [EventLog
-contract](../../internal/cluster/db/eventlog/README.md) now has separate tidwall
-and segmented implementations. A [raw-entry adapter
-experiment](../../internal/cluster/db/wal/eventlog_adapter.md)
-compares Committed protobuf records and existing scrub transformations with
-tidwall.
+appends and rollover; whole-log rewriting still excludes appends. Cursors do not
+pin a generation across reads.
+
+The running database can select this engine through `eventlog/segmented`; see the
+[integration status](../../internal/cluster/db/eventlog/README.md#integration-status).
+Protobuf interpretation, application visibility, scrub policy, and replication
+remain above this package. `CompressNextSealed` converts closed append files into
+indexed segments using the configured encoding. The database's background sealer
+drives that operation; this package starts no background sealing goroutine.
+Neither the API nor the file format is stable.
 
 ## Bbolt catalog
 
@@ -37,7 +39,7 @@ leave it unchanged; a poisoned handle must be reopened before querying selection
 
 | Layer | Responsibility | Status |
 | --- | --- | --- |
-| Experimental adapter (`internal/cluster/db/wal/`) | Raft entry serialization, visibility, replay, selection, protected readers | Implemented in isolated tests; production Storage uses legacy tidwall |
+| Application layer (`internal/cluster/db/wal/`) | Raft entry serialization, visibility, replay, selection, protected readers | Production binding selects native tidwall or segmented storage; private adapter tests also exercise both |
 | Ordered log (`pkg/segmentlog`) | Append, range ownership, catalog publication, recovery, rewriting, reclamation | Synchronous operations; no pinned views |
 | Segment operations (`pkg/segmentlog`) | Immutable encoding, sparse reads, range-preserving replacement, active append groups | Initial implementation |
 | Encoding (`pkg/segmentlog/internal/format`) | Bounded frames, CRC32C, and block codecs | Plain and zstd implemented |
@@ -51,8 +53,8 @@ rewrite publication establish trust from disk. See the
 
 Segment lifecycle, catalog publication, and rewriting share one package in the
 repository's Go module. The package does not import the application adapter,
-Raft, protobuf, or bbolt. The adapter checks that an outer record ID matches the
-ID inside its serialized Raft entry.
+Raft, or protobuf. Its catalog uses bbolt. The adapter checks that an outer record
+ID matches the ID inside its serialized Raft entry.
 
 ## Implemented contract
 
@@ -141,7 +143,7 @@ metadata lives in the checksummed index rather than a duplicated block header.
 Readers also accept experimental format 0 (40-byte index entries, plain blocks,
 reserved zero at offset 36, and END0 footer). New writes always use format 1.
 A fixed format-0 fixture tests that reader compatibility; old readers reject v1.
-Neither experimental format is an adopted production storage contract.
+The segmented backend does not read native tidwall files.
 
 ## Compression policy
 
