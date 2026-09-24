@@ -41,7 +41,7 @@ in each group. Per-sample percentiles use the nearest rank among only 32 batches
 Compression completions can include work on preloaded history that finishes
 during the measured interval.
 
-## Local results
+## Initial local results
 
 Three independent samples per backend on Apple M4 Max, darwin/arm64, Go 1.26.6,
 GOMAXPROCS 16, without overlapping test or lint runs. Ranges below are the
@@ -72,6 +72,44 @@ The history fits within both configured caches. This experiment does not test
 cache pressure, cold historical reads at large scale, realistic destination
 backpressure, or production latency distributions. It establishes correctness
 and comparative runtime for this specific concurrent workload.
+
+## Copying cached payloads outside the log mutex
+
+The segmented cursor previously copied each cached record while holding the
+log-wide mutex. A CPU/mutex profile of three segmented workload samples attributed
+about 85% of sampled mutex delay to cursor read releases. Profiles include setup
+and perturb timings; delay aggregates time across waiting goroutines.
+
+Cached cursor hits now select the record under that mutex and copy its payload
+after unlocking. The selected bytes remain alive through the local slice:
+sealed payloads are immutable, and resident-tail appends never change an existing
+payload prefix. Rewrite publication still uses the same mutex and replaces
+arrays. Callers still receive private payloads. Initial acquisition and uncached
+reads retain their existing path.
+
+Three fresh, unprofiled samples per engine produced:
+
+| Measurement | tidwall | segmented |
+| --- | ---: | ---: |
+| Writer completion | 1.225–1.302 s | 1.252–1.291 s |
+| Slowest live reader completion | 1.235–1.311 s | 1.262–1.300 s |
+| Slowest historical reader completion | 1.234–1.311 s | 1.261–1.298 s |
+| Batch p50 | 35.85–38.93 ms | 36.70–37.39 ms |
+| Batch p95 | 52.85–60.98 ms | 58.49–62.25 ms |
+| Largest batch latency | 52.97–63.00 ms | 63.25–64.18 ms |
+| Compression completions | 2 each run | 1 each run |
+| Cumulative allocations | 18.25–18.47 GB | 17.94 GB |
+
+The earlier segmented reader backlog is largely absent in these samples:
+readers finish about 8–10 ms after the writer. Writer completion is later than
+in the initial segmented samples, reflecting different interleaving rather than
+an improvement to every metric.
+
+Only one segmented compression completed inside each shorter measured interval,
+versus two initially. Shutdown joins any in-flight step outside the timer.
+Consequently this comparison does not establish a reduction in total compression
+work or allocations; it measures writer/reader completion while compression runs.
+It also does not establish performance under cache pressure or at production scale.
 
 ## Automated coverage
 

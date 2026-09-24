@@ -10,6 +10,8 @@ type CacheOptions struct {
 }
 
 // segmentBuilder is mutable only under Log.mu (or before a Log is published).
+// Appending never modifies an existing payload prefix; a selected payload slice
+// may be copied after releasing mu. Slice headers and indexes still require mu.
 // freeze transfers its arrays into an immutable entry; the builder is then
 // discarded, never appended to again.
 type segmentBuilder struct {
