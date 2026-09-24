@@ -82,3 +82,19 @@ performance with many concurrent streaming readers.
 [The concurrent reader workload](streaming-workload-results.md) separately
 measures durable appends with live readers, historical readers, and background
 compression.
+
+## Archive restore coverage
+
+`TestCompressedBackupRestoreBackends` separately checks complete node archives,
+including metadata and Raft state, using public `wal.Open` backend selection.
+Its smaller fixture uses 256 records and 64 KiB segments. It explicitly drains
+the production compression capability and requires at least one sealed segment
+to be compressed before capturing the archive.
+
+Eight cases cover both engines, live/offline backups, and histories before/after
+scrub. Each verifies exact surviving keys and payloads, absence of erased
+original records, and restored event/applied/Raft progress. The restored node
+accepts another committed write, closes, reopens, and verifies both that write
+and the original history again. This untagged test is included in normal CI
+and race jobs, without performance thresholds. The live cases keep the source
+open but do not append concurrently with capture.
