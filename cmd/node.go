@@ -169,6 +169,11 @@ docs/operations/ it points to.`,
 			zap.L().Fatal("environment", zap.Error(err))
 		}
 
+		eventLogOptions, err := loadEventLogOptions()
+		if err != nil {
+			zap.L().Fatal("event-log configuration", zap.Error(err))
+		}
+
 		// Node identity and addressing come from the environment so the
 		// same image can be templated per-node by an orchestrator (Docker,
 		// Kubernetes). The historical stdlib `flag` calls here were dead —
@@ -248,16 +253,7 @@ docs/operations/ it points to.`,
 		if m != nil {
 			walOpts = append(walOpts, wal.WithMetrics(m))
 		}
-		// COMMITTED_EVENT_CACHE_SEGMENTS sets how many event-log segments stay
-		// parsed in memory (default 16; each RESIDENT segment ≈ 21MB, unused
-		// capacity is free). Size it to your box: at least concurrent syncables
-		// + 2, raised freely on production RAM — syncables replaying history
-		// are concurrent readers, and a cache smaller than the reader count
-		// thrashes with ~20MB re-parses. Invalid values warn and keep the
-		// default (parseInt64Env), matching COMMITTED_MAX_PROPOSAL_BYTES.
-		if n, ok := parseInt64Env("COMMITTED_EVENT_CACHE_SEGMENTS"); ok {
-			walOpts = append(walOpts, wal.WithEventCacheSegments(int(n)))
-		}
+		walOpts = append(walOpts, eventLogOptions...)
 		// COMMITTED_SAFE_MODE boots the operator escape hatch: raft, apply,
 		// and the API run normally, but sync/ingest workers and the scrub
 		// worker are held — the window to inspect and delete/fix a config

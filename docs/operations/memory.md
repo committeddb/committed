@@ -4,7 +4,7 @@ A committed node's steady-state footprint is modest — a few hundred MB under
 heavy ingest — and one knob matters as deployments grow: the event-log segment
 cache.
 
-## The event-log segment cache — `COMMITTED_EVENT_CACHE_SEGMENTS`
+## The tidwall event-log segment cache — `COMMITTED_EVENT_CACHE_SEGMENTS`
 
 The permanent event log is stored in ~20MB segment files (compressed to a
 few MB at rest once sealed — see disk-limits § Event-log compression; a
@@ -49,3 +49,24 @@ buffers (~150MB) and the scrub's working set (~85MB, transient, scales with
 log size), plus bbolt's file-backed pages in RSS. Pull a live profile from
 your own workload with [`COMMITTED_PPROF`](logging.md) — heap profiles are the
 authoritative answer for your data shape.
+
+## Segmented event-log caches
+
+`COMMITTED_EVENT_LOG_BACKEND` selects `tidwall` (the default) or `segmented`.
+The setting applies to the permanent event log; Raft logs remain tidwall-backed.
+Use the same backend when reopening an existing directory. This setting does not
+convert formats, and an incompatible event directory is refused.
+
+For `segmented`, these runtime byte budgets replace `COMMITTED_EVENT_CACHE_SEGMENTS`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `COMMITTED_EVENT_CACHE_RECENT_BYTES` | `167772160` (160 MiB) | Retain recent segments, evicting older ones as new segments arrive. |
+| `COMMITTED_EVENT_CACHE_HISTORICAL_BYTES` | `167772160` (160 MiB) | Retain historical segments using LRU on segment acquisition. |
+
+Values are non-negative decimal byte counts; zero disables that tier. Invalid
+values fail startup. The budgets do not preallocate memory. Entries shared by
+readers remain immutable, and eviction does not invalidate an active reader.
+The active tail, reader-owned copies, and evicted entries still used by readers
+can consume memory beyond these budgets. Budgets are not persisted and can change
+between restarts. Setting both to zero disables caching.
