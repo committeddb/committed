@@ -1,15 +1,15 @@
 # Authenticating a Committed cluster
 
-This runbook is for operators. It describes the two independent
+This runbook is for operators. It describes the independent
 authentication layers Committed ships today, how to turn each one on,
 and how to keep the credentials healthy over time.
 
 The layers protect different traffic and are configured
 independently:
 
-- **HTTP API bearer token** — guards the client-facing REST API on
+- **Bearer credentials** — guard the client-facing REST API on
   port 8080 (by default). Humans and scripts talking to Committed use
-  this.
+  these credentials. The peer transport also requires its configured bearer token.
 - **HTTP API TLS** — encrypts the client-facing REST API on the wire.
   Optional client-cert enforcement (mTLS) is available on top.
 - **Peer mTLS** — guards the raft peer-to-peer transport between nodes
@@ -21,13 +21,44 @@ should have at least the bearer token **over TLS** (plaintext bearer
 tokens travel in the clear), and production deployments should have
 all three.
 
-There is no authorization layer yet. "Authenticated = full access" is
-the current model: any credential holder is a full cluster admin. This
-is acceptable when a cluster has a single trust domain — one team or one
-application owns the whole cluster, so the token holder is expected to
-have full access. A per-resource RBAC layer becomes necessary only if
-distinct actors ever share one cluster, and is filed as a follow-up on
-the `http-authentication.md` ticket.
+## Legacy and split authorization
+
+The node accepts these configurations (values are trimmed):
+
+| Credentials set | Mode |
+| --- | --- |
+| None | Unauthenticated development |
+| `COMMITTED_API_TOKEN` only | Legacy: one shared token for all protected routes and peer traffic |
+| `COMMITTED_API_TOKEN`, `COMMITTED_MEMBERSHIP_TOKEN`, and `COMMITTED_PEER_TOKEN` | Split: all three must be nonempty and distinct |
+
+Every other combination fails startup before storage is opened. Use the same
+credentials for each role on every node. Split mode has no token hierarchy:
+
+| Credential | Access |
+| --- | --- |
+| API | Application operations, including configuration, proposals, scrub, and node/cluster status |
+| Membership | Membership list/add/promote/remove, live backup, and enabled pprof endpoints |
+| Peer | `/raft/message`, `/raft/events`, and `/raft/disk-report` on the peer listener |
+
+Split mode sends disk reports to the leader's peer URL using peer TLS and its
+peer token. It does not require an advertised API URL for disk reporting.
+The legacy `/v1/node/disk-report` endpoint is unavailable in split mode.
+Legacy nodes continue sending reports to that API endpoint, so software can
+be upgraded while retaining the shared token. Enable split mode through a
+coordinated cluster restart after every node has been upgraded; mixed
+legacy/split configurations are not supported.
+
+When mTLS is enabled, split mode requires **both** a trusted client certificate
+and the correct bearer token. Certificates do not grant roles. The same
+operator certificate can be used with either an API or membership token.
+Forwarded API requests retain the caller's credential.
+
+Application configuration cannot interpolate `COMMITTED_MEMBERSHIP_TOKEN` or
+`COMMITTED_PEER_TOKEN`; see [Secrets](secrets.md). Do not copy infrastructure
+credentials into other environment variables exposed to application configs.
+
+The `member` and live `backup` CLI commands accept the membership credential
+through `--token`; their environment default remains `COMMITTED_API_TOKEN`.
 
 ## Trust model
 
@@ -75,7 +106,7 @@ header:
 Authorization: Bearer <long-random-string>
 ```
 
-Unset or empty disables auth entirely. On startup the node logs a
+With all three token variables unset or empty, bearer authentication is disabled. On startup the node logs a
 warning in that case; do not run production traffic through a node in
 this state.
 
@@ -98,7 +129,7 @@ token anywhere you can recover it from.
 ### Routes covered
 
 The middleware is wired on every HTTP route except the operational
-endpoints, which are always anonymous:
+GET endpoints, which do not require bearer credentials (listener TLS requirements still apply):
 
 - `/health` — liveness probe
 - `/ready` — readiness probe
@@ -286,11 +317,10 @@ origins instead.
 The raft transport between nodes carries every proposal, including
 entity payloads, conf-change messages, and cluster metadata. Without
 TLS it is plaintext and any host with network access to the raft port
-can impersonate a peer (forge leader elections, inject log entries,
-eavesdrop on data). Bearer tokens are the wrong shape for peer traffic
-— it's long-lived process-to-process, not request-response — so the
-standard fix is mTLS: both sides present certs signed by a
-cluster-wide CA before any application bytes flow.
+can eavesdrop on data and bearer credentials. Peer requests require the
+shared token in legacy mode or the peer token in split mode. With mTLS,
+both sides also present certificates signed by a cluster-wide CA before
+any application bytes flow.
 
 ### Enabling
 

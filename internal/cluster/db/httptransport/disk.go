@@ -30,6 +30,14 @@ type diskVerdict struct {
 	Leader uint64 `json:"leader"`
 }
 
+// SetDiskReporter attaches the engine's coordinator once it is initialized.
+// Incoming reports receive 503 until the coordinator is attached.
+func (t *HttpTransport) SetDiskReporter(report func(uint64, string) (cluster.DiskVerdict, error)) {
+	t.mu.Lock()
+	t.reportDisk = report
+	t.mu.Unlock()
+}
+
 func (t *HttpTransport) handleDiskReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -43,7 +51,10 @@ func (t *HttpTransport) handleDiskReport(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if t.reportDisk == nil {
+	t.mu.RLock()
+	reportDisk := t.reportDisk
+	t.mu.RUnlock()
+	if reportDisk == nil {
 		http.Error(w, "disk coordinator unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -53,7 +64,7 @@ func (t *HttpTransport) handleDiskReport(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "invalid disk report", http.StatusBadRequest)
 		return
 	}
-	verdict, err := t.reportDisk(report.Node, report.State)
+	verdict, err := reportDisk(report.Node, report.State)
 	if err != nil {
 		if errors.Is(err, cluster.ErrNotLeader) {
 			http.Error(w, "disk reports require the current leader", http.StatusServiceUnavailable)

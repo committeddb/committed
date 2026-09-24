@@ -10,6 +10,8 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // Transport is the raft peer transport: it ships this node's outgoing messages
@@ -141,6 +143,14 @@ type TransportRaft interface {
 // above, never on a concrete transport. The factory gets everything the node can
 // provide — its id, the seed peer set, the logger, the node's TransportRaft
 // callbacks, the event log it serves peers' catch-ups from (nil when the
-// storage has none), the optional mTLS config, and the cluster API bearer
+// storage has none), the optional mTLS config, and the peer bearer
 // token (empty when auth is off) — and returns a ready Transport.
 type TransportFactory func(id uint64, peers []raft.Peer, logger *zap.Logger, r TransportRaft, events EventServer, tlsInfo *tlstransport.TLSInfo, token string) Transport
+
+// DiskReportTransport carries disk admission reports over the peer connection.
+// The engine attaches its coordinator after initialization. Transports without
+// this capability can still use legacy API reporting.
+type DiskReportTransport interface {
+	SetDiskReporter(func(uint64, string) (cluster.DiskVerdict, error))
+	SendDiskReport(context.Context, uint64, string) (cluster.DiskVerdict, error)
+}

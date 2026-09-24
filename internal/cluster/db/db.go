@@ -389,6 +389,15 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		metrics:            cfg.metrics,
 	})
 
+	if transport, ok := db.raft.transport.(DiskReportTransport); ok {
+		if cfg.peerDiskReports {
+			db.disk.sendPeer = transport.SendDiskReport
+		}
+		transport.SetDiskReporter(db.ReportDisk)
+	} else if cfg.peerDiskReports {
+		panic("db: peer disk reporting requires DiskReportTransport")
+	}
+
 	// The watcher subscribes to leader-ID transitions from LeaderState
 	// BEFORE the first Ready iteration could land — subscribe() just
 	// registers a channel, so events that arrive before we start
