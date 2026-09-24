@@ -19,21 +19,14 @@ import (
 // Exercise actual node archives, including metadata and Raft state, after
 // physical compression and logical erasure through the public backend choice.
 func TestCompressedBackupRestoreBackends(t *testing.T) {
-	const records, deleted, segmentBytes = 256, 4, 64 << 10
+	const records, deleted = 256, 4
 	entries, typ, _ := workloadEntries(t, records)
 	expected := streamingExpectedRows(t, entries)
 	for _, backend := range []string{"tidwall", "segmented"} {
 		for _, mode := range []string{"live", "offline"} {
 			for _, scrubbed := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/scrubbed=%t", backend, mode, scrubbed), func(t *testing.T) {
-					options := []Option{WithSafeMode(), WithEventSegmentSize(segmentBytes)}
-					if backend == "segmented" {
-						options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
-							SegmentBytes: segmentBytes,
-							Encoding:     segmentlog.Options{Compression: segmentlog.ZstdDefault},
-							Cache:        segmentlog.CacheOptions{RecentBytes: 1 << 20, HistoricalBytes: 1 << 20},
-						}))
-					}
+					options := compressedStorageOptions(backend)
 					source := t.TempDir()
 					s, err := Open(source, nil, nil, nil, options...)
 					require.NoError(t, err)
@@ -41,20 +34,7 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 					require.NoError(t, applyWorkloadBatch(s, entries))
 					// Safe mode holds background workers; explicitly drain the same
 					// compression capability the production sealer uses.
-					require.NotNil(t, s.eventLog.compressor)
-					settle := func() int {
-						t.Helper()
-						count := 0
-						for {
-							did, err := s.eventLog.compressor.CompressNextSealed()
-							require.NoError(t, err)
-							if !did {
-								return count
-							}
-							count++
-						}
-					}
-					require.Positive(t, settle(), "fixture must contain compressed sealed segments")
+					require.Positive(t, compressWorkload(t, s), "fixture must contain compressed sealed segments")
 					last := uint64(len(entries))
 					if scrubbed {
 						deletes := make([]*pb.Entry, 0, deleted)
@@ -68,7 +48,7 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 						last++
 						require.NoError(t, applyWorkloadBatch(s, []*pb.Entry{workloadEntityEntry(t, last, command)}))
 						require.NoError(t, s.runPendingScrub())
-						settle()
+						compressWorkload(t, s)
 					}
 					verify := func(store *Storage, frontier uint64) {
 						t.Helper()
@@ -127,5 +107,33 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func compressedStorageOptions(backend string) []Option {
+	const segmentBytes = 64 << 10
+	options := []Option{WithSafeMode(), WithEventSegmentSize(segmentBytes)}
+	if backend == "segmented" {
+		options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
+			SegmentBytes: segmentBytes,
+			Encoding:     segmentlog.Options{Compression: segmentlog.ZstdDefault},
+			Cache:        segmentlog.CacheOptions{RecentBytes: 1 << 20, HistoricalBytes: 1 << 20},
+		}))
+	}
+	return options
+}
+
+// Safe mode holds both workers; drive the production sealer capability explicitly.
+func compressWorkload(t testing.TB, s *Storage) int {
+	t.Helper()
+	require.NotNil(t, s.eventLog.compressor)
+	count := 0
+	for {
+		did, err := s.eventLog.compressor.CompressNextSealed()
+		require.NoError(t, err)
+		if !did {
+			return count
+		}
+		count++
 	}
 }
