@@ -106,9 +106,10 @@ image can be templated per-node by an orchestrator:
                        recomputes the cluster-wide write-admission verdict
                        (admit iff the leader and a quorum of voters have disk
                        headroom), which every node enforces at its propose
-                       gate. Requires COMMITTED_API_URL on every node and a
-                       cluster-uniform COMMITTED_API_TOKEN; without them the
-                       gate falls back to the node-local decision. Any
+                       gate. Legacy mode reports through COMMITTED_API_URL
+                       with the shared API token; split mode uses the peer
+                       URL and peer token. Failed reports eventually fall
+                       back to the node-local decision. Any
                        zero duration ("0", "0s") disables cluster-aware
                        admission entirely.
 

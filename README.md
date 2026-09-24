@@ -125,7 +125,8 @@ Routes are served by Chi from `internal/cluster/db/http/`. The full
 OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
 `/docs`. Every API endpoint lives under a `/v1` prefix (see
 [`docs/api-compatibility.md`](docs/api-compatibility.md)); bearer-token
-auth is applied when `COMMITTED_API_TOKEN` is set (see
+auth supports a legacy shared token or separate API, membership, and peer
+credentials (see
 [`docs/operations/authentication.md`](docs/operations/authentication.md)).
 
 Runnable example configs live in [`examples/movies/`](examples/movies/), wired
