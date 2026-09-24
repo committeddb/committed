@@ -57,7 +57,8 @@ type Diagnosis struct {
 	Detail   string // human-readable explanation
 	Repaired bool   // RepairLog truncated a torn tail
 
-	segmentedSegment *segmentlog.SegmentRef
+	segmentedSegment            *segmentlog.SegmentRef
+	segmentedCatalogUnavailable bool
 
 	truncateSeg string // torn-tail: segment file to truncate or remove
 	truncateOff int64  // torn-tail: byte offset to truncate to (0 => remove file)

@@ -28,6 +28,10 @@ func diagnoseSegmentedLog(dir string) (*Diagnosis, error) {
 	case errors.Is(err, segmentlog.ErrCorrupt), errors.Is(err, os.ErrNotExist), errors.Is(err, bolterrors.ErrInvalid), errors.Is(err, bolterrors.ErrChecksum):
 		d.Status = LogCorrupt
 		d.Detail = fmt.Sprintf("segmented log: %v", err)
+		if !inspected.CatalogVerified {
+			d.segmentedCatalogUnavailable = true
+			d.Detail = "segmented catalog is missing or corrupt; current file selection cannot be established; restore a complete backup into an empty directory or rebuild from a healthy peer"
+		}
 	default:
 		// Ownership, permissions, I/O failures, and unknown format versions are
 		// inspection errors, not evidence that the stored content is corrupt.

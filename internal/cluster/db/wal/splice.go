@@ -208,6 +208,10 @@ func SpliceNode(baseDir string, archive io.Reader, commit bool) ([]*SpliceReport
 		if d.Status != LogCorrupt {
 			continue
 		}
+		if d.segmentedCatalogUnavailable {
+			rep.Refused = "cannot splice files without the current segmented catalog; restore a complete backup into an empty directory or rebuild from a healthy peer"
+			continue
+		}
 		if d.segmentedSegment != nil {
 			targets = append(targets, &spliceTarget{rel: strings.Join(parts, "/"), dir: dir, d: d, rep: rep})
 			continue

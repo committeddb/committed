@@ -19,9 +19,11 @@ import (
 // An incomplete tail is evidence of a partial group, not permission to truncate;
 // the application must establish its durability requirements before repair.
 type Inspection struct {
-	tailFile      string
-	checkpointEnd int64
-	Records       uint64
+	// CatalogVerified distinguishes catalog failures from selected-file failures.
+	CatalogVerified bool
+	tailFile        string
+	checkpointEnd   int64
+	Records         uint64
 	// DamagedSegment identifies a selected immutable file that failed validation.
 	// It is nil for catalog and active-tail failures.
 	DamagedSegment *SegmentRef
@@ -68,6 +70,7 @@ func inspectDirectoryLocked(ctx context.Context, path string) (result Inspection
 	if err != nil {
 		return result, err
 	}
+	result.CatalogVerified = true
 	for ref, err := range catalog.ranges(Coverage{head.Start, head.Active.Start}) {
 		if err != nil {
 			return result, err
