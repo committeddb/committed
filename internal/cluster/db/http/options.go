@@ -4,6 +4,7 @@ import (
 	httpgo "net/http"
 	"time"
 
+	"github.com/committeddb/committed/internal/cluster/auth"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -12,6 +13,7 @@ type Option func(*options)
 
 type options struct {
 	bearerToken      string
+	tokens           *auth.Tokens
 	corsOrigins      []string
 	corsMethods      []string
 	corsHeaders      []string
@@ -27,7 +29,7 @@ type options struct {
 // header that matches the configured value. An empty token disables
 // authentication (dev mode).
 func WithBearerToken(token string) Option {
-	return func(o *options) { o.bearerToken = token }
+	return func(o *options) { o.bearerToken = token; o.tokens = nil }
 }
 
 // WithMaxBodyBytes caps the size of any request body the API will buffer into
@@ -100,4 +102,9 @@ func WithProxyClient(c *httpgo.Client) Option {
 			o.proxyClient = c
 		}
 	}
+}
+
+// WithTokens selects validated shared or split authorization.
+func WithTokens(tokens auth.Tokens) Option {
+	return func(o *options) { o.tokens = &tokens; o.bearerToken = tokens.API() }
 }

@@ -147,24 +147,30 @@ func recoverPanic(next httpgo.Handler) httpgo.Handler {
 // Authorization header does not carry the expected bearer token.
 // Comparison uses crypto/subtle to prevent timing side-channels.
 func (h *HTTP) bearerAuth(next httpgo.Handler) httpgo.Handler {
-	return httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
-		header := r.Header.Get("Authorization")
-		if header == "" {
-			writeError(w, httpgo.StatusUnauthorized, "unauthorized", "missing Authorization header")
-			return
-		}
+	return bearerAuthToken(h.bearerToken)(next)
+}
 
-		token, ok := strings.CutPrefix(header, "Bearer ")
-		if !ok {
-			writeError(w, httpgo.StatusUnauthorized, "unauthorized", "Authorization header must use Bearer scheme")
-			return
-		}
+func bearerAuthToken(expected string) func(httpgo.Handler) httpgo.Handler {
+	return func(next httpgo.Handler) httpgo.Handler {
+		return httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
+			header := r.Header.Get("Authorization")
+			if header == "" {
+				writeError(w, httpgo.StatusUnauthorized, "unauthorized", "missing Authorization header")
+				return
+			}
 
-		if subtle.ConstantTimeCompare([]byte(token), []byte(h.bearerToken)) != 1 {
-			writeError(w, httpgo.StatusUnauthorized, "unauthorized", "invalid bearer token")
-			return
-		}
+			token, ok := strings.CutPrefix(header, "Bearer ")
+			if !ok {
+				writeError(w, httpgo.StatusUnauthorized, "unauthorized", "Authorization header must use Bearer scheme")
+				return
+			}
 
-		next.ServeHTTP(w, r)
-	})
+			if subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+				writeError(w, httpgo.StatusUnauthorized, "unauthorized", "invalid bearer token")
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
