@@ -43,7 +43,8 @@ follower forwards the proposal to the leader.
 
 Authentication and TLS mirror the node's API configuration:
 
-  COMMITTED_API_TOKEN           bearer token sent as Authorization (or --token)
+  COMMITTED_MEMBERSHIP_TOKEN    bearer token sent as Authorization (or --token)
+  COMMITTED_API_TOKEN           legacy fallback when membership token is unset
   COMMITTED_HTTP_TLS_CERT_FILE  when set (and --target is not given), the
                                 local API is HTTPS, so the call uses https://
 
@@ -176,14 +177,17 @@ func apiBaseURL(target string) (string, error) {
 }
 
 // memberAPIToken returns the bearer token to authenticate with: --token if
-// given, else COMMITTED_API_TOKEN, else empty (the API runs unauthenticated).
-func memberAPIToken() string { return apiToken(memberToken) }
+// given, else the membership token, then the legacy API token.
+func memberAPIToken() string { return membershipAPIToken(memberToken) }
 
-// apiToken is the bearer token a CLI command authenticates with: the flag
-// if given, else COMMITTED_API_TOKEN.
-func apiToken(flag string) string {
+// membershipAPIToken resolves an operator command's credential independently
+// of node configuration: a client needs only its membership credential.
+func membershipAPIToken(flag string) string {
 	if flag != "" {
 		return flag
+	}
+	if token := strings.TrimSpace(os.Getenv("COMMITTED_MEMBERSHIP_TOKEN")); token != "" {
+		return token
 	}
 	return apiTokenEnv()
 }
@@ -215,7 +219,7 @@ func apiClient(insecure bool, timeout time.Duration) *nethttp.Client {
 
 func init() {
 	memberCmd.PersistentFlags().StringVar(&memberTarget, "target", "", "base URL of a cluster node's API (default: local COMMITTED_API_ADDR)")
-	memberCmd.PersistentFlags().StringVar(&memberToken, "token", "", "API bearer token (default: COMMITTED_API_TOKEN)")
+	memberCmd.PersistentFlags().StringVar(&memberToken, "token", "", "membership bearer token (default: COMMITTED_MEMBERSHIP_TOKEN, then COMMITTED_API_TOKEN)")
 	memberCmd.PersistentFlags().BoolVar(&memberInsecure, "insecure", false, "skip TLS certificate verification when the target is https")
 
 	memberAddCmd.Flags().Uint64Var(&memberID, "id", 0, "raft node id of the member to add")

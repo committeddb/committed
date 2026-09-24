@@ -57,8 +57,11 @@ Application configuration cannot interpolate `COMMITTED_MEMBERSHIP_TOKEN` or
 `COMMITTED_PEER_TOKEN`; see [Secrets](secrets.md). Do not copy infrastructure
 credentials into other environment variables exposed to application configs.
 
-The `member` and live `backup` CLI commands accept the membership credential
-through `--token`; their environment default remains `COMMITTED_API_TOKEN`.
+The `member` and live `backup` CLI commands use `--token` when supplied, then
+`COMMITTED_MEMBERSHIP_TOKEN`, then the legacy `COMMITTED_API_TOKEN` fallback.
+A standalone operator client needs only its membership token; it does not
+need the API or peer token. These commands currently offer `--insecure` for
+server certificate verification but do not load client certificates for mTLS.
 
 ## Trust model
 
