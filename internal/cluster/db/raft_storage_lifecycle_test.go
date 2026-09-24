@@ -80,7 +80,7 @@ func TestAdversarial_StorageLeaderRestart(t *testing.T) {
 		})
 		nodes.WaitForLeader(t)
 		var seq uint64
-		proposeBurst(t, nodes, &seq, 5)
+		proposeAppliedStorageBurst(t, nodes, &seq, 5)
 		leader := nodes.LeaderRaft()
 		index := 0
 		var survivors Rafts
@@ -95,11 +95,40 @@ func TestAdversarial_StorageLeaderRestart(t *testing.T) {
 		require.NoError(t, leader.storage.Close())
 		survivors.WaitForLeader(t)
 		require.NotEqual(t, leader.id, survivors.LeaderRaft().id)
-		proposeBurst(t, survivors, &seq, 5)
+		proposeAppliedStorageBurst(t, survivors, &seq, 5)
 		rebootWalNode(t, leader, dirs[index], nil, fatalC, options...)
 		waitForLeaderExtended(t, nodes, 15*time.Second)
-		proposeBurst(t, nodes, &seq, 3)
+		proposeAppliedStorageBurst(t, nodes, &seq, 3)
 		waitForSurvivorConvergence(t, nodes, 20*time.Second)
 		requireNoFatal(t, fatalC)
 	})
+}
+
+// A Raft-log append alone does not establish commitment or application. Wait
+// for each exact proposal to be applied on every participating node before
+// advancing the lifecycle (especially closing the leader). Use the same catch-up
+// budget as the final convergence check rather than the initial-election budget.
+func proposeAppliedStorageBurst(t *testing.T, nodes Rafts, seq *uint64, count int) {
+	t.Helper()
+	for range count {
+		*seq++
+		payload := severeLagProposal(t, *seq)
+		proposeAndCheckBytes(t, nodes, payload)
+		for _, node := range nodes {
+			require.Eventually(t, func() bool {
+				entries, err := node.ents()
+				if err != nil {
+					return false
+				}
+				applied := node.storage.AppliedIndex()
+				for _, entry := range entries {
+					if entry.GetIndex() <= applied && bytes.Equal(entry.Data, payload) {
+						return true
+					}
+				}
+				return false
+			}, 20*time.Second, 10*time.Millisecond,
+				"node %d did not apply proposal %d", node.id, *seq)
+		}
+	}
 }
