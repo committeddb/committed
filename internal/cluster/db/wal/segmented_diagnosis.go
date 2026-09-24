@@ -9,6 +9,7 @@ import (
 
 	bolterrors "go.etcd.io/bbolt/errors"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
@@ -27,7 +28,8 @@ func diagnoseSegmentedLog(dir string) (*Diagnosis, error) {
 		d.Detail = "segmented log has an incomplete append group; truncation requires establishing the durable event boundary"
 	case errors.Is(err, segmentlog.ErrCorrupt), errors.Is(err, os.ErrNotExist), errors.Is(err, bolterrors.ErrInvalid), errors.Is(err, bolterrors.ErrChecksum):
 		d.Status = LogCorrupt
-		d.Detail = fmt.Sprintf("segmented log: %v", err)
+		message, _ := cluster.RedactedMessage(err)
+		d.Detail = "segmented log: " + message
 		if !inspected.CatalogVerified {
 			d.segmentedCatalogUnavailable = true
 			d.Detail = "segmented catalog is missing or corrupt; current file selection cannot be established; restore a complete backup into an empty directory or rebuild from a healthy peer"

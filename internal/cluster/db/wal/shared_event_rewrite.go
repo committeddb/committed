@@ -9,8 +9,8 @@ import (
 // rewriteSharedPlan is the shared-backend publication step for prepared scrub
 // plans. It does not reclaim retired files, mark scrub completion, or reconcile
 // erasure bookkeeping. The caller supplies a fresh backend generation and must
-// reopen after a backend failure before retrying. Production runScrub still uses
-// native execution; callers of this experimental step exclude Close/replacement.
+// reopen after a backend failure before retrying. The managed-backend scrub
+// worker calls this step and excludes Close/replacement for its lifetime.
 //
 // Appends wait for the rewrite. Existing protected readers or layout freezes
 // defer it; registration of new protected readers waits until this step returns.

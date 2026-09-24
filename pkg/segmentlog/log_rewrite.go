@@ -27,7 +27,7 @@ type SealedRewriteResult struct {
 // This is deliberately a sealed-only operation, not a whole-log scrub. The active
 // tail, append frontier, and rotation accounting are unchanged. It cannot complete
 // a request whose scope includes active records. Generation describes this scoped
-// transaction; Committed's full scrub-generation protocol is not integrated yet.
+// transaction; Committed's full scrub uses the whole-log Rewrite operation.
 //
 // Replacement writing allows reads, appends, and rollover. The captured sealed
 // prefix is fixed; later sealed ranges and the active tail remain unchanged by
