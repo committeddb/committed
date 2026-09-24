@@ -24,6 +24,7 @@ type layout interface {
 	// A nil tail reference preserves the current active tail without revalidation.
 	verifyRewrite([]SegmentRef, *TailRef) (*verifiedRewriteFiles, error)
 	publishRewrite(uint64, uint64, *verifiedRewriteFiles) error
+	publishCompression(uint64, *verifiedRewriteFiles) error
 	reclaim(*Log, context.Context) (ReclaimResult, error)
 	reclaimOrphans(*Log, context.Context) (ReclaimResult, error)
 	Close() error

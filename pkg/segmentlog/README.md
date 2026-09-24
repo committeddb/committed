@@ -194,6 +194,15 @@ ownership until Close, including across processes. Rollover currently blocks
 other operations; old files remain until explicit reclamation. See [the
 lifecycle contract and limitations](log-lifecycle.md).
 
+With compression enabled, `Log.CompressNextSealed()` converts one immutable
+closed tail to an indexed segment per call. Preparation permits reads, appends,
+and rollover. Atomic catalog publication preserves the logical generation,
+history, record IDs, and active tail. Existing readers retain their immutable
+bytes; obsolete files remain until `Reclaim`. The event-log adapter exposes
+this operation to the WAL background sealer and reclaims after each replacement.
+`NoCompression` disables this step. Already indexed ranges are skipped; scan
+progress is retained for the lifetime of the open log.
+
 Managed sealed-file reads check coverage and record count against the catalog
 before looking up or delivering records. A mismatch returns `ErrCorrupt`, including
 an unexpectedly empty file. These metadata checks complement selected-block

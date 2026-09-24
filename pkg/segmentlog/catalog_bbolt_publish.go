@@ -98,6 +98,15 @@ func (s *boltCatalog) verifyRewrite(changed []SegmentRef, active *TailRef) (*ver
 // publishRewrite selects only files returned by verifyRewrite. A nil active
 // leaves the current tail and its checkpoint unchanged. No payload I/O occurs.
 func (s *boltCatalog) publishRewrite(expected, generation uint64, files *verifiedRewriteFiles) error {
+	return s.publishReplacement(expected, generation, files, false)
+}
+
+// publishCompression changes physical representation without advancing logical history.
+func (s *boltCatalog) publishCompression(expected uint64, files *verifiedRewriteFiles) error {
+	return s.publishReplacement(expected, 0, files, true)
+}
+
+func (s *boltCatalog) publishReplacement(expected, generation uint64, files *verifiedRewriteFiles, compression bool) error {
 	if files == nil || files.consumed || files.owner != s {
 		return ErrInvalid
 	}
@@ -110,7 +119,13 @@ func (s *boltCatalog) publishRewrite(expected, generation uint64, files *verifie
 	if c.Revision != expected {
 		return ErrCatalogConflict
 	}
-	if expected == ^uint64(0) || generation <= c.Generation || (active != nil && active.Start != c.Active.Start) {
+	if compression {
+		if active != nil || len(changed) != 1 {
+			return ErrInvalid
+		}
+		generation = c.Generation
+	}
+	if expected == ^uint64(0) || (!compression && generation <= c.Generation) || (active != nil && active.Start != c.Active.Start) {
 		return ErrInvalid
 	}
 
@@ -128,6 +143,9 @@ func (s *boltCatalog) publishRewrite(expected, generation uint64, files *verifie
 			old, e := decodeBoltRef(k, b.Get(k))
 			if e != nil {
 				return e
+			}
+			if compression && (old.TailBytes == 0 || ref.TailBytes != 0 || ref.Count != old.Count) {
+				return ErrInvalid
 			}
 			if ref.Coverage != old.Coverage || ref.File == old.File {
 				return ErrInvalid

@@ -46,7 +46,7 @@ type fileInstaller interface {
 // Reclaim cleans obsolete managed files. There are no pinned views.
 type Log struct {
 	// Lock order: maintenanceMu (maintenance only), mutationMu, then mu.
-	// Appends and sealed rewrites share mutationMu; whole-log rewrites and
+	// Appends and sealed-file preparation share mutationMu; whole-log rewrites and
 	// destructive maintenance take it exclusively. mu guards all live state.
 	maintenanceMu sync.Mutex
 	mutationMu    sync.RWMutex
@@ -65,6 +65,9 @@ type Log struct {
 	poison        error
 	closed        bool
 	lock          *durablefs.DirectoryLock
+
+	compressionHistory [16]byte
+	compressionNext    uint64 // first range not yet examined during this open
 }
 
 func checkLogEncoding(target uint64, encoding Options) error {

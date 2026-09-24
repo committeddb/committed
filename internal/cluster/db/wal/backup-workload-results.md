@@ -18,7 +18,8 @@ not a cluster throughput benchmark or a customer-data compression estimate.
 - 128 deletes followed by a real scrub command. Localized deletes target the first
   128 records; distributed deletes target every 256th record throughout history.
 - Tidwall uses its default 16-segment cache. Segmented uses 160 MiB each for recent
-  and historical caches and ZstdDefault encoding for rewrite outputs.
+  and historical caches and ZstdDefault encoding for indexed outputs, including
+  background compression of untouched closed tails.
 - Durability remains enabled. Background sealing is stopped and the existing
   compressor, where available, is drained explicitly before both backup captures.
   Scrubbing is driven explicitly after applying its command.
@@ -31,42 +32,49 @@ not a cluster throughput benchmark or a customer-data compression estimate.
   policy. Full independent archives still store the entire backup each time.
 - The benchmark verifies that all requested upserts were erased.
 
-## Initial local measurement
+## Local measurement with sealed-segment compression
 
-One iteration per case on Apple M4 Max, darwin/arm64, Go benchmark GOMAXPROCS 16.
-Times are observations from a single run, not statistically established rankings.
-Sizes below are MiB (1,048,576 bytes).
+One iteration per case on Apple M4 Max, darwin/arm64, Go benchmark GOMAXPROCS 16,
+without overlapping test or lint runs. Times are observations from a single run,
+not statistically established rankings. Sizes below are MiB (1,048,576 bytes).
 
-| Deletes | Engine | Before backup | After backup | Changed bytes | Reused bytes / files | Append µs/record | Scrub ms |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Localized | tidwall | 42.93 | 42.40 | 42.40 | 0 / 0 | 151.9 | 788.9 |
-| Localized | segmented | 130.62 | 115.88 | 15.89 | 99.99 / 5 | 156.4 | 353.7 |
-| Distributed | tidwall | 42.93 | 42.42 | 42.42 | 0 / 0 | 148.0 | 809.7 |
-| Distributed | segmented | 130.62 | 42.76 | 42.76 | 0 / 0 | 151.0 | 977.7 |
+| Deletes | Engine | Before backup | After backup | Changed bytes | Reused bytes / files | Append µs/record | Scrub ms | Compression ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Localized | tidwall | 42.93 | 42.40 | 42.40 | 0 / 0 | 147.6 | 774.0 | 397.7 |
+| Localized | segmented | 42.92 | 42.79 | 15.89 | 26.91 / 5 | 130.6 | 456.6 | 833.4 |
+| Distributed | tidwall | 42.93 | 42.42 | 42.42 | 0 / 0 | 143.6 | 773.7 | 399.6 |
+| Distributed | segmented | 42.92 | 42.76 | 42.76 | 0 / 0 | 146.9 | 1092.0 | 866.9 |
 
 Append time includes Raft Save and application apply, excluding fixture generation
-and subsequent explicit compression. Tidwall's combined explicit compression
-steps took 398–409 ms per case. Segmented exposes no background sealed-file
-compressor; its rewrite encoding time is included in scrub time.
+and subsequent explicit compression. Compression time combines the explicit
+draining steps before both backups, including segmented retirement reclamation.
+Scrub time includes encoding the changed ranges. The active tail stays plain.
 
-Total measured workflow time was 8.41–8.51 seconds per case. Allocated bytes over
-the entire measured workflow were 6.43–6.50 GB for tidwall and 4.61–5.38 GB for
-segmented. These are cumulative allocations, **not peak or resident RAM**.
+Total measured workflow time was 8.30–8.37 seconds per case for tidwall and
+7.80–9.15 seconds for segmented. Allocated bytes over the entire measured workflow
+were 6.43–6.50 GB for tidwall and 5.59–6.37 GB for segmented. These are cumulative
+allocations, **not peak or resident RAM**.
 
 ## What this establishes
 
-Localized erasure preserves untouched segmented files. In this run, its changed
-backup bytes were about 62.5% lower than tidwall's. Distributed erasure touched
-every closed range and eliminated that reuse advantage.
+The initial measurement before background compression produced a 130.62 MiB
+segmented baseline: untouched closed append-format files were still plain.
+Compressing those files brings the initial event-log backup to 42.92 MiB, close
+to tidwall's 42.93 MiB for the same input.
 
-Compression is a separate issue: segmented rollover retains closed append-format
-files without compressing them. Only rewritten ranges become compressed indexed
-segments. Consequently its initial backup was about 3.04 times tidwall's, and its
-localized post-scrub backup remained about 2.73 times larger. Distributed scrub
-rewrote all ranges, bringing total backup size close to tidwall's.
+Localized erasure preserves five untouched compressed segmented files. Its
+changed backup bytes remain about 62.5% lower than tidwall's. Total post-scrub
+backup size is about 0.9% larger. Distributed erasure touches every closed range,
+eliminating the reuse advantage; total backup size is about 0.8% larger.
 
-The workload therefore demonstrates stable-file reuse, but does **not** establish
-a general backup-cost reduction. That depends on compression, which ranges each
-scrub touches, and whether the hosting backup system reuses unchanged files.
-It supplies no evidence about 100 TB scale, long retention histories, network
-transfer costs, or performance with many concurrent streaming readers.
+The segmented explicit compression step took roughly twice as long in this run,
+adding about 0.44–0.47 seconds for this workload. Localized scrub was faster and
+distributed scrub was slower. These observations do not establish general
+runtime rankings or the latency impact of compression running alongside writers:
+the benchmark deliberately drains compression separately.
+
+Backup-cost reduction still depends on which ranges each scrub touches and
+whether the hosting backup system reuses unchanged files. Independent full
+archives store the entire backup each time. This workload supplies no evidence
+about 100 TB scale, long retention histories, network transfer costs, or
+performance with many concurrent streaming readers.

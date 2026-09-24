@@ -135,3 +135,14 @@ func (l *Log) CaptureBackup(visit func(string, int64, func(io.Writer) error) err
 }
 
 func (l *Log) Reset() error { return translate(l.log.Reset()) }
+
+// CompressNextSealed implements the shared background maintenance capability.
+func (l *Log) CompressNextSealed() (bool, error) {
+	did, err := l.log.CompressNextSealed()
+	if err == nil && did {
+		_, err = l.log.Reclaim(context.Background())
+	}
+	return did, translate(err)
+}
+
+var _ eventlog.SealedCompressor = (*Log)(nil)
