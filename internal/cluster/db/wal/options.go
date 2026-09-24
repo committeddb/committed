@@ -6,6 +6,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster/metrics"
+	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 // Option configures behaviour of Open. Some are test-only (WithoutFsync,
@@ -14,6 +15,7 @@ import (
 type Option func(*options)
 
 type options struct {
+	eventLogOpener     eventLogOpener
 	eventSegmentSize   int
 	fsyncDisabled      bool
 	logger             *zap.Logger
@@ -104,4 +106,13 @@ func WithSealerIdleInterval(d time.Duration) Option {
 // (db.WithSafeMode); raft, apply, and the API run normally.
 func WithSafeMode() Option {
 	return func(o *options) { o.safeMode = true }
+}
+
+// WithSegmentedEventLog selects the segmented permanent event log. Raft logs
+// remain tidwall-backed. An empty events directory is initialized; an existing
+// directory must already contain this format. This does not convert storage.
+// SegmentBytes applies at creation; Encoding and Cache also apply on reopen.
+// These options replace the tidwall event segment/cache settings for this backend.
+func WithSegmentedEventLog(opts segmentlog.LogOptions) Option {
+	return func(o *options) { o.eventLogOpener = segmentedEventLogOpener(opts) }
 }

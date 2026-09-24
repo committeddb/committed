@@ -657,6 +657,9 @@ func openLog(dir, logName string, m *metrics.Metrics, walOpts *wal.Options) (*wa
 }
 
 func openEventLog(dir string, m *metrics.Metrics, opts tidwall.LegacyOptions) (*eventLogBinding, error) {
+	if err := rejectSegmentedEventDirectory(dir); err != nil {
+		return nil, err
+	}
 	lg, err := tidwall.OpenLegacy(dir, opts)
 	if err != nil {
 		return nil, logOpenError(dir, "event_log", m, err)
@@ -682,18 +685,24 @@ func logOpenError(dir, logName string, m *metrics.Metrics, err error) error {
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
 func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, opts ...Option) (*Storage, error) {
-	return openStorage(dir, p, sync, ingest, openEventLog, opts...)
+	return openStorage(dir, p, sync, ingest, nil, opts...)
 }
 
 // openStorage shares the node startup path with backend integration tests.
-// Public Open always supplies the native factory; this is not format detection
-// or a runtime backend-selection option.
+// An explicit factory is used by backend integration tests. Public Open selects
+// the configured factory, defaulting to native tidwall.
 func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, openEvents eventLogOpener, opts ...Option) (*Storage, error) {
 	var cfg options
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
+	if openEvents == nil {
+		openEvents = cfg.eventLogOpener
+		if openEvents == nil {
+			openEvents = openEventLog
+		}
+	}
 	entryLogDir := datadir.EntryLogDir(dir)
 	stateLogDir := datadir.StateLogDir(dir)
 	eventLogDir := datadir.EventsDir(dir)
