@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 )
 
@@ -118,7 +119,8 @@ type HttpTransport struct {
 	fetchClient *http.Client
 	// events is this node's event log, served to peers' catch-up fetches
 	// (events.go); nil when the storage has none (the in-memory doubles).
-	events db.EventServer
+	events     db.EventServer
+	reportDisk func(uint64, string) (cluster.DiskVerdict, error)
 	// token, when non-empty (COMMITTED_API_TOKEN set), is required as a bearer on
 	// the receive handler and sent on every POST — reusing the API-token posture
 	// so a sender without the shared secret can't inject raft messages.
@@ -147,8 +149,16 @@ type peer struct {
 // this concrete transport into db (used by cmd in production and by tests), so
 // db itself never imports this package.
 func Factory() db.TransportFactory {
+	return FactoryWithDiskReports(nil)
+}
+
+// FactoryWithDiskReports serves disk reports through the supplied coordinator.
+// The callback must be safe for concurrent requests and ready before Start.
+func FactoryWithDiskReports(report func(uint64, string) (cluster.DiskVerdict, error)) db.TransportFactory {
 	return func(id uint64, peers []raft.Peer, logger *zap.Logger, r db.TransportRaft, events db.EventServer, tlsInfo *transport.TLSInfo, token string) db.Transport {
-		return New(id, peers, logger, r, events, tlsInfo, token)
+		t := New(id, peers, logger, r, events, tlsInfo, token)
+		t.reportDisk = report
+		return t
 	}
 }
 
@@ -282,6 +292,7 @@ func (t *HttpTransport) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(raftMessagePath, t.handleMessage)
 	mux.HandleFunc(eventsPath, t.handleEvents)
+	mux.HandleFunc(diskReportPath, t.handleDiskReport)
 	return mux
 }
 
