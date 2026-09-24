@@ -72,5 +72,8 @@ sustained collection of independently paced historical readers.
 The untagged `TestStreamingWorkload` includes same-start and staggered-start
 cases for both backends, so normal CI verifies the harness's per-reader contents
 and counts without timing thresholds. Its small history does not exceed the
-default caches. The full constrained benchmark is opt-in and also runs with
-`-race`.
+default caches. The full constrained benchmark runs in the CI `make bench` job on pull
+requests, pushes to `main`, and manual workflow dispatches. CI records results
+in its job log without performance regression thresholds. The three-sample
+measurements above were separate local runs; `-race` benchmark runs are also
+invoked separately.

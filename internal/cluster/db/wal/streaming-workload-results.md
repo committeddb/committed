@@ -121,7 +121,10 @@ without timing thresholds. Its smaller history does not roll over default
 20 MiB segments.
 
 The full benchmark exercises concurrent compression and can also be run with
-`-race`. Benchmark measurements are opt-in; normal CI does not run them.
+`-race`. CI runs it through `make bench` (`-bench=. -benchtime=1s`) on pull
+requests, pushes to `main`, and manual workflow dispatches. Results appear in
+the benchmark job log; there are no performance regression thresholds. The
+three-sample, `-benchtime=1x` measurements above were separate local runs.
 
 [The constrained-cache comparison](cache-pressure-results.md) runs the same
 harness on a larger history with staggered historical readers, using both default
