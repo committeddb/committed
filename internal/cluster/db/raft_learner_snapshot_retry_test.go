@@ -4,6 +4,7 @@ package db_test
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,9 +49,13 @@ func TestAdversarial_LearnerRestartRetriesDroppedSnapshotWithoutElection(t *test
 		fatalC := make(chan fatalEvent, 16)
 		var armed atomic.Bool
 		dropped := make(chan error, 1)
-		opts := append(catchUpNodeOpts(), db.WithTransportWrapperForTest(func(inner db.Transport) db.Transport {
+		// Allow a one-second election timeout: this test requires a stable leader,
+		// and the shared harness's 200ms election timeout can expire under CI load.
+		opts := append(catchUpNodeOpts(), db.WithTickInterval(100*time.Millisecond), db.WithTransportWrapperForTest(func(inner db.Transport) db.Transport {
 			return &learnerSnapshotDropTransport{Transport: inner, learner: peers[3], armed: &armed, dropped: dropped}
 		}))
+		// Register directory cleanup before node cleanup (Cleanup runs in reverse).
+		root := t.TempDir()
 		nodes := make(Rafts, 0, 4)
 		t.Cleanup(func() {
 			for _, n := range nodes {
@@ -61,11 +66,11 @@ func TestAdversarial_LearnerRestartRetriesDroppedSnapshotWithoutElection(t *test
 			}
 		})
 		for i := 0; i < 3; i++ {
-			nodes = append(nodes, openWalRaft(t, peers[i].ID, peers[:3], t.TempDir(), fc, opts, fatalC, storageOpts...))
+			nodes = append(nodes, openWalRaft(t, peers[i].ID, peers[:3], filepath.Join(root, fmt.Sprint(peers[i].ID)), fc, opts, fatalC, storageOpts...))
 		}
 		nodes.WaitForLeader(t)
 		leader := nodes.LeaderRaft()
-		learnerDir := t.TempDir()
+		learnerDir := filepath.Join(root, "4")
 		joinOpts := append([]db.Option{db.WithJoin()}, opts...)
 		learner := openWalRaft(t, 4, peers, learnerDir, fc, joinOpts, fatalC, storageOpts...)
 		nodes = append(nodes, learner)
