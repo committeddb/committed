@@ -12050,7 +12050,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## github.com/jackc/pgx/v5 v5.10.0
+## github.com/jackc/pgx/v5 v5.11.0
 
 ```
 Copyright (c) 2013-2021 Jack Christensen
@@ -12106,7 +12106,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## github.com/klauspost/compress v1.19.0
+## github.com/klauspost/compress v1.19.2
 
 ```
 Copyright (c) 2012 The Go Authors. All rights reserved.
@@ -18192,7 +18192,7 @@ limitations under the License.
 
 ```
 
-## golang.org/x/crypto v0.56.0
+## golang.org/x/crypto v0.57.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -18258,7 +18258,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## golang.org/x/net v0.58.0
+## golang.org/x/net v0.59.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -18324,7 +18324,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## golang.org/x/sync v0.22.0
+## golang.org/x/sync v0.23.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -18357,7 +18357,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## golang.org/x/sys v0.47.0
+## golang.org/x/sys v0.48.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -18390,7 +18390,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## golang.org/x/term v0.45.0
+## golang.org/x/term v0.46.0
 
 ```
 Copyright 2009 The Go Authors.
@@ -18423,7 +18423,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## golang.org/x/text v0.41.0
+## golang.org/x/text v0.42.0
 
 ```
 Copyright 2009 The Go Authors.
