@@ -1,0 +1,160 @@
+package segmentlog
+
+import (
+	"context"
+	"errors"
+	"sync"
+)
+
+// SealedRewriteResult describes a sealed-only transaction. SealedEnd is the
+// exclusive end of its scope; the active tail is untouched. ChangedSegments
+// includes EmptiedSegments. Counts describe prepared replacements, even on error.
+// Published is true only after catalog durability is confirmed; false with an
+// error does not prove the previous catalog remained selected. Reopen to resolve uncertainty.
+type SealedRewriteResult struct {
+	SealedEnd       uint64
+	ChangedSegments uint64
+	EmptiedSegments uint64
+	Published       bool
+}
+
+// RewriteSealed atomically publishes transformations of the current sealed
+// ranges at a strictly newer logical generation. IDs and original coverage stay
+// fixed; unchanged files retain their names and bytes. Entirely erased ranges
+// become empty catalog descriptors without payload files. Even a no-op can
+// publish the requested generation, writing only catalog metadata.
+//
+// This is deliberately a sealed-only operation, not a whole-log scrub. The active
+// tail, append frontier, and rotation accounting are unchanged. It cannot complete
+// a request whose scope includes active records. Generation describes this scoped
+// transaction; Committed's full scrub uses the whole-log Rewrite operation.
+//
+// Replacement writing allows reads, appends, and rollover. The captured sealed
+// prefix is fixed; later sealed ranges and the active tail remain unchanged by
+// this rewrite. Reclamation, Close, and other rewrites wait until it finishes.
+// Transform runs once per examined record and must not call back into this Log.
+// Old files remain until Reclaim. After preparation begins, any failure poisons
+// the handle conservatively (including callback failure/cancellation); Close and
+// reopen before retrying or reclaiming unpublished replacements.
+func (l *Log) RewriteSealed(ctx context.Context, generation uint64, transform Transform) (result SealedRewriteResult, err error) {
+	resultAll, err := l.rewrite(ctx, generation, transform, false, nil)
+	return resultAll.SealedRewriteResult, err
+}
+
+// RewriteResult describes a whole-log transaction. TailChanged reports completed
+// tail preparation, including on failure. Published has the same uncertainty
+// semantics as SealedRewriteResult.Published.
+type RewriteResult struct {
+	SealedRewriteResult
+	TailChanged bool
+}
+
+// Rewrite atomically transforms every surviving record in the captured log,
+// including the active tail. It preserves original append progress and rotation
+// accounting. Reads may proceed during replacement writing; mutators wait until
+// publication finishes. Callbacks
+// must not reenter this Log. Old payload files remain until explicit Reclaim.
+// Invalid input leaves the handle usable; preparation/publication failures require
+// Close and reopen. This storage transaction does not update application metadata.
+func (l *Log) Rewrite(ctx context.Context, generation uint64, transform Transform) (RewriteResult, error) {
+	return l.rewrite(ctx, generation, transform, true, nil)
+}
+
+// RewriteWithPublicationLock performs Rewrite while excluding caller-owned read
+// lifetimes only during publication. Preparation and verification do not acquire
+// publication. The lock must be non-nil and must not call into this Log itself.
+// Readers may hold its matching read lock across multiple log reads, but must not
+// perform mutations while holding it: Rewrite retains mutation ownership while
+// waiting to publish. Lock acquisition is not context-cancelable; cancellation
+// is checked after it returns. Errors after preparation still poison the handle.
+func (l *Log) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform Transform, publication sync.Locker) (RewriteResult, error) {
+	if publication == nil {
+		return RewriteResult{}, ErrInvalid
+	}
+	return l.rewrite(ctx, generation, transform, true, publication)
+}
+
+func (l *Log) rewrite(ctx context.Context, generation uint64, transform Transform, includeTail bool, publication sync.Locker) (result RewriteResult, err error) {
+	l.maintenanceMu.Lock()
+	defer l.maintenanceMu.Unlock()
+	if includeTail {
+		l.mutationMu.Lock()
+		defer l.mutationMu.Unlock()
+	} else {
+		l.mutationMu.RLock()
+		defer l.mutationMu.RUnlock()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err = l.usable(); err != nil {
+		return result, err
+	}
+	if ctx == nil || transform == nil {
+		return result, ErrInvalid
+	}
+	if err = ctx.Err(); err != nil {
+		return result, err
+	}
+	c, err := l.catalog.head()
+	if err != nil {
+		return result, l.fail(err)
+	}
+	result.SealedEnd = c.Active.Start
+	if generation <= c.Generation || c.Revision == ^uint64(0) {
+		return result, ErrInvalid
+	}
+	if err = l.catalog.preflight(); err != nil {
+		return result, l.fail(err)
+	}
+	prepared := &preparedLogRewrite{baseRevision: c.Revision, generation: generation, result: result}
+	defer func() { err = errors.Join(err, prepared.close()) }()
+	if err = prepared.prepare(l, ctx, c, transform, includeTail); err != nil {
+		return prepared.result, l.fail(err)
+	}
+	if err = prepared.verify(l); err != nil {
+		return prepared.result, l.fail(err)
+	}
+	if publication != nil {
+		// A reader can hold the caller's lock while seeking under mu. Never
+		// wait for that reader with mu held, or neither side could finish.
+		l.mu.Unlock()
+		publication.Lock()
+		l.mu.Lock()
+		defer publication.Unlock()
+	}
+	if err = l.usable(); err != nil {
+		return prepared.result, err
+	}
+	if !includeTail {
+		// Only appends/rollovers can have changed the layout: maintenanceMu excludes
+		// competing rewrites and reclamation. Keep their new ranges and active tail.
+		latest, e := l.catalog.head()
+		if e != nil {
+			return prepared.result, l.fail(e)
+		}
+		if latest.Generation != c.Generation {
+			return prepared.result, l.fail(ErrCatalogConflict)
+		}
+		prepared.baseRevision = latest.Revision
+	}
+	if err = prepared.publish(l, ctx); err != nil {
+		return prepared.result, l.fail(err)
+	}
+	return prepared.result, nil
+}
+
+// prepareSealed borrows immutable source contents while maintenanceMu prevents
+// reclamation and Close. Acquisition, validation, writing, and release all run
+// outside mu; the cache has its own synchronization.
+func (l *Log) prepareSealed(ctx context.Context, ref SegmentRef, transform Transform) (replacement SegmentRef, changed bool, err error) {
+	writer := rewriteWriter{dir: l.dir, encoding: l.encoding}
+	path, cache := l.path, l.cache
+	l.mu.Unlock()
+	defer l.mu.Lock()
+	segment, release, err := acquireCachedRange(path, cache, ref)
+	if err != nil {
+		return replacement, false, err
+	}
+	defer func() { err = errors.Join(err, release()) }()
+	return writer.sealed(ctx, ref, segment.Records(), transform)
+}

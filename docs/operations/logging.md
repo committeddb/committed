@@ -20,9 +20,10 @@ Two node env vars control diagnostic verbosity; both take effect at process star
   diagnosing.
 - **`COMMITTED_PPROF`** — when truthy, mounts Go's runtime profiling endpoints at
   `/debug/pprof/` (CPU, heap, goroutine, etc.) for pulling profiles from a live
-  node. **Off by default.** It sits inside the authenticated route group, so it
-  requires the bearer token whenever `COMMITTED_API_TOKEN` is set; on a token-less
-  (trusted-network) node it is open like the rest of the API. The endpoints expose
+  node. **Off by default.** In split mode it requires
+  `COMMITTED_MEMBERSHIP_TOKEN`; in legacy mode it requires the shared
+  `COMMITTED_API_TOKEN` when set. With no tokens configured it is open like
+  the rest of the API. Configured API mTLS also applies. The endpoints expose
   runtime internals and a profile briefly costs CPU, so enable it only while
   diagnosing and only where that exposure is acceptable.
 

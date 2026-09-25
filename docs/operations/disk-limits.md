@@ -35,9 +35,13 @@ transparently, and memory sizing is unchanged (see operations/memory.md).
 recognize compressed (`.zst`) segments. Before starting an old binary
 against a data dir that ran 0.8.0+, stop the node and run
 `committed wal decompress --data <datadir>` — it rewrites every compressed
-segment back to the plain format. Upgrades need nothing.
+tidwall segment back to the plain format. Upgrades need nothing.
 
-`committed wal repair` understands both formats. A checksum failure inside a
+This downgrade command applies to tidwall storage. It refuses segmented storage
+before rewriting any log: decompressing its contents would not make its on-disk
+format readable by pre-0.8.0 binaries.
+
+`committed wal repair` understands both plain and compressed tidwall segments. A checksum failure inside a
 compressed segment is data corruption (rebuild from a healthy replica),
 never a torn tail — torn tails only occur in the plain active tail, exactly
 as before. Backups copy segment files as-is, so backups of a compressed log
@@ -166,27 +170,30 @@ sync/ingest checkpoints always flow. Raft **membership changes are
 never gated** (they travel a separate channel), so you can still add a
 relief node mid-incident.
 
-**How state moves.** Each member POSTs its disk state to the leader's
-announced API URL every `COMMITTED_DISK_REPORT_INTERVAL` (default 10s)
-at `POST /v1/node/disk-report`, and the response carries the leader's
-current verdict back; the member caches it and enforces it at its own
+**How state moves.** Each member POSTs its disk state to the leader every
+`COMMITTED_DISK_REPORT_INTERVAL` (default 10s), and the response carries the
+leader's current verdict back; the member caches it and enforces it at its own
 propose gate. Disk state deliberately does *not* travel through raft
 proposals — a node can't reliably write "I'm full" when it is full.
 Enforcing at every ingress also closes the leak where a follower
 forwarded proposals to a full leader over the raft transport,
 bypassing the leader's gate.
 
-This requires `COMMITTED_API_URL` on every node and a cluster-uniform
-`COMMITTED_API_TOKEN` (the report endpoint is authenticated like every
-other write). Setting `COMMITTED_DISK_REPORT_INTERVAL` to zero (`0`, `0s`)
-disables cluster-aware admission.
+In legacy authorization mode, reports use `POST /v1/node/disk-report` at
+the leader's announced `COMMITTED_API_URL`, with the shared
+`COMMITTED_API_TOKEN` when configured. In split mode, reports use
+`POST /raft/disk-report` at the leader's registered peer URL, with
+`COMMITTED_PEER_TOKEN` and the peer TLS configuration. Split-mode reporting
+does not require an API URL. See [Authentication](authentication.md).
+Setting `COMMITTED_DISK_REPORT_INTERVAL` to zero (`0`, `0s`) disables
+cluster-aware admission.
 
 **Staleness and degraded modes — the gate fails open.** A verdict (or
 a member report, on the leader's side) is trusted for 3× the report
 interval. A node falls back to its **node-local** decision when:
 
 - no leader is known,
-- the leader never announced an API URL, or
+- in legacy mode, the leader never announced an API URL, or
 - reports are failing (no fresh verdict).
 
 A voter the leader hasn't heard from counts as healthy in the quorum math (a

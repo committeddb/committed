@@ -118,7 +118,9 @@ func (s *Storage) CaptureBackup(visit func(name string, size int64, write func(i
 		s.eventMu.RLock()
 		log := s.eventLog
 		s.eventMu.RUnlock()
-		return s.captureLog(log, root, visit)
+		return backupEventError(log.backup.CaptureBackup(func(name string, size int64, write func(io.Writer) error) error {
+			return visit(filepath.ToSlash(filepath.Join("events", name)), size, write)
+		}))
 	}(); err != nil {
 		return info, fmt.Errorf("live backup: event log: %w", err)
 	}
@@ -199,4 +201,13 @@ func raced(err error) error {
 		return fmt.Errorf("%w: %v", ErrLiveBackupRaced, err)
 	}
 	return err
+}
+
+// A backend capture can race external native truncation or replacement. Keep
+// the archive retry behavior independent of the backend's file enumeration.
+func backupEventError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, wal.ErrClosed) {
+		return fmt.Errorf("%w: %v", ErrLiveBackupRaced, err)
+	}
+	return raced(err)
 }

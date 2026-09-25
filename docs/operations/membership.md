@@ -254,7 +254,7 @@ Common flags:
 | Flag         | Default                       | Meaning                                                       |
 |--------------|-------------------------------|--------------------------------------------------------------|
 | `--target`   | local `COMMITTED_API_ADDR`    | base URL of the cluster node's API to drive the change       |
-| `--token`    | `COMMITTED_API_TOKEN`         | bearer token for the authenticated API                       |
+| `--token`    | `COMMITTED_MEMBERSHIP_TOKEN`, then `COMMITTED_API_TOKEN` | membership bearer token |
 | `--insecure` | off                           | skip TLS verification when `--target` is `https://`          |
 
 With no `--target`, the command talks to the local node's API (deriving

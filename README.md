@@ -67,17 +67,17 @@ Single node — defaults to ID=1, HTTP at `:8080`, data dir `./data`:
 ./committed node
 ```
 
-Or run the published container (distroless, static, runs as nonroot uid
+Or run the release container (distroless, static, runs as nonroot uid
 65532). It reads the same `COMMITTED_*` env vars and persists WAL/state
 under `/home/nonroot/data`:
 
 ```sh
 docker run --rm -p 8080:8080 -p 9022:9022 \
   -v committed-data:/home/nonroot/data \
-  committeddb/committed:0.8.0
+  committeddb/committed:0.8.1
 ```
 
-`docker run committeddb/committed:0.8.0 --version` prints the build
+`docker run committeddb/committed:0.8.1 --version` prints the build
 identity; `:latest` tracks the most recent release. See
 [Configuration](#configuration) for the env vars and `docker-compose.yml`
 for a local single-node setup.
@@ -125,7 +125,8 @@ Routes are served by Chi from `internal/cluster/db/http/`. The full
 OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
 `/docs`. Every API endpoint lives under a `/v1` prefix (see
 [`docs/api-compatibility.md`](docs/api-compatibility.md)); bearer-token
-auth is applied when `COMMITTED_API_TOKEN` is set (see
+auth supports a legacy shared token or separate API, membership, and peer
+credentials (see
 [`docs/operations/authentication.md`](docs/operations/authentication.md)).
 
 Runnable example configs live in [`examples/movies/`](examples/movies/), wired

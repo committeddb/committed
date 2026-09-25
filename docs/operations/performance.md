@@ -62,7 +62,8 @@ e2e suites, none of this needs Docker or an external database; the 3-node
 report builds the real binary and runs it on loopback ports.
 
 ```bash
-make bench             # the micro-benchmarks above (real fsyncs, ~30s)
+make bench             # micro-benchmarks and storage workload comparisons
+make bench/workloads   # backup, concurrent streaming, and constrained caches
 make bench/multinode   # the 3-node throughput report (~15s), prints the
                        # THROUGHPUT REPORT line with proposals/sec + p50/p99
 ```
@@ -82,9 +83,32 @@ make bench > after.txt    # on your branch
 benchstat before.txt after.txt
 ```
 
-CI runs `make bench` and the 3-node report on every push and pull request,
-so each run's log holds that commit's numbers — release-to-release
-comparison is reading two logs side by side.
+CI runs `make bench` and the 3-node report on pull requests, pushes to `main`,
+and manual workflow dispatches. Branch pushes without a PR do not trigger this
+workflow.
+
+`make bench` runs the micro-benchmarks with a one-second time target, then
+`make bench/workloads`. The workload target runs each backup, streaming, and
+constrained-cache case exactly once (`-benchtime=1x -count=1`). These are complete
+durable workloads, so time-based calibration is unnecessary. For repeated local
+samples:
+
+```bash
+make bench/workloads BENCH_WORKLOAD_COUNT=3
+```
+
+The CI benchmark job uploads a `bench-<commit SHA>-<run attempt>` artifact using
+[GitHub's artifact action](https://github.com/actions/upload-artifact).
+It contains `bench-results.txt` (combined benchmark output) and
+`bench-environment.txt` (checked-out commit, Go version, target OS/architecture,
+and kernel information). Output remains in the job log as well. Partial output
+is uploaded after benchmark failure; saving output through `tee` preserves the
+benchmark command's failure status.
+
+Download artifacts from two CI runs and compare their `bench-results.txt` files
+with `benchstat`. A single CI sample is useful for inspection, not a statistical
+performance verdict; use repeated runs on consistent hardware for close comparisons.
+The artifact uses the repository's default retention period.
 
 ## Why regressions are not gated by thresholds
 

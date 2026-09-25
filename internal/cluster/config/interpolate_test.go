@@ -167,3 +167,44 @@ func TestMissingVarError_MessageHintsAtEscape(t *testing.T) {
 	// The escape hint, naming the specific variable.
 	require.Contains(t, msg, "$${MYSQL_PASSWORD}")
 }
+
+func TestInfrastructureCredentialsCannotBeExpanded(t *testing.T) {
+	for _, name := range []string{"COMMITTED_MEMBERSHIP_TOKEN", "COMMITTED_PEER_TOKEN", "committed_peer_token", "Committed_Membership_Token"} {
+		t.Run(name, func(t *testing.T) {
+			lookup := func(string) (string, bool) {
+				t.Fatal("reserved credential must never be looked up")
+				return "", false
+			}
+			value, err := expand("private-prefix-${"+name+"}", lookup)
+			require.Empty(t, value)
+			var restricted *RestrictedVarError
+			require.ErrorAs(t, err, &restricted)
+			require.Equal(t, name, restricted.Name)
+			require.NotContains(t, err.Error(), "private-prefix")
+			literal, err := expand("$${"+name+"}", lookup)
+			require.NoError(t, err)
+			require.Equal(t, "${"+name+"}", literal)
+		})
+	}
+}
+
+func TestInterpolateRejectsInfrastructureHeader(t *testing.T) {
+	for _, name := range []string{"COMMITTED_MEMBERSHIP_TOKEN", "COMMITTED_PEER_TOKEN"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "infrastructure-secret")
+			settings := map[string]interface{}{
+				"http": map[string]interface{}{
+					"headers": []interface{}{map[string]interface{}{
+						"name": "Authorization", "value": "Bearer ${" + name + "}",
+					}},
+				},
+			}
+			var restricted *RestrictedVarError
+			require.ErrorAs(t, Interpolate(settings), &restricted)
+			value, err := ExpandString("${" + name + "}")
+			require.Empty(t, value)
+			require.ErrorAs(t, err, &restricted)
+			require.NotContains(t, err.Error(), "infrastructure-secret")
+		})
+	}
+}

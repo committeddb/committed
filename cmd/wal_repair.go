@@ -65,10 +65,12 @@ func runWalRepair() error {
 		return err
 	}
 
-	corrupt, torn := false, false
+	corrupt, torn, incomplete := false, false, false
 	for _, d := range results {
 		_, _ = fmt.Fprintf(os.Stdout, "%s: %s — %s\n", d.Dir, d.Status, d.Detail)
 		switch d.Status {
+		case wal.LogIncompleteTail:
+			incomplete = true
 		case wal.LogCorrupt:
 			corrupt = true
 		case wal.LogTornTail:
@@ -77,6 +79,8 @@ func runWalRepair() error {
 	}
 
 	switch {
+	case incomplete:
+		return fmt.Errorf("wal repair: incomplete segmented tail left unchanged; safe truncation requires establishing the durable event boundary")
 	case corrupt:
 		_, _ = fmt.Fprintln(os.Stdout, "\nnon-recoverable corruption (checksum failure or mid-compaction): rebuild this node from a healthy replica; see docs/operations/rebuild.md")
 		return fmt.Errorf("wal repair: corruption that is not a torn tail; rebuild required")
@@ -158,7 +162,11 @@ running is refused via its lock), and only when downgrading to a binary
 older than 0.8.0 — those binaries do not recognize compressed segments and
 would open a partial log. Upgrades need nothing: mixed logs read
 transparently, and the background sealer re-compresses after the next start
-on a 0.8.0+ binary.`,
+on a 0.8.0+ binary.
+
+This command applies to tidwall storage. Segmented storage uses a different
+on-disk format and is refused before any log is rewritten; decompression
+cannot make that format readable by pre-0.8.0 binaries.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if walDecompressData == "" {

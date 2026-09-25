@@ -15,6 +15,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/backup"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 // seedRaftLog writes n raft entries with recognizable payloads into a fresh
@@ -149,4 +150,27 @@ func TestWalDecompress_RequiresDataAndIsANoOpOnPlainLogs(t *testing.T) {
 	after, err := os.ReadDir(datadir.EventsDir(dataDir))
 	require.NoError(t, err)
 	require.Equal(t, len(before), len(after), "nothing to rewrite, nothing rewritten")
+}
+
+func TestWalRepairReportsIncompleteSegmentedTail(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "events")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	log, err := segmentlog.CreateLog(dir, 1, segmentlog.LogOptions{})
+	require.NoError(t, err)
+	c, err := log.InspectCatalog()
+	require.NoError(t, err)
+	require.NoError(t, log.Close())
+	tail := filepath.Join(dir, c.Active.File)
+	data, err := os.ReadFile(tail)
+	require.NoError(t, err)
+	data = append(data, 1)
+	require.NoError(t, os.WriteFile(tail, data, 0o600))
+	for _, commit := range []bool{false, true} {
+		withWalRepairFlags(t, base, "", commit)
+		require.ErrorContains(t, runWalRepair(), "incomplete segmented tail left unchanged")
+		after, err := os.ReadFile(tail)
+		require.NoError(t, err)
+		require.Equal(t, data, after)
+	}
 }

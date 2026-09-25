@@ -68,7 +68,8 @@ atomically: a failed backup leaves no file at the destination.
                        is not given (offline; a live backup records the
                        node's own id)
   COMMITTED_API_ADDR   default for --target with --live (this host's API)
-  COMMITTED_API_TOKEN  bearer token for --live (or --token)`,
+  COMMITTED_MEMBERSHIP_TOKEN  bearer token for --live (or --token)
+  COMMITTED_API_TOKEN         legacy fallback when membership token is unset`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBackup()
@@ -137,7 +138,7 @@ func runLiveBackup() error {
 	if err != nil {
 		return err
 	}
-	if token := apiToken(backupToken); token != "" {
+	if token := membershipAPIToken(backupToken); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	// No overall timeout: the archive can be terabytes. The node bounds its
@@ -305,7 +306,7 @@ func init() {
 	backupCmd.Flags().Uint64Var(&backupNodeID, "node-id", 0, "node id to record in the manifest for provenance (default $COMMITTED_NODE_ID); offline mode")
 	backupCmd.Flags().BoolVar(&backupLive, "live", false, "take the backup from a running node over its API (GET /v1/node/backup)")
 	backupCmd.Flags().StringVar(&backupTarget, "target", "", "with --live: base URL of the node's API (default: local COMMITTED_API_ADDR)")
-	backupCmd.Flags().StringVar(&backupToken, "token", "", "with --live: API bearer token (default: COMMITTED_API_TOKEN)")
+	backupCmd.Flags().StringVar(&backupToken, "token", "", "with --live: membership bearer token (default: COMMITTED_MEMBERSHIP_TOKEN, then COMMITTED_API_TOKEN)")
 	backupCmd.Flags().BoolVar(&backupInsecure, "insecure", false, "with --live: skip TLS certificate verification for an https target")
 	rootCmd.AddCommand(backupCmd)
 }

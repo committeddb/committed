@@ -234,3 +234,21 @@ If `/ready` stays 5xx for more than a few minutes after startup, check
   least one peer runs a binary that serves fetches (0.8.0 or later).
 - No `catchingUp` and `leader` is 0: the conf change (for new nodes) has
   not committed yet, or the node cannot reach the cluster.
+
+## Segmented event-log catalog damage
+
+The segmented engine stores its selected file revisions, erased ranges, and tail
+checkpoint in `events/metadata.db`. `wal repair` reports a missing or corrupt
+catalog. `wal repair --from` cannot repair individual segments without that
+catalog: it needs the current selection and digests to validate replacement bytes.
+
+Do not copy an older catalog over the damaged one or reconstruct its selection
+from directory filenames. Retired files and replacement files can coexist, and
+fully erased ranges may have no file. An older catalog can select data from before
+a completed scrub.
+
+Recover by rebuilding from a healthy peer, or restore a **complete backup into an
+empty directory** using the [backup restore procedure](backup.md). A complete
+restore recovers the backup's event log, application metadata, and Raft state
+together. It restores the backup point in time, including its scrub state; it does
+not preserve writes or erasures performed after that backup.

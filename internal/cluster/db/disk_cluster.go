@@ -109,6 +109,7 @@ type diskAdmissionDeps struct {
 	reportInterval   time.Duration
 	transferCooldown time.Duration
 	send             diskReportSender
+	sendPeer         func(context.Context, uint64, string) (cluster.DiskVerdict, error)
 	reportClient     *nethttp.Client
 	reportToken      string
 
@@ -453,7 +454,7 @@ func (a *diskAdmission) coordinate(now time.Time) {
 }
 
 // reportToLeader performs the follower half of one cycle: resolve the
-// leader's announced API URL, POST this node's disk state, and cache the
+// leader's peer or legacy API URL, POST this node's disk state, and cache the
 // verdict from the response. Any failure leaves the cached verdict to age
 // out, after which the gate falls back to the node-local decision — so the
 // failure modes (no leader, no announced URL, leader unreachable, leadership
@@ -465,15 +466,21 @@ func (a *diskAdmission) reportToLeader(now time.Time) {
 	if leaderID == 0 || leaderID == a.selfID() {
 		return
 	}
-	leaderURL, ok := a.memberAPIURL(leaderID)
-	if !ok || leaderURL == "" {
-		return
-	}
-
 	state := a.localState()
 	ctx, cancel := context.WithTimeout(a.ctx, defaultDiskReportTimeout)
 	defer cancel()
-	verdict, err := a.send(ctx, leaderURL, a.selfID(), state.String())
+	var verdict cluster.DiskVerdict
+	var err error
+	if a.sendPeer != nil {
+		verdict, err = a.sendPeer(ctx, leaderID, state.String())
+	} else {
+		leaderURL, ok := a.memberAPIURL(leaderID)
+		if !ok || leaderURL == "" {
+			return
+		}
+		verdict, err = a.send(ctx, leaderURL, a.selfID(), state.String())
+	}
+
 	if err != nil {
 		a.logger.Debug("disk report to leader failed",
 			zap.Uint64("leader", leaderID), zap.Error(err))

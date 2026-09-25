@@ -3,7 +3,9 @@ package http_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -128,11 +130,15 @@ func TestGetIngestableStatus(t *testing.T) {
 	}, nil)
 	e.addRecorderIngestable(t, "ing-1", "photos")
 
-	w := e.doEmpty(t, "GET", "/v1/ingestable/ing-1/status")
-	mustStatus(t, w, 200)
-	require.Contains(t, w.Body.String(), `"lagUnit":"bytes"`)
-	require.Contains(t, w.Body.String(), `"position":"binlog.000004:1547"`)
-	require.Contains(t, w.Body.String(), `"caughtUp":true`)
+	// Config application and worker startup run independently. A successful POST
+	// does not guarantee that the local worker is already registered for status.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		w := e.doEmpty(t, "GET", "/v1/ingestable/ing-1/status")
+		require.Equal(c, 200, w.Code, w.Body.String())
+		require.Contains(c, w.Body.String(), `"lagUnit":"bytes"`)
+		require.Contains(c, w.Body.String(), `"position":"binlog.000004:1547"`)
+		require.Contains(c, w.Body.String(), `"caughtUp":true`)
+	}, 15*time.Second, 10*time.Millisecond)
 }
 
 // TestGetIngestableStatus_UnknownIs404: the existence gate — a typo'd id

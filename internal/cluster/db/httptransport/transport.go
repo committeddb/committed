@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 )
 
@@ -35,7 +36,8 @@ import (
 //
 // Shape: one bounded send queue + worker goroutine per peer. Send() enqueues
 // non-blocking and DROPS when a peer's queue is full — raft retransmits, and the
-// raft loop must never block on a slow peer. A failed POST reports the peer
+// raft loop must never block on a slow peer. Dropped snapshots report failure
+// so raft can resume probing instead of waiting for snapshot delivery. A failed POST reports the peer
 // unreachable so raft backs off probing it. Snapshots flow inline as ordinary
 // messages (committed never configured out-of-band snapshot streaming, and its
 // snapshot is a bounded bbolt metadata dump), so there is no streaming
@@ -117,7 +119,8 @@ type HttpTransport struct {
 	fetchClient *http.Client
 	// events is this node's event log, served to peers' catch-up fetches
 	// (events.go); nil when the storage has none (the in-memory doubles).
-	events db.EventServer
+	events     db.EventServer
+	reportDisk func(uint64, string) (cluster.DiskVerdict, error)
 	// token, when non-empty (COMMITTED_API_TOKEN set), is required as a bearer on
 	// the receive handler and sent on every POST — reusing the API-token posture
 	// so a sender without the shared secret can't inject raft messages.
@@ -146,8 +149,16 @@ type peer struct {
 // this concrete transport into db (used by cmd in production and by tests), so
 // db itself never imports this package.
 func Factory() db.TransportFactory {
+	return FactoryWithDiskReports(nil)
+}
+
+// FactoryWithDiskReports serves disk reports through the supplied coordinator.
+// The callback must be safe for concurrent requests and ready before Start.
+func FactoryWithDiskReports(report func(uint64, string) (cluster.DiskVerdict, error)) db.TransportFactory {
 	return func(id uint64, peers []raft.Peer, logger *zap.Logger, r db.TransportRaft, events db.EventServer, tlsInfo *transport.TLSInfo, token string) db.Transport {
-		return New(id, peers, logger, r, events, tlsInfo, token)
+		t := New(id, peers, logger, r, events, tlsInfo, token)
+		t.reportDisk = report
+		return t
 	}
 }
 
@@ -281,6 +292,7 @@ func (t *HttpTransport) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(raftMessagePath, t.handleMessage)
 	mux.HandleFunc(eventsPath, t.handleEvents)
+	mux.HandleFunc(diskReportPath, t.handleDiskReport)
 	return mux
 }
 
@@ -375,7 +387,8 @@ func (t *HttpTransport) RemovePeer(id uint64) {
 
 // Send routes each message to its target peer's queue, non-blocking. Messages to
 // self, to id 0, or to an unknown peer are dropped, as are messages for a peer
-// whose queue is full — raft retransmits, and the raft loop must never block.
+// whose queue is full. Dropped snapshots report failure so raft can retry them;
+// ordinary messages rely on raft retransmission without marking the peer unreachable.
 func (t *HttpTransport) Send(msgs []*raftpb.Message) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -385,13 +398,19 @@ func (t *HttpTransport) Send(msgs []*raftpb.Message) {
 		}
 		pr, ok := t.peers[m.GetTo()]
 		if !ok {
+			if m.GetType() == raftpb.MsgSnap {
+				t.raft.ReportSnapshot(m.GetTo(), raft.SnapshotFailure)
+			}
 			continue
 		}
 		select {
 		case pr.msgc <- m:
 		default:
-			// Queue full: drop. raft will retransmit. Reporting unreachable here
-			// would be too aggressive (a transient burst, not a dead peer).
+			// A dropped snapshot must release raft's pending-snapshot state.
+			// Queue pressure alone does not establish that the peer is unreachable.
+			if m.GetType() == raftpb.MsgSnap {
+				t.raft.ReportSnapshot(m.GetTo(), raft.SnapshotFailure)
+			}
 		}
 	}
 }

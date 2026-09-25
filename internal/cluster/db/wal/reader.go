@@ -2,17 +2,14 @@ package wal
 
 import (
 	"errors"
-	"fmt"
-	"io"
 	"sync"
 	"sync/atomic"
 
-	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
 // Reader streams committed proposals out of the permanent event log.
@@ -26,12 +23,8 @@ import (
 // bootstrap path ("new syncable reads from the start") and for operation
 // after the raft log gets compacted.
 //
-// EventLog's internal sequence numbers (1..N, dense) are not the raft
-// indices of the entries they store — raft indices can have gaps when a
-// caller bypasses ApplyCommitted (tests do this), and they don't start
-// at 1 on a node restored by rsync. Reader therefore maintains its own
-// walSeq cursor and resolves it lazily on the first Read from the
-// syncable's raft-index position.
+// The backend cursor resolves stable Raft indexes into its physical positions.
+// Application progress advances only after a successful decode or deliberate skip.
 type Reader struct {
 	sync.Mutex
 	raftIndex uint64 // last raft index returned to caller
@@ -46,129 +39,28 @@ type Reader struct {
 	// line — none of the shared-line contention the reader-scaling work
 	// removed. 0 means nothing examined yet (also true for a reader that
 	// resolved at head and went straight to EOF — pair with caughtUp).
-	pos            atomic.Uint64
-	walSeq         uint64 // wal seq to read next; 0 until resolved
-	walSeqResolved bool
-	// lastGen is the scrub generation walSeq was resolved against. When the
-	// storage's generation moves ahead of it, a scrub re-densified the wal
-	// seqs and walSeq is stale, so we re-resolve from raftIndex (which is
-	// never renumbered). See Storage.scrubGen.
-	lastGen uint64
-	s       *Storage
+	pos    atomic.Uint64
+	cursor productionEventCursor
+	closed bool
+	s      *Storage
 }
 
 func (r *Reader) Read() (*cluster.Actual, error) {
 	r.Lock()
 	defer r.Unlock()
+	if r.closed {
+		return nil, eventlog.ErrClosed
+	}
 
-	// Hold eventMu.RLock for the whole read so a concurrent scrub swap can't
-	// re-densify the seqs mid-scan, and so the generation check + resolve +
-	// scan see one consistent log. Uses the *Locked accessors throughout to
-	// avoid re-acquiring RLock (which would deadlock against a waiting swap).
+	// Keep one generation through storage reads and proposal/type decoding.
 	r.s.eventMu.RLock()
 	defer r.s.eventMu.RUnlock()
+	cursor := r.eventCursorLocked()
 
-	// If a scrub completed since we last resolved, our cached walSeq points
-	// into the old (pre-densification) seq space. Re-resolve from raftIndex.
-	gen := r.s.scrubGen.Load()
-	if r.walSeqResolved && gen != r.lastGen {
-		r.walSeqResolved = false
-	}
-	r.lastGen = gen
-
-	if !r.walSeqResolved {
-		seq, err := r.resolveStartSeqLocked()
-		if err != nil {
-			return nil, err
-		}
-		r.walSeq = seq
-		r.walSeqResolved = true
-	}
-
-	for {
-		walLast, err := r.s.lastEventSeqLocked()
-		if err != nil {
-			return nil, err
-		}
-		if r.walSeq == 0 || r.walSeq > walLast {
-			return nil, io.EOF
-		}
-
-		bs, err := r.s.readEventAtLocked(r.walSeq)
-		if err != nil {
-			return nil, fmt.Errorf("event log read seq %d: %w", r.walSeq, err)
-		}
-
-		ent := &pb.Entry{}
-		if err := proto.Unmarshal(bs, ent); err != nil {
-			// A decode failure does NOT advance the cursor: a corrupt or
-			// undecodable committed entry must surface loudly and retry the
-			// same seq (the caller classifies ErrCorruptEntry as fatal),
-			// never be silently skipped by advancing past it.
-			return nil, err
-		}
-
-		// Visibility watermark: never surface an entry whose apply has not
-		// completed. appendEvents publishes a whole Ready's entries to the
-		// event log BEFORE their entities are applied to bbolt (the tolerated
-		// p>r window, and restart replay), so an entry whose raft index
-		// exceeds AppliedIndex may reference a type not yet written — resolving
-		// it would fail, and pre-watermark the cursor had already advanced, so
-		// the row was skipped forever (reader-sees-unapplied). Treat
-		// not-yet-applied as EOF WITHOUT advancing; a later Read surfaces it
-		// once AppliedIndex catches up (sub-millisecond in steady state, and
-		// as replay progresses on a restart). AppliedIndex is an atomic load,
-		// safe under the eventMu.RLock held here.
-		if ent.GetIndex() > r.s.AppliedIndex() {
-			return nil, io.EOF
-		}
-
-		if ent.GetType() != pb.EntryNormal || ent.Data == nil {
-			r.raftIndex = ent.GetIndex()
-			r.pos.Store(ent.GetIndex())
-			r.walSeq++
-			continue
-		}
-
-		p := &cluster.Proposal{}
-		if err := p.Unmarshal(ent.Data, r.s); err != nil {
-			// A namespaced system type from a NEWER version, marked skippable
-			// (ungated): the apply path skipped it too (compat namespace), so
-			// skip it here — advance the cursor and keep scanning — rather than
-			// stalling the syncable on a coordination record it never wanted.
-			var ure *cluster.UnknownReservedTypeError
-			if errors.As(err, &ure) && ure.Skippable() {
-				r.raftIndex = ent.GetIndex()
-				r.pos.Store(ent.GetIndex())
-				r.walSeq++
-				continue
-			}
-			// Otherwise: do not advance (as above). With the watermark, a
-			// within-AppliedIndex entry's type is guaranteed applied, so a
-			// resolution failure here is genuine corruption/bug — retry-loudly
-			// beats skip-silently.
-			return nil, err
-		}
-
-		r.raftIndex = ent.GetIndex()
-		r.pos.Store(ent.GetIndex())
-		r.walSeq++
-
-		// Internal metadata entities — committed's own config (type / database /
-		// syncable / ingestable) and coordination (syncable index +
-		// dead-letters + stuck/skip, ingestable position, scrub, etc.) —
-		// are not topic data and must NOT be projected into a syncable: a
-		// syncable would otherwise re-Sync its own dead letters, and
-		// committed's control plane would leak out of band into every
-		// downstream sink. Skip them per-entity so a syncable sees only
-		// user-defined topic data (ingested data included — it rides under user
-		// topic types). This is the "skipping internal metadata entries" the
-		// read path documents; filtering per-entity (not by Entities[0]) makes
-		// that literally true regardless of proposal composition. Keep scanning.
-		if userEntities := userTopicEntities(p.Entities); len(userEntities) > 0 {
-			return &cluster.Actual{Index: ent.GetIndex(), Entities: userEntities}, nil
-		}
-	}
+	return readCursorActual(cursor, r.raftIndex, r.s, r.s.AppliedIndex, func(index uint64) {
+		r.raftIndex = index
+		r.pos.Store(index)
+	}, nil)
 }
 
 // userTopicEntities returns the user-topic entities of a committed proposal,
@@ -208,27 +100,6 @@ func userTopicEntities(entities []*cluster.Entity) []*cluster.Entity {
 	return filtered
 }
 
-// resolveStartSeqLocked binary-searches the event log for the first wal seq
-// whose entry's raft index is strictly greater than r.raftIndex. Returns
-// 0 if the log is empty or every entry is at or below r.raftIndex (EOF).
-// Caller must hold r.s.eventMu (Read holds RLock), so it uses the lock-free
-// accessors.
-//
-// Binary search is safe because the raft-index column of the event log is
-// strictly ascending: appends gate on entry.Index > eventIndex.Load(), and a
-// right-to-be-forgotten scrub only *removes* entries (it never reorders or
-// renumbers them), so the column stays sorted — just sparse (gapped) after a
-// scrub. Binary search tolerates the gaps; only the arithmetic fast-path
-// would not, which is why this resolves by search, not by formula.
-func (r *Reader) resolveStartSeqLocked() (uint64, error) {
-	// The reader starts AFTER its checkpoint: the first event past raftIndex
-	// (the storage's search is shared with the peer fetch).
-	if r.raftIndex == 0 {
-		return r.s.eventSeqForIndexLocked(0)
-	}
-	return r.s.eventSeqForIndexLocked(r.raftIndex + 1)
-}
-
 // ErrActualNotFound is returned by ActualAt when no committed Actual exists
 // at the requested raft index (it was never committed, has been scrubbed, or
 // the entry there carries no proposal data).
@@ -243,54 +114,18 @@ var ErrActualNotFound = errors.New("wal: no committed entry at raft index")
 // or scrubbed) or carries no proposal.
 //
 // Holds eventMu.RLock for the whole search so a concurrent scrub swap can't
-// re-densify the seqs mid-search; uses the lock-free accessors throughout.
+// re-densify the seqs mid-search or invalidate the returned entry during decoding.
 func (s *Storage) ActualAt(index uint64) (*cluster.Actual, error) {
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
-	first, err := s.firstEventSeqLocked()
+	cursor := s.eventLog.entries.NewEntryCursor(index)
+	defer func() { _ = cursor.Close() }()
+	entry, err := exactEntry(cursor, index)
 	if err != nil {
 		return nil, err
 	}
-	last, err := s.lastEventSeqLocked()
-	if err != nil {
-		return nil, err
-	}
-	if first == 0 || last == 0 || last < first {
-		return nil, ErrActualNotFound
-	}
-
-	lo, hi := first, last
-	for lo <= hi {
-		mid := lo + (hi-lo)/2
-		bs, err := s.readEventAtLocked(mid)
-		if err != nil {
-			return nil, fmt.Errorf("event log read seq %d: %w", mid, err)
-		}
-		ent := &pb.Entry{}
-		if err := proto.Unmarshal(bs, ent); err != nil {
-			return nil, err
-		}
-		switch {
-		case ent.GetIndex() == index:
-			if ent.GetType() != pb.EntryNormal || ent.Data == nil {
-				return nil, ErrActualNotFound
-			}
-			p := &cluster.Proposal{}
-			if err := p.Unmarshal(ent.Data, s); err != nil {
-				return nil, err
-			}
-			return &cluster.Actual{Index: ent.GetIndex(), Entities: p.Entities}, nil
-		case ent.GetIndex() < index:
-			lo = mid + 1
-		default:
-			if mid == first {
-				return nil, ErrActualNotFound
-			}
-			hi = mid - 1
-		}
-	}
-	return nil, ErrActualNotFound
+	return actualFromEntry(entry, s)
 }
 
 func (s *Storage) Reader(id string) db.ActualReader {
@@ -333,4 +168,15 @@ func (s *Storage) ReaderAt(index uint64) db.ActualReader {
 // See the pos field doc for semantics (0 = nothing examined yet).
 func (r *Reader) Position() uint64 {
 	return r.pos.Load()
+}
+
+// Close releases the backend cursor. It waits for an in-flight Read to finish.
+func (r *Reader) Close() error {
+	r.Lock()
+	defer r.Unlock()
+	r.closed = true
+	if r.cursor.entryCursor != nil {
+		return r.cursor.Close()
+	}
+	return nil
 }

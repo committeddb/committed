@@ -10,7 +10,6 @@ import (
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -189,63 +188,42 @@ func (s *Storage) deleteKeyEraseGate(cmdIndex, bound uint64) (eligibleMax uint64
 	createIndex := map[string]uint64{} // current incarnation's create index
 	ckpt := map[string]uint64{}        // latest committed checkpoint (0 after a reset)
 
-	first, err := s.firstEventSeq()
-	if err != nil {
-		return 0, nil, err
-	}
-	last, err := s.lastEventSeq()
-	if err != nil {
-		return 0, nil, err
-	}
-	if first != 0 && last != 0 {
-		for seq := first; seq <= last; seq++ {
-			raw, rerr := s.readEventAt(seq)
-			if rerr != nil {
-				return 0, nil, rerr
-			}
-			pe := &pb.Entry{}
-			if uerr := proto.Unmarshal(raw, pe); uerr != nil {
-				return 0, nil, uerr
-			}
-			// Seqs are append order = raft-index order; stop past the command.
-			if pe.GetIndex() > cmdIndex {
-				break
-			}
-			if pe.GetType() != pb.EntryNormal || pe.Data == nil {
-				continue
-			}
-			idx := pe.GetIndex()
-			if err := cluster.ForEachProposalEntity(pe.Data, func(typeID string, key, data []byte, isDelete bool) error {
-				switch {
-				case cluster.IsSyncable(typeID):
-					id := string(key)
-					if isDelete {
-						delete(createIndex, id)
-						delete(ckpt, id)
-					} else if _, alive := createIndex[id]; !alive {
-						createIndex[id] = idx // create; re-POSTs don't move it
-					}
-				case cluster.IsSyncableIndex(typeID):
-					id := string(key)
-					if isDelete {
-						ckpt[id] = 0 // rebuild/re-materialization reset
-					} else {
-						si := &cluster.SyncableIndex{}
-						if uerr := si.Unmarshal(data); uerr != nil {
-							// The value decodes on every replica or none —
-							// surface it rather than silently skewing the gate.
-							return uerr
-						}
-						ckpt[id] = si.Index
-					}
-				case isUserDefinedType(typeID) && isDelete && !cluster.IsErasedKey(key) && idx <= bound:
-					raws = append(raws, rawDelete{index: idx, tk: string(tombstoneKey(typeID, key))})
-				}
-				return nil
-			}); err != nil {
-				return 0, nil, err
-			}
+	err = s.scanEventEntries(cmdIndex, func(pe *pb.Entry) error {
+		if pe.GetType() != pb.EntryNormal || pe.Data == nil {
+			return nil
 		}
+		idx := pe.GetIndex()
+		return cluster.ForEachProposalEntity(pe.Data, func(typeID string, key, data []byte, isDelete bool) error {
+			switch {
+			case cluster.IsSyncable(typeID):
+				id := string(key)
+				if isDelete {
+					delete(createIndex, id)
+					delete(ckpt, id)
+				} else if _, alive := createIndex[id]; !alive {
+					createIndex[id] = idx // create; re-POSTs don't move it
+				}
+			case cluster.IsSyncableIndex(typeID):
+				id := string(key)
+				if isDelete {
+					ckpt[id] = 0 // rebuild/re-materialization reset
+				} else {
+					si := &cluster.SyncableIndex{}
+					if uerr := si.Unmarshal(data); uerr != nil {
+						// The value decodes on every replica or none —
+						// surface it rather than silently skewing the gate.
+						return uerr
+					}
+					ckpt[id] = si.Index
+				}
+			case isUserDefinedType(typeID) && isDelete && !cluster.IsErasedKey(key) && idx <= bound:
+				raws = append(raws, rawDelete{index: idx, tk: string(tombstoneKey(typeID, key))})
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return 0, nil, err
 	}
 
 	eligibleMax = bound
@@ -274,16 +252,23 @@ func (s *Storage) reconcileUnhashedDeletes(bound, eligibleMax uint64, raws []raw
 			return ErrBucketMissing
 		}
 		c := b.Cursor()
-		var stale [][]byte
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
-			if len(k) == 8 && binary.BigEndian.Uint64(k) <= bound {
-				stale = append(stale, append([]byte(nil), k...))
+		// Delete in place without retaining a copy of every key. Seek back
+		// to the removed key after each deletion: Next can skip a neighbor
+		// when deleting shifts entries within a bbolt leaf page.
+		var removed [8]byte
+		for k, _ := c.First(); k != nil; {
+			if len(k) != 8 {
+				k, _ = c.Next()
+				continue
 			}
-		}
-		for _, k := range stale {
-			if err := b.Delete(k); err != nil {
+			if binary.BigEndian.Uint64(k) > bound {
+				break
+			}
+			copy(removed[:], k)
+			if err := c.Delete(); err != nil {
 				return err
 			}
+			k, _ = c.Seek(removed[:])
 		}
 		for _, rd := range raws {
 			if rd.index <= eligibleMax {

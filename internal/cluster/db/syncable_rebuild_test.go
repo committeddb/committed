@@ -199,15 +199,23 @@ func TestRebuildSyncable_RefusesDestinationNotOwned(t *testing.T) {
 	seedUserProposals(t, d, s, "evt", []string{"a", "b"})
 	require.Eventually(t, func() bool { return rec.syncedCount() == 2 },
 		10*time.Second, 10*time.Millisecond)
+	// Sync records delivery before its checkpoint proposal commits. Wait for
+	// the final data entry, not merely the first nonzero checkpoint, so normal
+	// worker progress cannot change the baseline during the refusal assertion.
+	before := s.DataEventIndex()
+	require.NotZero(t, before)
 	require.Eventually(t, func() bool {
-		cp, _ := s.GetSyncableIndex(id)
-		return cp > 0
-	}, 10*time.Second, 10*time.Millisecond)
-	before, _ := s.GetSyncableIndex(id)
+		cp, err := s.GetSyncableIndex(id)
+		return err == nil && cp == before
+	}, 10*time.Second, 10*time.Millisecond, "checkpoint must reach the final data entry")
+	d.SetAfterRebuildCheckpointResetForTest(func() {
+		t.Error("refused rebuild must not reset the checkpoint")
+	})
 
 	require.ErrorIs(t, d.RebuildSyncable(testCtx(t), id), cluster.ErrDestinationNotOwned)
 
-	after, _ := s.GetSyncableIndex(id)
+	after, err := s.GetSyncableIndex(id)
+	require.NoError(t, err)
 	require.Equal(t, before, after, "the checkpoint must stand")
 	require.Zero(t, rec.count(), "no teardown ran")
 	require.True(t, hasSyncable(t, s, id), "the config is kept")

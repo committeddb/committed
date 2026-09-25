@@ -389,6 +389,15 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		metrics:            cfg.metrics,
 	})
 
+	if transport, ok := db.raft.transport.(DiskReportTransport); ok {
+		if cfg.peerDiskReports {
+			db.disk.sendPeer = transport.SendDiskReport
+		}
+		transport.SetDiskReporter(db.ReportDisk)
+	} else if cfg.peerDiskReports {
+		panic("db: peer disk reporting requires DiskReportTransport")
+	}
+
 	// The watcher subscribes to leader-ID transitions from LeaderState
 	// BEFORE the first Ready iteration could land — subscribe() just
 	// registers a channel, so events that arrive before we start
@@ -1425,10 +1434,10 @@ var ErrMembershipUnsettled = errors.New("membership change not applied within th
 // waitForMembership blocks until this node's applied raft configuration
 // reaches target — id in the expected set (voter / learner / neither) AND the
 // joint transition complete — ctx is canceled, the settle timeout elapses,
-// or the DB is shutting down. A wake on the applied broadcast also means
-// raft's own applied index has passed the change (the Ready loop Advances
-// before broadcasting), so the next conf change a caller proposes on return
-// is never dropped by raft as "unapplied".
+// or the DB is shutting down. Every check also requires Raft's own applied
+// index to cover the observed configuration entry. The configuration becomes
+// visible during ApplyConfChange, before durable apply and Advance, so merely
+// observing the final role (even after an earlier broadcast) is insufficient.
 // It waits on the same applied-index broadcast (appliedNotify) the Ready loop
 // fires after each apply, re-checking on every wake rather than polling: a
 // membership change advances the applied index when both the enter-joint and
@@ -1443,7 +1452,7 @@ func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershi
 	}
 	settled := func() bool {
 		voters, learners, joint := db.raft.memberStatus()
-		if joint {
+		if joint || !db.raft.membershipApplied() {
 			return false
 		}
 		_, isVoter := voters[id]

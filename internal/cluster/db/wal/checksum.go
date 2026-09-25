@@ -40,12 +40,16 @@ var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
 // frame wraps payload in a v1 checksum frame. The returned slice is a fresh
 // allocation; payload is not retained.
 func frame(payload []byte) []byte {
-	out := make([]byte, frameHeaderSize+len(payload))
-	out[0], out[1], out[2] = frameMagic[0], frameMagic[1], frameMagic[2]
-	out[3] = frameVersion
-	binary.BigEndian.PutUint32(out[4:8], crc32.Checksum(payload, crc32cTable))
-	copy(out[frameHeaderSize:], payload)
-	return out
+	return appendFrame(make([]byte, 0, frameHeaderSize+len(payload)), payload)
+}
+
+// appendFrame writes directly into an outgoing batch, avoiding an intermediate
+// frame allocation. payload must not overlap dst's unused capacity.
+func appendFrame(dst, payload []byte) []byte {
+	dst = append(dst, frameMagic[0], frameMagic[1], frameMagic[2], frameVersion)
+	dst = binary.BigEndian.AppendUint32(dst, crc32.Checksum(payload, crc32cTable))
+	dst = append(dst, payload...)
+	return dst
 }
 
 // unframe inverts frame: it verifies the v1 magic, version, and CRC32C and

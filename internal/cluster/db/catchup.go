@@ -55,13 +55,15 @@ type EventReceiver interface {
 	// resumes at that generation instead of starting over.
 	SetEventLogGeneration(gen uint64) error
 	// ResetEventLog discards this node's event log so a fetch starts from
-	// the peer's first sequence.
+	// the beginning of the peer's history.
 	ResetEventLog() error
-	// AppendFetchedRecords appends a run of records in the log's on-disk
+	// AppendFetchedRecords appends a run of records in the peer wire
 	// encoding; records at or below this node's event index are skipped.
 	AppendFetchedRecords(data []byte) error
 	// AdoptEventSegments takes staged whole segment files into the log, in
-	// order; the files are consumed.
+	// order; the files are consumed. A receiver may import their logical
+	// records instead of installing the physical files. On error, a durable
+	// prefix may remain; EventIndex determines where a retry resumes.
 	AdoptEventSegments(paths []string) error
 	// EventFetchDir is the staging directory for segment files in flight.
 	EventFetchDir() string
@@ -391,7 +393,8 @@ func (f *fetchSink) Records(data []byte) error {
 
 func (f *fetchSink) End(EventServeResult) error { return f.adoptStaged() }
 
-// adoptStaged takes every staged segment into the log in one reopen. The
+// adoptStaged passes the staged batch to the receiver. Native receivers
+// install it in one reopen; shared receivers import its records. The
 // files are consumed either way: adoption moves them, and a refused batch
 // is removed so a retry stages afresh.
 func (f *fetchSink) adoptStaged() error {

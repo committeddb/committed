@@ -3,7 +3,7 @@ package wal
 import (
 	"fmt"
 
-	"github.com/tidwall/wal"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
@@ -18,28 +18,19 @@ func (s *Storage) EventIndex() uint64 {
 	return s.eventIndex.Load()
 }
 
-// recoverEventIndex sets eventIndex from the last durable event-log entry's raft
-// index. Open calls it early so reconcileBboltWithSnapshot can apply the same
-// snapIdx <= eventIndex guard RestoreSnapshot uses before any bbolt swap. It is
-// idempotent with the fuller event-log recovery later in Open, which re-derives
-// the same value alongside firstEventIndex/dataEventIndex.
+// recoverEventIndex restores durable append progress, including indexes whose
+// records have been erased. Open calls it before bbolt reconciliation so the
+// snapshot guard uses storage progress rather than the last surviving record.
 func (s *Storage) recoverEventIndex() error {
-	last, err := s.eventLog.LastIndex()
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	last, ok, err := s.eventLog.entries.LastAppended()
 	if err != nil {
-		return err
+		return fmt.Errorf("event log recover append progress: %w", err)
 	}
-	if last == 0 {
-		return nil
+	if ok {
+		s.eventIndex.Store(last)
 	}
-	data, err := s.readEventAt(last)
-	if err != nil {
-		return fmt.Errorf("event log read last entry: %w", err)
-	}
-	e := &pb.Entry{}
-	if err := proto.Unmarshal(data, e); err != nil {
-		return fmt.Errorf("event log unmarshal last entry: %w", err)
-	}
-	s.eventIndex.Store(e.GetIndex())
 	return nil
 }
 
@@ -68,7 +59,10 @@ func (s *Storage) firstEventSeq() (uint64, error) {
 // eventMu (R or W). Used by the scrub swap, which already holds eventMu.Lock
 // and would deadlock re-acquiring RLock.
 func (s *Storage) firstEventSeqLocked() (uint64, error) {
-	return s.eventLog.FirstIndex()
+	if err := s.requireNativeEventLogLocked(); err != nil {
+		return 0, err
+	}
+	return s.nativeEventTransferLocked().FirstSequence()
 }
 
 // lastEventSeq returns the wal sequence of the last entry in the
@@ -81,7 +75,10 @@ func (s *Storage) lastEventSeq() (uint64, error) {
 
 // lastEventSeqLocked is lastEventSeq without the lock; caller must hold eventMu.
 func (s *Storage) lastEventSeqLocked() (uint64, error) {
-	return s.eventLog.LastIndex()
+	if err := s.requireNativeEventLogLocked(); err != nil {
+		return 0, err
+	}
+	return s.nativeEventTransferLocked().LastSequence()
 }
 
 // readEventAt reads the pb.Entry bytes at the given wal sequence from the
@@ -97,17 +94,16 @@ func (s *Storage) readEventAt(seq uint64) ([]byte, error) {
 
 // readEventAtLocked is readEventAt without the lock; caller must hold eventMu.
 func (s *Storage) readEventAtLocked(seq uint64) ([]byte, error) {
-	raw, err := s.eventLog.Read(seq)
-	if err != nil {
+	if err := s.requireNativeEventLogLocked(); err != nil {
 		return nil, err
 	}
-	return s.unframe(raw, "event_log")
+	return s.nativeEventTransferLocked().ReadPayload(seq)
 }
 
 // unframe verifies and strips the checksum frame from a raw log read,
 // recording a corruption-counter sample (attributed to logName) before
-// returning ErrCorruptEntry on a CRC mismatch. The metrics handle is
-// nil-safe. Legacy un-checksummed entries pass through unchanged.
+// returning ErrCorruptEntry on invalid framing or a CRC mismatch. The metrics
+// handle is nil-safe. Unframed entries are rejected.
 func (s *Storage) unframe(raw []byte, logName string) ([]byte, error) {
 	payload, err := unframe(raw)
 	if err != nil {
@@ -139,16 +135,19 @@ func (s *Storage) recordCorrupt(logName string) {
 // restart replay never double-appends. Same eventMu.RLock scope as appendEvent
 // for the same scrub-swap reason.
 func (s *Storage) appendEvents(entries []*pb.Entry) error {
+	s.eventAppendMu.Lock()
+	defer s.eventAppendMu.Unlock()
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
 
-	nextSeq, err := s.eventLog.LastIndex()
+	appender := s.eventAppenderLocked()
+	_, hasHistory, err := appender.LastAppended()
 	if err != nil {
 		return fmt.Errorf("event log last index: %w", err)
 	}
-	batch := new(wal.Batch)
+	records := make([]eventlog.Record, 0, len(entries))
 	first, last := uint64(0), uint64(0)
-	wroteSeqOne := nextSeq == 0
+	wasEmpty := !hasHistory
 	for _, entry := range entries {
 		if entry.GetIndex() <= s.eventIndex.Load() {
 			continue
@@ -157,8 +156,7 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 		if err != nil {
 			return fmt.Errorf("marshal entry for event log: %w", err)
 		}
-		nextSeq++
-		batch.Write(nextSeq, frame(entryBytes))
+		records = append(records, eventlog.Record{ID: entry.GetIndex(), Payload: entryBytes})
 		if first == 0 {
 			first = entry.GetIndex()
 		}
@@ -167,13 +165,13 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 	if last == 0 {
 		return nil
 	}
-	if err := s.eventLog.WriteBatch(batch); err != nil {
+	if err := appender.Append(records); err != nil {
 		return fmt.Errorf("event log write batch (raft indexes %d-%d): %w", first, last, err)
 	}
 	s.eventLogWriteOps.Add(1)
-	if wroteSeqOne {
+	if wasEmpty {
 		// The log was empty before this batch: record the raft index its
-		// first record carries, as appendEvent does for seq 1.
+		// first record carries.
 		s.firstEventIndex.Store(first)
 	}
 	s.eventIndex.Store(last)
@@ -181,9 +179,10 @@ func (s *Storage) appendEvents(entries []*pb.Entry) error {
 }
 
 func (s *Storage) appendEvent(entry *pb.Entry) error {
-	// RLock for the whole body so the seq it computes (LastIndex+1) and the
-	// Write that consumes it can't straddle a scrub swap that would replace the
-	// handle underneath them. Shared with concurrent readers; only the swap
+	s.eventAppendMu.Lock()
+	defer s.eventAppendMu.Unlock()
+	// RLock keeps backend progress and the append on the same handle across
+	// a scrub swap. Shared with concurrent readers; only the swap
 	// (eventMu.Lock) is excluded.
 	s.eventMu.RLock()
 	defer s.eventMu.RUnlock()
@@ -192,16 +191,16 @@ func (s *Storage) appendEvent(entry *pb.Entry) error {
 	if err != nil {
 		return fmt.Errorf("marshal entry for event log: %w", err)
 	}
-	nextSeq, err := s.eventLog.LastIndex()
+	appender := s.eventAppenderLocked()
+	_, hasHistory, err := appender.LastAppended()
 	if err != nil {
 		return fmt.Errorf("event log last index: %w", err)
 	}
-	nextSeq++
-	if err := s.eventLog.Write(nextSeq, frame(entryBytes)); err != nil {
-		return fmt.Errorf("event log write seq %d (raft index %d): %w", nextSeq, entry.GetIndex(), err)
+	if err := appender.Append([]eventlog.Record{{ID: entry.GetIndex(), Payload: entryBytes}}); err != nil {
+		return fmt.Errorf("event log write raft index %d: %w", entry.GetIndex(), err)
 	}
 	s.eventLogWriteOps.Add(1)
-	if nextSeq == 1 {
+	if !hasHistory {
 		s.firstEventIndex.Store(entry.GetIndex())
 	}
 	s.eventIndex.Store(entry.GetIndex())

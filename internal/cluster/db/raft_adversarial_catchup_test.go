@@ -71,6 +71,10 @@ func requireNoFatal(t *testing.T, fatalC <-chan fatalEvent) {
 // promoted and participate — with byte-identical events. This is the
 // "add a node" flow with no rsync step.
 func TestAdversarial_EmptyLearnerCatchesUp(t *testing.T) {
+	forLifecycleBackends(t, testEmptyLearnerCatchesUp)
+}
+
+func testEmptyLearnerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 	ports := pickFreePorts(4)
 	all := make([]raft.Peer, 4)
 	for i := range all {
@@ -84,7 +88,7 @@ func TestAdversarial_EmptyLearnerCatchesUp(t *testing.T) {
 	rafts := make(Rafts, 0, 4)
 	for i := 0; i < 3; i++ {
 		dirs[i] = t.TempDir()
-		rafts = append(rafts, openWalRaft(t, all[i].ID, all[:3], dirs[i], fc, opts, fatalC))
+		rafts = append(rafts, openWalRaft(t, all[i].ID, all[:3], dirs[i], fc, opts, fatalC, storageOpts...))
 	}
 	defer func() {
 		for _, r := range rafts {
@@ -109,7 +113,7 @@ func TestAdversarial_EmptyLearnerCatchesUp(t *testing.T) {
 	// The new node: an empty data directory, join mode, every peer known.
 	dirs[3] = t.TempDir()
 	joinOpts := append([]db.Option{db.WithJoin()}, opts...)
-	node4 := openWalRaft(t, 4, all, dirs[3], fc, joinOpts, fatalC)
+	node4 := openWalRaft(t, 4, all, dirs[3], fc, joinOpts, fatalC, storageOpts...)
 	rafts = append(rafts, node4)
 
 	leader := rafts[:3].LeaderRaft()
@@ -169,7 +173,11 @@ func TestAdversarial_EmptyLearnerCatchesUp(t *testing.T) {
 // peers and without the erased upsert. Right-to-be-forgotten survives the
 // member's absence.
 func TestAdversarial_MemberBackFromAScrubRefetchesWhole(t *testing.T) {
-	rafts, fc, dirs, fatalC := newSevereLagCluster(t, 3, catchUpNodeOpts())
+	forLifecycleBackends(t, testMemberBackFromAScrubRefetchesWhole)
+}
+
+func testMemberBackFromAScrubRefetchesWhole(t *testing.T, storageOpts []wal.Option) {
+	rafts, fc, dirs, fatalC := newSevereLagCluster(t, 3, catchUpNodeOpts(), storageOpts...)
 	alive := []bool{true, true, true}
 	defer func() {
 		for i, r := range rafts {
@@ -273,7 +281,7 @@ func TestAdversarial_MemberBackFromAScrubRefetchesWhole(t *testing.T) {
 	waitForSurvivorConvergence(t, survivors, 10*time.Second)
 
 	// Node 3 returns over its stale, unscrubbed log.
-	rebootWalNode(t, rafts[2], dirs[2], catchUpNodeOpts(), fatalC)
+	rebootWalNode(t, rafts[2], dirs[2], catchUpNodeOpts(), fatalC, storageOpts...)
 	alive[2] = true
 	time.Sleep(adversarialSettleTime)
 	waitForLeaderExtended(t, rafts, 15*time.Second)

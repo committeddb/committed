@@ -94,12 +94,13 @@ type options struct {
 	// nil (the default) leaves the peer transport as plaintext HTTP.
 	tlsInfo *transport.TLSInfo
 
-	// apiToken is the cluster bearer token the peer transport sends on its
-	// requests, injected from WithAPIToken by cmd/node.go (which reads
-	// COMMITTED_API_TOKEN at the composition root). Empty leaves peer requests
+	// peerToken is the cluster bearer token the peer transport sends on its
+	// requests, injected from WithPeerToken by cmd/node.go (which reads
+	// the applicable legacy or split credential). Empty leaves peer requests
 	// unauthenticated. Injecting it keeps the env read out of the transport
 	// constructor, where it was ambient global state.
-	apiToken string
+	peerToken       string
+	peerDiskReports bool
 
 	// transportFactory builds the peer Transport. The composition root injects
 	// it via WithTransportFactory (cmd wires the HTTP transport) so db never
@@ -458,11 +459,14 @@ func WithTLSInfo(info *transport.TLSInfo) Option {
 	return func(o *options) { o.tlsInfo = info }
 }
 
-// WithAPIToken sets the cluster bearer token the peer transport sends on its
-// requests. The composition root (cmd/node.go) reads COMMITTED_API_TOKEN once
-// and injects it here, so the transport constructor doesn't reach into the
-// process environment itself. Default (no call, or "") leaves peer requests
-// unauthenticated.
-func WithAPIToken(token string) Option {
-	return func(o *options) { o.apiToken = token }
+// WithPeerToken sets the bearer credential used for peer requests. The
+// composition root supplies the shared legacy token or the split peer token.
+func WithPeerToken(token string) Option {
+	return func(o *options) { o.peerToken = token }
+}
+
+// WithPeerDiskReports sends disk reports through the peer transport instead of
+// the legacy API endpoint. Requires a transport implementing DiskReportTransport.
+func WithPeerDiskReports() Option {
+	return func(o *options) { o.peerDiskReports = true }
 }

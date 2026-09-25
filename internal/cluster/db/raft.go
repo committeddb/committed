@@ -59,6 +59,9 @@ type Raft struct {
 	// channels goroutine to assert compaction progress without racing
 	// the writer.
 	lastCompactedIndex atomic.Uint64
+	// Set before ApplyConfChange exposes a configuration, so membership
+	// waiters can require Raft to acknowledge its entry through Advance.
+	lastMembershipIndex atomic.Uint64
 	// lastCompactTime is the wall-clock moment of the most recent
 	// compaction (or startRaft time if no compaction has happened).
 	// The age limb of the policy fires when (time.Now() -
@@ -119,10 +122,10 @@ type Raft struct {
 	// tlsInfo is captured from the options so startRaft can pass it to the
 	// transport factory. nil means plaintext peer transport (default).
 	tlsInfo *tlstransport.TLSInfo
-	// apiToken is captured from the options so startRaft can pass the cluster
+	// peerToken is captured from the options so startRaft can pass the cluster
 	// bearer token to the transport factory. Empty means unauthenticated peer
 	// requests.
-	apiToken string
+	peerToken string
 
 	// closeC is closed by Close() to tell serveChannels (both its inner
 	// proposeC reader and its outer Ready loop) to exit. Without this,
@@ -184,7 +187,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-cha
 		transportWrapper:     cfg.transportWrapper,
 		transportFactory:     cfg.transportFactory,
 		tlsInfo:              cfg.tlsInfo,
-		apiToken:             cfg.apiToken,
+		peerToken:            cfg.peerToken,
 		join:                 cfg.join,
 		closeC:               make(chan struct{}),
 		serveChannelsDoneC:   make(chan struct{}),
@@ -344,7 +347,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	// log when the storage has one (wal.Storage); the in-memory doubles do
 	// not, and serve nothing.
 	events, _ := n.storage.(EventServer)
-	t := n.transportFactory(id, ps, n.logger, r, events, n.tlsInfo, n.apiToken)
+	t := n.transportFactory(id, ps, n.logger, r, events, n.tlsInfo, n.peerToken)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
 		// wrapper returns a Transport that conforms to the same interface,
@@ -487,6 +490,20 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 	}
 }
 
+// raftAppliedCoversStorage reports whether raft's own applied index is at or
+// past the durable applied index. Used by membership regression tests to
+// check that successful calls wait for Raft to acknowledge application.
+func (n *Raft) raftAppliedCoversStorage() bool {
+	return n.node.Status().Applied >= n.storage.AppliedIndex()
+}
+
+// membershipApplied checks Raft's acknowledgement, not just durable storage:
+// ApplyConfChange exposes the new configuration before either has advanced.
+func (n *Raft) membershipApplied() bool {
+	st := n.node.Status()
+	return st.Applied >= n.lastMembershipIndex.Load()
+}
+
 // memberStatus reports the current raft configuration as observed by this
 // node: voters is the union of the incoming and (during a joint transition)
 // outgoing voter sets, learners is the learner set, and joint is true while
@@ -499,14 +516,6 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 // Both maps are owned by the caller: Status() returns a Clone of the tracker
 // config, so Voters.IDs() and the Learners map are fresh per call. learners is
 // nil when there are none (a nil-map read is a safe miss).
-// raftAppliedCoversStorage reports whether raft's own applied index is at or
-// past the durable applied index — the Ready loop's ordering guarantee (see
-// the Advance placement): whenever a waiter wakes on "applied", raft agrees,
-// so a conf change it proposes next is never dropped as unapplied.
-func (n *Raft) raftAppliedCoversStorage() bool {
-	return n.node.Status().Applied >= n.storage.AppliedIndex()
-}
-
 func (n *Raft) memberStatus() (voters, learners map[uint64]struct{}, joint bool) {
 	cfg := n.node.Status().Config
 	return cfg.Voters.IDs(), cfg.Learners, len(cfg.Voters[1]) > 0
@@ -765,6 +774,7 @@ func (n *Raft) serveChannels() {
 						n.sendRaftError(err)
 						continue
 					}
+					n.lastMembershipIndex.Store(entry.GetIndex())
 					n.applyConfChange(&cc, cc.Context)
 				case raftpb.EntryConfChange:
 					// Backward compatibility: a v1 ConfChange can only appear
@@ -778,6 +788,7 @@ func (n *Raft) serveChannels() {
 						n.sendRaftError(err) // guarded — see the v2 twin above
 						continue
 					}
+					n.lastMembershipIndex.Store(entry.GetIndex())
 					n.applyConfChange(&cc, cc.Context)
 				}
 			}

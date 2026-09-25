@@ -178,6 +178,21 @@ func New(d *db.DB, opts ...Option) *HTTP {
 	r.Get("/openapi.yaml", h.OpenAPISpec)
 	r.Get("/docs", h.SwaggerUI)
 
+	split := o.tokens != nil && o.tokens.Split()
+	if split {
+		r.Group(func(r chi.Router) {
+			r.Use(bearerAuthToken(o.tokens.Membership()))
+			r.Get("/v1/membership", h.leaderRead(h.GetMembership))
+			r.Post("/v1/membership", h.AddMember)
+			r.Post("/v1/membership/{id}/promote", h.PromoteMember)
+			r.Delete("/v1/membership/{id}", h.RemoveMember)
+			r.Get("/v1/node/backup", h.NodeBackup)
+			if o.pprof {
+				r.Mount("/debug", middleware.Profiler())
+			}
+		})
+	}
+
 	r.Group(func(r chi.Router) {
 		if h.bearerToken != "" {
 			r.Use(h.bearerAuth)
@@ -187,7 +202,7 @@ func New(d *db.DB, opts ...Option) *HTTP {
 		// it (WithPprof). Mounted inside this group so it inherits bearer auth when
 		// a token is configured. middleware.Profiler serves /debug/pprof and the
 		// named profiles (heap, goroutine, allocs, profile, trace, ...).
-		if o.pprof {
+		if o.pprof && !split {
 			r.Mount("/debug", middleware.Profiler())
 			zap.L().Warn("pprof profiling endpoints enabled at /debug/pprof (COMMITTED_PPROF); disable when not diagnosing")
 		}
@@ -295,7 +310,9 @@ func New(d *db.DB, opts ...Option) *HTTP {
 			r.Get("/node/status", h.NodeStatus)
 			// A backup archive of this node, taken live — streamed, so it is
 			// scoped to the answering node like /node/status.
-			r.Get("/node/backup", h.NodeBackup)
+			if !split {
+				r.Get("/node/backup", h.NodeBackup)
+			}
 
 			// Cluster-wide diagnostics that read the same from ANY node (the
 			// fan-out sibling reserved by /node/status). Today: the parked-worker
@@ -309,7 +326,9 @@ func New(d *db.DB, opts ...Option) *HTTP {
 			// admission (see db/disk_cluster.go). Authenticated with the
 			// same bearer token as every other write, which is why the
 			// token must be cluster-uniform.
-			r.Post("/node/disk-report", h.DiskReport)
+			if !split {
+				r.Post("/node/disk-report", h.DiskReport)
+			}
 
 			// Live cluster membership. GET lists members with their roles
 			// and (leader-observed) replication progress; POST adds a voter
@@ -321,10 +340,12 @@ func New(d *db.DB, opts ...Option) *HTTP {
 			// caller a leader-truthful answer (per-member match index is
 			// leader-only state). The node added via POST must first be
 			// started in join mode. See docs/operations/membership.md.
-			r.Get("/membership", h.leaderRead(h.GetMembership))
-			r.Post("/membership", h.AddMember)
-			r.Post("/membership/{id}/promote", h.PromoteMember)
-			r.Delete("/membership/{id}", h.RemoveMember)
+			if !split {
+				r.Get("/membership", h.leaderRead(h.GetMembership))
+				r.Post("/membership", h.AddMember)
+				r.Post("/membership/{id}/promote", h.PromoteMember)
+				r.Delete("/membership/{id}", h.RemoveMember)
+			}
 
 			// Answer unmatched /v1 paths from inside this (authenticated)
 			// subrouter, so a probe for a nonexistent /v1 route requires the

@@ -163,3 +163,41 @@ func unitLeaderIDDetail(t *testing.T, body []byte) float64 {
 	require.NoError(t, json.Unmarshal(body, &e))
 	return e.Details.LeaderID
 }
+
+// Authentication precedes the proxy hop, and the destination independently
+// checks the original credential, even with the forwarding marker present.
+func TestLeaderReadMembershipAuthorization(t *testing.T) {
+	for _, leaderToken := range []string{"membership", "different-membership"} {
+		t.Run(leaderToken, func(t *testing.T) {
+			calls := make(chan string, 4)
+			leader := httptest.NewServer(httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) {
+				calls <- r.Header.Get("Authorization")
+				bearerAuthToken(leaderToken)(httpgo.HandlerFunc(func(w httpgo.ResponseWriter, r *httpgo.Request) { w.WriteHeader(httpgo.StatusNoContent) })).ServeHTTP(w, r)
+			}))
+			defer leader.Close()
+			view := &viewStub{id: 2, leader: 1, apiURLs: map[uint64]string{1: leader.URL}}
+			h := proxyHTTP(view, nil)
+			ran := false
+			handler := bearerAuthToken("membership")(h.leaderRead(marker(&ran)))
+			for _, token := range []string{"", "api", "peer", "membership"} {
+				req := httptest.NewRequest(httpgo.MethodGet, "/v1/membership", nil)
+				if token != "" {
+					req.Header.Set("Authorization", "Bearer "+token)
+				}
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, req)
+				want := httpgo.StatusUnauthorized
+				if token == "membership" && leaderToken == "membership" {
+					want = httpgo.StatusNoContent
+				}
+				require.Equal(t, want, w.Code)
+				if token == "membership" {
+					require.Equal(t, "Bearer membership", <-calls)
+				} else {
+					require.Empty(t, calls, "rejected credentials must not reach the leader")
+				}
+			}
+			require.False(t, ran)
+		})
+	}
+}

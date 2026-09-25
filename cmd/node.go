@@ -106,9 +106,10 @@ image can be templated per-node by an orchestrator:
                        recomputes the cluster-wide write-admission verdict
                        (admit iff the leader and a quorum of voters have disk
                        headroom), which every node enforces at its propose
-                       gate. Requires COMMITTED_API_URL on every node and a
-                       cluster-uniform COMMITTED_API_TOKEN; without them the
-                       gate falls back to the node-local decision. Any
+                       gate. Legacy mode reports through COMMITTED_API_URL
+                       with the shared API token; split mode uses the peer
+                       URL and peer token. Failed reports eventually fall
+                       back to the node-local decision. Any
                        zero duration ("0", "0s") disables cluster-aware
                        admission entirely.
 
@@ -167,6 +168,16 @@ docs/operations/ it points to.`,
 		// which is all-or-nothing, that means plaintext.
 		if err := checkRemovedEnvVars(); err != nil {
 			zap.L().Fatal("environment", zap.Error(err))
+		}
+
+		tokens, err := loadAuthTokens()
+		if err != nil {
+			zap.L().Fatal("authorization configuration", zap.Error(err))
+		}
+
+		eventLogOptions, err := loadEventLogOptions()
+		if err != nil {
+			zap.L().Fatal("event-log configuration", zap.Error(err))
 		}
 
 		// Node identity and addressing come from the environment so the
@@ -248,16 +259,7 @@ docs/operations/ it points to.`,
 		if m != nil {
 			walOpts = append(walOpts, wal.WithMetrics(m))
 		}
-		// COMMITTED_EVENT_CACHE_SEGMENTS sets how many event-log segments stay
-		// parsed in memory (default 16; each RESIDENT segment ≈ 21MB, unused
-		// capacity is free). Size it to your box: at least concurrent syncables
-		// + 2, raised freely on production RAM — syncables replaying history
-		// are concurrent readers, and a cache smaller than the reader count
-		// thrashes with ~20MB re-parses. Invalid values warn and keep the
-		// default (parseInt64Env), matching COMMITTED_MAX_PROPOSAL_BYTES.
-		if n, ok := parseInt64Env("COMMITTED_EVENT_CACHE_SEGMENTS"); ok {
-			walOpts = append(walOpts, wal.WithEventCacheSegments(int(n)))
-		}
+		walOpts = append(walOpts, eventLogOptions...)
 		// COMMITTED_SAFE_MODE boots the operator escape hatch: raft, apply,
 		// and the API run normally, but sync/ingest workers and the scrub
 		// worker are held — the window to inspect and delete/fix a config
@@ -382,19 +384,18 @@ docs/operations/ it points to.`,
 			zap.L().Info("advertising API URL for leader-read proxying", zap.String("url", apiURL))
 		}
 
-		// Cluster-aware disk admission: each member reports its disk state
-		// to the leader over the HTTP API and enforces the verdict the
-		// response carries. The report sender reuses the leader-read proxy's
-		// TLS client (same peer-API trust) and the cluster's API bearer
-		// token (the report endpoint is authenticated like every write).
-		// Read here, before db.New, and reused for the HTTP options below.
-		apiToken := apiTokenEnv()
+		// Legacy disk reports reuse the API proxy's TLS client. Split mode
+		// sends them through the peer transport with its own TLS and credential.
 		proxyClient, err := loadProxyClient()
 		if err != nil {
 			// G706 false positive: values come from operator-supplied env vars.
 			log.Fatalf("leader-read proxy client: %v", err) //nolint:gosec // G706
 		}
-		dbOpts = append(dbOpts, db.WithDiskReportHTTP(proxyClient, apiToken))
+		if tokens.Split() {
+			dbOpts = append(dbOpts, db.WithPeerDiskReports())
+		} else {
+			dbOpts = append(dbOpts, db.WithDiskReportHTTP(proxyClient, tokens.API()))
+		}
 		// Any zero duration disables; WithDiskReportInterval owns that
 		// mapping (<= 0 → off), so the command does not restate it.
 		if d, ok := parseDisableableDurationEnv("COMMITTED_DISK_REPORT_INTERVAL"); ok {
@@ -405,9 +406,9 @@ docs/operations/ it points to.`,
 		}
 
 		dbOpts = append(dbOpts, db.WithTransportFactory(httptransport.Factory()))
-		// Inject the bearer token the peer transport sends, read once above, so
+		// Inject the bearer token the peer transport sends, validated above, so
 		// the transport constructor doesn't reach into the environment itself.
-		dbOpts = append(dbOpts, db.WithAPIToken(apiToken))
+		dbOpts = append(dbOpts, db.WithPeerToken(tokens.Peer()))
 
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
 		fmt.Printf("Raft Running...\n")
@@ -420,15 +421,12 @@ docs/operations/ it points to.`,
 			}
 		}
 
-		var httpOpts []http.Option
-		if apiToken != "" {
-			httpOpts = append(httpOpts, http.WithBearerToken(apiToken))
-		}
+		httpOpts := []http.Option{http.WithTokens(tokens)}
 		if m != nil {
 			httpOpts = append(httpOpts, http.WithMetrics(m))
 		}
 		// COMMITTED_PPROF mounts /debug/pprof/* for live CPU/heap profiling. Off by
-		// default; behind bearer auth when COMMITTED_API_TOKEN is set.
+		// default; requires membership authorization in split mode.
 		if boolEnvOrExit("COMMITTED_PPROF") {
 			httpOpts = append(httpOpts, http.WithPprof())
 		}
@@ -528,7 +526,7 @@ docs/operations/ it points to.`,
 		// Security-posture floor: loud Error + startup banner if the write API is
 		// reachable off-host with no auth (see docs/operations/authentication.md).
 		// Deliberately not a refuse-to-boot — self-hosted test use is supported.
-		warnInsecurePosture(addr, apiToken, tlsCfg, peerTLS != nil)
+		warnInsecurePosture(addr, tokens.API(), tlsCfg, peerTLS != nil)
 
 		exitCode := runNode(d, h.NewServer(addr, serverOpts...))
 

@@ -5,7 +5,7 @@
 # pathological package: internal/cluster/backup's tar extraction + filepath.Walk
 # make the taint analyzers (G701-G707) run for ~6 HOURS, which is what wedged CI.
 # exclusions.paths only filters output, not analysis, so the `make lint/gosec`
-# target runs gosec over the package list with backup left OUT entirely. All
+# target scans internal/, cmd/, and pkg/, with backup left OUT entirely. All
 # gosec lives here, off the blocking-lint critical path.
 #
 # Rule set: gosec's full default — every AST rule AND every SSA analyzer,

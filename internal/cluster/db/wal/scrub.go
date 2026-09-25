@@ -2,11 +2,12 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"time"
 
-	"github.com/tidwall/wal"
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
+
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
@@ -117,25 +118,30 @@ func (s *Storage) stopScrubWorker() {
 // on each signal.
 func (s *Storage) scrubWorker() {
 	defer close(s.scrubDone)
-	if err := s.runPendingScrub(); err != nil {
-		s.logger.Error("resume pending scrub", zap.Error(err))
-	}
+	// Only temporary admission failures are retried automatically. Backend
+	// failures may require reopen and must not become a tight retry loop.
+	retry := time.NewTimer(time.Hour)
+	retry.Stop()
+	defer retry.Stop()
 	for {
+		if err := s.runOwedCompaction(); err != nil {
+			s.logger.Error("run owed compaction", zap.Error(err))
+		}
+		err := s.runPendingScrub()
+		switch {
+		case errors.Is(err, errScrubStopped):
+			return
+		case errors.Is(err, errEventRewriteDeferred), errors.Is(err, ErrLayoutFrozen), errors.Is(err, errScrubApplyPending):
+			retry.Reset(50 * time.Millisecond)
+		case err != nil:
+			s.logger.Error("run pending scrub", zap.Error(err))
+		}
 		select {
 		case <-s.scrubStop:
 			return
 		case <-s.scrubSignal:
-			// Finish any physical erasure a prior scrub pruned but couldn't
-			// compact (crash/ENOSPC) before processing new bounds — the completed
-			// bound wouldn't otherwise re-drive it. See runOwedCompaction.
-			if err := s.runOwedCompaction(); err != nil {
-				s.logger.Error("run owed compaction", zap.Error(err))
-			}
-			if err := s.runPendingScrub(); err != nil {
-				// Leave the pending bound set; a later signal or a restart
-				// retries. The rewrite is idempotent, so a retry is safe.
-				s.logger.Error("run pending scrub", zap.Error(err))
-			}
+			retry.Stop()
+		case <-retry.C:
 		}
 	}
 }
@@ -144,6 +150,12 @@ func (s *Storage) scrubWorker() {
 // completed, looping so a bound raised during a rewrite is picked up
 // immediately.
 func (s *Storage) runPendingScrub() error {
+	s.eventMu.RLock()
+	shared := s.eventLog.managed != nil
+	s.eventMu.RUnlock()
+	if shared {
+		return s.runPendingSharedScrub()
+	}
 	for {
 		bound, hash, cmdIndex, err := s.loadPendingScrub()
 		if err != nil {
@@ -197,310 +209,17 @@ type eraseOutcome struct {
 	msel        map[string]uint64
 }
 
-// runScrub rewrites the event log, removing entities tombstoned within the
-// freeze line bound, and swaps the rewritten directory in. See the file header
-// for the determinism and invariant guarantees. hash authorizes the delete-key
-// erasure pass (Scrub.HashDeleteKeys) and cmdIndex is the authorizing
-// command's raft index — the deterministic cap for the erasure gate's harvest.
+// runScrub prepares application policy and executes the native rewrite. Physical
+// execution must finish before the caller marks completion or reconciles erasure.
 func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutcome, error) {
-	// RTBF (user-tombstone) selection: max delete index <= bound per (type, key).
-	// Captured once; deletes recorded after this point have index > bound and are
-	// irrelevant, so the selection is frozen and identical across replicas.
-	sel, err := s.tombstoneSelections(bound)
+	plan, err := s.prepareScrubPlan(bound, hash, cmdIndex)
 	if err != nil {
 		return nil, err
 	}
-
-	// Delete-key erasure threshold (0 disables the pass): retained user-delete
-	// entries at raft index <= eraseMax get their raw subject key rewritten to
-	// cluster.ErasedKey. Computed like sel/msel as a pure function of
-	// replicated state — see deleteKeyEraseGate.
-	var erase *eraseOutcome
-	var eraseMax uint64
-	if hash {
-		var eraseRaws []rawDelete
-		eraseMax, eraseRaws, err = s.deleteKeyEraseGate(cmdIndex, bound)
-		if err != nil {
-			return nil, err
-		}
-		erase = &eraseOutcome{eligibleMax: eraseMax, raws: eraseRaws}
-	}
-
-	// Metadata-GC (system-tombstone) selection: max raft index <= bound per
-	// system-tombstonable (type, key). The rewrite keeps only that latest entry
-	// per key and drops earlier ones. Derived from the log prefix <= bound, so —
-	// like sel — it is a pure function of (log bytes, bound), identical on every
-	// replica. sel (RTBF) and msel (metadata GC) are NOT disjoint — a user
-	// EntityKindSnapshot key with a delete appears in both — but scrubFilterEntry
-	// ORs the two predicates and, where they overlap, they provably agree (RTBF
-	// spares the delete-tombstone; metadata GC keeps the latest per key), so the
-	// removal set is well-defined regardless. Do NOT re-derive an optimization
-	// from a disjointness assumption.
-	msel, err := s.metadataSupersessions(bound)
-	if err != nil {
+	if err := s.rewriteLegacyEvents(plan); err != nil {
 		return nil, err
 	}
-	if erase != nil {
-		erase.msel = msel
-	}
-
-	tmpDir := s.scrubTmpDir(bound)
-	if err := os.RemoveAll(tmpDir); err != nil { // clear any stale partial attempt
-		return nil, err
-	}
-	// NoSync: this is a throwaway temp log that becomes authoritative only at the
-	// atomic rename below, and any pre-swap crash discards it (recoverScrubDirs /
-	// the defer drop tmpDir), leaving the pre-scrub log untouched — so a per-entry
-	// fsync here buys no crash-safety, it only serializes the whole O(N) rewrite
-	// behind one fsync per surviving entry. On a large log that starves the raft
-	// propose path through the shared storage lock for hours. We fsync explicitly
-	// with newLog.Sync() before the rename instead; segment cycling still fsyncs
-	// each filled segment (cycle()), so only the tail is left for that final Sync.
-	// The rewritten log compresses like the live one; the drain below (before
-	// the swap lock) compresses everything this rewrite sealed, so the swap
-	// installs an already-compressed log instead of leaving the whole rewrite
-	// as backlog for the sealer.
-	newLog, err := wal.Open(tmpDir, &wal.Options{NoSync: true, SealedSegmentCompression: wal.CompressionZstd})
-	if err != nil {
-		return nil, err
-	}
-	swapped := false
-	retired := s.eventRetiredDir()
-	defer func() {
-		if !swapped {
-			// On any pre-swap failure, drop the half-built log so a retry starts
-			// clean. After a successful swap newLog is already closed and renamed.
-			_ = newLog.Close()
-			_ = os.RemoveAll(tmpDir)
-			return
-		}
-		// Swap succeeded: reap the retired pre-scrub log — potentially thousands of
-		// segment files. This defer is registered BEFORE the eventMu.Lock defer, so
-		// LIFO runs it AFTER eventMu is released: doing the O(files) os.RemoveAll
-		// under eventMu.Lock would stall the Ready loop's appendEvents for the whole
-		// unlink duration, which scales with log size. A leftover events.retired/ is
-		// harmless — recoverScrubDirs reaps it on the next Open — so warn, don't fail.
-		if err := os.RemoveAll(retired); err != nil {
-			s.logger.Warn("could not remove retired event-log dir after scrub swap; it will be reaped on the next restart",
-				zap.String("dir", retired), zap.Error(err))
-		}
-	}()
-
-	var nextSeq uint64
-	writeSurvivor := func(payload []byte) error {
-		nextSeq++
-		return newLog.Write(nextSeq, frame(payload))
-	}
-	copyRange := func(lo, hi uint64, locked bool) error {
-		for seq := lo; seq <= hi; seq++ {
-			var raw []byte
-			var rerr error
-			if locked {
-				raw, rerr = s.readEventAtLocked(seq)
-			} else {
-				raw, rerr = s.readEventAt(seq)
-			}
-			if rerr != nil {
-				return rerr
-			}
-			keep, payload, ferr := scrubFilterEntry(raw, sel, msel, eraseMax)
-			if ferr != nil {
-				return ferr
-			}
-			if keep {
-				if werr := writeSurvivor(payload); werr != nil {
-					return werr
-				}
-			}
-		}
-		return nil
-	}
-
-	// Phase A (unlocked): bulk-copy the log as it stood at the start. New commits
-	// keep appending to the OLD log meanwhile (all at indices > bound, so always
-	// survivors); they are chased down in phase A' and caught up under the lock in
-	// phase B.
-	first, err := s.firstEventSeq()
-	if err != nil {
-		return nil, err
-	}
-	startLast, err := s.lastEventSeq()
-	if err != nil {
-		return nil, err
-	}
-	// Sequence numbers and a tombstoned-key count only — no source keys/PII.
-	s.logger.Info("scrub: rewriting permanent event log",
-		zap.Uint64("bound", bound),
-		zap.Uint64("firstSeq", first),
-		zap.Uint64("lastSeq", startLast),
-		zap.Int("tombstonedKeys", len(sel)))
-	if first != 0 && startLast != 0 {
-		if err := copyRange(first, startLast, false); err != nil {
-			return nil, err
-		}
-	}
-
-	if s.scrubPostBulkHookForTest != nil {
-		s.scrubPostBulkHookForTest()
-	}
-
-	// Phase A' (unlocked convergence): on a heavy-write system entries keep landing
-	// on the old log while phase A runs. Copying that whole delta under eventMu.Lock
-	// would stall the appender in proportion to the write rate, so chase it with
-	// repeated UNLOCKED passes first — a NoSync copy outruns fsync'd appends, so each
-	// pass leaves less than the last and the residue for the locked phase shrinks to
-	// a sliver. Bounded by scrubConvergeRounds so a writer we cannot outrun still
-	// terminates (phase B then just copies a larger delta); the reads are of
-	// already-durable seqs on the live log, safe without the lock.
-	copied := startLast
-	for range scrubConvergeRounds {
-		cur, lerr := s.lastEventSeq()
-		if lerr != nil {
-			return nil, lerr
-		}
-		if cur <= copied || cur-copied <= scrubConvergeResidue {
-			break // caught up, or small enough to finish under the lock
-		}
-		if err := copyRange(copied+1, cur, false); err != nil {
-			return nil, err
-		}
-		copied = cur
-	}
-
-	// Durability: fsync the survivors written so far BEFORE taking the lock. With
-	// NoSync only the current tail segment is unpersisted (cycle() fsynced the rest),
-	// so this flushes at most ~SegmentSize and does the bulk of the fsync work
-	// OUTSIDE the lock. The tiny locked delta is synced again below.
-	if err := newLog.Sync(); err != nil {
-		return nil, err
-	}
-
-	// Phase B (locked): catch up the now-small delta, then swap. eventMu.Lock waits
-	// for in-flight reads/the appender to drain and blocks new ones for the brief
-	// Compress the rewrite's sealed segments BEFORE taking the swap lock —
-	// this is O(surviving log) work that must not stall appendEvents. The
-	// locked delta below may seal a few more segments; those trickle through
-	// the background sealer after the swap.
-	for {
-		did, cerr := newLog.CompressNextSealed()
-		if cerr != nil {
-			return nil, cerr
-		}
-		if !did {
-			break
-		}
-	}
-
-	// Before the swap: wait out any in-flight from-0 log reads, so no such
-	// read spans the swap and observes two different rewrite states — the
-	// pair-consistency invariant the delete-key erasure gate rests on (see
-	// BeginFromZeroRead). Placed before the lock so pinned readers (and the
-	// appender) keep running while we wait; shutdown aborts the wait and the
-	// pending bound retries later.
-	releaseLayout, werr := s.waitLayoutQuiet()
-	if werr != nil {
-		return nil, werr
-	}
-	defer releaseLayout()
-
-	// swap.
-	s.eventMu.Lock()
-	defer s.eventMu.Unlock()
-
-	endLast, err := s.lastEventSeqLocked()
-	if err != nil {
-		return nil, err
-	}
-	if endLast > copied {
-		if err := copyRange(copied+1, endLast, true); err != nil {
-			return nil, err
-		}
-	}
-	// Sync the locked delta (bounded by the residue + current tail segment) so the
-	// whole rewritten log is durable before the rename makes it authoritative.
-	if err := newLog.Sync(); err != nil {
-		return nil, err
-	}
-	if err := newLog.Close(); err != nil {
-		return nil, err
-	}
-	// Durability: fsync the freshly-written swap dir so its segment entries survive
-	// power loss BEFORE it is renamed into place. The parent-dir fsync after the
-	// swap (below) makes the *rename* durable, but not the segment filenames inside
-	// the swapped-in dir. Best-effort, like the parent fsync; the newLog.Sync calls
-	// above already committed the entries' content (NoSync moved that fsync out of
-	// the per-entry path), so this only needs to persist their directory entries.
-	s.syncDirBestEffort(tmpDir, "event-log scrub swap dir")
-
-	// Swap: events -> events.retired, events.scrub.<B> -> events. Renames are
-	// atomic on POSIX; a crash between them is rolled back by recoverScrubDirs
-	// on the next Open. Clear any stale events.retired/ first (usually absent —
-	// recoverScrubDirs reaps it on Open — so this is a fast no-op).
-	if err := os.RemoveAll(retired); err != nil {
-		return nil, err
-	}
-	// Close the LIVE event-log handle ahead of the rename, or fatal — a returned
-	// error would leave the dead handle for appendEvent to hit later as a
-	// mis-attributed ErrClosed crash. (The newLog.Close above is the temp log, not
-	// the live handle, so it correctly returns instead of fataling.)
-	s.closeEventLogBeforeSwapOrFatal("close event log before scrub swap")
-	if err := os.Rename(s.eventLogDir, retired); err != nil {
-		// eventLog is already closed but this rename failed, so s.eventLogDir is
-		// untouched (still the original log). Reopen it so the node survives; fatal
-		// only if that also fails, so a closed handle never reaches appendEvent.
-		s.reopenEventLogAfterSwapOrFatal("event-log scrub aborted before swap")
-		return nil, fmt.Errorf("move events aside for scrub swap: %w", err)
-	}
-	if err := os.Rename(tmpDir, s.eventLogDir); err != nil {
-		// eventLog is closed and the original was already moved to `retired`, so
-		// s.eventLogDir is now missing. Roll the first rename back to restore the
-		// original, then reopen it (mirroring recoverScrubDirs). If the rollback
-		// fails we cannot restore the log and must NOT reopen a missing dir — that
-		// would create an empty log (silent event loss) — so fatal. swapped stays
-		// false, so the defer drops tmpDir.
-		if rbErr := os.Rename(retired, s.eventLogDir); rbErr != nil {
-			s.logger.Fatal("event-log scrub swap failed and rollback failed; the node cannot continue (restart to recover via recoverScrubDirs)",
-				zap.Error(err), zap.NamedError("rollback", rbErr))
-		}
-		s.reopenEventLogAfterSwapOrFatal("event-log scrub swap rolled back")
-		return nil, fmt.Errorf("rename scrubbed event log into place: %w", err)
-	}
-	swapped = true
-	// The bytes on disk are now the rewrite's: the log's generation moves with
-	// the swap, not with the completion mark (see EventLogGeneration).
-	s.swappedBound.Store(bound)
-
-	// The two renames above changed the events/ parent directory; fsync it so the
-	// completed swap survives an immediate crash (an un-persisted rename could
-	// resurrect the pre-scrub log, or leave events/ missing until recoverScrubDirs
-	// runs). Best-effort — the swap is already committed and visible here.
-	s.syncDirBestEffort(filepath.Dir(s.eventLogDir), "event-log scrub swap")
-
-	// Post-swap reopen: s.eventLogDir now holds the scrubbed log. Reopen it or
-	// fatal — a returned error here previously left s.eventLog closed for the next
-	// appendEvent to hit as ErrClosed, a delayed crash mis-attributed to append.
-	s.reopenEventLogAfterSwapOrFatal("reopen event log after scrub")
-	// Recompute the in-memory bounds against the re-densified log, or fatal. The
-	// swap has committed, so a failure here is NOT survivable: returning it into
-	// the survive-and-continue scrub worker would leave stale eventIndex/
-	// firstEventIndex and an un-bumped scrubGen (below) while the on-disk log is
-	// the new one — in-flight Readers would never re-derive their walSeq cursor
-	// and would silently read wrong offsets. A restart recomputes cleanly (Open
-	// does the same). Same reason as reopenEventLogAfterSwapOrFatal.
-	s.recomputeEventBoundsAfterSwapOrFatal("recompute event bounds after scrub")
-	// Bump the generation so in-flight Readers re-derive their walSeq cursor
-	// (the rewrite re-densified the seqs underneath them). Done under
-	// eventMu.Lock, before releasing it, so no Reader can observe the new log
-	// without also observing the new generation.
-	s.scrubGen.Add(1)
-	// The retired pre-scrub log is reaped by the deferred cleanup AFTER eventMu is
-	// released (see the swapped branch of the defer above), NOT here under the
-	// lock — so the O(files) removal can't stall the apply path.
-	s.logger.Info("scrubbed permanent event log",
-		zap.Uint64("bound", bound),
-		zap.Int("tombstonedKeys", len(sel)),
-		zap.Uint64("survivorEntries", nextSeq))
-	return erase, nil
+	return plan.erase, nil
 }
 
 // reopenEventLogAfterSwapOrFatal reopens the permanent event log at
@@ -527,15 +246,12 @@ func (s *Storage) closeEventLogBeforeSwapOrFatal(what string) {
 }
 
 func (s *Storage) reopenEventLogAfterSwapOrFatal(what string) {
-	// s.eventWalOpts, not nil: the reopen must carry the configured
-	// segment-cache size (COMMITTED_EVENT_CACHE_SEGMENTS) or a scrub swap
-	// silently reverts the event log to the library default until restart.
-	reopened, err := wal.Open(s.eventLogDir, s.eventWalOpts)
+	reopened, err := tidwallbackend.OpenLegacy(s.eventLogDir, s.eventOpenOptions)
 	if err != nil {
 		s.logger.Fatal("event-log swap could not reopen storage; the node cannot continue (restart to recover via recoverScrubDirs)",
 			zap.String("op", what), zap.Error(err))
 	}
-	s.eventLog = reopened
+	s.eventLog = bindLegacyEventLog(reopened, s.metrics)
 }
 
 // recomputeEventBoundsAfterSwapOrFatal recomputes the in-memory event bounds
@@ -652,70 +368,15 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64, eraseMax uint64) 
 // Deterministic: a pure function of the log prefix <= bound, identical on every
 // replica, like tombstoneSelections. Keyed by tombstoneKey(type, key) so it
 // shares that encoding; disjoint from the RTBF selection (a user delete is
-// handled by RTBF, not here). Runs unlocked in scrub phase A, the same access
-// pattern as the phase-A copy — entries appended concurrently are all at index
-// > bound and excluded.
+// handled by RTBF, not here). Runs in scrub phase A under the event publication read lock. Appends
+// can continue; entries at index > bound are excluded.
 func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error) {
-	sel := make(map[string]uint64)
-	// User-type kinds, harvested in index order from type registrations as we
-	// scan. typeType being Revision (retained) guarantees a type's registration
-	// precedes its data here.
-	userKind := make(map[string]cluster.EntityKind)
-	first, err := s.firstEventSeq()
+	selection := newMetadataSelection()
+	err := s.scanEventEntries(bound, selection.observe)
 	if err != nil {
 		return nil, err
 	}
-	last, err := s.lastEventSeq()
-	if err != nil {
-		return nil, err
-	}
-	if first == 0 || last == 0 {
-		return sel, nil
-	}
-	for seq := first; seq <= last; seq++ {
-		raw, err := s.readEventAt(seq)
-		if err != nil {
-			return nil, err
-		}
-		pe := &pb.Entry{}
-		if err := proto.Unmarshal(raw, pe); err != nil {
-			return nil, err
-		}
-		// Event-log seqs are append order = raft-index order, so once an entry is
-		// past the freeze line the rest are too — stop before reading the tail.
-		if pe.GetIndex() > bound {
-			break
-		}
-		if pe.GetType() != pb.EntryNormal || pe.Data == nil {
-			continue
-		}
-		idx := pe.GetIndex()
-		if err := cluster.ForEachProposalEntity(pe.Data, func(typeID string, key, data []byte, isDelete bool) error {
-			// Learn each user type's declared kind from its registration.
-			if cluster.IsType(typeID) && !isDelete {
-				t := &cluster.Type{}
-				if uerr := t.Unmarshal(data); uerr != nil {
-					return uerr
-				}
-				userKind[t.ID] = t.EntityKind
-				return nil
-			}
-			// Compactable iff Snapshot: an internal Snapshot built-in, or a user
-			// type harvested as Snapshot. Everything else — Revision configs,
-			// Standalone dead-letters, Event/Command/Unspecified streams — is
-			// retained.
-			if !cluster.IsSystemTombstonable(typeID) && userKind[typeID] != cluster.EntityKindSnapshot {
-				return nil
-			}
-			if tk := string(tombstoneKey(typeID, key)); idx > sel[tk] {
-				sel[tk] = idx
-			}
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-	}
-	return sel, nil
+	return selection.latest, nil
 }
 
 // recomputeEventBoundsLocked refreshes firstEventIndex/eventIndex from the
@@ -724,7 +385,7 @@ func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error)
 // equals the existing one and refuses to lower it (a lower value would trip the
 // Ready loop's P==R invariant check and fatal-exit the node).
 func (s *Storage) recomputeEventBoundsLocked() error {
-	last, err := s.lastEventSeqLocked()
+	first, last, err := s.eventBoundsLocked()
 	if err != nil {
 		return err
 	}
@@ -732,12 +393,11 @@ func (s *Storage) recomputeEventBoundsLocked() error {
 		return fmt.Errorf("scrub emptied the event log: the tail must always survive")
 	}
 	prev := s.eventIndex.Load()
-	if err := s.deriveEventBoundsLocked(); err != nil {
-		return err
+	if last != prev {
+		return fmt.Errorf("scrub changed EventIndex from %d to %d; the tail must be preserved", prev, last)
 	}
-	if got := s.eventIndex.Load(); got != prev {
-		return fmt.Errorf("scrub changed EventIndex from %d to %d; the tail must be preserved", prev, got)
-	}
+	s.firstEventIndex.Store(first)
+	s.eventIndex.Store(last)
 	return nil
 }
 

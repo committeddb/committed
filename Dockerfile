@@ -54,10 +54,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -o /out/committed .
 
 # ---- runtime stage ----
-# distroless/static-debian12:nonroot ships only CA certs, tzdata, and a
+# distroless/static-debian13:nonroot ships only CA certs, tzdata, and a
 # nonroot user (uid 65532) — no shell, package manager, or toolchain, so
 # the runtime attack surface is the binary itself.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 
 # OCI image labels advertise provenance on the registry and in
 # `docker inspect`. version/revision/created mirror the same build args

@@ -12,7 +12,7 @@ import (
 // handle, the raft entry log deliberately keeps the library default (its
 // reader is the single sequential Ready loop — not a tunable anyone needs),
 // and — the regression that matters — the scrub-swap REOPEN carries the
-// configured size. Without eventWalOpts on the reopen, a scrub swap silently
+// configured size. Without retained backend options on the reopen, a scrub swap silently
 // reverted the cache to the library default until the next restart.
 func TestEventCacheSegments(t *testing.T) {
 	// Default when unconfigured.
@@ -20,7 +20,7 @@ func TestEventCacheSegments(t *testing.T) {
 	require.NoError(t, err)
 	s.stopScrubWorker()
 	s.stopSealer()
-	require.Equal(t, DefaultEventCacheSegments, s.eventLog.SegmentCacheSize())
+	require.Equal(t, DefaultEventCacheSegments, s.eventLog.native.SegmentCacheSize())
 	require.NotEqual(t, DefaultEventCacheSegments, s.EntryLog.SegmentCacheSize(),
 		"the entry log keeps the library default — single sequential reader, no thrash")
 	require.NoError(t, s.Close())
@@ -31,7 +31,7 @@ func TestEventCacheSegments(t *testing.T) {
 	s2.stopScrubWorker()
 	s2.stopSealer()
 	defer func() { _ = s2.Close() }()
-	require.Equal(t, 5, s2.eventLog.SegmentCacheSize())
+	require.Equal(t, 5, s2.eventLog.native.SegmentCacheSize())
 
 	// …and survives the scrub-swap reopen path (close → reopen, exactly the
 	// sequence runScrub performs around the directory rename).
@@ -39,6 +39,6 @@ func TestEventCacheSegments(t *testing.T) {
 	s2.closeEventLogBeforeSwapOrFatal("test reopen")
 	s2.reopenEventLogAfterSwapOrFatal("test reopen")
 	s2.eventMu.Unlock()
-	require.Equal(t, 5, s2.eventLog.SegmentCacheSize(),
+	require.Equal(t, 5, s2.eventLog.native.SegmentCacheSize(),
 		"the scrub-swap reopen must carry the configured cache size, not revert to the library default")
 }

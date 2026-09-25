@@ -84,7 +84,8 @@ committed backup --live --target http://n2:8080 --to /backups/committed-2026-09-
   `COMMITTED_API_ADDR`). Target a node **directly**, not a load balancer —
   the archive is that node's state — and prefer a follower: the node's raft
   loop keeps running, but the stream is disk and network work on that node.
-- `--token` (default `COMMITTED_API_TOKEN`) authenticates; `--insecure` skips
+- `--token` (default `COMMITTED_MEMBERSHIP_TOKEN`, falling back to
+  `COMMITTED_API_TOKEN`) authenticates; `--insecure` skips
   TLS verification for an https target.
 - A live archive does **not** carry projection stage stores (`projections/`
   under the data dir); an offline archive does. After restoring a live

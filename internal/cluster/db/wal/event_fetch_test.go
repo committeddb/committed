@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +28,7 @@ func compressOldestSealed(t *testing.T, s *Storage) {
 	s.eventMu.RLock()
 	log := s.eventLog
 	s.eventMu.RUnlock()
-	did, err := log.CompressNextSealed()
+	did, err := log.native.CompressNextSealed()
 	require.NoError(t, err)
 	require.True(t, did, "the seeded log must hold a plain sealed segment to compress")
 }
@@ -39,7 +41,7 @@ func stage(t *testing.T, sealed []EventSegment) []string {
 	out := make([]string, 0, len(sealed))
 	for _, sg := range sealed {
 		dst := filepath.Join(dir, filepath.Base(sg.Path))
-		require.NoError(t, copyFile(sg.Path, dst))
+		require.NoError(t, tidwallbackend.CopyLegacySegment(sg.Path, dst))
 		out = append(out, dst)
 	}
 	return out

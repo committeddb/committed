@@ -713,3 +713,6 @@ const FeatureLevelRematerializationForTest = featureLevelRematerialization
 
 // FeatureLevelZonePinningForTest exposes the pin gate for the same reason.
 const FeatureLevelZonePinningForTest = featureLevelZonePinning
+
+// TermForTest returns the live Raft term without reading storage during snapshot work.
+func (n *Raft) TermForTest() uint64 { return n.node.Status().GetTerm() }

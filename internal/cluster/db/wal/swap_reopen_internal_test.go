@@ -84,7 +84,7 @@ func TestReopenEventLogAfterSwap_ReopensClosedHandle(t *testing.T) {
 
 	s.reopenEventLogAfterSwapOrFatal("test")
 
-	_, err = s.eventLog.LastIndex()
+	_, err = s.nativeEventTransferLocked().LastSequence()
 	require.NoError(t, err, "event log must be live after the swap, not ErrClosed")
 }
 

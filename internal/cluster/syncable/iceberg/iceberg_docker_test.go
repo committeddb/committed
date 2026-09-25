@@ -32,7 +32,9 @@ const (
 	// silently. If a registry push ever breaks the suite, the autopsy
 	// capture below names the image's own output rather than leaving a bare
 	// failure.
-	minioImage  = "quay.io/minio/minio:latest" // Docker Hub's minio/minio was withdrawn (pull access denied, every tag); quay.io is MinIO's registry
+	// MinIO's official registry rejects pulls. This community image builds
+	// MinIO from source: https://github.com/coollabsio/minio.
+	minioImage  = "ghcr.io/coollabsio/minio:latest"
 	restImage   = "tabulario/iceberg-rest:latest"
 	duckdbImage = "duckdb/duckdb:latest"
 	minioStarts = 2 // bounded retry — ALSO an experiment: CI has seen the first minio die pre-exec while an identical later start succeeds

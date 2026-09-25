@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Committed API
-  version: 0.8.0
+  version: 0.8.1
   description: |
     HTTP API for Committed — a distributed commit log database.
 
@@ -27,11 +27,19 @@ info:
 
     ## Authentication
 
-    When the server is started with `COMMITTED_API_TOKEN`, all API
-    endpoints require a bearer token in the `Authorization` header. The
-    operational endpoints `/health`, `/ready`, `/version`, `/openapi.yaml`,
-    and `/docs` are exempt. In development mode (no token configured) no
-    authentication is enforced.
+    With only `COMMITTED_API_TOKEN` configured, one legacy bearer token
+    authorizes all protected routes. With `COMMITTED_API_TOKEN`,
+    `COMMITTED_MEMBERSHIP_TOKEN`, and `COMMITTED_PEER_TOKEN` configured,
+    the three tokens must be distinct: application routes require the API
+    token; membership operations and live backup require the membership
+    token. Enabled `/debug/pprof/` endpoints also require the membership
+    token. Peer routes use the peer token on the separate peer listener.
+
+    Supply the required token in the `Authorization: Bearer <token>` header.
+    The GET endpoints `/health`, `/ready`, `/version`, `/openapi.yaml`, and
+    `/docs` are exempt from bearer authentication. Configured mTLS still
+    applies to every request; a certificate does not replace a bearer token
+    in split mode. With no tokens configured, bearer authentication is off.
 
     ## Content types
 
@@ -2127,6 +2135,8 @@ paths:
 
   /v1/node/backup:
     get:
+      security:
+        - membershipAuth: []
       tags: [node]
       summary: A backup archive of this node, taken live
       description: |
@@ -2225,11 +2235,12 @@ paths:
         own propose gate, so one round trip per member per interval keeps
         both directions fresh.
 
-        Nodes call this on each other; operators normally never do (though
-        it is harmless to — a report only updates the sender's own entry).
-        Authenticated with the same bearer token as every other write,
-        which is why `COMMITTED_API_TOKEN` must be cluster-uniform. Only
-        the leader aggregates reports: any other node answers 503
+        Available only in legacy authorization mode, using the shared
+        `COMMITTED_API_TOKEN` when configured. In split mode this endpoint
+        is unavailable: members send reports to POST `/raft/disk-report`
+        on the leader's peer listener with `COMMITTED_PEER_TOKEN` instead.
+        A report identifies its sender by the node ID in the request body.
+        Only the leader aggregates reports: any other node answers 503
         `leader_unavailable` with the believed `leaderId`, and the
         reporter re-resolves the leader on its next cycle. See
         docs/operations/disk-limits.md.
@@ -2264,6 +2275,8 @@ paths:
 
   /v1/membership:
     get:
+      security:
+        - membershipAuth: []
       tags: [membership]
       summary: List cluster members with roles and replication progress
       description: |
@@ -2305,6 +2318,8 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
     post:
+      security:
+        - membershipAuth: []
       tags: [membership]
       summary: 'Add a node to the cluster (voter, or learner with "learner": true)'
       description: |
@@ -2343,6 +2358,8 @@ paths:
 
   /v1/membership/{id}:
     delete:
+      security:
+        - membershipAuth: []
       tags: [membership]
       summary: Remove a node from the cluster
       description: |
@@ -2384,6 +2401,8 @@ paths:
 
   /v1/membership/{id}/promote:
     post:
+      security:
+        - membershipAuth: []
       tags: [membership]
       summary: Promote a learner to a voter
       description: |
@@ -2424,9 +2443,16 @@ components:
       type: http
       scheme: bearer
       description: |
-        Static bearer token configured via `COMMITTED_API_TOKEN`. If the
-        server was started without a token, authentication is disabled
-        and any `Authorization` header is ignored.
+        Application bearer token configured via `COMMITTED_API_TOKEN`.
+        In legacy mode this token also authorizes membership and peer traffic.
+        With no tokens configured, bearer authentication is disabled.
+    membershipAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Membership bearer token configured via `COMMITTED_MEMBERSHIP_TOKEN`
+        in split mode. In legacy mode use `COMMITTED_API_TOKEN` here.
+        With no tokens configured, bearer authentication is disabled.
 
   parameters:
     ResourceId:

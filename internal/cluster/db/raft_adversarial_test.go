@@ -1613,6 +1613,10 @@ func TestAdversarial_DiskFull(t *testing.T) {
 //
 // -----------------------------------------------------------------------------
 func TestAdversarial_SevereLagFollowerCatchesUp(t *testing.T) {
+	forLifecycleBackends(t, testSevereLagFollowerCatchesUp)
+}
+
+func testSevereLagFollowerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 	// Seeded RNG reserved for future test randomness — same pattern as
 	// scenarios (a), (b), (c), (d), (f), (g). Keeps triage uniform.
 	_ = rand.New(rand.NewSource(8))
@@ -1634,7 +1638,7 @@ func TestAdversarial_SevereLagFollowerCatchesUp(t *testing.T) {
 		db.WithCompactMaxAge(0),
 	}
 
-	rafts, cluster, dirs, fatalC := newSevereLagCluster(t, replicas, nodeOpts)
+	rafts, cluster, dirs, fatalC := newSevereLagCluster(t, replicas, nodeOpts, storageOpts...)
 
 	// Track whether each node is currently open so the deferred cleanup
 	// doesn't double-close a storage we already closed mid-test. Indexed
@@ -1782,7 +1786,7 @@ func TestAdversarial_SevereLagFollowerCatchesUp(t *testing.T) {
 	// at an index beyond follower 3's event log. The Ready loop must fetch
 	// the missing events from a peer before saving the snapshot — with no
 	// fatal, and no operator involvement.
-	rebootWalNode(t, rafts[2], follower3Dir, nodeOpts, fatalC)
+	rebootWalNode(t, rafts[2], follower3Dir, nodeOpts, fatalC, storageOpts...)
 	alive[2] = true
 
 	// Give the rebooted transport a moment to bind and re-establish peer
@@ -1926,13 +1930,16 @@ func TestAdversarial_SevereLagFollowerCatchesUp(t *testing.T) {
 	assertEventLogPrefixMatches(t, rafts, dirs)
 }
 
-// assertEventLogPrefixMatches reopens each node's events/ dir as a
-// standalone tidwall/wal log, and asserts every node has byte-identical
-// raw bytes at every wal sequence from 1 through the minimum lastSeq
+// assertEventLogPrefixMatches reopens each node's events/ directory using its
+// backend and compares the common durable prefix. Native logs compare framed
+// records by sequence; segmented logs compare logical IDs and protobuf bytes
 // observed across all nodes. Runs with every raft + storage already
 // closed so the on-disk state is stable.
 func assertEventLogPrefixMatches(t *testing.T, rafts Rafts, dirs []string) {
 	t.Helper()
+	if compareSegmentedEventPrefix(t, dirs) {
+		return
+	}
 	// Reopen each events/ dir as a raw wal.Log so we can read raw bytes
 	// by sequence. wal.Open at the storage-layer level would re-run
 	// migrations + bbolt and want sync/ingest channels — too heavy for
@@ -2103,7 +2110,7 @@ func proposeAndCheckBytes(t *testing.T, rs Rafts, payload []byte) {
 // through the hook: the event is delivered on fatalC and runtime.Goexit
 // terminates only the calling goroutine (typically serveChannels),
 // leaving the test process alive to run the rebuild phase.
-func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option) (Rafts, *FaultyCluster, []string, chan fatalEvent) {
+func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option, storageOpts ...wal.Option) (Rafts, *FaultyCluster, []string, chan fatalEvent) {
 	t.Helper()
 
 	ports := pickFreePorts(replicas)
@@ -2121,7 +2128,7 @@ func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option) (Rafts, *
 	rafts := make(Rafts, replicas)
 	for i := 0; i < replicas; i++ {
 		dirs[i] = t.TempDir()
-		rafts[i] = openWalRaft(t, peers[i].ID, peers, dirs[i], fc, opts, fatalC)
+		rafts[i] = openWalRaft(t, peers[i].ID, peers, dirs[i], fc, opts, fatalC, storageOpts...)
 	}
 	return rafts, fc, dirs, fatalC
 }
@@ -2136,13 +2143,13 @@ func newSevereLagCluster(t *testing.T, replicas int, opts []db.Option) (Rafts, *
 // configs), so ApplyCommitted's undecodable-proposal branch runs and the
 // channels stay empty. A 64-entry buffer is ample headroom if a future
 // caller wants to propose configs against this harness.
-func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *FaultyCluster, opts []db.Option, fatalC chan<- fatalEvent) *Raft {
+func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *FaultyCluster, opts []db.Option, fatalC chan<- fatalEvent, storageOpts ...wal.Option) *Raft {
 	t.Helper()
 
 	p := parser.New()
 	syncCh := make(chan *db.SyncableWithID, 64)
 	ingestCh := make(chan *db.IngestableWithID, 64)
-	s, err := wal.Open(dir, p, syncCh, ingestCh, wal.WithoutFsync())
+	s, err := wal.Open(dir, p, syncCh, ingestCh, append([]wal.Option{wal.WithoutFsync()}, storageOpts...)...)
 	if err != nil {
 		t.Fatalf("wal.Open(%s): %v", dir, err)
 	}
@@ -2188,7 +2195,7 @@ func openWalRaft(t *testing.T, id uint64, peers []raft.Peer, dir string, fc *Fau
 // Analogous to raft_test.go's (*Raft).Restart but rewires storage too,
 // which Restart doesn't — Restart is built for the MemoryStorage case
 // where the storage object survives across the restart.
-func rebootWalNode(t *testing.T, rs *Raft, dir string, opts []db.Option, fatalC chan<- fatalEvent) {
+func rebootWalNode(t *testing.T, rs *Raft, dir string, opts []db.Option, fatalC chan<- fatalEvent, storageOpts ...wal.Option) {
 	t.Helper()
 
 	rs.mu.RLock()
@@ -2197,7 +2204,7 @@ func rebootWalNode(t *testing.T, rs *Raft, dir string, opts []db.Option, fatalC 
 	fc := rs.faultyCluster
 	rs.mu.RUnlock()
 
-	rebuilt := openWalRaft(t, id, peers, dir, fc, opts, fatalC)
+	rebuilt := openWalRaft(t, id, peers, dir, fc, opts, fatalC, storageOpts...)
 
 	rs.mu.Lock()
 	rs.storage = rebuilt.storage

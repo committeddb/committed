@@ -13,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/committeddb/committed/internal/cluster/auth"
 	"github.com/committeddb/committed/internal/cluster/db"
 )
 
@@ -349,4 +350,8 @@ func checkRemovedEnvVars() error {
 	}
 	return fmt.Errorf("these COMMITTED_* settings were renamed in 0.8.0 and are no longer read: %s — rename them in your deployment and restart (peer TLS is all-or-nothing, so an unrenamed trio would silently run plaintext)",
 		strings.Join(found, "; "))
+}
+
+func loadAuthTokens() (auth.Tokens, error) {
+	return auth.NewTokens(os.Getenv("COMMITTED_API_TOKEN"), os.Getenv("COMMITTED_MEMBERSHIP_TOKEN"), os.Getenv("COMMITTED_PEER_TOKEN"))
 }

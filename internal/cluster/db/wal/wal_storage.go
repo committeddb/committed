@@ -20,6 +20,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
@@ -276,18 +278,18 @@ type Storage struct {
 	// can't be bypassed by an outside caller writing directly. Access
 	// goes through appendEvent / readEventAt / EventIndex /
 	// firstEventSeq / lastEventSeq.
-	eventLog *wal.Log
+	eventLog *eventLogBinding
+	// Production append composition. eventAppendMu serializes a complete batch
+	// and precedes eventMu; the latter excludes native scrub/fetch handle swaps.
+	eventAppendMu sync.Mutex
 	// eventLogDir is the on-disk directory for eventLog (<datadir>/events).
 	// The scrubber rewrites the event log by building a sibling directory and
 	// renaming it over this one, so it needs the path (tidwall/wal doesn't
 	// expose it). Set once in Open and never changed.
 	eventLogDir string
-	// eventWalOpts is the tidwall options the event log was opened with
-	// (segment-cache size — see WithEventCacheSegments). Stored so every
-	// event-log (re)open uses them: the scrub swap reopens the log in-process,
-	// and without this that reopen would silently revert the configured cache
-	// to the library default until the next restart. Set once in Open.
-	eventWalOpts *wal.Options
+	// eventOpenOptions preserves backend configuration across startup, scrub,
+	// reset, and peer adoption. Set once in Open.
+	eventOpenOptions tidwall.LegacyOptions
 	// eventMu guards the s.eventLog handle pointer and the on-disk events/
 	// directory identity against the scrubber's swap (close → rename → reopen),
 	// exactly mirroring how kvMu guards the bbolt handle against RestoreSnapshot.
@@ -643,36 +645,64 @@ type Storage struct {
 // COMMITTED_EVENT_CACHE_SEGMENTS to fit their RAM.
 const DefaultEventCacheSegments = 16
 
-// openLog opens one of a node's tidwall logs, turning tidwall's opaque
+// openLog opens one of a node's Raft logs, turning tidwall's opaque
 // ErrCorrupt ("log corrupt") into an actionable ErrCorruptEntry: it records the
 // corruption metric and points the operator at the offline repair CLI and the
 // rebuild runbook, so a torn tail or bit-flip fails startup with a message they
 // can act on instead of a bare "log corrupt". Other open errors pass through.
-// walOpts may be nil (the library defaults); the event log passes its
-// configured segment-cache size.
+// walOpts may be nil (the library defaults).
 func openLog(dir, logName string, m *metrics.Metrics, walOpts *wal.Options) (*wal.Log, error) {
 	lg, err := wal.Open(dir, walOpts)
-	if err == nil {
-		return lg, nil
+	return lg, logOpenError(dir, logName, m, err)
+}
+
+func openEventLog(dir string, m *metrics.Metrics, opts tidwall.LegacyOptions) (*eventLogBinding, error) {
+	if err := rejectSegmentedEventDirectory(dir); err != nil {
+		return nil, err
 	}
-	if errors.Is(err, wal.ErrCorrupt) {
+	lg, err := tidwall.OpenLegacy(dir, opts)
+	if err != nil {
+		return nil, logOpenError(dir, "event_log", m, err)
+	}
+	return bindLegacyEventLog(lg, m), nil
+}
+
+// logOpenError keeps operator diagnostics and metrics above the backend.
+func logOpenError(dir, logName string, m *metrics.Metrics, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, wal.ErrCorrupt) || errors.Is(err, eventlog.ErrCorrupt) {
 		if m != nil {
 			m.WalCorruptEntry(logName)
 		}
-		return nil, fmt.Errorf("%w: the %s at %q will not open (%v) — stop the node and run `committed wal repair --data <node-data-dir>` to truncate a torn tail, or rebuild this node from a healthy replica; see docs/operations/rebuild.md",
+		return fmt.Errorf("%w: the %s at %q will not open (%v) — stop the node and run `committed wal repair --data <node-data-dir>` to truncate a torn tail, or rebuild this node from a healthy replica; see docs/operations/rebuild.md",
 			ErrCorruptEntry, logName, dir, err)
 	}
-	return nil, fmt.Errorf("open %s: %w", logName, err)
+	return fmt.Errorf("open %s: %w", logName, err)
 }
 
 // Returns a *WalStorage, whether this storage existed already, or an error
 // func Open() (*WalStorage, bool, error) {
 func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, opts ...Option) (*Storage, error) {
+	return openStorage(dir, p, sync, ingest, nil, opts...)
+}
+
+// openStorage shares the node startup path with backend integration tests.
+// An explicit factory is used by backend integration tests. Public Open selects
+// the configured factory, defaulting to native tidwall.
+func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, openEvents eventLogOpener, opts ...Option) (*Storage, error) {
 	var cfg options
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
+	if openEvents == nil {
+		openEvents = cfg.eventLogOpener
+		if openEvents == nil {
+			openEvents = openEventLog
+		}
+	}
 	entryLogDir := datadir.EntryLogDir(dir)
 	stateLogDir := datadir.StateLogDir(dir)
 	eventLogDir := datadir.EventsDir(dir)
@@ -695,6 +725,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 		return nil, err
 	}
 	boltOpts := &bolt.Options{Timeout: 1 * time.Second, NoSync: cfg.fsyncDisabled}
+	var ws *Storage
 	keyValueStorage, err := bolt.Open(datadir.BoltPath(keyValueStorageDir), 0o600, boltOpts)
 	if err != nil {
 		return nil, err
@@ -705,7 +736,11 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	opened := false
 	defer func() {
 		if !opened {
-			_ = keyValueStorage.Close()
+			if ws != nil {
+				_ = ws.keyValueStorage.Close()
+			} else {
+				_ = keyValueStorage.Close()
+			}
 		}
 	}()
 
@@ -741,10 +776,30 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if !opened {
+			if ws != nil {
+				_ = ws.EntryLog.Close()
+			} else {
+				_ = entryLog.Close()
+			}
+		}
+	}()
+
 	stateLog, err := openLog(stateLogDir, "state_log", cfg.metrics, nil)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if !opened {
+			if ws != nil {
+				_ = ws.StateLog.Close()
+			} else {
+				_ = stateLog.Close()
+			}
+		}
+	}()
+
 	// The event log gets a configurable segment cache (its readers — syncables
 	// replaying history — are concurrent, one resident segment each; see
 	// WithEventCacheSegments). The entry/state logs keep the library default:
@@ -760,15 +815,24 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	// still holds decompressed tables and its RAM sizing is unchanged.
 	// Downgrade door: `committed wal decompress` (offline) rewrites the
 	// plain format for pre-0.8.0 binaries.
-	eventWalOpts := &wal.Options{
-		SegmentCacheSize:         cacheSegments,
-		SegmentSize:              cfg.eventSegmentSize,
-		SealedSegmentCompression: wal.CompressionZstd,
+	eventOpenOptions := tidwall.LegacyOptions{
+		SegmentCacheSize: cacheSegments,
+		SegmentSize:      cfg.eventSegmentSize,
 	}
-	eventLog, err := openLog(eventLogDir, "event_log", cfg.metrics, eventWalOpts)
+	eventLog, err := openEvents(eventLogDir, cfg.metrics, eventOpenOptions)
 	if err != nil {
 		return nil, err
 	}
+
+	defer func() {
+		if !opened {
+			if ws != nil {
+				_ = ws.eventLog.Close()
+			} else {
+				_ = eventLog.Close()
+			}
+		}
+	}()
 
 	// Sweep any bbolt.db.restore.* / bbolt.db.compact.* temp file a crash left
 	// between a full-DB write and its atomic rename (RestoreSnapshot /
@@ -810,33 +874,33 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 
 	dbs := make(map[string]cluster.Database)
-	ws := &Storage{
-		eventLayout:     layoutLock{name: "event log", logger: logger},
-		raftLayout:      layoutLock{name: "raft entry log", logger: logger},
-		raftLogDir:      entryLogDir,
-		EntryLog:        entryLog,
-		eventLog:        eventLog,
-		eventLogDir:     eventLogDir,
-		eventWalOpts:    eventWalOpts,
-		StateLog:        stateLog,
-		keyValueStorage: keyValueStorage,
-		databases:       dbs,
-		parser:          p,
-		sync:            sync,
-		ingest:          ingest,
-		logger:          logger,
-		fsyncDisabled:   cfg.fsyncDisabled,
-		safeMode:        cfg.safeMode,
-		configErrors:    make(map[string]configErr),
-		metrics:         cfg.metrics,
-		lostCallback:    cfg.lostCallback,
-		scrubSignal:     make(chan struct{}, 1),
-		scrubStop:       make(chan struct{}),
-		scrubDone:       make(chan struct{}),
-		sealerStop:      make(chan struct{}),
-		sealerDone:      make(chan struct{}),
-		sealerIdle:      cfg.sealerIdleInterval,
-		closeC:          make(chan struct{}),
+	ws = &Storage{
+		eventLayout:      layoutLock{name: "event log", logger: logger},
+		raftLayout:       layoutLock{name: "raft entry log", logger: logger},
+		raftLogDir:       entryLogDir,
+		EntryLog:         entryLog,
+		eventLog:         eventLog,
+		eventLogDir:      eventLogDir,
+		eventOpenOptions: eventOpenOptions,
+		StateLog:         stateLog,
+		keyValueStorage:  keyValueStorage,
+		databases:        dbs,
+		parser:           p,
+		sync:             sync,
+		ingest:           ingest,
+		logger:           logger,
+		fsyncDisabled:    cfg.fsyncDisabled,
+		safeMode:         cfg.safeMode,
+		configErrors:     make(map[string]configErr),
+		metrics:          cfg.metrics,
+		lostCallback:     cfg.lostCallback,
+		scrubSignal:      make(chan struct{}, 1),
+		scrubStop:        make(chan struct{}),
+		scrubDone:        make(chan struct{}),
+		sealerStop:       make(chan struct{}),
+		sealerDone:       make(chan struct{}),
+		sealerIdle:       cfg.sealerIdleInterval,
+		closeC:           make(chan struct{}),
 	}
 	if ws.sealerIdle <= 0 {
 		ws.sealerIdle = sealerIdleInterval
@@ -1000,45 +1064,12 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	}
 	ws.appliedIndex.Store(idx)
 
-	// eventIndex (P_local) is the raft index of the last entry durably
-	// written to EventLog. EventLog's own sequence numbers are
-	// monotonic-from-1 and don't match raft index, so we recover the
-	// raft index by unmarshaling the last stored entry. Empty EventLog
-	// (fresh install or pre-Phase-1 migration) leaves eventIndex at 0.
-	evLast, err := eventLog.LastIndex()
-	if err != nil {
-		return nil, err
+	// Recover logical bounds through the shared binding before restoring the
+	// persisted data head or running its bounded fallback.
+	if err := ws.deriveEventBoundsLocked(); err != nil {
+		return nil, fmt.Errorf("recover event log bounds: %w", err)
 	}
-	if evLast > 0 {
-		// Reads go through ws.readEventAt so the checksum verify happens at
-		// the single chokepoint; a corrupt boundary entry fails Open here
-		// (node fatal-exits with the ErrCorruptEntry message → rebuild.md).
-		data, err := ws.readEventAt(evLast)
-		if err != nil {
-			return nil, fmt.Errorf("event log read last entry: %w", err)
-		}
-		last := &pb.Entry{}
-		if err := proto.Unmarshal(data, last); err != nil {
-			return nil, fmt.Errorf("event log unmarshal last entry: %w", err)
-		}
-		ws.eventIndex.Store(last.GetIndex())
-
-		// Read the first entry to initialize firstEventIndex so
-		// Reader.Read can map raft index ↔ wal seq.
-		evFirst, err := eventLog.FirstIndex()
-		if err != nil {
-			return nil, err
-		}
-		firstData, err := ws.readEventAt(evFirst)
-		if err != nil {
-			return nil, fmt.Errorf("event log read first entry: %w", err)
-		}
-		first := &pb.Entry{}
-		if err := proto.Unmarshal(firstData, first); err != nil {
-			return nil, fmt.Errorf("event log unmarshal first entry: %w", err)
-		}
-		ws.firstEventIndex.Store(first.GetIndex())
-
+	if ws.EventIndex() > 0 {
 		// Restore the persisted data head (written in the same bbolt
 		// transaction as appliedIndex — see dataEventIndexKey). The backscan
 		// below is now only the FALLBACK for logs written before the head was
@@ -1053,49 +1084,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 			ws.dataEventIndex.Store(persisted)
 		}
 
-		// Fallback derivation for pre-feature logs: scan the event log
-		// backward from the tail to the first user-topic-data entry,
-		// mirroring the reader's IsInternal filter. The trailing internal run
-		// (index bumps, dead-letters, config, positions) is normally tiny;
-		// cap the scan so a pathological tail can't make Open O(log). On the
-		// cap or any read/decode failure, the head stays 0 — under-reporting
-		// only ever makes lag look smaller — but LOUDLY: the operator must
-		// know the lag/caughtUp instrument is blind until the next data entry
-		// applies (or a re-POST after one).
-		const dataHeadBackscanCap = 4096
-		scannedOut := 0
-		for seq, scanned := evLast, 0; ws.dataEventIndex.Load() == 0 && seq >= evFirst && scanned < dataHeadBackscanCap; seq, scanned = seq-1, scanned+1 {
-			scannedOut = scanned + 1
-			raw, rerr := ws.readEventAt(seq)
-			if rerr != nil {
-				ws.logger.Warn("dataEventIndex backscan: read failed; leaving head at 0",
-					zap.Uint64("seq", seq), zap.Error(rerr))
-				break
-			}
-			e := &pb.Entry{}
-			if uerr := proto.Unmarshal(raw, e); uerr != nil {
-				ws.logger.Warn("dataEventIndex backscan: entry unmarshal failed; leaving head at 0",
-					zap.Uint64("seq", seq), zap.Error(uerr))
-				break
-			}
-			if e.GetType() != pb.EntryNormal || len(e.Data) == 0 {
-				continue
-			}
-			typeID, ok, derr := cluster.FirstEntityTypeID(e.Data)
-			if derr != nil {
-				ws.logger.Warn("dataEventIndex backscan: proposal decode failed; leaving head at 0",
-					zap.Uint64("seq", seq), zap.Uint64("index", e.GetIndex()), zap.Error(derr))
-				break
-			}
-			if ok && !cluster.IsInternal(typeID) {
-				ws.dataEventIndex.Store(e.GetIndex())
-				break
-			}
-		}
-		if ws.dataEventIndex.Load() == 0 && scannedOut >= dataHeadBackscanCap {
-			ws.logger.Warn("dataEventIndex backscan hit its cap without finding a data entry; the data head is 0 until the next data entry applies — syncable lag/caughtUp UNDER-REPORT until then (a fresh syncable may briefly read caughtUp over an empty replay range)",
-				zap.Int("scanned", scannedOut))
-		}
+		ws.recoverDataHead()
 	}
 
 	// Compile the interpretation registry from the applied restatements so readers
@@ -1113,6 +1102,9 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 	completed, err := ws.loadScrubCompleted()
 	if err != nil {
 		return nil, err
+	}
+	if err := ws.recoverFetchedGeneration(completed); err != nil {
+		return nil, fmt.Errorf("recover fetched event generation: %w", err)
 	}
 	ws.lastScrubbedBound.Store(completed)
 	if ws.safeMode {

@@ -389,3 +389,29 @@ func TestCatchUp_UnavailableWithoutAnEventLog(t *testing.T) {
 	require.True(t, needed, "an in-memory storage's event index is 0")
 	require.False(t, catchUp(n, 100, 0))
 }
+
+// A transfer can fail after importing a complete segment. No successful End or
+// result is required for the coordinator to resume from that durable progress.
+func TestCatchUp_ResumesDurablePrefixAfterFailedExchange(t *testing.T) {
+	recv := &fakeReceiver{snapCompleted: 4}
+	peers := &fakePeers{recv: recv}
+	calls := 0
+	peers.answer = func(req EventFetchRequest, sink EventSink) (EventFetchResult, error) {
+		calls++
+		require.NoError(t, sink.Begin(4, 100))
+		if calls == 1 {
+			recv.advance(40)
+			return EventFetchResult{}, errors.New("segment import interrupted")
+		}
+		require.Equal(t, EventFetchRequest{After: 40, To: 100, Generation: 4, MinGeneration: 4}, req)
+		recv.advance(100)
+		return EventFetchResult{Peer: 2, EventServeResult: EventServeResult{Generation: 4, EventIndex: 100, LastIndex: 100}}, sink.End(EventServeResult{})
+	}
+	n := newCatchUpRaft(t, recv, peers)
+	require.True(t, catchUp(n, 100, 4))
+	require.Equal(t, 2, calls)
+	require.Zero(t, recv.resets)
+	require.Equal(t, []uint64{4}, recv.genSets)
+	require.Equal(t, 1, recv.fenced)
+	require.Equal(t, 1, recv.released)
+}

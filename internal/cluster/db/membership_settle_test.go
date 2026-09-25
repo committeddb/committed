@@ -16,8 +16,9 @@ import (
 // before the entry — and raft silently drops a conf change proposed in that
 // window ("possible unapplied conf change"). The next change, proposed
 // immediately, was dropped and its caller waited forever. Advance now
-// precedes the broadcast, so after every call raft's applied index covers
-// the durable one and the pair can be repeated back to back indefinitely.
+// precedes the broadcast, and every membership check also waits for Raft's
+// applied index to cover the configuration entry: observing the final role
+// before the broadcast must not let the next call race ahead.
 func TestMembership_BackToBackChangesAreNotDropped(t *testing.T) {
 	d, _ := newWalDB(t)
 	const peerURL = "http://127.0.0.1:29331"

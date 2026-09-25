@@ -17,15 +17,15 @@ import (
 // TestTransport_MTLS_AcceptsAuthorizedClient verifies the positive
 // path: a client that presents a cert signed by the configured CA
 // completes the TLS handshake against a transport started with
-// matching mTLS config. This is the invariant the Phase 2 of
-// http-authentication.md exists to produce — a CA-signed client cert
-// is both necessary and sufficient to be allowed to talk to a peer.
+// matching mTLS config. A CA-signed client cert permits the TLS
+// connection; when a peer token is configured, requests must also
+// authenticate with that token.
 //
 // We don't drive a full raft message through the transport here;
 // that's covered indirectly by every existing multi-node test. What
 // this test guards is the wiring: TLS termination sits in front of
 // the handler, a good client can handshake, and the bytes after the
-// handshake land on the rafthttp handler.
+// handshake land on the peer handler.
 func TestTransport_MTLS_AcceptsAuthorizedClient(t *testing.T) {
 	pki := newTestPKI(t)
 	serverCert, serverKey := pki.issueNodeCert(t, "server")
