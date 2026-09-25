@@ -10,6 +10,29 @@ moving on. A node only ever changes its **binary** — its
 `COMMITTED_*` environment (node id, peers, data directory) stays the
 same, and its on-disk state is reused in place.
 
+## Upgrading from 0.8.0 to 0.8.1
+
+Keep the existing tidwall event-log backend and legacy authentication settings
+while following the rolling binary-upgrade procedure below. The snapshot-drop
+recovery fix requires no new configuration. The projection spelling changes
+listed below apply when crossing from releases before 0.8.0; they do not require
+another config rewrite for an existing 0.8.0 cluster.
+
+The two optional features require separate configuration decisions:
+
+- **Split authorization:** upgrade every node first, then set distinct
+  `COMMITTED_API_TOKEN`, `COMMITTED_MEMBERSHIP_TOKEN`, and
+  `COMMITTED_PEER_TOKEN` values and perform a coordinated cluster restart.
+  Mixed legacy/split authorization is not supported. Operator membership and
+  live-backup requests use the membership credential. See
+  [authentication](authentication.md).
+- **Segmented event logs:** select `COMMITTED_EVENT_LOG_BACKEND=segmented`
+  when provisioning a new cluster, using the same backend on every node.
+  Existing directories must retain their original backend; changing this
+  setting does not migrate them. Segmented directories cannot be opened by
+  0.8.0, and `wal decompress` does not convert them to tidwall. See
+  [storage configuration](memory.md#segmented-event-log-caches).
+
 ## Why this works
 
 Two properties make a rolling upgrade safe:
