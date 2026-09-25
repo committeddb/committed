@@ -115,9 +115,9 @@ func TestEventLogProtectedReaderExpiryReleasesWithoutClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-ctx.Done()
-	if _, err := r.Read(); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal(err)
-	}
+	// The parent closes Done before propagating cancellation to its children.
+	// Wait for automatic release to prove the reader's lifetime has expired
+	// before checking Read; otherwise an empty reader can still return EOF.
 	deadline := time.After(5 * time.Second)
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
@@ -127,6 +127,9 @@ func TestEventLogProtectedReaderExpiryReleasesWithoutClose(t *testing.T) {
 		case <-deadline:
 			t.Fatal("expiry did not release")
 		}
+	}
+	if _, err := r.Read(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
 	}
 	if _, err := adapter.rewriteRaw(t.Context(), 1, func(raw []byte) (bool, []byte, error) { return true, raw, nil }); err != nil {
 		t.Fatal(err)
