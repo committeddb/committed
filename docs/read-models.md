@@ -306,9 +306,9 @@ set = [
 
 The language: `+ - * /`, comparisons (`= <> < <= > >=`), the boolean
 predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
-`x in (…)`, `x is [not] null`, `true`/`false` literals — plus `coalesce`, `nullif`,
+`x in (…)`, `x is [not] null`, `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
 `round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
-zero), decimal and `'string'` literals, and `$.…` paths into the
+zero), SQL's `case` conditional, decimal and `'string'` literals, and `$.…` paths into the
 payload. Connectives follow SQL's three-valued logic — `null or true`
 is TRUE, `null and false` is FALSE — the one deliberate exception to
 blanket null propagation; `is [not] null` never returns null, and it
@@ -321,6 +321,26 @@ non-terminating value, **every `/` must sit under a `round` or `trunc`**
 rejected at POST, not at apply. A missing field is null; null propagates
 through arithmetic and comparison; `coalesce`/`nullif` are the null-aware
 escape hatches (`nullif(x, 0)` is the division-by-zero guard).
+
+`case` takes both SQL forms — searched (`case when … then … else … end`)
+and simple (`case $.status when 1 then 'open' when 2 then 'closed' end`):
+
+```toml
+set = [
+  { column = "size_band", expr = "case when $.hours < 8 then 'small' when $.hours < 40 then 'medium' else 'large' end" },
+  { column = "rate",      expr = "case when $.hours = 0 then null else round($.amount / $.hours, 2) end" },
+]
+```
+
+The first `when` that is TRUE selects its result; a null or false `when`
+falls through (in the simple form a null operand matches nothing), and no
+match without an `else` is null. Only the selected branch is evaluated, so
+a guarded branch never fails the event — `rate` above never divides by
+zero. A `/` inside a result still needs a `round`/`trunc` (one around the
+whole `case` covers every branch), and literal results of different kinds
+(`then 1 else 'x'`) are rejected at POST. `case` works everywhere `expr`
+does, including fold arms — SQL's conditional sum is
+`{ field = "done_hours", sum = "case when $.status = 'done' then $.hours else 0 end" }`.
 
 ## Folding several topics into one row (multi-source)
 

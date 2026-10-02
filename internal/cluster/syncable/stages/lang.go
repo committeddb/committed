@@ -21,8 +21,12 @@ import (
 // deliberate EXCEPTION to blanket propagation: or/and/not follow SQL's
 // three-valued logic (null is UNKNOWN, so null or true = true and null and
 // false = false), `x in (...)` is its expansion into equalities, and
-// `x is [not] null` is the one predicate that never returns null. Keywords
-// match case-insensitively, like the function names. Because only division can
+// `x is [not] null` is the one predicate that never returns null. `case`
+// is SQL's conditional: the first WHEN that is TRUE selects its THEN (null
+// and false both fall through), no match and no ELSE is null, and only the
+// selected branch evaluates — so a data error in an unselected branch never
+// surfaces (the guard idiom `case when $.n = 0 then null else … end`).
+// Keywords match case-insensitively, like the function names. Because only division can
 // produce a value with no finite decimal representation, every `/` must be
 // dominated by a round/trunc (or comparison — booleans never materialize a
 // decimal) ancestor in its tree, checked at admission: a bare quotient that
@@ -40,15 +44,18 @@ import (
 //	additive   := multiplicative (('+'|'-') multiplicative)*
 //	multiplicative := unary (('*'|'/') unary)*
 //	unary      := '-' unary | primary
-//	primary    := NUMBER | STRING | TRUE | FALSE | PATH
+//	primary    := NUMBER | STRING | TRUE | FALSE | NULL | PATH | caseExpr
 //	              | IDENT '(' expr (',' expr)* ')' | '(' expr ')'
+//	caseExpr   := 'case' expr? ('when' expr 'then' expr)+ ('else' expr)? 'end'
 //	compareOp  := '=' | '<>' | '<' | '<=' | '>' | '>='
 //
 // NUMBER is a plain decimal literal (no exponent form); STRING is a
 // SQL-style single-quoted literal with '' as the escaped quote (needed by
 // real formulas like nullif($.GroupName, '')); PATH is a `$…` jsonpath
 // into the event payload; IDENT names one of the closed function set:
-// coalesce, nullif, round, trunc (matched case-insensitively).
+// coalesce, nullif, round, trunc (matched case-insensitively). A `case`
+// with an operand is the simple form (`case x when a then …`): each WHEN
+// is `x = a`, so a null operand matches no branch.
 
 // exprMaxBits caps the combined numerator+denominator size of any
 // intermediate value — unreachable for admissible formulas (the domination
@@ -89,6 +96,18 @@ type exprIsNull struct {
 
 type exprBool struct{ val bool }
 
+type exprNull struct{}
+
+// exprCase is both CASE forms: operand is nil for the searched form
+// (whens are predicates) and set for the simple form (whens are values
+// compared to the operand).
+type exprCase struct {
+	operand Node
+	whens   []Node
+	thens   []Node
+	els     Node // nil: no ELSE (an unmatched case is null)
+}
+
 func (exprNum) node()    {}
 func (exprStr) node()    {}
 func (exprPath) node()   {}
@@ -99,6 +118,8 @@ func (exprNot) node()    {}
 func (exprIn) node()     {}
 func (exprIsNull) node() {}
 func (exprBool) node()   {}
+func (exprNull) node()   {}
+func (exprCase) node()   {}
 
 // ── lexing ──────────────────────────────────────────────────────────────
 
@@ -422,9 +443,15 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		if fn == "true" || fn == "false" {
 			return exprBool{fn == "true"}, nil
 		}
+		if fn == "null" {
+			return exprNull{}, nil
+		}
+		if fn == "case" {
+			return p.parseCase()
+		}
 		spec, ok := exprFunctions[fn]
 		if !ok {
-			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is coalesce, nullif, round, trunc)", t.text, t.pos)
+			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is coalesce, nullif, round, trunc; case … end is the conditional)", t.text, t.pos)
 		}
 		if err := p.expectOp("("); err != nil {
 			return nil, err
@@ -473,6 +500,107 @@ func (p *exprParser) parsePrimary() (Node, error) {
 	return nil, fmt.Errorf("unexpected %q at position %d", t.text, t.pos)
 }
 
+// parseCase parses the rest of a CASE after its `case` keyword: an
+// optional operand (the simple form), one or more WHEN … THEN arms, an
+// optional ELSE, and END.
+func (p *exprParser) parseCase() (Node, error) {
+	var c exprCase
+	if p.atKeyword("end") || p.atKeyword("else") || p.atKeyword("then") {
+		t := p.peek()
+		return nil, fmt.Errorf("case needs at least one when … then at position %d, got %q", t.pos, t.text)
+	}
+	if !p.atKeyword("when") {
+		operand, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		c.operand = operand
+	}
+	for p.atKeyword("when") {
+		p.next()
+		w, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if !p.atKeyword("then") {
+			t := p.peek()
+			return nil, fmt.Errorf("expected then at position %d, got %q", t.pos, t.text)
+		}
+		p.next()
+		th, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		c.whens = append(c.whens, w)
+		c.thens = append(c.thens, th)
+	}
+	if len(c.whens) == 0 {
+		t := p.peek()
+		return nil, fmt.Errorf("case needs at least one when … then at position %d, got %q", t.pos, t.text)
+	}
+	if p.atKeyword("else") {
+		p.next()
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		c.els = e
+	}
+	if !p.atKeyword("end") {
+		t := p.peek()
+		return nil, fmt.Errorf("expected when, else, or end in case at position %d, got %q", t.pos, t.text)
+	}
+	p.next()
+	if err := checkCaseResultFamilies(c); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// checkCaseResultFamilies rejects a CASE whose result branches are LITERALS
+// of different families (`then 1 else 'x'`) — a certain bug, caught at
+// admission. Non-literal branches are not typed (payload paths are
+// dynamic), so a runtime mix is allowed and the column's coercion decides.
+func checkCaseResultFamilies(c exprCase) error {
+	branches := append([]Node{}, c.thens...)
+	if c.els != nil {
+		branches = append(branches, c.els)
+	}
+	first := ""
+	for _, b := range branches {
+		fam := literalFamily(b)
+		if fam == "" {
+			continue
+		}
+		if first == "" {
+			first = fam
+			continue
+		}
+		if fam != first {
+			return fmt.Errorf("case result branches mix literal types (%s and %s) — every branch should produce the same kind of value", first, fam)
+		}
+	}
+	return nil
+}
+
+// literalFamily names a literal node's value family ("" for non-literals
+// and for null, which belongs to every family).
+func literalFamily(n Node) string {
+	switch x := n.(type) {
+	case exprNum:
+		return "number"
+	case exprNeg:
+		if _, ok := x.operand.(exprNum); ok {
+			return "number"
+		}
+	case exprStr:
+		return "string"
+	case exprBool:
+		return "boolean"
+	}
+	return ""
+}
+
 // scaleLiteral enforces the spec's scale rule: round/trunc scale is a
 // literal integer ≥ 0 (bounded to keep 10^s sane), never an expression. A
 // negative literal parses as unary minus over a number, so unwrap it to
@@ -504,7 +632,7 @@ func scaleLiteral(n Node, fn string) (int64, error) {
 // rounding materializes everything beneath it.
 func checkMaterializable(n Node, dominated bool) error {
 	switch x := n.(type) {
-	case exprNum, exprStr, exprPath, exprBool:
+	case exprNum, exprStr, exprPath, exprBool, exprNull:
 		return nil
 	case exprNeg:
 		return checkMaterializable(x.operand, dominated)
@@ -544,6 +672,27 @@ func checkMaterializable(n Node, dominated bool) error {
 		return nil
 	case exprIsNull:
 		return checkMaterializable(x.operand, true)
+	case exprCase:
+		// The operand and the WHENs are compared/tested, never stored; the
+		// results inherit the enclosing context, so round(case … end, 2)
+		// dominates every branch.
+		if x.operand != nil {
+			if err := checkMaterializable(x.operand, true); err != nil {
+				return err
+			}
+		}
+		for i := range x.whens {
+			if err := checkMaterializable(x.whens[i], true); err != nil {
+				return err
+			}
+			if err := checkMaterializable(x.thens[i], dominated); err != nil {
+				return err
+			}
+		}
+		if x.els != nil {
+			return checkMaterializable(x.els, dominated)
+		}
+		return nil
 	}
 	return fmt.Errorf("unhandled expression node %T", n)
 }
@@ -586,6 +735,8 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return x.val, nil
 	case exprBool:
 		return x.val, nil
+	case exprNull:
+		return nil, nil
 	case exprPath:
 		v, err := ResolvePath(x.path, payload, parent)
 		if err != nil {
@@ -620,6 +771,8 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return !b, nil
 	case exprIn:
 		return evalIn(x, payload, parent)
+	case exprCase:
+		return evalCase(x, payload, parent)
 	case exprIsNull:
 		// A PATH operand tests presence directly, skipping scalar
 		// normalization: `$.cust is not null` legitimately asks about a
@@ -804,6 +957,50 @@ func boolOperand(v any, op string) (val, isNull bool, err error) {
 	default:
 		return false, false, fmt.Errorf("%s needs boolean operands (comparisons/predicates), got %T", op, v)
 	}
+}
+
+// evalCase selects the first branch whose WHEN is TRUE (searched form) or
+// equals the operand (simple form); null and false fall through, as in
+// SQL. Evaluation is lazy: WHENs after the match and every unselected
+// result never run, so their data errors cannot surface — unlike the
+// connectives, whose operands always evaluate.
+func evalCase(x exprCase, payload, parent any) (any, error) {
+	var operand any
+	if x.operand != nil {
+		v, err := Eval(x.operand, payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		operand = v
+	}
+	for i, w := range x.whens {
+		wv, err := Eval(w, payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		matched := false
+		if x.operand != nil {
+			// x = a: a null on either side is UNKNOWN, never a match.
+			if operand != nil && wv != nil {
+				if matched, err = exprEqual(operand, wv); err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			b, isNull, err := boolOperand(wv, "case when")
+			if err != nil {
+				return nil, err
+			}
+			matched = !isNull && b
+		}
+		if matched {
+			return Eval(x.thens[i], payload, parent)
+		}
+	}
+	if x.els != nil {
+		return Eval(x.els, payload, parent)
+	}
+	return nil, nil
 }
 
 // evalIn is x = m1 or x = m2 ... with SQL's semantics folded in: a null

@@ -486,6 +486,17 @@ func walkExprPaths(n Node, visit func(string)) {
 		for _, a := range x.args {
 			walkExprPaths(a, visit)
 		}
+	case exprCase:
+		if x.operand != nil {
+			walkExprPaths(x.operand, visit)
+		}
+		for i := range x.whens {
+			walkExprPaths(x.whens[i], visit)
+			walkExprPaths(x.thens[i], visit)
+		}
+		if x.els != nil {
+			walkExprPaths(x.els, visit)
+		}
 	}
 }
 
