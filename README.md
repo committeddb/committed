@@ -482,8 +482,9 @@ several topics into one denormalized "BFF" row (a **spine** plus
 **contributors**), fold a collection of child rows into one JSON column
 (**aggregate**) or into scalar aggregate columns (count/sum/min/max/
 countDistinct over the child set), compute columns with exact-decimal
-expressions (**expr** — coalesce/nullif/round/trunc, `case`, and arithmetic, no
-floats anywhere), and enrich folded elements from a dimension topic
+expressions (**expr** — coalesce/nullif/round/trunc, `case`, string
+functions and `like`, and arithmetic, no floats anywhere), and enrich
+folded elements from a dimension topic
 (**lookup**), fan one event's array into N rows (**forEach**, with
 absolute reconciliation and cascading parent deletes), and chain internal
 **stages** — private keyed refolds (filter → aggregate → aggregate) a

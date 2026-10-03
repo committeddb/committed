@@ -306,9 +306,9 @@ set = [
 
 The language: `+ - * /`, comparisons (`= <> < <= > >=`), the boolean
 predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
-`x in (…)`, `x is [not] null`, `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
+`x [not] in (…)`, `x [not] like pattern`, `x is [not] null`, `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
 `round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
-zero), SQL's `case` conditional, decimal and `'string'` literals, and `$.…` paths into the
+zero), SQL's `case` conditional, the string functions below, decimal and `'string'` literals, and `$.…` paths into the
 payload. Connectives follow SQL's three-valued logic — `null or true`
 is TRUE, `null and false` is FALSE — the one deliberate exception to
 blanket null propagation; `is [not] null` never returns null, and it
@@ -341,6 +341,49 @@ whole `case` covers every branch), and literal results of different kinds
 (`then 1 else 'x'`) are rejected at POST. `case` works everywhere `expr`
 does, including fold arms — SQL's conditional sum is
 `{ field = "done_hours", sum = "case when $.status = 'done' then $.hours else 0 end" }`.
+
+The string functions follow PostgreSQL, counting in characters (code
+points), never bytes:
+
+| Function | Result |
+|---|---|
+| `a \|\| b` | concatenation; null if either side is null |
+| `concat(a, …)` | concatenation that skips nulls (`concat(null)` is `''`) |
+| `lower(s)`, `upper(s)` | case mapping |
+| `trim(s[, chars])`, `ltrim`, `rtrim` | strip spaces — or the characters in `chars` — from both ends, the start, or the end |
+| `substring(s, start[, count])` | characters from 1-based `start`; a `start` below 1 eats into `count` |
+| `length(s)`, `char_length(s)` | character count |
+| `replace(s, from, to)` | every literal occurrence of `from` replaced (no regex) |
+| `starts_with(s, prefix)` | boolean |
+| `s [not] like pattern` | case-sensitive whole-string match: `%` any run, `_` one character, `\` escapes the next |
+
+```toml
+set = [
+  { column = "display_name", expr = "trim(coalesce($.first, '') || ' ' || coalesce($.last, ''))" },
+  { column = "code",         expr = "upper(trim($.code))" },
+]
+when = [ { expr = "$.sku like 'SVC-%'" } ]
+```
+
+A null argument makes any of them null except `concat`. `||` binds looser
+than `+`/`-` and tighter than comparisons, as in PostgreSQL (`'#' || $.n + 1`
+concatenates the sum). `||` and `concat` render a number in canonical digits
+and a boolean as `true`/`false`; every other string function, and `like`,
+needs a string (`lower` of a number fails the event — there is no implicit
+conversion). `trim` strips spaces only, not tabs or newlines, matching
+PostgreSQL. Three deliberate differences from PostgreSQL keep the results
+identical on every replay:
+
+- **Case mapping is locale-free** — Unicode's simple one-to-one mappings,
+  so `upper('ß')` stays `ß` (PostgreSQL can give `ẞ`, depending on its locale). The Unicode tables
+  ship with committed's binary, and Unicode very rarely changes an existing
+  mapping (it gave Georgian new capitals in 2018); should an upgrade carry
+  such a change, rows written before it keep the old result until you
+  rebuild.
+- **Numbers render in canonical digits** — `'n=' || $.n` over a payload
+  `1.50` is `n=1.5` (PostgreSQL keeps the source scale, `n=1.50`).
+- **Booleans render as `true`/`false` in `concat`** too (PostgreSQL's
+  `concat` writes `t`/`f`, its `||` writes `true`/`false`).
 
 ## Folding several topics into one row (multi-source)
 

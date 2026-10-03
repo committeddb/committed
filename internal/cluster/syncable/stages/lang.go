@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/PaesslerAG/jsonpath"
 )
@@ -26,6 +27,14 @@ import (
 // and false both fall through), no match and no ELSE is null, and only the
 // selected branch evaluates — so a data error in an unselected branch never
 // surfaces (the guard idiom `case when $.n = 0 then null else … end`).
+// The string functions follow PostgreSQL over code points: `||` propagates
+// null and `concat` skips it (both render a number in canonical digits and
+// a boolean as true/false); `lower`/`upper` use Unicode SIMPLE case mapping
+// (locale-free, so `ß` stays `ß` where PG's `upper` gives `ẞ`; a Go
+// toolchain's Unicode-table bump can, rarely, change a mapping — Unicode 11
+// gave Georgian new capitals); `trim`/`ltrim`/`rtrim` strip spaces (or the
+// characters of a second argument); `like` is case-sensitive and anchored,
+// with % (any run), _ (one character), and \ as the escape.
 // Keywords match case-insensitively, like the function names. Because only division can
 // produce a value with no finite decimal representation, every `/` must be
 // dominated by a round/trunc (or comparison — booleans never materialize a
@@ -38,9 +47,11 @@ import (
 //	orExpr     := andExpr ('or' andExpr)*
 //	andExpr    := notExpr ('and' notExpr)*
 //	notExpr    := 'not' notExpr | comparison
-//	comparison := additive (compareOp additive
-//	              | 'in' '(' additive (',' additive)* ')'
+//	comparison := concat (compareOp concat
+//	              | 'not'? 'in' '(' concat (',' concat)* ')'
+//	              | 'not'? 'like' concat
 //	              | 'is' 'not'? 'null')?
+//	concat     := additive ('||' additive)*
 //	additive   := multiplicative (('+'|'-') multiplicative)*
 //	multiplicative := unary (('*'|'/') unary)*
 //	unary      := '-' unary | primary
@@ -52,8 +63,9 @@ import (
 // NUMBER is a plain decimal literal (no exponent form); STRING is a
 // SQL-style single-quoted literal with '' as the escaped quote (needed by
 // real formulas like nullif($.GroupName, '')); PATH is a `$…` jsonpath
-// into the event payload; IDENT names one of the closed function set:
-// coalesce, nullif, round, trunc (matched case-insensitively). A `case`
+// into the event payload; IDENT names one of the closed function set
+// (exprFunctionList, matched case-insensitively). `||` binds looser than
+// `+`/`-` and tighter than comparison, as in PostgreSQL. A `case`
 // with an operand is the simple form (`case x when a then …`): each WHEN
 // is `x = a`, so a null operand matches no branch.
 
@@ -98,6 +110,9 @@ type exprBool struct{ val bool }
 
 type exprNull struct{}
 
+// exprLike is `operand like pattern` (`not like` wraps it in exprNot).
+type exprLike struct{ operand, pattern Node }
+
 // exprCase is both CASE forms: operand is nil for the searched form
 // (whens are predicates) and set for the simple form (whens are values
 // compared to the operand).
@@ -120,6 +135,7 @@ func (exprIsNull) node() {}
 func (exprBool) node()   {}
 func (exprNull) node()   {}
 func (exprCase) node()   {}
+func (exprLike) node()   {}
 
 // ── lexing ──────────────────────────────────────────────────────────────
 
@@ -168,7 +184,7 @@ func lexExpr(src string) ([]exprToken, error) {
 					}
 					continue
 				}
-				if strings.ContainsRune(" \t\n\r+-*/(),=<>", rune(src[i])) {
+				if strings.ContainsRune(" \t\n\r+-*/(),=<>|", rune(src[i])) {
 					break
 				}
 				i++
@@ -219,6 +235,12 @@ func lexExpr(src string) ([]exprToken, error) {
 				toks = append(toks, exprToken{"op", ">", i})
 				i++
 			}
+		case c == '|':
+			if i+1 >= len(src) || src[i+1] != '|' {
+				return nil, fmt.Errorf("unexpected character %q at position %d (concatenation is ||)", "|", i)
+			}
+			toks = append(toks, exprToken{"op", "||", i})
+			i += 2
 		case strings.ContainsRune("+-*/(),=", rune(c)):
 			toks = append(toks, exprToken{"op", string(c), i})
 			i++
@@ -250,11 +272,25 @@ func (p *exprParser) expectOp(op string) error {
 }
 
 var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
-	"coalesce": {2, 16},
-	"nullif":   {2, 2},
-	"round":    {2, 2},
-	"trunc":    {1, 2},
+	"coalesce":    {2, 16},
+	"nullif":      {2, 2},
+	"round":       {2, 2},
+	"trunc":       {1, 2},
+	"concat":      {1, 16},
+	"lower":       {1, 1},
+	"upper":       {1, 1},
+	"trim":        {1, 2},
+	"ltrim":       {1, 2},
+	"rtrim":       {1, 2},
+	"substring":   {2, 3},
+	"length":      {1, 1},
+	"char_length": {1, 1},
+	"replace":     {3, 3},
+	"starts_with": {2, 2},
 }
+
+// exprFunctionList names the closed set for error messages.
+const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with"
 
 // atKeyword reports whether the next token is the given SQL keyword
 // (identifiers double as keywords, matched case-insensitively; a `$`
@@ -309,17 +345,34 @@ func (p *exprParser) parseNot() (Node, error) {
 }
 
 func (p *exprParser) parseComparison() (Node, error) {
-	l, err := p.parseAdditive()
+	l, err := p.parseConcat()
 	if err != nil {
 		return nil, err
 	}
 	if t := p.peek(); t.kind == "op" && (t.text == "=" || t.text == "<>" || t.text == "<" || t.text == "<=" || t.text == ">" || t.text == ">=") {
 		p.next()
-		r, err := p.parseAdditive()
+		r, err := p.parseConcat()
 		if err != nil {
 			return nil, err
 		}
 		return exprBin{t.text, l, r}, nil
+	}
+	// `x not in (…)` / `x not like p` are SQL's spellings of not(x in …) /
+	// not(x like p) — three-valued, so a null stays null.
+	negate := false
+	if p.atKeyword("not") {
+		if nt := p.toks[p.i+1]; nt.kind == "ident" && (strings.EqualFold(nt.text, "in") || strings.EqualFold(nt.text, "like")) {
+			p.next()
+			negate = true
+		}
+	}
+	if p.atKeyword("like") {
+		p.next()
+		pat, err := p.parseConcat()
+		if err != nil {
+			return nil, err
+		}
+		return negateIf(exprLike{l, pat}, negate), nil
 	}
 	if p.atKeyword("in") {
 		p.next()
@@ -328,7 +381,7 @@ func (p *exprParser) parseComparison() (Node, error) {
 		}
 		var list []Node
 		for {
-			m, err := p.parseAdditive()
+			m, err := p.parseConcat()
 			if err != nil {
 				return nil, err
 			}
@@ -342,7 +395,7 @@ func (p *exprParser) parseComparison() (Node, error) {
 			}
 			return nil, fmt.Errorf("expected \",\" or \")\" at position %d, got %q", nt.pos, nt.text)
 		}
-		return exprIn{l, list}, nil
+		return negateIf(exprIn{l, list}, negate), nil
 	}
 	if p.atKeyword("is") {
 		p.next()
@@ -359,6 +412,32 @@ func (p *exprParser) parseComparison() (Node, error) {
 		return exprIsNull{l, negate}, nil
 	}
 	return l, nil
+}
+
+func negateIf(n Node, negate bool) Node {
+	if negate {
+		return exprNot{n}
+	}
+	return n
+}
+
+func (p *exprParser) parseConcat() (Node, error) {
+	l, err := p.parseAdditive()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		t := p.peek()
+		if t.kind != "op" || t.text != "||" {
+			return l, nil
+		}
+		p.next()
+		r, err := p.parseAdditive()
+		if err != nil {
+			return nil, err
+		}
+		l = exprBin{"||", l, r}
+	}
 }
 
 func (p *exprParser) parseAdditive() (Node, error) {
@@ -451,7 +530,7 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		}
 		spec, ok := exprFunctions[fn]
 		if !ok {
-			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is coalesce, nullif, round, trunc; case … end is the conditional)", t.text, t.pos)
+			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is %s; case … end is the conditional)", t.text, t.pos, exprFunctionList)
 		}
 		if err := p.expectOp("("); err != nil {
 			return nil, err
@@ -672,6 +751,11 @@ func checkMaterializable(n Node, dominated bool) error {
 		return nil
 	case exprIsNull:
 		return checkMaterializable(x.operand, true)
+	case exprLike:
+		if err := checkMaterializable(x.operand, true); err != nil {
+			return err
+		}
+		return checkMaterializable(x.pattern, true)
 	case exprCase:
 		// The operand and the WHENs are compared/tested, never stored; the
 		// results inherit the enclosing context, so round(case … end, 2)
@@ -773,6 +857,8 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return evalIn(x, payload, parent)
 	case exprCase:
 		return evalCase(x, payload, parent)
+	case exprLike:
+		return evalLike(x, payload, parent)
 	case exprIsNull:
 		// A PATH operand tests presence directly, skipping scalar
 		// normalization: `$.cust is not null` legitimately asks about a
@@ -819,6 +905,16 @@ func evalBin(x exprBin, payload, parent any) (any, error) {
 			return !eq, nil
 		}
 		return eq, nil
+	case "||":
+		ls, err := renderText(l, "||")
+		if err != nil {
+			return nil, err
+		}
+		rs, err := renderText(r, "||")
+		if err != nil {
+			return nil, err
+		}
+		return ls + rs, nil
 	}
 	lr, err := ratOperand(l)
 	if err != nil {
@@ -901,8 +997,252 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 			scale = x.args[1].(exprNum).val.Num().Int64() // literal, checked at parse
 		}
 		return scaleRat(r, scale, x.fn == "round"), nil
+	case "concat":
+		// PG's concat: null arguments are skipped, never propagated.
+		var sb strings.Builder
+		for _, a := range x.args {
+			v, err := Eval(a, payload, parent)
+			if err != nil {
+				return nil, err
+			}
+			if v == nil {
+				continue
+			}
+			s, err := renderText(v, "concat")
+			if err != nil {
+				return nil, err
+			}
+			sb.WriteString(s)
+		}
+		return sb.String(), nil
+	case "lower", "upper", "trim", "ltrim", "rtrim", "substring", "length", "char_length", "replace", "starts_with":
+		// Strict, as in PG: any null argument makes the result null. Every
+		// argument evaluates first, so a data error surfaces regardless of
+		// which argument is null.
+		args := make([]any, len(x.args))
+		for i, a := range x.args {
+			v, err := Eval(a, payload, parent)
+			if err != nil {
+				return nil, err
+			}
+			args[i] = v
+		}
+		for _, v := range args {
+			if v == nil {
+				return nil, nil
+			}
+		}
+		return evalStringFn(x.fn, args)
 	}
 	return nil, fmt.Errorf("unhandled function %q", x.fn)
+}
+
+func evalStringFn(fn string, args []any) (any, error) {
+	s, err := stringArg(args[0], fn)
+	if err != nil {
+		return nil, err
+	}
+	switch fn {
+	case "lower":
+		return strings.ToLower(s), nil
+	case "upper":
+		return strings.ToUpper(s), nil
+	case "length", "char_length":
+		return new(big.Rat).SetInt64(int64(utf8.RuneCountInString(s))), nil
+	case "trim", "ltrim", "rtrim":
+		cut := " " // PG trims spaces only, never tabs or newlines
+		if len(args) == 2 {
+			if cut, err = stringArg(args[1], fn); err != nil {
+				return nil, err
+			}
+		}
+		switch fn {
+		case "ltrim":
+			return strings.TrimLeft(s, cut), nil
+		case "rtrim":
+			return strings.TrimRight(s, cut), nil
+		}
+		return strings.Trim(s, cut), nil
+	case "replace":
+		from, err := stringArg(args[1], fn)
+		if err != nil {
+			return nil, err
+		}
+		to, err := stringArg(args[2], fn)
+		if err != nil {
+			return nil, err
+		}
+		if from == "" {
+			return s, nil
+		}
+		return strings.ReplaceAll(s, from, to), nil
+	case "starts_with":
+		prefix, err := stringArg(args[1], fn)
+		if err != nil {
+			return nil, err
+		}
+		return strings.HasPrefix(s, prefix), nil
+	case "substring":
+		return substringRunes(s, args[1:])
+	}
+	return nil, fmt.Errorf("unhandled function %q", fn)
+}
+
+// substringRunes is PG's substring(s, start[, count]) over code points:
+// positions are 1-based, the window [start, start+count) is clipped to
+// the string (so a start below 1 eats into the count), and a negative
+// count is an error.
+func substringRunes(s string, args []any) (any, error) {
+	start, err := intArg(args[0], "substring")
+	if err != nil {
+		return nil, err
+	}
+	runes := []rune(s)
+	n := int64(len(runes))
+	end := n + 1
+	if len(args) == 2 {
+		count, err := intArg(args[1], "substring")
+		if err != nil {
+			return nil, err
+		}
+		if count < 0 {
+			return nil, fmt.Errorf("substring length must not be negative, got %d", count)
+		}
+		end = start + count
+	}
+	from, to := max(start, 1), min(end, n+1)
+	if to <= from {
+		return "", nil
+	}
+	return string(runes[from-1 : to-1]), nil
+}
+
+// evalLike is SQL's LIKE: null on either side is null; both sides must be
+// strings.
+func evalLike(x exprLike, payload, parent any) (any, error) {
+	v, err := Eval(x.operand, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	pv, err := Eval(x.pattern, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	if v == nil || pv == nil {
+		return nil, nil
+	}
+	s, err := stringArg(v, "like")
+	if err != nil {
+		return nil, err
+	}
+	pat, err := stringArg(pv, "like")
+	if err != nil {
+		return nil, err
+	}
+	return likeMatch(s, pat)
+}
+
+// likeMatch is PG's LIKE over code points: % matches any run (including
+// none), _ exactly one character, \ makes the next pattern character
+// literal; case-sensitive and anchored at both ends. The match is the
+// greedy two-pointer algorithm with single-% backtracking — O(len(s) ·
+// len(pattern)) worst case, never exponential.
+func likeMatch(s, pattern string) (bool, error) {
+	type elem struct {
+		kind byte // 'l' literal, '_' one character, '%' any run
+		r    rune
+	}
+	var pat []elem
+	pr := []rune(pattern)
+	for i := 0; i < len(pr); i++ {
+		switch pr[i] {
+		case '\\':
+			if i+1 == len(pr) {
+				return false, fmt.Errorf("like pattern must not end with the escape character \\")
+			}
+			i++
+			pat = append(pat, elem{'l', pr[i]})
+		case '%', '_':
+			pat = append(pat, elem{byte(pr[i]), 0})
+		default:
+			pat = append(pat, elem{'l', pr[i]})
+		}
+	}
+	str := []rune(s)
+	si, pi := 0, 0
+	starP, starS := -1, 0
+	for si < len(str) {
+		switch {
+		case pi < len(pat) && (pat[pi].kind == '_' || pat[pi].kind == 'l' && pat[pi].r == str[si]):
+			si++
+			pi++
+		case pi < len(pat) && pat[pi].kind == '%':
+			starP, starS = pi, si
+			pi++
+		case starP >= 0:
+			starS++
+			si, pi = starS, starP+1
+		default:
+			return false, nil
+		}
+	}
+	for pi < len(pat) && pat[pi].kind == '%' {
+		pi++
+	}
+	return pi == len(pat), nil
+}
+
+// renderText is the implicit text rendering `||` and concat apply: strings
+// pass through, numbers render in canonical digits (FormatRat — 1.50 is
+// "1.5"), booleans as true/false.
+func renderText(v any, fn string) (string, error) {
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case *big.Rat:
+		return FormatRat(t)
+	case bool:
+		if t {
+			return "true", nil
+		}
+		return "false", nil
+	}
+	return "", fmt.Errorf("%s needs text, a number, or a boolean, got %s", fn, describeValue(v))
+}
+
+func stringArg(v any, fn string) (string, error) {
+	if s, ok := v.(string); ok {
+		return s, nil
+	}
+	return "", fmt.Errorf("%s needs a string, got %s", fn, describeValue(v))
+}
+
+// intArg reads an integral number within PG's integer range — the
+// position/length arguments of substring.
+func intArg(v any, fn string) (int64, error) {
+	r, ok := v.(*big.Rat)
+	if !ok || !r.IsInt() {
+		return 0, fmt.Errorf("%s needs an integer position/length, got %s", fn, describeValue(v))
+	}
+	if !r.Num().IsInt64() || r.Num().Int64() < -1<<31 || r.Num().Int64() > 1<<31-1 {
+		return 0, fmt.Errorf("%s position/length %s is out of the integer range", fn, r.Num())
+	}
+	return r.Num().Int64(), nil
+}
+
+func describeValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return fmt.Sprintf("the string %q", t)
+	case *big.Rat:
+		if s, err := FormatRat(t); err == nil {
+			return "the number " + s
+		}
+		return "a number"
+	case bool:
+		return "a boolean"
+	}
+	return fmt.Sprintf("%T", v)
 }
 
 // evalConnective applies SQL's three-valued logic — null is UNKNOWN, so
