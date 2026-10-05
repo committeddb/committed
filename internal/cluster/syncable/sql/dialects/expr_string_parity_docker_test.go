@@ -18,7 +18,8 @@ import (
 // committed's evaluator and through PostgreSQL over the same rows. The
 // corpus avoids the listed divergences (non-ASCII case mapping, numbers
 // with trailing zeros, booleans in concat), which the stages tests pin
-// on our side instead.
+// on our side instead. Text ordering compares against COLLATE "C" (byte
+// order — ours); the locale-collation divergence is pinned after the loop.
 func TestPostgreSQLIntegration_ExprStringParity(t *testing.T) {
 	d := &dialects.PostgreSQLDialect{}
 	db, err := d.Open(pgConnString)
@@ -68,6 +69,11 @@ func TestPostgreSQLIntegration_ExprStringParity(t *testing.T) {
 		{"$.code like '%_ö%'", "code like '%_ö%'"},
 		{"$.first not in ('Ada', 'Grace')", "first not in ('Ada', 'Grace')"},
 		{"$.first || 'x' = 'Adax'", "first || 'x' = 'Adax'"},
+		{"$.code < 'm'", `code COLLATE "C" < 'm'`},
+		{"$.first > $.last", `first COLLATE "C" > last`},
+		{"$.sku >= 'SVC'", `sku COLLATE "C" >= 'SVC'`},
+		{"$.code <= 'xxCODExx'", `code COLLATE "C" <= 'xxCODExx'`},
+		{"$.n < 3", "n < 3"},
 	}
 
 	for _, c := range cases {
@@ -100,4 +106,15 @@ func TestPostgreSQLIntegration_ExprStringParity(t *testing.T) {
 			}
 		}
 	}
+
+	// The pinned divergence: a locale collation (ICU here) orders 'a'
+	// before 'B'; ours is byte order, PG's COLLATE "C".
+	var icu, c bool
+	require.NoError(t, db.QueryRow(`SELECT 'B' < 'a' COLLATE "und-x-icu", 'B' < 'a' COLLATE "C"`).Scan(&icu, &c))
+	n, err := stages.Compile("'B' < 'a'")
+	require.NoError(t, err)
+	ours, err := stages.Eval(n, map[string]any{}, nil)
+	require.NoError(t, err)
+	require.False(t, icu, "a locale collation puts a before B")
+	require.Equal(t, c, ours, "ours is byte order, as COLLATE \"C\"")
 }

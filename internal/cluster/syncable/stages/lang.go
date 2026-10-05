@@ -905,6 +905,8 @@ func evalBin(x exprBin, payload, parent any) (any, error) {
 			return !eq, nil
 		}
 		return eq, nil
+	case "<", "<=", ">", ">=":
+		return orderedCompare(x.op, l, r)
 	case "||":
 		ls, err := renderText(l, "||")
 		if err != nil {
@@ -936,14 +938,6 @@ func evalBin(x exprBin, payload, parent any) (any, error) {
 			return nil, fmt.Errorf("division by zero (guard the divisor with nullif(x, 0))")
 		}
 		return capBits(new(big.Rat).Quo(lr, rr))
-	case "<":
-		return lr.Cmp(rr) < 0, nil
-	case "<=":
-		return lr.Cmp(rr) <= 0, nil
-	case ">":
-		return lr.Cmp(rr) > 0, nil
-	case ">=":
-		return lr.Cmp(rr) >= 0, nil
 	}
 	return nil, fmt.Errorf("unhandled operator %q", x.op)
 }
@@ -1035,6 +1029,41 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 		return evalStringFn(x.fn, args)
 	}
 	return nil, fmt.Errorf("unhandled function %q", x.fn)
+}
+
+// orderedCompare is SQL's < <= > >= within one family: numbers exactly,
+// strings byte-wise (code-point order — PostgreSQL's COLLATE "C", never a
+// locale collation, which library upgrades can reorder), booleans
+// false < true. It orders by collectLess, the order min/max and collect
+// fold by, so an expression and a fold can never disagree. Mixed families
+// are a data error, as in PG (there is no text < numeric).
+func orderedCompare(op string, l, r any) (any, error) {
+	lf, rf := orderFamily(l), orderFamily(r)
+	if lf == "" || rf == "" || lf != rf {
+		return nil, fmt.Errorf("%s compares two values of the same kind, got %s and %s", op, describeValue(l), describeValue(r))
+	}
+	less, greater := collectLess(l, r), collectLess(r, l)
+	switch op {
+	case "<":
+		return less, nil
+	case "<=":
+		return !greater, nil
+	case ">":
+		return greater, nil
+	}
+	return !less, nil
+}
+
+func orderFamily(v any) string {
+	switch v.(type) {
+	case *big.Rat:
+		return "number"
+	case string:
+		return "text"
+	case bool:
+		return "boolean"
+	}
+	return ""
 }
 
 func evalStringFn(fn string, args []any) (any, error) {

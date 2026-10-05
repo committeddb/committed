@@ -1278,12 +1278,17 @@ set  = [ { column = "state", value = "billable" } ]
 	require.NotNil(t, when[1].GreaterThan)
 	require.NotNil(t, when[2].LessThan)
 
-	// A non-numeric ordering literal is rejected at admission.
-	bad := strings.Replace(toml, `greaterThan = 0`, `greaterThan = "high"`, 1)
+	// A text ordering literal admits; a QUOTED NUMBER is rejected — as
+	// text it would order "10" before "9", silently.
+	text := strings.Replace(toml, `greaterThan = 0`, `greaterThan = "2026-01-01"`, 1)
+	v = readConfig(t, "toml", strings.NewReader(text))
+	_, err = (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
+	require.NoError(t, err)
+
+	bad := strings.Replace(toml, `greaterThan = 0`, `greaterThan = "0"`, 1)
 	v = readConfig(t, "toml", strings.NewReader(bad))
 	_, err = (&sql.ProjectionSyncableParser{}).ParseConfig(v, projectionStorage())
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "greaterThan takes a numeric literal")
+	require.ErrorContains(t, err, `greaterThan = "0" is a quoted number`)
 }
 
 // The determinism boundary for the degraded-build retry loop: a

@@ -227,10 +227,13 @@ error handling, deletes, and schema evolution:
   *present* JSON null — the flag form, since TOML cannot write
   `equals = null`), `notEquals`, `notNull` (present and
   non-null — SQL's IS NOT NULL, the merge's left/inner gate), or
-  `greaterThan`/`lessThan` (numeric literals, strict). Comparisons follow SQL: a missing or null value
+  `greaterThan`/`lessThan` (strict; a number literal compares numbers,
+  a text literal compares strings in byte order — `greaterThan =
+  "2026-01-01"` is an ISO-date window — and a quoted number like `"5"` is
+  rejected, since as text `"10"` sorts before `"9"`). Comparisons follow SQL: a missing or null value
   matches NO comparison — including `notEquals` — and a value of a
   different scalar family (a string where the literal is a number)
-  matches neither `equals` nor `notEquals`. That is the whole language —
+  matches no comparison either. That is the whole language —
   single field, compare-to-literal; boolean expressions stay out.
   A missing path is "no match", never an error — including for `null`
   clauses, so an absent field never matches. Inside a fan (a forEach
@@ -304,7 +307,9 @@ set = [
 ]
 ```
 
-The language: `+ - * /`, comparisons (`= <> < <= > >=`), the boolean
+The language: `+ - * /`, comparisons (`= <> < <= > >=` — numbers
+numerically, strings in byte order, `false < true`; ordering a string
+against a number is an error), the boolean
 predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
 `x [not] in (…)`, `x [not] like pattern`, `x is [not] null`, `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
 `round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
@@ -371,7 +376,7 @@ concatenates the sum). `||` and `concat` render a number in canonical digits
 and a boolean as `true`/`false`; every other string function, and `like`,
 needs a string (`lower` of a number fails the event — there is no implicit
 conversion). `trim` strips spaces only, not tabs or newlines, matching
-PostgreSQL. Three deliberate differences from PostgreSQL keep the results
+PostgreSQL. Four deliberate differences from PostgreSQL keep the results
 identical on every replay:
 
 - **Case mapping is locale-free** — Unicode's simple one-to-one mappings,
@@ -384,6 +389,10 @@ identical on every replay:
   `1.50` is `n=1.5` (PostgreSQL keeps the source scale, `n=1.50`).
 - **Booleans render as `true`/`false` in `concat`** too (PostgreSQL's
   `concat` writes `t`/`f`, its `||` writes `true`/`false`).
+- **Strings order by byte (code point)** — PostgreSQL's `COLLATE "C"`,
+  not a locale collation, which a library upgrade can reorder: `'B' < 'a'`
+  is true (a locale puts `a` first). ISO dates and same-case codes order
+  identically either way, and the `min`/`max` folds use the same order.
 
 ## Folding several topics into one row (multi-source)
 

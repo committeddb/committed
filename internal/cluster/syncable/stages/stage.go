@@ -59,8 +59,14 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 			if lit == nil {
 				continue
 			}
+			if s, ok := lit.(string); ok {
+				if _, isNum := numericDigits(s); isNum {
+					return fmt.Errorf("%s: when entry for %q: %s = %q is a quoted number — write it unquoted to compare numerically (as text, \"10\" sorts before \"9\"); for a deliberate text comparison of digits use an expr arm", where, cl.Path, arm, s)
+				}
+				continue
+			}
 			if _, ok := ratFromScalar(lit); !ok {
-				return fmt.Errorf("%s: when entry for %q: %s takes a numeric literal (values compare numerically, SQL-style), got %T", where, cl.Path, arm, lit)
+				return fmt.Errorf("%s: when entry for %q: %s takes a number or text literal, got %T", where, cl.Path, arm, lit)
 			}
 		}
 	}
