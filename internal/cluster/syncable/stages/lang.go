@@ -50,12 +50,15 @@ import (
 //	comparison := concat (compareOp concat
 //	              | 'not'? 'in' '(' concat (',' concat)* ')'
 //	              | 'not'? 'like' concat
+//	              | 'not'? 'between' concat 'and' concat
 //	              | 'is' 'not'? 'null')?
 //	concat     := additive ('||' additive)*
 //	additive   := multiplicative (('+'|'-') multiplicative)*
 //	multiplicative := unary (('*'|'/') unary)*
-//	unary      := '-' unary | primary
+//	unary      := '-' unary | postfix
+//	postfix    := primary ('::' TYPE)*
 //	primary    := NUMBER | STRING | TRUE | FALSE | NULL | PATH | caseExpr
+//	              | ('cast' | 'try_cast') '(' expr 'as' TYPE ')'
 //	              | IDENT '(' expr (',' expr)* ')' | '(' expr ')'
 //	caseExpr   := 'case' expr? ('when' expr 'then' expr)+ ('else' expr)? 'end'
 //	compareOp  := '=' | '<>' | '<' | '<=' | '>' | '>='
@@ -65,7 +68,9 @@ import (
 // real formulas like nullif($.GroupName, '')); PATH is a `$…` jsonpath
 // into the event payload; IDENT names one of the closed function set
 // (exprFunctionList, matched case-insensitively). `||` binds looser than
-// `+`/`-` and tighter than comparison, as in PostgreSQL. A `case`
+// `+`/`-` and tighter than comparison, as in PostgreSQL. TYPE is a cast
+// target (castTypes); casts and the math functions live in lang_cast.go.
+// `x between a and b` is `a <= x and x <= b`. A `case`
 // with an operand is the simple form (`case x when a then …`): each WHEN
 // is `x = a`, so a null operand matches no branch.
 
@@ -184,7 +189,7 @@ func lexExpr(src string) ([]exprToken, error) {
 					}
 					continue
 				}
-				if strings.ContainsRune(" \t\n\r+-*/(),=<>|", rune(src[i])) {
+				if strings.ContainsRune(" \t\n\r+-*/(),=<>|:", rune(src[i])) {
 					break
 				}
 				i++
@@ -235,6 +240,12 @@ func lexExpr(src string) ([]exprToken, error) {
 				toks = append(toks, exprToken{"op", ">", i})
 				i++
 			}
+		case c == ':':
+			if i+1 >= len(src) || src[i+1] != ':' {
+				return nil, fmt.Errorf("unexpected character %q at position %d (a cast is ::type)", ":", i)
+			}
+			toks = append(toks, exprToken{"op", "::", i})
+			i += 2
 		case c == '|':
 			if i+1 >= len(src) || src[i+1] != '|' {
 				return nil, fmt.Errorf("unexpected character %q at position %d (concatenation is ||)", "|", i)
@@ -287,10 +298,17 @@ var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
 	"char_length": {1, 1},
 	"replace":     {3, 3},
 	"starts_with": {2, 2},
+	"abs":         {1, 1},
+	"ceil":        {1, 1},
+	"ceiling":     {1, 1},
+	"floor":       {1, 1},
+	"mod":         {2, 2},
+	"greatest":    {1, 16},
+	"least":       {1, 16},
 }
 
 // exprFunctionList names the closed set for error messages.
-const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with"
+const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with, abs, ceil, ceiling, floor, mod, greatest, least"
 
 // atKeyword reports whether the next token is the given SQL keyword
 // (identifiers double as keywords, matched case-insensitively; a `$`
@@ -361,10 +379,28 @@ func (p *exprParser) parseComparison() (Node, error) {
 	// not(x like p) — three-valued, so a null stays null.
 	negate := false
 	if p.atKeyword("not") {
-		if nt := p.toks[p.i+1]; nt.kind == "ident" && (strings.EqualFold(nt.text, "in") || strings.EqualFold(nt.text, "like")) {
+		if nt := p.toks[p.i+1]; nt.kind == "ident" && (strings.EqualFold(nt.text, "in") || strings.EqualFold(nt.text, "like") || strings.EqualFold(nt.text, "between")) {
 			p.next()
 			negate = true
 		}
+	}
+	if p.atKeyword("between") {
+		p.next()
+		lo, err := p.parseConcat()
+		if err != nil {
+			return nil, err
+		}
+		if !p.atKeyword("and") {
+			t := p.peek()
+			return nil, fmt.Errorf("expected and in between at position %d, got %q", t.pos, t.text)
+		}
+		p.next()
+		hi, err := p.parseConcat()
+		if err != nil {
+			return nil, err
+		}
+		// SQL's definition, three-valued logic included.
+		return negateIf(exprBin{"and", exprBin{"<=", lo, l}, exprBin{"<=", l, hi}}, negate), nil
 	}
 	if p.atKeyword("like") {
 		p.next()
@@ -487,7 +523,7 @@ func (p *exprParser) parseUnary() (Node, error) {
 		}
 		return exprNeg{operand}, nil
 	}
-	return p.parsePrimary()
+	return p.parsePostfix()
 }
 
 func (p *exprParser) parsePrimary() (Node, error) {
@@ -527,6 +563,9 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		}
 		if fn == "case" {
 			return p.parseCase()
+		}
+		if fn == "cast" || fn == "try_cast" {
+			return p.parseCastCall(fn == "try_cast")
 		}
 		spec, ok := exprFunctions[fn]
 		if !ok {
@@ -730,7 +769,12 @@ func checkMaterializable(n Node, dominated bool) error {
 		}
 		return checkMaterializable(x.r, childDominated)
 	case exprCall:
-		childDominated := dominated || x.fn == "round" || x.fn == "trunc"
+		// round/trunc/ceil/floor materialize what lies beneath them.
+		childDominated := dominated
+		switch x.fn {
+		case "round", "trunc", "ceil", "ceiling", "floor":
+			childDominated = true
+		}
 		for _, a := range x.args {
 			if err := checkMaterializable(a, childDominated); err != nil {
 				return err
@@ -751,6 +795,10 @@ func checkMaterializable(n Node, dominated bool) error {
 		return nil
 	case exprIsNull:
 		return checkMaterializable(x.operand, true)
+	case exprCast:
+		// An integer cast rounds, and a boolean cast never stores a decimal;
+		// numeric and text casts carry the value through as it is.
+		return checkMaterializable(x.operand, dominated || x.typ == "integer" || x.typ == "bigint" || x.typ == "boolean")
 	case exprLike:
 		if err := checkMaterializable(x.operand, true); err != nil {
 			return err
@@ -859,6 +907,8 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return evalCase(x, payload, parent)
 	case exprLike:
 		return evalLike(x, payload, parent)
+	case exprCast:
+		return evalCast(x, payload, parent)
 	case exprIsNull:
 		// A PATH operand tests presence directly, skipping scalar
 		// normalization: `$.cust is not null` legitimately asks about a
@@ -1009,6 +1059,8 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 			sb.WriteString(s)
 		}
 		return sb.String(), nil
+	case "abs", "ceil", "ceiling", "floor", "mod", "greatest", "least":
+		return evalMathCall(x, payload, parent)
 	case "lower", "upper", "trim", "ltrim", "rtrim", "substring", "length", "char_length", "replace", "starts_with":
 		// Strict, as in PG: any null argument makes the result null. Every
 		// argument evaluates first, so a data error surfaces regardless of

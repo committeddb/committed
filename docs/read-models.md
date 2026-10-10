@@ -313,7 +313,7 @@ against a number is an error), the boolean
 predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
 `x [not] in (…)`, `x [not] like pattern`, `x is [not] null`, `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
 `round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
-zero), SQL's `case` conditional, the string functions below, decimal and `'string'` literals, and `$.…` paths into the
+zero), SQL's `case` conditional, `x [not] between a and b`, the string functions, casts, and math functions below, decimal and `'string'` literals, and `$.…` paths into the
 payload. Connectives follow SQL's three-valued logic — `null or true`
 is TRUE, `null and false` is FALSE — the one deliberate exception to
 blanket null propagation; `is [not] null` never returns null, and it
@@ -393,6 +393,45 @@ identical on every replay:
   not a locale collation, which a library upgrade can reorder: `'B' < 'a'`
   is true (a locale puts `a` first). ISO dates and same-case codes order
   identically either way, and the `min`/`max` folds use the same order.
+
+Casts convert between numbers, text, and booleans with PostgreSQL's rules —
+`cast(x as t)` or the shorthand `x::t`, for `numeric` (`decimal`), `integer`
+(`int`), `bigint`, `text` (`varchar`), and `boolean` (`bool`):
+
+```toml
+set = [
+  { column = "qty",         expr = "greatest(cast($.qty as numeric), 0)" },
+  { column = "status_code", expr = "$.Status::integer" },
+  { column = "discount",    expr = "coalesce(try_cast($.discount as numeric), 0)" },
+]
+```
+
+- **`numeric`** reads a string in PostgreSQL's numeric syntax, exactly:
+  surrounding spaces, a sign, a fraction, an exponent (`1e3`), `0x`/`0o`/`0b`
+  prefixes, and `_` between digits (`1_000`).
+- **`integer`/`bigint`** round a number half away from zero (`2.5` → `3`)
+  but read a string only in integer syntax (`'2.5'::integer` fails — go
+  through `::numeric` first), map a boolean to `1`/`0`, and fail outside
+  their range.
+- **`boolean`** reads PostgreSQL's spellings — `true`/`false`, `yes`/`no`,
+  `on`/`off`, `1`/`0`, or any unambiguous prefix (`t`, `n`), in any case —
+  and casts an integer as nonzero-is-true.
+- **`text`** renders a number in canonical digits and a boolean as
+  `true`/`false`.
+
+A cast that cannot convert its value fails the event, as in PostgreSQL.
+**`try_cast(x as t)`** — committed's one addition — is the same conversion,
+yielding null instead, for a producer whose strings are sometimes junk;
+pair it with `coalesce` for a default. `NaN` and `Infinity`, which
+PostgreSQL's numeric accepts, have no exact value here and are a failed
+conversion.
+
+The math functions: `abs`, `ceil` (`ceiling`), `floor`, `mod(a, b)` (the
+remainder takes the dividend's sign; `mod(x, 0)` fails), and
+`greatest(…)`/`least(…)`, which ignore nulls (null only when every argument
+is) and order values like the comparisons do. `ceil`, `floor`, and an
+`integer` cast settle a division the way `round` does, so
+`ceil($.minutes / 60)` needs no `round`.
 
 ## Folding several topics into one row (multi-source)
 
