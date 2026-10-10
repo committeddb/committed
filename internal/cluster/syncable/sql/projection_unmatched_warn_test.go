@@ -20,9 +20,7 @@ import (
 // occasional foreign variants never trip it.
 func TestProjectionWarnsOnLongUnmatchedRun(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
-	prev := zap.L()
-	zap.ReplaceGlobals(zap.New(core))
-	defer zap.ReplaceGlobals(prev)
+	defer zap.ReplaceGlobals(zap.New(core))()
 
 	config := tenantProjectionConfig()
 	projection, mock, _, _ := newMockProjection(t, config, nil)
@@ -46,9 +44,7 @@ func TestProjectionWarnsOnLongUnmatchedRun(t *testing.T) {
 // The reset: a single match inside the run keeps the warning silent.
 func TestProjectionUnmatchedRunResetsOnMatch(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
-	prev := zap.L()
-	zap.ReplaceGlobals(zap.New(core))
-	defer zap.ReplaceGlobals(prev)
+	defer zap.ReplaceGlobals(zap.New(core))()
 
 	config := tenantProjectionConfig()
 	projection, mock, rules, _ := newMockProjection(t, config, nil)

@@ -302,15 +302,15 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64, eraseMax uint64) 
 	}
 	idx := pe.GetIndex()
 	remove := func(typeID string, key []byte, isDelete bool) bool {
-		tk := string(tombstoneKey(typeID, key))
+		tk := tombstoneKey(typeID, key)
 		// RTBF: spare deletes (the tombstone must survive).
 		if !isDelete {
-			if d := sel[tk]; d != 0 && idx < d {
+			if d := sel[string(tk)]; d != 0 && idx < d {
 				return true
 			}
 		}
 		// Metadata GC: drop anything below the latest entry for this key.
-		if m := msel[tk]; m != 0 && idx < m {
+		if m := msel[string(tk)]; m != 0 && idx < m {
 			return true
 		}
 		return false

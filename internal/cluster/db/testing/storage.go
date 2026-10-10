@@ -324,7 +324,9 @@ func (StorageStubs) SyncableDeadLetterAt(id string, index uint64) (cluster.Synca
 func (StorageStubs) SyncableDeadLetters(id string, since uint64, limit int) ([]cluster.SyncableDeadLetter, error) {
 	return nil, nil
 }
+
 func (StorageStubs) HasSyncableDeadLetter(id string, index uint64) (bool, error) { return false, nil }
+
 func (StorageStubs) TypeMigrationDeadLetters(typeID string, since uint64, limit int) ([]cluster.TypeMigrationDeadLetter, error) {
 	return nil, nil
 }

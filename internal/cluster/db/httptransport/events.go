@@ -221,7 +221,7 @@ func (t *HttpTransport) FetchEvents(ctx context.Context, req db.EventFetchReques
 	if len(peers) == 0 {
 		return db.EventFetchResult{}, db.ErrNoPeerToFetchFrom
 	}
-	rand.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
+	rand.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] }) //nolint:gosec // G404: spreads fetch load across peers, not security-sensitive
 	var last error
 	for _, pr := range peers {
 		res, err := t.fetchFrom(ctx, pr, req, sink)

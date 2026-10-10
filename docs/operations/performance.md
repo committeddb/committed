@@ -57,7 +57,7 @@ floor, not a capacity estimate.
 
 ## Re-measuring
 
-Prerequisites: Go 1.26+ and `make` — nothing else. Unlike the Docker-backed
+Prerequisites: Go 1.27+ and `make` — nothing else. Unlike the Docker-backed
 e2e suites, none of this needs Docker or an external database; the 3-node
 report builds the real binary and runs it on loopback ports.
 

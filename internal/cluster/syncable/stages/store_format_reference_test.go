@@ -249,7 +249,7 @@ func TestStoreReferenceFixtureCoversTheVocabulary(t *testing.T) {
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
 		switch v.Kind() {
-		case reflect.Ptr, reflect.Interface:
+		case reflect.Pointer, reflect.Interface:
 			if !v.IsNil() {
 				walk(v.Elem())
 			}

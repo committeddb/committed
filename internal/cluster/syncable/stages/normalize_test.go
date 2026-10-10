@@ -129,9 +129,7 @@ func TestNormalizeValidated(t *testing.T) {
 // array-shaped input resets the run.
 func TestStageForEachNonArrayWarns(t *testing.T) {
 	core, logs := observer.New(zap.WarnLevel)
-	prev := zap.L()
-	zap.ReplaceGlobals(zap.New(core))
-	defer zap.ReplaceGlobals(prev)
+	defer zap.ReplaceGlobals(zap.New(core))()
 
 	stages := []Stage{{
 		Name: "fan", From: "txns", ForEach: "$.EventData.elements[*]",
