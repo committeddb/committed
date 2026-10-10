@@ -36,6 +36,8 @@ emit    = [ { field = "margin",   expr = "round((sum($.rev) - sum($.cost)) / nul
             { field = "techs",    expr = "count(distinct $.tech_id)" },
             { field = "done",     expr = "count(*) filter (where $.status = 'done')" },
             { field = "source",   expr = "'teamup'" },
+            { field = "crew",     expr = "array_agg(distinct $.tech_id order by $.tech_id)" },
+            { field = "log",      expr = "string_agg($.note, '; ' order by $.at desc nulls last)" },
             { field = "hours",    sum  = "$.hours" } ]
 having  = "sum($.hours) > 0"
 

@@ -1,4 +1,4 @@
-"meta"	"fingerprint"	615c49aed578f071ce85897eef7456d4cb037051aa433aa3cc6dd7c64e4d8f6b
+"meta"	"fingerprint"	ee1dff87a3609f7fc28f8e3e531e30ef6161707f380c85294ee6496a94987baa
 "meta"	"format"	"\x00\x00\x00\x00\x00\x00\x00\x02"
 "meta"	"frontier"	"\x00\x00\x00\x00\x00\x00\x00\x0e"
 "stage:cand:dim:blocks"	"j2"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"blocked\":true}"
@@ -77,6 +77,13 @@
 "stage:monthly:src"	"q1"	2026-01-01 00:00:00+00:00
 "stage:monthly:src"	"q2"	2026-01-01 00:00:00+00:00
 "stage:monthly:src"	"q3"	2026-02-01 00:00:00+00:00
+"stage:payer-list:in"	"\x03allq1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":10,\"at\":\"2026-01-05T10:00:00Z\",\"payer\":\"Ada\"}"
+"stage:payer-list:in"	"\x03allq2"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":3,\"at\":\"2026-01-20\",\"payer\":\"ada\"}"
+"stage:payer-list:in"	"\x03allq3"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":-4,\"at\":\"2026-01-31 20:00:00-05:00\",\"payer\":\"Bea\"}"
+"stage:payer-list:out"	"all"	{"by_amount":["ada","ada","bea"],"names":"Ada, Bea, ada","notes":[null,null,null]}
+"stage:payer-list:src"	"q1"	all
+"stage:payer-list:src"	"q2"	all
+"stage:payer-list:src"	"q3"	all
 "stage:props:in"	"\x015p1"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"amount\":10,\"id\":\"5.0000\",\"projectId\":\"J1\"}"
 "stage:props:out"	"5"	{"amount":11,"pid":"J1"}
 "stage:props:src"	"p1"	5

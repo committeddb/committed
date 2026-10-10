@@ -508,6 +508,9 @@ func walkExprPaths(n Node, visit func(string)) {
 		if x.filter != nil {
 			walkExprPaths(x.filter, visit)
 		}
+		for _, o := range x.order {
+			walkExprPaths(o.expr, visit)
+		}
 	case exprLike:
 		walkExprPaths(x.operand, visit)
 		walkExprPaths(x.pattern, visit)

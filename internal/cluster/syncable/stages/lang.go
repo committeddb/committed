@@ -838,6 +838,11 @@ func checkMaterializable(n Node, dominated bool) error {
 				return err
 			}
 		}
+		for _, o := range x.order {
+			if err := checkMaterializable(o.expr, true); err != nil {
+				return err
+			}
+		}
 		if x.filter != nil {
 			return checkMaterializable(x.filter, true)
 		}
@@ -1397,6 +1402,8 @@ func describeValue(v any) string {
 		return "a number"
 	case bool:
 		return "a boolean"
+	case []any:
+		return "an array"
 	case timestampVal, dateVal, intervalVal:
 		m, _ := Materialize(t)
 		return fmt.Sprintf("the %s %s", describeTimeType(t), m)
@@ -1598,6 +1605,11 @@ func ratOperand(v any) (*big.Rat, error) {
 }
 
 func exprEqual(a, b any) (bool, error) {
+	_, aArr := a.([]any)
+	_, bArr := b.([]any)
+	if aArr || bArr {
+		return false, fmt.Errorf("an array (array_agg's result) does not compare")
+	}
 	a, b, err := coerceTimePair(a, b)
 	if err != nil {
 		return false, err

@@ -673,6 +673,16 @@ func Materialize(v any) (any, error) {
 		return formatDate(t), nil
 	case intervalVal:
 		return formatInterval(t), nil
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			m, err := Materialize(e)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = m
+		}
+		return out, nil
 	}
 	return v, nil
 }

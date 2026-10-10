@@ -712,9 +712,10 @@ set = [ { column = "total", from = "$.total" },
   having = "sum($.hours) > 0"
   ```
 
-  The calls are `sum`, `min`, `max`, `avg`, `count(*)`, and `count(x)`
-  (non-null values), with `distinct` on `count`/`sum`/`avg` and
-  `filter (where …)` on any of them. Each is folded over the key's inputs
+  The calls are `sum`, `min`, `max`, `avg`, `count(*)`, `count(x)`
+  (non-null values), `array_agg(x [order by …])`, and
+  `string_agg(x, 'sep' [order by …])`, with `distinct` on all but
+  `min`/`max` and `filter (where …)` on any of them. Each is folded over the key's inputs
   with the same refold-from-scratch rules as the arms, and SQL's
   empty-set results (`count` 0, the others null). `avg` is an exact
   quotient, so like `/` it sits under `round`/`trunc`; `sum` also adds
@@ -723,6 +724,19 @@ set = [ { column = "total", from = "$.total" },
   reaches the table through the stage key. The arm forms (`sum = "$.x"`)
   remain as shorthand for one call. Aggregate calls belong to aggregate
   stages' emits and `having` only.
+- **`array_agg` and `string_agg` order by a business field**:
+  `array_agg($.person_id order by $.billing)`,
+  `string_agg($.name, ', ' order by $.billing desc)`. Each `order by` key
+  takes `asc`/`desc` and `nulls first`/`last` (default: nulls last
+  ascending, first descending). They follow PostgreSQL: `array_agg` keeps
+  null elements, `string_agg` skips nulls and takes text only (cast a
+  number: `$.n::text`), the delimiter is a string literal, both are null
+  — not empty — when no input qualifies, and with `distinct` the `order
+  by` must be the argument itself. Where PostgreSQL leaves the order
+  unspecified — no `order by`, or a tie — committed sorts by the value
+  (nulls last), so a refold is byte-identical. The `collect` arm is the
+  older, unordered form: it skips nulls and yields `[]` for an empty
+  set.
 - **`having` filters the folded keys** — SQL's HAVING: an expression over
   aggregate calls, evaluated after the fold. A key whose `having` is not
   TRUE has no output, so it retracts downstream like an emptied key and

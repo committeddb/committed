@@ -188,6 +188,18 @@ func storeReferenceFixture() []Stage {
 			},
 			Having: "sum($.amount) > 0",
 		},
+		// Ordered aggregates: array_agg's order-by with a descending key and
+		// a null element, string_agg's distinct value order, and the
+		// value-order tiebreak — engine-chosen orders the store pins.
+		{
+			Name: "payer-list", From: "payments", KeyPath: []string{"'all'"},
+			Reduce: "aggregate",
+			Emit: []Emit{
+				{Field: "by_amount", Expr: "array_agg(lower($.payer) order by $.amount desc)"},
+				{Field: "names", Expr: "string_agg(distinct $.payer, ', ' order by $.payer)"},
+				{Field: "notes", Expr: "array_agg($.note)"},
+			},
+		},
 	}
 }
 
