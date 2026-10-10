@@ -670,6 +670,7 @@ paths:
                         fanned: { type: integer, format: int64 }
                         keys: { type: integer }
                         unkeyedDeletes: { type: integer, format: int64 }
+                        havingRejected: { type: integer, format: int64 }
                         liveDeltas: { type: integer, format: int64 }
                         retractions: { type: integer, format: int64 }
                         joins:
@@ -3312,6 +3313,13 @@ components:
                 description: |
                   Delete-shaped inputs whose key could not resolve — lost
                   retractions, the key each meant to kill stays live. Omitted while zero.
+              havingRejected:
+                type: integer
+                format: int64
+                description: |
+                  Refolds an aggregate stage's having held back since the worker
+                  started — keys 0 with havingRejected above 0 means the having
+                  rejects every key. Omitted while zero.
               joins:
                 type: array
                 description: Per-join hit/miss counters (omitted for stages without joins).

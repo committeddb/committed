@@ -29,7 +29,7 @@ func TestPostgreSQLIntegration_ProjGroupByExpression(t *testing.T) {
 	defer db.Close()
 
 	table := uniqueTable(t)
-	raw := table + "_raw"
+	raw := "raw_" + table // a prefix: PG truncates names at 63 bytes, so a suffix could collide
 	defer dropTable(t, table)
 	defer dropTable(t, raw)
 	_, err = db.DB.Exec(fmt.Sprintf(`CREATE TABLE %q (id TEXT PRIMARY KEY, customer TEXT, paid_at TEXT, amount NUMERIC)`, raw))

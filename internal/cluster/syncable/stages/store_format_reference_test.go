@@ -173,6 +173,21 @@ func storeReferenceFixture() []Stage {
 			},
 			Emit: []Emit{{Field: "amount", From: "$.c.amount"}, {Field: "area", From: "$.wa.name"}},
 		},
+		// Aggregate expressions and having (SQL's select list and HAVING)
+		// over a computed key (GROUP BY <expression>): key rendering of a
+		// time value, avg's exact quotient under round, FILTER, a distinct
+		// count, a constant column, and a month the having holds back.
+		{
+			Name: "monthly", From: "payments", KeyPath: []string{"date_trunc('month', $.at::timestamptz)"},
+			Reduce: "aggregate",
+			Emit: []Emit{
+				{Field: "avg", Expr: "round(avg($.amount), 2)"},
+				{Field: "big", Expr: "count(*) filter (where $.amount > 5)"},
+				{Field: "payers", Expr: "count(distinct lower($.payer))"},
+				{Field: "source", Expr: "'ledger'"},
+			},
+			Having: "sum($.amount) > 0",
+		},
 	}
 }
 
@@ -207,6 +222,9 @@ func storeReferenceFeed(fold func(topic, key, payload string, gen uint64), sweep
 	// refold; o3 (epoch 2) survives.
 	sweep("owners", 2)
 	del("proposals", "p3")
+	fold("payments", "q1", `{"at":"2026-01-05T10:00:00Z","amount":10,"payer":"Ada"}`, 0)
+	fold("payments", "q2", `{"at":"2026-01-20","amount":3,"payer":"ada"}`, 0)
+	fold("payments", "q3", `{"at":"2026-01-31 20:00:00-05:00","amount":-4,"payer":"Bea"}`, 0) // Feb 1 UTC: Feb's sum is -4, held back
 }
 
 // TestStoreReferenceFixtureCoversTheVocabulary makes the reference's coverage

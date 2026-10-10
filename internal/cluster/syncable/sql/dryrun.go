@@ -141,6 +141,7 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 				Fanned:         fc.Fanned,
 				Keys:           keys,
 				UnkeyedDeletes: fc.UnkeyedDeletes,
+				HavingRejected: fc.HavingRejected,
 				LiveDeltas:     liveDeltas[name],
 				Retractions:    retractions[name],
 				Joins:          joinStats(fc.Joins),
@@ -459,6 +460,9 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 			if !j.Absent && j.Hits == 0 && j.Misses >= dryRunFindingFloor {
 				findings = append(findings, fmt.Sprintf("stage %q join on %q never resolved a dimension row (0 hits / %d attempts) — check the on path, the key space (normalize/keyType), and whether the dimension's region was sampled", name, j.Target, j.Misses))
 			}
+		}
+		if st.Keys == 0 && st.HavingRejected > 0 {
+			findings = append(findings, fmt.Sprintf("stage %q folded inputs but its having held back every key (%d refold(s) rejected) — check the having predicate against the sample's values", name, st.HavingRejected))
 		}
 		if st.UnkeyedDeletes > 0 {
 			findings = append(findings, fmt.Sprintf("stage %q dropped %d delete-shaped input(s) that could not key — LOST retractions; the delete events' payloads lack the keyPath field or fail its keyType", name, st.UnkeyedDeletes))

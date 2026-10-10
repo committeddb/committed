@@ -268,6 +268,11 @@ func lexExpr(src string) ([]exprToken, error) {
 type exprParser struct {
 	toks []exprToken
 	i    int
+	// aggs collects aggregate calls as fold slots; nil means aggregates
+	// are not allowed here (everywhere but an aggregate stage's emit expr
+	// and having). inAgg rejects a nested aggregate.
+	aggs  *[]exprAgg
+	inAgg bool
 }
 
 func (p *exprParser) peek() exprToken { return p.toks[p.i] }
@@ -574,6 +579,11 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		if fn == "extract" {
 			return p.parseExtract()
 		}
+		if aggregateFns[fn] {
+			if nt := p.peek(); nt.kind == "op" && nt.text == "(" {
+				return p.parseAggCall(fn, t.pos)
+			}
+		}
 		if typ, ok := typedLiteralTypes[fn]; ok && p.peek().kind == "str" {
 			// PG's typed literal: date '2024-01-15', interval '30 days'.
 			return exprCast{exprStr{p.next().text}, typ, false}, nil
@@ -817,6 +827,21 @@ func checkMaterializable(n Node, dominated bool) error {
 		return nil
 	case exprIsNull:
 		return checkMaterializable(x.operand, true)
+	case exprAgg:
+		// avg is an exact quotient (like /); count's argument is only
+		// tested for null; sum/min/max store values derived from theirs.
+		if x.fn == "avg" && !dominated {
+			return fmt.Errorf("avg(...) is an exact quotient with no finite decimal form to store — wrap it in round(..., scale) or trunc(...)")
+		}
+		if x.arg != nil {
+			if err := checkMaterializable(x.arg, dominated || x.fn == "count"); err != nil {
+				return err
+			}
+		}
+		if x.filter != nil {
+			return checkMaterializable(x.filter, true)
+		}
+		return nil
 	case exprCast:
 		// An integer cast rounds, and a boolean cast never stores a decimal;
 		// numeric and text casts carry the value through as it is.
@@ -934,6 +959,12 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return evalLike(x, payload, parent)
 	case exprCast:
 		return evalCast(x, payload, parent)
+	case exprAgg:
+		res, ok := payload.(aggResults)
+		if !ok {
+			return nil, fmt.Errorf("internal: aggregate %s evaluated outside a fold", x.fn)
+		}
+		return res[x.slot], nil
 	case exprIsNull:
 		// A PATH operand tests presence directly, skipping scalar
 		// normalization: `$.cust is not null` legitimately asks about a

@@ -501,6 +501,13 @@ func walkExprPaths(n Node, visit func(string)) {
 		}
 	case exprCast:
 		walkExprPaths(x.operand, visit)
+	case exprAgg:
+		if x.arg != nil {
+			walkExprPaths(x.arg, visit)
+		}
+		if x.filter != nil {
+			walkExprPaths(x.filter, visit)
+		}
 	case exprLike:
 		walkExprPaths(x.operand, visit)
 		walkExprPaths(x.pattern, visit)

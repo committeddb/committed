@@ -62,6 +62,10 @@ type graphNode struct {
 	unkeyedDeletes atomic.Int64
 	// unkeyedDeleteWarned one-shots the warn log (worker goroutine only).
 	unkeyedDeleteWarned bool
+	// havingRejected counts refolds whose having held the key's output
+	// back (since the worker started) — "folded but filtered" told apart
+	// from "no inputs". Same atomicity contract as inputs/fanned.
+	havingRejected atomic.Int64
 	// keyExprs are the compiled keyPath expressions, parallel to
 	// def.KeyPath (nil for a plain path); keyExprWarned one-shots the
 	// warning for a key expression's data error (worker goroutine only).
@@ -525,7 +529,7 @@ func FanMiss(path string, payload any, elems *[]any) string {
 func (g *Graph) FlowCounts() map[string]FlowCount {
 	out := make(map[string]FlowCount, len(g.order))
 	for _, n := range g.order {
-		fc := FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load()}
+		fc := FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load(), HavingRejected: n.havingRejected.Load()}
 		for ji := range n.def.Joins {
 			j := &n.def.Joins[ji]
 			target := j.Topic
@@ -545,6 +549,8 @@ type FlowCount struct {
 	Fanned int64
 	// UnkeyedDeletes counts lost retractions — see graphNode.
 	UnkeyedDeletes int64
+	// HavingRejected counts refolds a having held back — see graphNode.
+	HavingRejected int64
 	// Joins are the per-join resolution counters — see graphNode.
 	Joins []JoinFlow
 }
@@ -1377,6 +1383,7 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 	maxs := make([]any, len(st.Emit))
 	counts := make([]int, len(st.Emit))
 	collects := make([][]any, len(st.Emit))
+	accs := make([]aggAcc, len(st.aggSlots))
 	count := 0
 
 	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
@@ -1396,8 +1403,16 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 		if err != nil {
 			return err
 		}
+		for k := range st.aggSlots {
+			if err := st.aggSlots[k].add(&accs[k], obj, parent); err != nil {
+				return cluster.Permanent(fmt.Errorf("stage %q %s(…): %w", st.Name, st.aggSlots[k].fn, err))
+			}
+		}
 		for i := range st.Emit {
 			e := &st.Emit[i]
+			if e.Expr != "" {
+				continue // an expr over aggregate calls evaluates after the fold
+			}
 			// Per-emit where (SQL's FILTER): this input skips THIS
 			// field's fold only — membership already counted above.
 			if len(e.Where) > 0 && !MatchScoped(e.Where, obj, parent) {
@@ -1457,12 +1472,30 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 	if count == 0 {
 		return nil, false, nil
 	}
+	results := make(aggResults, len(st.aggSlots))
+	for k := range st.aggSlots {
+		results[k] = st.aggSlots[k].result(&accs[k])
+	}
+	if st.havingCompiled != nil {
+		// SQL's HAVING: only TRUE keeps the key (false, null, and a data
+		// error hold it back, as a when arm does).
+		if v, err := Eval(st.havingCompiled, results, nil); err != nil || v != true {
+			if n := g.byName[st.Name]; n != nil {
+				n.havingRejected.Add(1)
+			}
+			return nil, false, nil
+		}
+	}
 
 	emitted := make(map[string]any, len(st.Emit))
 	for i := range st.Emit {
 		e := &st.Emit[i]
 		var v any
 		switch {
+		case e.Expr != "":
+			if v, err = Eval(e.compiled, results, nil); err != nil {
+				return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
+			}
 		case e.Count:
 			v = json.Number(fmt.Sprintf("%d", counts[i]))
 		case e.Collect != "":

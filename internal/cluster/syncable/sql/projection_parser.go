@@ -202,6 +202,7 @@ type rawProjectionStage struct {
 	KeyType     any            `mapstructure:"keyType"`
 	Merge       any            `mapstructure:"merge"`
 	Emit        []StageEmit    `mapstructure:"emit"`
+	Having      string         `mapstructure:"having"`
 	ForEach     string         `mapstructure:"forEach"`
 	Fan         []StageFanArm  `mapstructure:"fan"`
 	ElementKey  string         `mapstructure:"elementKey"`
@@ -257,6 +258,7 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 			OrderByType: strings.ToLower(rs.OrderByType),
 			TieBy:       rs.TieBy,
 			TieByType:   strings.ToLower(rs.TieByType),
+			Having:      rs.Having,
 			Joins:       stageJoins(rs.Join),
 			Emit:        rs.Emit,
 			ForEach:     rs.ForEach,

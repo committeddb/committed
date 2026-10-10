@@ -613,6 +613,11 @@ type StageStat struct {
 	// stays live. Nonzero answers "the delete event arrived but the key
 	// is still live" in one read. Omitted while zero.
 	UnkeyedDeletes int64 `json:"unkeyedDeletes,omitempty"`
+	// HavingRejected counts refolds an aggregate stage's having held back
+	// since the worker started — "folded but filtered" told apart from "no
+	// inputs" (keys 0 with havingRejected > 0: the having rejects every
+	// key). Omitted while zero.
+	HavingRejected int64 `json:"havingRejected,omitempty"`
 	// Joins are per-join resolution counters (hits/misses since the
 	// worker started) — "the join never resolved" as a number instead
 	// of a replay-diff hunt. Omitted for stages without joins.

@@ -130,6 +130,7 @@ type DryRunStage struct {
 	Fanned         int64             `json:"fanned,omitempty"`
 	Keys           int               `json:"keys"`
 	UnkeyedDeletes int64             `json:"unkeyedDeletes,omitempty"`
+	HavingRejected int64             `json:"havingRejected,omitempty"`
 	LiveDeltas     int64             `json:"liveDeltas"`
 	Retractions    int64             `json:"retractions"`
 	Joins          []JoinStat        `json:"joins,omitempty"`

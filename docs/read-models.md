@@ -699,6 +699,35 @@ set = [ { column = "total", from = "$.total" },
   count = true, where = [ { path = "$.billed", equals = "true" } ] }`
   folds only matching inputs for THAT field, while row membership stays
   the key's.
+- **An aggregate emit can be an expression over aggregate calls** —
+  SQL's select list over a GROUP BY, so a ratio, an average, or a
+  conditional count is one emit instead of a fold stage plus a reshape:
+
+  ```toml
+  emit   = [ { field = "margin",   expr = "round((sum($.rev) - sum($.cost)) / nullif(sum($.rev), 0), 4)" },
+             { field = "avg_rate", expr = "round(avg($.rate), 2)" },
+             { field = "techs",    expr = "count(distinct $.tech_id)" },
+             { field = "done",     expr = "count(*) filter (where $.status = 'done')" },
+             { field = "source",   expr = "'teamup'" } ]
+  having = "sum($.hours) > 0"
+  ```
+
+  The calls are `sum`, `min`, `max`, `avg`, `count(*)`, and `count(x)`
+  (non-null values), with `distinct` on `count`/`sum`/`avg` and
+  `filter (where …)` on any of them. Each is folded over the key's inputs
+  with the same refold-from-scratch rules as the arms, and SQL's
+  empty-set results (`count` 0, the others null). `avg` is an exact
+  quotient, so like `/` it sits under `round`/`trunc`; `sum` also adds
+  intervals. Outside an aggregate call an expression reads no input path
+  — which input would it come from? — so a constant is fine and the key
+  reaches the table through the stage key. The arm forms (`sum = "$.x"`)
+  remain as shorthand for one call. Aggregate calls belong to aggregate
+  stages' emits and `having` only.
+- **`having` filters the folded keys** — SQL's HAVING: an expression over
+  aggregate calls, evaluated after the fold. A key whose `having` is not
+  TRUE has no output, so it retracts downstream like an emptied key and
+  re-enters when the predicate flips back; the stage's `havingRejected`
+  counter (below) tells "folded but filtered" apart from "no inputs".
 - **Keys can be computed** — SQL's `GROUP BY <expression>`: a `keyPath`
   entry may be an expression instead of a path, so a rollup by month, a
   normalized email, or a `case` bucket is one stage:
@@ -829,7 +858,7 @@ set = [ { column = "total", from = "$.total" },
   each stage's row — `keys` (the store's current output count) plus
   `inputs`/`fanned` flow counters since the worker started, and
   `unkeyedDeletes` (delete-shaped inputs whose key would not resolve or
-  render), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
+  render), `havingRejected` (refolds an aggregate's `having` held back), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
   arrived but the key is still live" in one read; each also warns once
   in the log). The three
   numbers split every silent-empty state: `inputs` 0 = that topic's log

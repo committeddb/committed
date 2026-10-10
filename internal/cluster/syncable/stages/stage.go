@@ -101,6 +101,16 @@ type Stage struct {
 	TieByType   string `json:"tieByType,omitempty"`
 	Joins       []Join `json:"joins,omitempty"`
 	Emit        []Emit `json:"emit,omitempty"`
+	// Having filters an aggregate stage's FOLDED keys — SQL's HAVING: an
+	// expression over aggregate calls (`count(*) > 5`), evaluated after
+	// the fold. A key whose having is not TRUE has no output: it retracts
+	// downstream, and re-enters when the predicate flips back.
+	Having string `mapstructure:"having" json:"having,omitempty"`
+	// aggSlots are the aggregate calls of the emit exprs and having, in
+	// fold order; havingCompiled is Having's AST. Populated by
+	// ValidateShapes.
+	aggSlots       []exprAgg
+	havingCompiled Node
 	// ForEach fans each input into N element-inputs (the deliberately
 	// multi-valued path selects them): keyPath and emit/join paths resolve
 	// against the ELEMENT, `$parent.` reaches the enclosing input, and a
@@ -571,6 +581,7 @@ func ValidateShapes(stages []Stage) error {
 			return fmt.Errorf("%s: emit needs at least one field", where)
 		}
 		emitted := make(map[string]bool, len(st.Emit))
+		st.aggSlots, st.havingCompiled = nil, nil
 		for k := range st.Emit {
 			e := &st.Emit[k]
 			ew := fmt.Sprintf("%s emit %q", where, e.Field)
@@ -594,8 +605,11 @@ func ValidateShapes(stages []Stage) error {
 				}
 			}
 			if st.Reduce == "aggregate" { //nolint:gocritic // if-else reads clearer than switch here
-				if folds != 1 || plain != 0 {
-					return fmt.Errorf("%s: an aggregate stage's emit carries exactly one of sum, min, max, count, or collect", ew)
+				if folds+plain != 1 || e.From != "" {
+					return fmt.Errorf("%s: an aggregate stage's emit carries exactly one of sum, min, max, count, collect, or an expr over aggregate calls (round(sum($.a) / count(*), 2))", ew)
+				}
+				if e.Expr != "" && len(e.Where) > 0 {
+					return fmt.Errorf("%s: where filters a single fold arm — inside an expr, filter each aggregate call: sum($.x) filter (where …)", ew)
 				}
 			} else {
 				if plain != 1 || folds != 0 {
@@ -623,6 +637,14 @@ func ValidateShapes(stages []Stage) error {
 					return err
 				}
 			}
+			if st.Reduce == "aggregate" && e.Expr != "" {
+				compiled, err := compileAggregate(e.Expr, &st.aggSlots)
+				if err != nil {
+					return fmt.Errorf("%s: %w", ew, err)
+				}
+				e.compiled = compiled
+				continue
+			}
 			for _, src := range []string{e.Expr, e.Sum, e.Min, e.Max, e.Collect} {
 				if src == "" {
 					continue
@@ -633,6 +655,16 @@ func ValidateShapes(stages []Stage) error {
 				}
 				e.compiled = compiled
 			}
+		}
+		if st.Having != "" {
+			if st.Reduce != "aggregate" {
+				return fmt.Errorf("%s: having filters an aggregate stage's folded keys (SQL's HAVING) — on other stages the condition is the stage's when", where)
+			}
+			compiled, err := compileAggregate(st.Having, &st.aggSlots)
+			if err != nil {
+				return fmt.Errorf("%s having: %w", where, err)
+			}
+			st.havingCompiled = compiled
 		}
 	}
 	return nil
@@ -908,9 +940,13 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 				return err
 			}
 		}
-		if e.compiled != nil {
+		compiled := e.compiled
+		if compiled == nil && e.Expr != "" {
+			compiled = compileForPathCheck(st, e.Expr)
+		}
+		if compiled != nil {
 			var werr error
-			walkExprPaths(e.compiled, func(p string) {
+			walkExprPaths(compiled, func(p string) {
 				if werr == nil {
 					werr = check(p, pos)
 				}
@@ -921,6 +957,19 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 		}
 		if err := checkWhens(e.Where, pos+" where"); err != nil {
 			return err
+		}
+	}
+	if st.Having != "" {
+		if compiled := compileForPathCheck(st, st.Having); compiled != nil {
+			var werr error
+			walkExprPaths(compiled, func(p string) {
+				if werr == nil {
+					werr = check(p, "having")
+				}
+			})
+			if werr != nil {
+				return werr
+			}
 		}
 	}
 	return nil
