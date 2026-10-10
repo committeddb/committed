@@ -1,8 +1,6 @@
 package sql
 
 import (
-	"math/big"
-
 	"github.com/committeddb/committed/internal/cluster/syncable/stages"
 )
 
@@ -41,7 +39,7 @@ func evalExpr(n stages.Node, payload, parent any) (any, error) {
 	return stages.Eval(n, payload, parent)
 }
 
-func formatRat(r *big.Rat) (string, error) { return stages.FormatRat(r) }
+func materializeExprValue(v any) (any, error) { return stages.Materialize(v) }
 
 func validateWhenClauses(c []WhenClause, where string) error { return stages.ValidateWhen(c, where) }
 

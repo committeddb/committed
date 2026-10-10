@@ -1494,17 +1494,10 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 }
 
 // stageValue renders an evaluator value into its stored JSON form:
-// rationals become exact minimal-decimal json.Numbers, scalars pass
-// through, null stays null.
+// rationals become exact minimal-decimal json.Numbers, date/time values
+// their canonical text, scalars pass through, null stays null.
 func stageValue(v any) (any, error) {
-	if r, ok := v.(*big.Rat); ok {
-		text, err := FormatRat(r)
-		if err != nil {
-			return nil, err
-		}
-		return json.Number(text), nil
-	}
-	return v, nil
+	return Materialize(v)
 }
 
 // sortCollectValues orders evaluator scalars deterministically: numbers
@@ -1526,19 +1519,32 @@ func collectLess(a, b any) bool {
 		return a.(*big.Rat).Cmp(b.(*big.Rat)) < 0
 	case 1:
 		return a.(string) < b.(string)
-	default:
+	case 2:
 		return !a.(bool) && b.(bool)
+	case 3:
+		au, _ := timeInstantUs(a)
+		bu, _ := timeInstantUs(b)
+		return au < bu
+	default:
+		return intervalCmpValue(a.(intervalVal)).Cmp(intervalCmpValue(b.(intervalVal))) < 0
 	}
 }
 
+// collectFamily ranks the value families: numbers, strings, bools, then
+// date/time values (one timeline), then intervals. New families only ever
+// append, so an existing fold's order never moves.
 func collectFamily(v any) int {
 	switch v.(type) {
 	case *big.Rat:
 		return 0
 	case string:
 		return 1
-	default:
+	case bool:
 		return 2
+	case timestampVal, dateVal:
+		return 3
+	default:
+		return 4
 	}
 }
 
@@ -1557,6 +1563,11 @@ func distinctCollectValues(vals []any) []any {
 			key = "s|" + t
 		case bool:
 			key = fmt.Sprintf("b|%t", t)
+		case timestampVal, dateVal:
+			us, _ := timeInstantUs(t)
+			key = fmt.Sprintf("t|%d", us)
+		case intervalVal:
+			key = "i|" + intervalCmpValue(t).String()
 		}
 		if seen[key] {
 			continue

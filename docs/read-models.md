@@ -313,7 +313,7 @@ against a number is an error), the boolean
 predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
 `x [not] in (…)`, `x [not] like pattern`, `x is [not] null`, `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
 `round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
-zero), SQL's `case` conditional, `x [not] between a and b`, the string functions, casts, and math functions below, decimal and `'string'` literals, and `$.…` paths into the
+zero), SQL's `case` conditional, `x [not] between a and b`, the string functions, casts, math, and date/time functions below, decimal and `'string'` literals, and `$.…` paths into the
 payload. Connectives follow SQL's three-valued logic — `null or true`
 is TRUE, `null and false` is FALSE — the one deliberate exception to
 blanket null propagation; `is [not] null` never returns null, and it
@@ -432,6 +432,71 @@ remainder takes the dividend's sign; `mod(x, 0)` fails), and
 is) and order values like the comparisons do. `ceil`, `floor`, and an
 `integer` cast settle a division the way `round` does, so
 `ceil($.minutes / 60)` needs no `round`.
+
+#### Dates and times
+
+Four PostgreSQL types compute over time: `timestamptz`, `timestamp`,
+`date`, and `interval`. A payload carries times as strings, so you reach
+them with a cast or a typed literal:
+
+```toml
+set = [
+  { column = "due",       expr = "cast($.created as timestamptz) + interval '30 days'" },
+  { column = "days_open", expr = "trunc(extract(epoch from ($.closed::timestamptz - $.created::timestamptz)) / 86400)" },
+  { column = "month",     expr = "date_trunc('month', $.paid_at::timestamptz)" },
+]
+when = [ { expr = "$.paid_at::date >= '2026-01-01'" } ]
+```
+
+- **Input** is the ISO 8601 family every source writes: `2024-01-15`,
+  then a `T` or a space and `HH:MM[:SS[.fraction]]`, then an optional
+  offset `Z`, `+05:30`, `+0530`, or `+05`. That covers Postgres, MySQL,
+  and SQL Server ingest renderings and RFC 3339 producer timestamps alike.
+  **A time without an offset is UTC.**
+- **Output** is canonical text: a `timestamptz` as
+  `2024-01-15 07:00:45.123456+00:00`, a `timestamp` without the offset, a
+  `date` as `2024-01-15`, and an `interval` in PostgreSQL's form
+  (`1 year 2 mons 3 days 04:05:06.5`). Every SQL destination column
+  accepts these (MySQL rejects PostgreSQL's own `+00` and a trailing `Z`,
+  which is why the offset is written `+00:00`).
+- **Typed literals**: `date '2024-01-15'`, `timestamptz '…'`,
+  `interval '30 days'` — intervals also read `'1 day 02:00'`,
+  `'2 hours 30 mins'`, `'1.5 months'`, `'2 weeks ago'`, and ISO 8601
+  `'P1DT2H'`.
+- **Arithmetic** follows PostgreSQL: `timestamp ± interval`;
+  `timestamp - timestamp` is an interval; `date ± n` moves whole days;
+  `date - date` is a day count; `date ± interval` is a `timestamp`;
+  intervals add, subtract, negate, and multiply by a number. Months are
+  calendar months — `date '2024-01-31' + interval '1 month'` is Feb 29.
+- **Functions**: `date_trunc('unit', t)` (`microseconds` through
+  `millennium`, `week` starting Monday), `extract(field from t)` /
+  `date_part('field', t)` (`year`, `quarter`, `month`, `week`, `day`,
+  `dow`, `isodow`, `doy`, `hour`, `minute`, `second`, `epoch`, …),
+  `to_timestamp(epoch_seconds)`, and `make_date(y, m, d)`. The unit is a
+  literal, checked when the config is posted.
+- **Comparisons** between times — including against a string, which is
+  read as the other side's type (`$.paid_at::date >= '2026-01-01'`) —
+  compare instants; a date is its midnight. Two plain strings still
+  compare as text, which orders ISO strings correctly only when they share
+  one rendering: `'2024-01-15T10:00Z'` and `'2024-01-15 09:00+00'` do NOT
+  compare as times until you cast them. `min`/`max`/`collect` order time
+  values chronologically.
+
+**Time zones: UTC only.** There are no named zones and no `AT TIME ZONE`:
+a zone's rules change between releases of the time-zone database, and a
+replay must compute what the first pass computed. So
+`date_trunc('day', …)` starts days at UTC midnight — a daily rollup for a
+non-UTC business shifts its boundaries by the offset; shift the timestamp
+first (`$.at::timestamptz - interval '7 hours'`) if a fixed offset fits.
+There is no `now()` either: a read model computed from "now" would change
+on every replay.
+
+The other differences from PostgreSQL: years run 0001–9999 (no BC, no
+`infinity`), and PostgreSQL's free-form inputs (`January 8, 2024`,
+`epoch`, `today`) are failed conversions — `try_cast` turns them into
+null. Precision is PostgreSQL's microseconds, rounded the way it rounds,
+so a SQL Server `datetime2(7)` value loses its seventh digit exactly as
+PostgreSQL would drop it.
 
 ## Folding several topics into one row (multi-source)
 

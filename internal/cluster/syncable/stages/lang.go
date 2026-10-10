@@ -283,32 +283,36 @@ func (p *exprParser) expectOp(op string) error {
 }
 
 var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
-	"coalesce":    {2, 16},
-	"nullif":      {2, 2},
-	"round":       {2, 2},
-	"trunc":       {1, 2},
-	"concat":      {1, 16},
-	"lower":       {1, 1},
-	"upper":       {1, 1},
-	"trim":        {1, 2},
-	"ltrim":       {1, 2},
-	"rtrim":       {1, 2},
-	"substring":   {2, 3},
-	"length":      {1, 1},
-	"char_length": {1, 1},
-	"replace":     {3, 3},
-	"starts_with": {2, 2},
-	"abs":         {1, 1},
-	"ceil":        {1, 1},
-	"ceiling":     {1, 1},
-	"floor":       {1, 1},
-	"mod":         {2, 2},
-	"greatest":    {1, 16},
-	"least":       {1, 16},
+	"coalesce":     {2, 16},
+	"nullif":       {2, 2},
+	"round":        {2, 2},
+	"trunc":        {1, 2},
+	"concat":       {1, 16},
+	"lower":        {1, 1},
+	"upper":        {1, 1},
+	"trim":         {1, 2},
+	"ltrim":        {1, 2},
+	"rtrim":        {1, 2},
+	"substring":    {2, 3},
+	"length":       {1, 1},
+	"char_length":  {1, 1},
+	"replace":      {3, 3},
+	"starts_with":  {2, 2},
+	"abs":          {1, 1},
+	"ceil":         {1, 1},
+	"ceiling":      {1, 1},
+	"floor":        {1, 1},
+	"mod":          {2, 2},
+	"greatest":     {1, 16},
+	"least":        {1, 16},
+	"date_trunc":   {2, 2},
+	"date_part":    {2, 2},
+	"to_timestamp": {1, 1},
+	"make_date":    {3, 3},
 }
 
 // exprFunctionList names the closed set for error messages.
-const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with, abs, ceil, ceiling, floor, mod, greatest, least"
+const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with, abs, ceil, ceiling, floor, mod, greatest, least, date_trunc, date_part, to_timestamp, make_date; extract(field from x)"
 
 // atKeyword reports whether the next token is the given SQL keyword
 // (identifiers double as keywords, matched case-insensitively; a `$`
@@ -567,6 +571,13 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		if fn == "cast" || fn == "try_cast" {
 			return p.parseCastCall(fn == "try_cast")
 		}
+		if fn == "extract" {
+			return p.parseExtract()
+		}
+		if typ, ok := typedLiteralTypes[fn]; ok && p.peek().kind == "str" {
+			// PG's typed literal: date '2024-01-15', interval '30 days'.
+			return exprCast{exprStr{p.next().text}, typ, false}, nil
+		}
 		spec, ok := exprFunctions[fn]
 		if !ok {
 			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is %s; case … end is the conditional)", t.text, t.pos, exprFunctionList)
@@ -592,6 +603,17 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		}
 		if len(args) < spec.minArgs || len(args) > spec.maxArgs {
 			return nil, fmt.Errorf("%s takes %d–%d arguments, got %d", fn, spec.minArgs, spec.maxArgs, len(args))
+		}
+		if fn == "date_trunc" || fn == "date_part" {
+			allowed := func(string) bool { return true }
+			if fn == "date_trunc" {
+				allowed = func(u string) bool { return truncUnits[u] }
+			}
+			u, err := timeUnitLiteral(args[0], fn, allowed)
+			if err != nil {
+				return nil, err
+			}
+			args[0] = exprStr{u}
 		}
 		if (fn == "round" || fn == "trunc") && len(args) == 2 {
 			s, err := scaleLiteral(args[1], fn)
@@ -772,7 +794,7 @@ func checkMaterializable(n Node, dominated bool) error {
 		// round/trunc/ceil/floor materialize what lies beneath them.
 		childDominated := dominated
 		switch x.fn {
-		case "round", "trunc", "ceil", "ceiling", "floor":
+		case "round", "trunc", "ceil", "ceiling", "floor", "to_timestamp":
 			childDominated = true
 		}
 		for _, a := range x.args {
@@ -882,6 +904,9 @@ func Eval(n Node, payload, parent any) (any, error) {
 		if err != nil || v == nil {
 			return nil, err
 		}
+		if iv, ok := v.(intervalVal); ok {
+			return negInterval(iv), nil
+		}
 		r, err := ratOperand(v)
 		if err != nil {
 			return nil, err
@@ -967,6 +992,9 @@ func evalBin(x exprBin, payload, parent any) (any, error) {
 			return nil, err
 		}
 		return ls + rs, nil
+	}
+	if v, ok, err := evalTimeArith(x.op, l, r); ok {
+		return v, err
 	}
 	lr, err := ratOperand(l)
 	if err != nil {
@@ -1061,6 +1089,8 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 		return sb.String(), nil
 	case "abs", "ceil", "ceiling", "floor", "mod", "greatest", "least":
 		return evalMathCall(x, payload, parent)
+	case "date_trunc", "date_part", "to_timestamp", "make_date":
+		return evalTimeCall(x, payload, parent)
 	case "lower", "upper", "trim", "ltrim", "rtrim", "substring", "length", "char_length", "replace", "starts_with":
 		// Strict, as in PG: any null argument makes the result null. Every
 		// argument evaluates first, so a data error surfaces regardless of
@@ -1090,6 +1120,10 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 // fold by, so an expression and a fold can never disagree. Mixed families
 // are a data error, as in PG (there is no text < numeric).
 func orderedCompare(op string, l, r any) (any, error) {
+	l, r, err := coerceTimePair(l, r)
+	if err != nil {
+		return nil, err
+	}
 	lf, rf := orderFamily(l), orderFamily(r)
 	if lf == "" || rf == "" || lf != rf {
 		return nil, fmt.Errorf("%s compares two values of the same kind, got %s and %s", op, describeValue(l), describeValue(r))
@@ -1114,6 +1148,10 @@ func orderFamily(v any) string {
 		return "text"
 	case bool:
 		return "boolean"
+	case timestampVal, dateVal:
+		return "time" // a date, timestamp, and timestamptz compare on one timeline
+	case intervalVal:
+		return "interval"
 	}
 	return ""
 }
@@ -1287,6 +1325,12 @@ func renderText(v any, fn string) (string, error) {
 			return "true", nil
 		}
 		return "false", nil
+	case timestampVal, dateVal, intervalVal:
+		m, err := Materialize(t)
+		if err != nil {
+			return "", err
+		}
+		return m.(string), nil
 	}
 	return "", fmt.Errorf("%s needs text, a number, or a boolean, got %s", fn, describeValue(v))
 }
@@ -1322,6 +1366,9 @@ func describeValue(v any) string {
 		return "a number"
 	case bool:
 		return "a boolean"
+	case timestampVal, dateVal, intervalVal:
+		m, _ := Materialize(t)
+		return fmt.Sprintf("the %s %s", describeTimeType(t), m)
 	}
 	return fmt.Sprintf("%T", v)
 }
@@ -1520,6 +1567,13 @@ func ratOperand(v any) (*big.Rat, error) {
 }
 
 func exprEqual(a, b any) (bool, error) {
+	a, b, err := coerceTimePair(a, b)
+	if err != nil {
+		return false, err
+	}
+	if fa := orderFamily(a); (fa == "time" || fa == "interval") && fa == orderFamily(b) {
+		return !collectLess(a, b) && !collectLess(b, a), nil
+	}
 	ar, aNum := a.(*big.Rat)
 	br, bNum := b.(*big.Rat)
 	if aNum && bNum {

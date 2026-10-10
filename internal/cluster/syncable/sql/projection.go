@@ -6,7 +6,6 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"os"
 	"strconv"
 
@@ -1125,12 +1124,7 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 			case s.Expr != "":
 				v, err := evalExpr(s.compiled, data, parent)
 				if err == nil {
-					if r, ok := v.(*big.Rat); ok {
-						var text string
-						if text, err = formatRat(r); err == nil {
-							v = json.Number(text)
-						}
-					}
+					v, err = materializeExprValue(v)
 				}
 				if err != nil {
 					return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] expr for column %q: %w", s.Column, err))

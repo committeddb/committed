@@ -32,9 +32,10 @@ var castTypes = map[string]string{
 	"bigint": "bigint", "int8": "bigint",
 	"text": "text", "varchar": "text",
 	"boolean": "boolean", "bool": "boolean",
+	"timestamptz": "timestamptz", "timestamp": "timestamp", "date": "date", "interval": "interval",
 }
 
-const castTypeList = "numeric, decimal, integer, int, int4, bigint, int8, text, varchar, boolean, bool"
+const castTypeList = "numeric, decimal, integer, int, int4, bigint, int8, text, varchar, boolean, bool, timestamptz, timestamp, date, interval"
 
 // parseCastType reads the type name after `as` or `::`.
 func (p *exprParser) parseCastType() (string, error) {
@@ -140,6 +141,32 @@ func castValue(v any, typ string) (any, error) {
 		}
 	case "text":
 		return renderText(v, "cast")
+	case "timestamptz", "timestamp":
+		zoned := typ == "timestamptz"
+		switch t := v.(type) {
+		case string:
+			return parseTimestamp(t, zoned)
+		case timestampVal:
+			return timestampVal{t.us, zoned}, nil
+		case dateVal:
+			return timestampVal{t.days * usPerDay, zoned}, nil
+		}
+	case "date":
+		switch t := v.(type) {
+		case string:
+			return parseDate(t)
+		case dateVal:
+			return t, nil
+		case timestampVal:
+			return dateVal{floorDiv(t.us, usPerDay)}, nil
+		}
+	case "interval":
+		switch t := v.(type) {
+		case string:
+			return parseInterval(t)
+		case intervalVal:
+			return t, nil
+		}
 	case "boolean":
 		switch t := v.(type) {
 		case bool:
@@ -158,6 +185,14 @@ func castValue(v any, typ string) (any, error) {
 		}
 	}
 	return nil, fmt.Errorf("cannot cast %s to %s", describeValue(v), typ)
+}
+
+func floorDiv(a, b int64) int64 {
+	q := a / b
+	if a%b != 0 && (a < 0) != (b < 0) {
+		q--
+	}
+	return q
 }
 
 func inIntRange(n *big.Int, typ string) bool {
@@ -387,6 +422,17 @@ func floorRat(r *big.Rat) *big.Rat {
 // every argument is), and the values must share a family — ordered by
 // collectLess, the order of comparisons and the min/max folds.
 func greatestLeast(fn string, args []any) (any, error) {
+	for _, v := range args {
+		if isTimeValue(v) {
+			for i, a := range args {
+				var err error
+				if args[i], err = coerceTimeOperand(v, a); err != nil {
+					return nil, err
+				}
+			}
+			break
+		}
+	}
 	var best any
 	for _, v := range args {
 		if v == nil {
