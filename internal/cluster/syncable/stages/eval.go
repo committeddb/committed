@@ -62,6 +62,11 @@ type graphNode struct {
 	unkeyedDeletes atomic.Int64
 	// unkeyedDeleteWarned one-shots the warn log (worker goroutine only).
 	unkeyedDeleteWarned bool
+	// keyExprs are the compiled keyPath expressions, parallel to
+	// def.KeyPath (nil for a plain path); keyExprWarned one-shots the
+	// warning for a key expression's data error (worker goroutine only).
+	keyExprs      []Node
+	keyExprWarned bool
 	// joinFlows counts each join's dimension-resolution outcomes since
 	// this worker started — hit = a row matched (passing the join's
 	// where) — indexed parallel to def.Joins. With inputs/fanned these
@@ -125,7 +130,7 @@ func BuildGraph(stages []Stage) *Graph {
 	copy(owned, stages)
 	for i := range owned {
 		owned[i].Joins = append([]Join(nil), owned[i].Joins...)
-		nodes[i] = &graphNode{def: &owned[i], joinFlows: make([]joinFlowCount, len(owned[i].Joins))}
+		nodes[i] = &graphNode{def: &owned[i], joinFlows: make([]joinFlowCount, len(owned[i].Joins)), keyExprs: compileKeyParts(owned[i].KeyPath)}
 		g.byName[owned[i].Name] = nodes[i]
 	}
 	g.order = nodes
@@ -635,15 +640,17 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 		return err
 	}
 
-	identityPath := st.ElementKey
-	if identityPath == "" {
-		identityPath = st.KeyPath[0]
-	}
 	current := map[string]bool{}
 	for _, f := range fans {
 		for _, el := range f.elems {
 			n.fanned.Add(1)
-			kv, err := ResolvePath(identityPath, el, payload)
+			var kv any
+			var err error
+			if st.ElementKey != "" {
+				kv, err = ResolvePath(st.ElementKey, el, payload)
+			} else {
+				kv, err = n.resolveKeyValue(0, el, payload)
+			}
 			if err != nil || kv == nil {
 				continue // an unidentifiable element fans nothing (and reconciles away)
 			}
@@ -689,7 +696,7 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 
 	parts := make([]string, len(st.KeyPath))
 	for i, kp := range st.KeyPath {
-		kv, err := ResolvePath(kp, data, parent)
+		kv, err := n.resolveKeyValue(i, data, parent)
 		if err != nil || kv == nil {
 			// A matched input without a (complete) key cannot fold; treat as
 			// non-membership (and retract any prior membership) rather than

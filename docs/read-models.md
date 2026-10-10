@@ -699,6 +699,20 @@ set = [ { column = "total", from = "$.total" },
   count = true, where = [ { path = "$.billed", equals = "true" } ] }`
   folds only matching inputs for THAT field, while row membership stays
   the key's.
+- **Keys can be computed** — SQL's `GROUP BY <expression>`: a `keyPath`
+  entry may be an expression instead of a path, so a rollup by month, a
+  normalized email, or a `case` bucket is one stage:
+  `keyPath = [ "$.customer", "date_trunc('month', $.paid_at::timestamptz)" ]`.
+  The value keys exactly as a stored value renders (a month is
+  `2024-03-01 00:00:00+00:00`, which lands in a `TIMESTAMPTZ` key column
+  as is), `keyType`/`normalize` apply after it, an input whose expression
+  is null or fails is not a member (the first failure is logged), and an
+  input whose value changes moves to its new key like any rekey. Probe it
+  with the computed value (`probeKey=2024-03-01 00:00:00+00:00`). An
+  entry is a path whenever it is one — `$.id`, and also the bare
+  `tenant_id` form — so existing keys never change meaning. Computed keys
+  belong to stages and topic merge sides; a table source keys rows by a
+  path (feed it from the stage instead).
 - **Filtering is refold**: an input that stops matching a stage's `when`
   retracts from its key — predicate rows leave the read model when the
   predicate flips off, and re-enter when it flips back.

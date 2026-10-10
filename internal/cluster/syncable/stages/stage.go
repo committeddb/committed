@@ -361,7 +361,7 @@ func ValidateShapes(stages []Stage) error {
 			return fmt.Errorf("%s: keyPath is required (one path per key part; several = a composite key)", where)
 		}
 		for _, kp := range st.KeyPath {
-			if err := RejectMultiValued(kp, where+": keyPath"); err != nil {
+			if err := validateKeyPart(kp, where+": keyPath"); err != nil {
 				return err
 			}
 		}
@@ -681,6 +681,11 @@ func validateMergeStage(stages []Stage, st *Stage, names map[string]bool, where 
 			if err := validateKeyTypes(e.KeyType, len(e.KeyPath), ew+" keyType"); err != nil {
 				return err
 			}
+			for _, kp := range e.KeyPath {
+				if err := validateKeyPart(kp, ew+": keyPath"); err != nil {
+					return err
+				}
+			}
 		} else {
 			if len(e.KeyPath) > 0 || len(e.KeyType) > 0 || e.Normalize != "" {
 				return fmt.Errorf("%s: keyPath/keyType/normalize are only for TOPIC sides — a stage side's key space is the stage's own", ew)
@@ -859,8 +864,14 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 		return nil
 	}
 	for _, kp := range st.KeyPath {
-		if err := check(kp, "keyPath"); err != nil {
-			return err
+		var kerr error
+		walkKeyPaths(kp, func(p string) {
+			if kerr == nil {
+				kerr = check(p, "keyPath")
+			}
+		})
+		if kerr != nil {
+			return kerr
 		}
 	}
 	if err := checkWhens(st.When, "when"); err != nil {
@@ -991,8 +1002,14 @@ func rejectFoldTimeAliasRefs(st *Stage, aliases map[string]bool, where string) e
 		return err
 	}
 	for _, kp := range st.KeyPath {
-		if err := checkPath(kp, "keyPath"); err != nil {
-			return err
+		var kerr error
+		walkKeyPaths(kp, func(p string) {
+			if kerr == nil {
+				kerr = checkPath(p, "keyPath")
+			}
+		})
+		if kerr != nil {
+			return kerr
 		}
 	}
 	if st.ForEach != "" {

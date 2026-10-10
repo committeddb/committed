@@ -926,8 +926,18 @@ func validateProjectionJSONPaths(c *ProjectionConfig) error {
 	for si, src := range c.Sources {
 		where := fmt.Sprintf("source %d (topic %q)", si+1, src.Topic)
 		for _, kp := range src.KeyPath {
-			if err := validateJSONPath(kp, where+" keyPath"); err != nil {
-				return err
+			// The jsonpath library parses a function call (lower($.x)), so a
+			// computed key would pass validateJSONPath and then silently
+			// resolve nothing. Table sources key by path; computed keys are
+			// a stage's.
+			_, isExpr, cerr := stages.ClassifyKeyPath(kp)
+			if !isExpr {
+				if err := validateJSONPath(kp, where+" keyPath"); err != nil {
+					return err
+				}
+			}
+			if isExpr || cerr != nil {
+				return fmt.Errorf("%s keyPath: %q is not a path — a table source keys rows by a path; to key by a computed value, compute it in a stage's keyPath and read that stage (from = \"<stage>\")", where, kp)
 			}
 		}
 		for _, cl := range src.When {
