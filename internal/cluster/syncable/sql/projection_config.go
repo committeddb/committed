@@ -700,7 +700,7 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			if fi < 0 {
 				return fmt.Errorf("%s: from %q names no declared stage", where, src.FromStage)
 			}
-			if arity, _, _ := stages.ResolvedKeySpace(c.Stages, fi); len(c.PrimaryKey) != arity {
+			if arity, _, _ := stages.ResolvedKeySpace(c.Stages, fi); arity != stages.KeyArityProducer && len(c.PrimaryKey) != arity {
 				return fmt.Errorf("%s: this table's primaryKey has %d column(s) but stage %q keys by %d path(s) — a stage-fed source's rows are keyed BY the stage's key, so the arities must match", where, len(c.PrimaryKey), src.FromStage, arity)
 			}
 			if src.Aggregate != nil || src.Lookup != nil || src.ForEach != "" {

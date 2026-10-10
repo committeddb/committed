@@ -146,6 +146,9 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 				Retractions:    retractions[name],
 				Joins:          joinStats(fc.Joins),
 				Samples:        samples[name],
+
+				WindowRowsRecomputed:   fc.WindowRowsRecomputed,
+				WindowLargestPartition: fc.WindowLargestPartition,
 			}
 		}
 		return nil
@@ -463,6 +466,9 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 		}
 		if st.Keys == 0 && st.HavingRejected > 0 {
 			findings = append(findings, fmt.Sprintf("stage %q folded inputs but its having held back every key (%d refold(s) rejected) — check the having predicate against the sample's values", name, st.HavingRejected))
+		}
+		if st.WindowLargestPartition >= stages.WindowLargePartitionRows {
+			findings = append(findings, fmt.Sprintf("window stage %q has a partition of %d rows — every out-of-order change recomputes the rows after it in its partition; partition by entity (an account, a job) rather than a tenant or the whole stream", name, st.WindowLargestPartition))
 		}
 		if st.UnkeyedDeletes > 0 {
 			findings = append(findings, fmt.Sprintf("stage %q dropped %d delete-shaped input(s) that could not key — LOST retractions; the delete events' payloads lack the keyPath field or fail its keyType", name, st.UnkeyedDeletes))

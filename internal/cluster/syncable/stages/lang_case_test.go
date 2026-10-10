@@ -160,3 +160,26 @@ func TestExprCaseInFoldArm(t *testing.T) {
 	}))
 	require.Equal(t, `{"bands":["large","small"],"done_hours":4.5}`, got)
 }
+
+// IS [NOT] DISTINCT FROM — PG's null-safe comparison: never null.
+func TestExprIsDistinctFrom(t *testing.T) {
+	for _, tc := range []struct {
+		payload        string
+		distinct, same bool
+	}{
+		{`{"a":1,"b":1}`, false, true},
+		{`{"a":1,"b":2}`, true, false},
+		{`{"a":1}`, true, false},
+		{`{"b":1}`, true, false},
+		{`{}`, false, true},
+		{`{"a":"x","b":"x"}`, false, true},
+		{`{"a":5,"b":5.0}`, false, true},
+	} {
+		require.Equal(t, tc.distinct, evalToString(t, "$.a is distinct from $.b", tc.payload), tc.payload)
+		require.Equal(t, tc.same, evalToString(t, "$.a IS NOT DISTINCT FROM $.b", tc.payload), tc.payload)
+	}
+	// Comparison precedence: the right side is a full concat-level operand.
+	require.Equal(t, false, evalToString(t, "$.a is distinct from $.b || 'x'", `{"a":"yx","b":"y"}`))
+	_, err := Compile("$.a is distinct $.b")
+	require.ErrorContains(t, err, "expected from after is distinct")
+}

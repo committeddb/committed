@@ -126,15 +126,18 @@ type DryRunWindow struct {
 // the first few output objects (the value-shaped bugs — null columns,
 // wrong paths — are invisible in counts).
 type DryRunStage struct {
-	Inputs         int64             `json:"inputs"`
-	Fanned         int64             `json:"fanned,omitempty"`
-	Keys           int               `json:"keys"`
-	UnkeyedDeletes int64             `json:"unkeyedDeletes,omitempty"`
-	HavingRejected int64             `json:"havingRejected,omitempty"`
-	LiveDeltas     int64             `json:"liveDeltas"`
-	Retractions    int64             `json:"retractions"`
-	Joins          []JoinStat        `json:"joins,omitempty"`
-	Samples        []json.RawMessage `json:"samples,omitempty"`
+	Inputs         int64 `json:"inputs"`
+	Fanned         int64 `json:"fanned,omitempty"`
+	Keys           int   `json:"keys"`
+	UnkeyedDeletes int64 `json:"unkeyedDeletes,omitempty"`
+	HavingRejected int64 `json:"havingRejected,omitempty"`
+	// Window stages: rows recomputed, and the largest partition walked.
+	WindowRowsRecomputed   int64             `json:"windowRowsRecomputed,omitempty"`
+	WindowLargestPartition int64             `json:"windowLargestPartition,omitempty"`
+	LiveDeltas             int64             `json:"liveDeltas"`
+	Retractions            int64             `json:"retractions"`
+	Joins                  []JoinStat        `json:"joins,omitempty"`
+	Samples                []json.RawMessage `json:"samples,omitempty"`
 }
 
 // JoinStat is one join's resolution counters, with enough of the

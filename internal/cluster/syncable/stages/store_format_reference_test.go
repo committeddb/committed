@@ -200,6 +200,21 @@ func storeReferenceFixture() []Stage {
 				{Field: "notes", Expr: "array_agg($.note)"},
 			},
 		},
+		// Window: one row per input in business order — the ord/pos/row
+		// buckets, the order-preserving sort key (a time value descending,
+		// a numeric tie), a computed partition, each row's running state,
+		// and peers (equal orderBy) sharing the running sum.
+		{
+			Name: "ledger-rows", From: "ledger", Reduce: "window",
+			PartitionBy: []string{"lower($.acct)"}, WindowOrderBy: []string{"$.at::timestamptz desc"}, WindowTieBy: []string{"$.seq"},
+			Emit: []Emit{
+				{Field: "n", Expr: "row_number()"},
+				{Field: "bal", Expr: "sum($.amount)"},
+				{Field: "prev", Expr: "lag($.amount, 1, 0)"},
+				{Field: "first", Expr: "first_value($.seq)"},
+				{Field: "seq", From: "$.seq"},
+			},
+		},
 	}
 }
 
@@ -237,6 +252,12 @@ func storeReferenceFeed(fold func(topic, key, payload string, gen uint64), sweep
 	fold("payments", "q1", `{"at":"2026-01-05T10:00:00Z","amount":10,"payer":"Ada"}`, 0)
 	fold("payments", "q2", `{"at":"2026-01-20","amount":3,"payer":"ada"}`, 0)
 	fold("payments", "q3", `{"at":"2026-01-31 20:00:00-05:00","amount":-4,"payer":"Bea"}`, 0) // Feb 1 UTC: Feb's sum is -4, held back
+	fold("ledger", "l1", `{"acct":"A","at":"2026-01-02","seq":1,"amount":5}`, 0)
+	fold("ledger", "l2", `{"acct":"a","at":"2026-01-01","seq":2,"amount":-2.5}`, 0)
+	fold("ledger", "l3", `{"acct":"B","at":"2026-01-03","seq":3,"amount":1}`, 0)
+	fold("ledger", "l4", `{"acct":"a","at":"2026-01-02","seq":4,"amount":2}`, 0) // a peer of l1
+	fold("ledger", "l3", `{"acct":"a","at":"2026-01-03","seq":3,"amount":1}`, 0) // moves partitions
+	del("ledger", "l2")
 }
 
 // TestStoreReferenceFixtureCoversTheVocabulary makes the reference's coverage

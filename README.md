@@ -487,7 +487,9 @@ functions and `like`, casts, math and date/time functions, and
 arithmetic, no floats anywhere), and enrich folded elements from a dimension topic
 (**lookup**), fan one event's array into N rows (**forEach**, with
 absolute reconciliation and cascading parent deletes), and chain internal
-**stages** — private keyed refolds (filter → aggregate → aggregate) a
+**stages** — private keyed refolds (filter → aggregate → aggregate, and
+window functions over an entity's ordered history: `lag`/`lead`, running
+totals, `row_number`/`rank`) a
 table source consumes by name, with retraction and row ownership built
 in (one source declares `rowOwner = true` and owns row existence; the
 others decorate) — each with its own delete lifecycle, plus dimension fan-out for out-of-order dimensions. The full reference, with rule semantics and worked

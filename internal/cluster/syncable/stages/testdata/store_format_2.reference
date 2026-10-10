@@ -1,4 +1,4 @@
-"meta"	"fingerprint"	ee1dff87a3609f7fc28f8e3e531e30ef6161707f380c85294ee6496a94987baa
+"meta"	"fingerprint"	7b6e1cbf548c2e365003c57bc30cfed9a6364bca951735c8d95366d9a8ad6a8f
 "meta"	"format"	"\x00\x00\x00\x00\x00\x00\x00\x02"
 "meta"	"frontier"	"\x00\x00\x00\x00\x00\x00\x00\x0e"
 "stage:cand:dim:blocks"	"j2"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"blocked\":true}"
@@ -64,6 +64,24 @@
 "stage:latest-status:src"	"s1"	j1
 "stage:latest-status:src"	"s2"	j1
 "stage:latest-status:src"	"s3"	j1
+"stage:ledger-rows:in"	"\x01al1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"A\",\"amount\":5,\"at\":\"2026-01-02\",\"seq\":1}"
+"stage:ledger-rows:in"	"\x01al3"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"a\",\"amount\":1,\"at\":\"2026-01-03\",\"seq\":3}"
+"stage:ledger-rows:in"	"\x01al4"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"a\",\"amount\":2,\"at\":\"2026-01-02\",\"seq\":4}"
+"stage:ledger-rows:ord"	"\x01a\xbf\x7f\xf9\xb8\x8f~0\xff\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x04\x00l3"	"\t\x15"
+"stage:ledger-rows:ord"	"\x01a\xbf\x7f\xf9\xb8\xa3\x9c\b_\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x02\x00l1"	"\t\x15"
+"stage:ledger-rows:ord"	"\x01a\xbf\x7f\xf9\xb8\xa3\x9c\b_\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x05\x00l4"	"\t\x15"
+"stage:ledger-rows:out"	"l1"	{"bal":8,"first":3,"n":2,"prev":1,"seq":1}
+"stage:ledger-rows:out"	"l3"	{"bal":1,"first":3,"n":1,"prev":0,"seq":3}
+"stage:ledger-rows:out"	"l4"	{"bal":8,"first":3,"n":3,"prev":5,"seq":4}
+"stage:ledger-rows:pos"	"l1"	"\x01a\xbf\x7f\xf9\xb8\xa3\x9c\b_\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x02\x00l1"
+"stage:ledger-rows:pos"	"l3"	"\x01a\xbf\x7f\xf9\xb8\x8f~0\xff\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x04\x00l3"
+"stage:ledger-rows:pos"	"l4"	"\x01a\xbf\x7f\xf9\xb8\xa3\x9c\b_\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x05\x00l4"
+"stage:ledger-rows:row"	"l1"	{"rn":2,"rank":2,"dense":2,"accs":[{},{"n":2,"sum":{"n":"6"}},{},{}],"first":[null,null,null,{"n":"3"}],"hasFirst":true}
+"stage:ledger-rows:row"	"l3"	{"rn":1,"rank":1,"dense":1,"accs":[{},{"n":1,"sum":{"n":"1"}},{},{}],"first":[null,null,null,{"n":"3"}],"hasFirst":true}
+"stage:ledger-rows:row"	"l4"	{"rn":3,"rank":2,"dense":2,"accs":[{},{"n":3,"sum":{"n":"8"}},{},{}],"first":[null,null,null,{"n":"3"}],"hasFirst":true}
+"stage:ledger-rows:src"	"l1"	a
+"stage:ledger-rows:src"	"l3"	a
+"stage:ledger-rows:src"	"l4"	a
 "stage:lines:in"	"\x02r1\x02r1s1"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"e\":{\"note\":null,\"order\":\"r1\",\"qty\":2,\"sku\":\"s1\"},\"p\":{\"lines\":[{\"note\":null,\"order\":\"r1\",\"qty\":2,\"sku\":\"s1\"},{\"note\":null,\"order\":\"r1\",\"qty\":0,\"sku\":\"s2\"},{\"order\":\"r1\",\"qty\":4,\"sku\":\"s3\"}]}}"
 "stage:lines:out"	"r1"	{"qty":2}
 "stage:lines:rev:\x00fan"	"\x02r1\x02r1s1"	

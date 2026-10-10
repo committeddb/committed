@@ -20,6 +20,15 @@
 //	stage:<name>:out         output key -> the stage's current output bytes
 //	stage:<name>:in          retained input set: frame(outKey)+inKey -> input
 //	stage:<name>:rev:<join>  reverse index: frame(dimKey)+outKey -> nil
+//	stage:<name>:ord         window stages: frame(partition)+sortKey+inKey -> order length
+//	stage:<name>:pos         window stages: inKey -> its current ord key
+//	stage:<name>:row         window stages: inKey -> the row's running state
+//
+// The ord/pos/row buckets exist only for window stages (reduce =
+// "window"): ord walks a partition in business order (the sort key is an
+// order-preserving encoding, so bytes compare as values do), pos finds an
+// input's entry when it moves or leaves, and row holds the running state
+// a recompute continues from instead of re-reading the prefix.
 //
 // The in/rev keys are length-framed (varint prefix) rather than
 // separator-joined so an output key containing any byte — including a
@@ -370,6 +379,204 @@ func (tx *Tx) InputsFor(stage string, outKey []byte, fn func(inKey, val []byte) 
 		}
 	}
 	return nil
+}
+
+// GetIn reads one retained input (nil if absent). The returned bytes are
+// only valid within the transaction.
+func (tx *Tx) GetIn(stage string, outKey, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(inBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(frameKey(outKey, inKey)), nil
+}
+
+func ordBucket(stage string) []byte { return []byte("stage:" + stage + ":ord") }
+func posBucket(stage string) []byte { return []byte("stage:" + stage + ":pos") }
+func rowBucket(stage string) []byte { return []byte("stage:" + stage + ":row") }
+
+// OrdPrefix is the ord-key prefix of one window partition: every entry of
+// the partition, and nothing else, starts with it.
+func OrdPrefix(partition []byte) []byte { return framePrefix(partition) }
+
+// OrdKey composes a window row's ord key: the partition prefix, the sort
+// key (order values, then tie values — order-preserving encodings), and
+// the input key as the final tiebreak.
+func OrdKey(partition, sortKey, inKey []byte) []byte {
+	out := framePrefix(partition)
+	out = append(out, sortKey...)
+	return append(out, inKey...)
+}
+
+// OrdEntry is one decoded ord entry. OrderEnd and SortEnd are absolute
+// offsets into Key: Key[:OrderEnd] is the shared prefix of the row's peer
+// group (partition + order values), Key[SortEnd:] is the input key.
+type OrdEntry struct {
+	Key       []byte
+	Partition []byte
+	OrderEnd  int
+	SortEnd   int
+}
+
+// InKey is the entry's input key.
+func (e OrdEntry) InKey() []byte { return e.Key[e.SortEnd:] }
+
+// PeerPrefix is the prefix every peer of this row (equal order values in
+// the same partition) shares, and that no other row has.
+func (e OrdEntry) PeerPrefix() []byte { return e.Key[:e.OrderEnd] }
+
+// decodeOrdEntry resolves an ord key and its value (the order and sort
+// lengths) into an entry; ok=false at a cursor's end or on a malformed
+// entry.
+func decodeOrdEntry(k, v []byte) (OrdEntry, bool) {
+	if k == nil {
+		return OrdEntry{}, false
+	}
+	part, rest, ok := splitFrame(k)
+	if !ok {
+		return OrdEntry{}, false
+	}
+	orderLen, n1 := binary.Uvarint(v)
+	if n1 <= 0 {
+		return OrdEntry{}, false
+	}
+	sortLen, n2 := binary.Uvarint(v[n1:])
+	if n2 <= 0 || sortLen > uint64(len(rest)) || orderLen > sortLen {
+		return OrdEntry{}, false
+	}
+	base := len(k) - len(rest)
+	return OrdEntry{Key: k, Partition: part, OrderEnd: base + int(orderLen), SortEnd: base + int(sortLen)}, true //nolint:gosec // G115: bounded by len(rest) above
+}
+
+// PutOrd records a window row's position: its ord key with the byte
+// lengths of the order part and the whole sort key (order + tie values).
+func (tx *Tx) PutOrd(stage string, ordKey []byte, orderLen, sortLen int) error {
+	b, err := tx.bucket(ordBucket(stage))
+	if err != nil {
+		return err
+	}
+	v := binary.AppendUvarint(nil, uint64(orderLen)) //nolint:gosec // G115: a length, never negative
+	v = binary.AppendUvarint(v, uint64(sortLen))     //nolint:gosec // G115: as above
+	return b.Put(ordKey, v)
+}
+
+// DeleteOrd removes a window row's position.
+func (tx *Tx) DeleteOrd(stage string, ordKey []byte) error {
+	b, err := tx.bucket(ordBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(ordKey)
+}
+
+// GetOrd reads one ord entry (ok=false when absent).
+func (tx *Tx) GetOrd(stage string, ordKey []byte) (OrdEntry, bool, error) {
+	b, err := tx.bucket(ordBucket(stage))
+	if err != nil || b == nil {
+		return OrdEntry{}, false, err
+	}
+	v := b.Get(ordKey)
+	if v == nil {
+		return OrdEntry{}, false, nil
+	}
+	e, ok := decodeOrdEntry(ordKey, v)
+	return e, ok, nil
+}
+
+// OrdCursor walks one window stage's ord bucket in key (business) order.
+// Writes to the ord bucket invalidate it; writes to other buckets do not.
+// Returned entries' bytes are only valid within the transaction.
+type OrdCursor struct{ c *bolt.Cursor }
+
+// OrdCursor opens a cursor over a window stage's ord bucket; on a stage
+// that has never folded it yields nothing.
+func (tx *Tx) OrdCursor(stage string) (*OrdCursor, error) {
+	b, err := tx.bucket(ordBucket(stage))
+	if err != nil || b == nil {
+		return &OrdCursor{}, err
+	}
+	return &OrdCursor{c: b.Cursor()}, nil
+}
+
+// Seek positions at the first entry >= k; Next and Prev step. ok=false at
+// either end.
+func (c *OrdCursor) Seek(k []byte) (OrdEntry, bool) {
+	if c.c == nil {
+		return OrdEntry{}, false
+	}
+	return decodeOrdEntry(c.c.Seek(k))
+}
+
+func (c *OrdCursor) Next() (OrdEntry, bool) {
+	if c.c == nil {
+		return OrdEntry{}, false
+	}
+	return decodeOrdEntry(c.c.Next())
+}
+
+func (c *OrdCursor) Prev() (OrdEntry, bool) {
+	if c.c == nil {
+		return OrdEntry{}, false
+	}
+	return decodeOrdEntry(c.c.Prev())
+}
+
+// Last positions at the bucket's last entry.
+func (c *OrdCursor) Last() (OrdEntry, bool) {
+	if c.c == nil {
+		return OrdEntry{}, false
+	}
+	return decodeOrdEntry(c.c.Last())
+}
+
+// PutPos / GetPos / DeletePos map a window input to its current ord key.
+func (tx *Tx) PutPos(stage string, inKey, ordKey []byte) error {
+	b, err := tx.bucket(posBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(inKey, ordKey)
+}
+
+func (tx *Tx) GetPos(stage string, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(posBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(inKey), nil
+}
+
+func (tx *Tx) DeletePos(stage string, inKey []byte) error {
+	b, err := tx.bucket(posBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(inKey)
+}
+
+// PutRow / GetRow / DeleteRow hold a window row's running state.
+func (tx *Tx) PutRow(stage string, inKey, state []byte) error {
+	b, err := tx.bucket(rowBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(inKey, state)
+}
+
+func (tx *Tx) GetRow(stage string, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(rowBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(inKey), nil
+}
+
+func (tx *Tx) DeleteRow(stage string, inKey []byte) error {
+	b, err := tx.bucket(rowBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(inKey)
 }
 
 // PutRev records that dimKey (in one of the stage's joins) is referenced

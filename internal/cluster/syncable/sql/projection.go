@@ -1562,7 +1562,11 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 				return err
 			}
 			fc := flows[name]
-			out[name] = cluster.StageStat{Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, HavingRejected: fc.HavingRejected, Joins: joinStats(fc.Joins)}
+			out[name] = cluster.StageStat{
+				Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, HavingRejected: fc.HavingRejected,
+				WindowRowsRecomputed: fc.WindowRowsRecomputed, WindowLargestPartition: fc.WindowLargestPartition,
+				Joins: joinStats(fc.Joins),
+			}
 		}
 		return nil
 	})

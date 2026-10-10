@@ -286,6 +286,8 @@ func exprChildren(n Node) []Node {
 			out = append(out, o.expr)
 		}
 		return out
+	case exprWin:
+		return x.children()
 	}
 	return nil
 }
@@ -530,10 +532,14 @@ func distinctKey(v any) string {
 func compileForPathCheck(st *Stage, src string) Node {
 	var n Node
 	var err error
-	if st.Reduce == "aggregate" {
+	switch st.Reduce {
+	case "aggregate":
 		var scratch []exprAgg
 		n, err = compileAggregate(src, &scratch)
-	} else {
+	case "window":
+		var scratch []exprWin
+		n, err = compileWindowExpr(src, &scratch)
+	default:
 		n, err = Compile(src)
 	}
 	if err != nil {

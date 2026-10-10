@@ -671,6 +671,8 @@ paths:
                         keys: { type: integer }
                         unkeyedDeletes: { type: integer, format: int64 }
                         havingRejected: { type: integer, format: int64 }
+                        windowRowsRecomputed: { type: integer, format: int64 }
+                        windowLargestPartition: { type: integer, format: int64 }
                         liveDeltas: { type: integer, format: int64 }
                         retractions: { type: integer, format: int64 }
                         joins:
@@ -3320,6 +3322,19 @@ components:
                   Refolds an aggregate stage's having held back since the worker
                   started — keys 0 with havingRejected above 0 means the having
                   rejects every key. Omitted while zero.
+              windowRowsRecomputed:
+                type: integer
+                format: int64
+                description: |
+                  Rows a window stage recomputed since the worker started — an
+                  in-order append recomputes one or two, a late event the rows
+                  after it in its partition. Omitted for other stages.
+              windowLargestPartition:
+                type: integer
+                format: int64
+                description: |
+                  The largest partition (rows) a window stage's recompute walked
+                  to its end since the worker started. Omitted for other stages.
               joins:
                 type: array
                 description: Per-join hit/miss counters (omitted for stages without joins).

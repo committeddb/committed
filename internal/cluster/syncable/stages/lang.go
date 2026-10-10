@@ -273,6 +273,11 @@ type exprParser struct {
 	// and having). inAgg rejects a nested aggregate.
 	aggs  *[]exprAgg
 	inAgg bool
+	// wins collects window calls as row slots; nil means window functions
+	// are not allowed here (everywhere but a window stage's emit expr).
+	// inWin rejects a nested window call.
+	wins  *[]exprWin
+	inWin bool
 }
 
 func (p *exprParser) peek() exprToken { return p.toks[p.i] }
@@ -449,6 +454,9 @@ func (p *exprParser) parseComparison() (Node, error) {
 			p.next()
 			negate = true
 		}
+		if p.atKeyword("distinct") {
+			return p.parseDistinctFrom(l, negate)
+		}
 		if !p.atKeyword("null") {
 			t := p.peek()
 			return nil, fmt.Errorf("expected null after is at position %d, got %q", t.pos, t.text)
@@ -457,6 +465,35 @@ func (p *exprParser) parseComparison() (Node, error) {
 		return exprIsNull{l, negate}, nil
 	}
 	return l, nil
+}
+
+// parseDistinctFrom parses the rest of `x IS [NOT] DISTINCT FROM y` —
+// SQL's null-safe comparison: two nulls are not distinct, a null and a
+// value are, and two values compare as = does; the result is never null.
+// It desugars to the CASE that defines it.
+func (p *exprParser) parseDistinctFrom(l Node, negate bool) (Node, error) {
+	p.next() // distinct
+	if !p.atKeyword("from") {
+		t := p.peek()
+		return nil, fmt.Errorf("expected from after is distinct at position %d, got %q", t.pos, t.text)
+	}
+	p.next()
+	r, err := p.parseConcat()
+	if err != nil {
+		return nil, err
+	}
+	if negate { // is not distinct from
+		return exprCase{
+			whens: []Node{exprIsNull{l, false}, exprIsNull{r, false}},
+			thens: []Node{exprIsNull{r, false}, exprBool{false}},
+			els:   exprBin{"=", l, r},
+		}, nil
+	}
+	return exprCase{
+		whens: []Node{exprIsNull{l, false}, exprIsNull{r, false}},
+		thens: []Node{exprIsNull{r, true}, exprBool{true}},
+		els:   exprBin{"<>", l, r},
+	}, nil
 }
 
 func negateIf(n Node, negate bool) Node {
@@ -578,6 +615,11 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		}
 		if fn == "extract" {
 			return p.parseExtract()
+		}
+		if windowFns[fn] || (p.wins != nil && aggregateFns[fn]) {
+			if nt := p.peek(); nt.kind == "op" && nt.text == "(" {
+				return p.parseWinCall(fn, t.pos)
+			}
 		}
 		if aggregateFns[fn] {
 			if nt := p.peek(); nt.kind == "op" && nt.text == "(" {
@@ -827,6 +869,8 @@ func checkMaterializable(n Node, dominated bool) error {
 		return nil
 	case exprIsNull:
 		return checkMaterializable(x.operand, true)
+	case exprWin:
+		return checkWinMaterializable(x, dominated)
 	case exprAgg:
 		// avg is an exact quotient (like /); count's argument is only
 		// tested for null; sum/min/max store values derived from theirs.
@@ -922,7 +966,7 @@ func Eval(n Node, payload, parent any) (any, error) {
 	case exprNull:
 		return nil, nil
 	case exprPath:
-		v, err := ResolvePath(x.path, payload, parent)
+		v, err := ResolvePath(x.path, rowObject(payload), parent)
 		if err != nil {
 			// A missing field is null (the spec's null semantics) — payload
 			// shapes legitimately vary across a topic's event types.
@@ -970,13 +1014,19 @@ func Eval(n Node, payload, parent any) (any, error) {
 			return nil, fmt.Errorf("internal: aggregate %s evaluated outside a fold", x.fn)
 		}
 		return res[x.slot], nil
+	case exprWin:
+		row, ok := payload.(windowRow)
+		if !ok {
+			return nil, fmt.Errorf("internal: window function %s evaluated outside a window stage", x.fn)
+		}
+		return row.res[x.slot], nil
 	case exprIsNull:
 		// A PATH operand tests presence directly, skipping scalar
 		// normalization: `$.cust is not null` legitimately asks about a
 		// looked-up row or a merge side — SQL's row-valued IS NULL — and
 		// an object in a value position stays an error everywhere else.
 		if p, ok := x.operand.(exprPath); ok {
-			v, err := ResolvePath(p.path, payload, parent)
+			v, err := ResolvePath(p.path, rowObject(payload), parent)
 			if err != nil {
 				v = nil // missing = null, per the language
 			}

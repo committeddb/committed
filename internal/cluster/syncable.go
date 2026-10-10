@@ -618,6 +618,12 @@ type StageStat struct {
 	// inputs" (keys 0 with havingRejected > 0: the having rejects every
 	// key). Omitted while zero.
 	HavingRejected int64 `json:"havingRejected,omitempty"`
+	// WindowRowsRecomputed counts the rows a window stage recomputed since
+	// the worker started, and WindowLargestPartition is the largest
+	// partition (rows) a recompute walked to its end — a backfill's or a
+	// late event's cost, visible. Omitted for other stages.
+	WindowRowsRecomputed   int64 `json:"windowRowsRecomputed,omitempty"`
+	WindowLargestPartition int64 `json:"windowLargestPartition,omitempty"`
 	// Joins are per-join resolution counters (hits/misses since the
 	// worker started) — "the join never resolved" as a number instead
 	// of a replay-diff hunt. Omitted for stages without joins.

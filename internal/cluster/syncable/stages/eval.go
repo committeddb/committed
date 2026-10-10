@@ -85,6 +85,8 @@ type graphNode struct {
 	// mergeConsumers are the merge stages combining THIS stage's outputs
 	// as one aliased side of their tuples.
 	mergeConsumers []mergeRef
+	// win is a window stage's runtime (nil for every other stage).
+	win *windowRuntime
 }
 
 // Graph is the compiled stage topology of one projection: manifest
@@ -134,7 +136,16 @@ func BuildGraph(stages []Stage) *Graph {
 	copy(owned, stages)
 	for i := range owned {
 		owned[i].Joins = append([]Join(nil), owned[i].Joins...)
+		if owned[i].Reduce == "window" {
+			// A window stage retains its inputs by PARTITION — the
+			// retention key's role — so the graph-owned copy keys by
+			// partitionBy and the shared fold path places each input.
+			owned[i].KeyPath = append([]string(nil), owned[i].PartitionBy...)
+		}
 		nodes[i] = &graphNode{def: &owned[i], joinFlows: make([]joinFlowCount, len(owned[i].Joins)), keyExprs: compileKeyParts(owned[i].KeyPath)}
+		if owned[i].Reduce == "window" {
+			nodes[i].win = newWindowRuntime(&owned[i])
+		}
 		g.byName[owned[i].Name] = nodes[i]
 	}
 	g.order = nodes
@@ -300,6 +311,12 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 			return err
 		}
 		for _, sl := range stales {
+			if n.win != nil {
+				if err := g.foldDeleteInput(tx, n, sl.inKey, dirty); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := tx.DeleteIn(st.Name, sl.outKey, sl.inKey); err != nil {
 				return err
 			}
@@ -420,6 +437,10 @@ func (g *Graph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte, d
 func (g *Graph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte, dirty Dirty) error {
 	return tx.DependentsOf(d.node.def.Name, d.join.target(), dimKey, func(outKey []byte) error {
 		dirty.Mark(d.node, outKey)
+		if d.node.win != nil {
+			// Membership may move every position in the partition.
+			d.node.win.markFull(outKey)
+		}
 		return nil
 	})
 }
@@ -530,6 +551,10 @@ func (g *Graph) FlowCounts() map[string]FlowCount {
 	out := make(map[string]FlowCount, len(g.order))
 	for _, n := range g.order {
 		fc := FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load(), HavingRejected: n.havingRejected.Load()}
+		if n.win != nil {
+			fc.WindowRowsRecomputed = n.win.recomputed.Load()
+			fc.WindowLargestPartition = n.win.largest.Load()
+		}
 		for ji := range n.def.Joins {
 			j := &n.def.Joins[ji]
 			target := j.Topic
@@ -551,6 +576,12 @@ type FlowCount struct {
 	UnkeyedDeletes int64
 	// HavingRejected counts refolds a having held back — see graphNode.
 	HavingRejected int64
+	// WindowRowsRecomputed counts a window stage's row recomputes, and
+	// WindowLargestPartition is the largest partition (rows) a recompute
+	// walked to its end — both since the worker started; a backfill's or
+	// a late event's cost shows here.
+	WindowRowsRecomputed   int64
+	WindowLargestPartition int64
 	// Joins are the per-join resolution counters — see graphNode.
 	Joins []JoinFlow
 }
@@ -728,6 +759,17 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 		parts[i] = NormalizeKeyPart(st.Normalize, part)
 	}
 	outKey := []byte(OutKey(parts))
+	if n.win != nil {
+		// A window stage's outKey is the input's PARTITION; the row's
+		// position in it comes from its order values.
+		placed, err := g.windowPlace(tx, n, outKey, inKey, data)
+		if err != nil {
+			return err
+		}
+		if !placed {
+			return g.foldDeleteInput(tx, n, inKey, dirty)
+		}
+	}
 
 	// Rekey: if this input previously fed a DIFFERENT key, retract it
 	// there first — its old key refolds without it.
@@ -818,6 +860,11 @@ func (g *Graph) foldDeleteInput(tx *stagestore.Tx, n *graphNode, inKey []byte, d
 	if err != nil || outKey == nil {
 		return err // never fed this stage — a no-op, not an error
 	}
+	if n.win != nil {
+		if err := g.windowRemove(tx, n, inKey); err != nil {
+			return err
+		}
+	}
 	if err := tx.DeleteIn(st.Name, outKey, inKey); err != nil {
 		return err
 	}
@@ -836,9 +883,25 @@ func (g *Graph) foldDeleteInput(tx *stagestore.Tx, n *graphNode, inKey []byte, d
 // sound and which turns a batch touching one key N times into one
 // refold and at most one downstream write.
 func (g *Graph) Drain(tx *stagestore.Tx, dirty Dirty) error {
+	// Window stages' pending positions belong to this batch: cleared on
+	// the way out, success or not (a failed batch rolls back and refolds
+	// from scratch).
+	defer func() {
+		for _, n := range g.order {
+			if n.win != nil {
+				n.win.reset()
+			}
+		}
+	}()
 	for _, n := range g.order {
 		keys := dirty[n]
 		if len(keys) == 0 {
+			continue
+		}
+		if n.win != nil {
+			if err := g.drainWindow(tx, n, keys, dirty); err != nil {
+				return err
+			}
 			continue
 		}
 		sorted := make([]string, 0, len(keys))
@@ -872,37 +935,52 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 		if prior == nil {
 			return nil // was absent, still absent — nothing to say
 		}
-		if err := tx.DeleteOut(st.Name, outKey); err != nil {
-			return err
-		}
-		if g.OnDelta != nil {
-			if err := g.OnDelta(st.Name, outKey, nil, false); err != nil {
-				return err
-			}
-		}
-		for _, d := range n.dimConsumers {
-			if err := tx.DeleteDim(d.node.def.Name, d.join.target(), outKey); err != nil {
-				return err
-			}
-			if err := g.markDimDependents(tx, d, outKey, dirty); err != nil {
-				return err
-			}
-		}
-		for _, c := range n.consumers {
-			if err := g.foldDelete(tx, c, outKey, dirty); err != nil {
-				return err
-			}
-		}
-		for _, m := range n.mergeConsumers {
-			if err := g.foldMergeSide(tx, m.node, m.alias, outKey, nil, dirty); err != nil {
-				return err
-			}
-		}
-		return nil
+		return g.retractOutput(tx, n, outKey, dirty)
 	}
 	if prior != nil && bytes.Equal(prior, out) {
 		return nil // unchanged — suppressed (deterministic bytes make this sound)
 	}
+	return g.publishOutput(tx, n, outKey, out, dirty)
+}
+
+// retractOutput deletes a stage's output for one key and cascades the
+// retraction: the chaining terminal, the joins using this stage as their
+// dimension, consumer retention, and merge sides.
+func (g *Graph) retractOutput(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty Dirty) error {
+	st := n.def
+	if err := tx.DeleteOut(st.Name, outKey); err != nil {
+		return err
+	}
+	if g.OnDelta != nil {
+		if err := g.OnDelta(st.Name, outKey, nil, false); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.dimConsumers {
+		if err := tx.DeleteDim(d.node.def.Name, d.join.target(), outKey); err != nil {
+			return err
+		}
+		if err := g.markDimDependents(tx, d, outKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, c := range n.consumers {
+		if err := g.foldDelete(tx, c, outKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, m := range n.mergeConsumers {
+		if err := g.foldMergeSide(tx, m.node, m.alias, outKey, nil, dirty); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// publishOutput stores a stage's changed output for one key and cascades
+// it, as retractOutput does a retraction.
+func (g *Graph) publishOutput(tx *stagestore.Tx, n *graphNode, outKey, out []byte, dirty Dirty) error {
+	st := n.def
 	if err := tx.PutOut(st.Name, outKey, out); err != nil {
 		return err
 	}

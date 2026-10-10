@@ -180,6 +180,28 @@ type Stage struct {
 	// part. One entry per keyPath position; a single value broadcasts.
 	// Joins addressing this stage inherit these types (like Normalize).
 	KeyType []string `mapstructure:"keyType" json:"keyType,omitempty"`
+	// PartitionBy, WindowOrderBy, and WindowTieBy declare a window stage's
+	// window (reduce = "window") — SQL's named WINDOW w AS (PARTITION BY …
+	// ORDER BY …). A window stage keeps ONE ROW PER INPUT, keyed by the
+	// input's own key, and its emit exprs read each row's position in its
+	// ordered partition through window calls (row_number(), lag(x),
+	// sum(x) …). PartitionBy groups rows (paths or expressions, like
+	// keyPath; none = one partition); WindowOrderBy is the business order
+	// (expressions, each optionally asc|desc and nulls first|last), whose
+	// equal values make rows PEERS (rank and the running aggregates treat
+	// peers alike, as PostgreSQL does); WindowTieBy orders rows within a
+	// peer group — required when a tie-sensitive function (row_number,
+	// lag/lead, first_value/last_value) is used — and the input key breaks
+	// any tie left after it. The TOML spelling is orderBy/tieBy; the
+	// field names differ from latest's single-path OrderBy/TieBy so that
+	// existing configs keep their fingerprints.
+	PartitionBy   []string `mapstructure:"partitionBy" json:"partitionBy,omitempty"`
+	WindowOrderBy []string `mapstructure:"windowOrderBy" json:"windowOrderBy,omitempty"`
+	WindowTieBy   []string `mapstructure:"windowTieBy" json:"windowTieBy,omitempty"`
+	// winOrder/winTie are the compiled order keys and winSlots the window
+	// calls of the emit exprs, in slot order. Populated by ValidateShapes.
+	winOrder, winTie []winKey
+	winSlots         []exprWin
 }
 
 // FanArm is one arm of a multi-arm fan (see Stage.Fan).
@@ -367,8 +389,11 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 		}
-		if len(st.KeyPath) == 0 && len(st.Merge) == 0 {
+		if len(st.KeyPath) == 0 && len(st.Merge) == 0 && st.Reduce != "window" {
 			return fmt.Errorf("%s: keyPath is required (one path per key part; several = a composite key)", where)
+		}
+		if st.Reduce != "window" && (len(st.PartitionBy) > 0 || len(st.WindowOrderBy) > 0 || len(st.WindowTieBy) > 0) {
+			return fmt.Errorf("%s: partitionBy and the orderBy/tieBy lists declare a window — they are only for reduce = \"window\"", where)
 		}
 		for _, kp := range st.KeyPath {
 			if err := validateKeyPart(kp, where+": keyPath"); err != nil {
@@ -424,6 +449,10 @@ func ValidateShapes(stages []Stage) error {
 			}
 		}
 		switch st.Reduce {
+		case "window":
+			if err := validateWindowStage(st, where); err != nil {
+				return err
+			}
 		case "", "aggregate":
 			if st.OrderBy != "" || st.TieBy != "" {
 				return fmt.Errorf("%s: orderBy/tieBy are only for reduce = \"latest\"", where)
@@ -455,7 +484,7 @@ func ValidateShapes(stages []Stage) error {
 				}
 			}
 		default:
-			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", \"liveSet\", or omit for a reshape stage)", where, st.Reduce)
+			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", \"liveSet\", \"window\", or omit for a reshape stage)", where, st.Reduce)
 		}
 		if st.ForEach != "" && !MultiValuedPath(st.ForEach) {
 			return fmt.Errorf("%s: forEach path [%s] is single-valued — forEach fans an array into element-inputs; drop it for one input per entity", where, st.ForEach)
@@ -528,7 +557,7 @@ func ValidateShapes(stages []Stage) error {
 			}
 			if j.From != "" && j.Field == "" {
 				if fi := IndexOf(stages, j.From); fi >= 0 {
-					if arity, _, _ := ResolvedKeySpace(stages, fi); len(j.On) != arity {
+					if arity, _, _ := ResolvedKeySpace(stages, fi); arity != KeyArityProducer && len(j.On) != arity {
 						return fmt.Errorf("%s: on has %d path(s) but stage %q keys by %d path(s) — a stage join's on addresses the joined stage's key, so the arities must match, in the same order", jw, len(j.On), j.From, arity)
 					}
 				}
@@ -581,7 +610,7 @@ func ValidateShapes(stages []Stage) error {
 			return fmt.Errorf("%s: emit needs at least one field", where)
 		}
 		emitted := make(map[string]bool, len(st.Emit))
-		st.aggSlots, st.havingCompiled = nil, nil
+		st.aggSlots, st.havingCompiled, st.winSlots = nil, nil, nil
 		for k := range st.Emit {
 			e := &st.Emit[k]
 			ew := fmt.Sprintf("%s emit %q", where, e.Field)
@@ -613,7 +642,11 @@ func ValidateShapes(stages []Stage) error {
 				}
 			} else {
 				if plain != 1 || folds != 0 {
-					return fmt.Errorf("%s: a reshape stage's emit carries exactly one of from or expr", ew)
+					kind := "reshape"
+					if st.Reduce != "" {
+						kind = st.Reduce
+					}
+					return fmt.Errorf("%s: a %s stage's emit carries exactly one of from or expr", ew, kind)
 				}
 			}
 			if e.Distinct && e.Collect == "" {
@@ -645,6 +678,14 @@ func ValidateShapes(stages []Stage) error {
 				e.compiled = compiled
 				continue
 			}
+			if st.Reduce == "window" && e.Expr != "" {
+				compiled, err := compileWindowExpr(e.Expr, &st.winSlots)
+				if err != nil {
+					return fmt.Errorf("%s: %w", ew, err)
+				}
+				e.compiled = compiled
+				continue
+			}
 			for _, src := range []string{e.Expr, e.Sum, e.Min, e.Max, e.Collect} {
 				if src == "" {
 					continue
@@ -654,6 +695,13 @@ func ValidateShapes(stages []Stage) error {
 					return fmt.Errorf("%s: %w", ew, err)
 				}
 				e.compiled = compiled
+			}
+		}
+		if st.Reduce == "window" && len(st.WindowTieBy) == 0 {
+			for _, w := range st.winSlots {
+				if tieSensitiveFns[w.fn] {
+					return fmt.Errorf("%s: %s(…) depends on the order WITHIN ties (rows with equal orderBy values) — declare tieBy (an id or sequence column is the usual choice); rank, dense_rank, and the running aggregates treat ties as peers and need none", where, w.fn)
+				}
 			}
 		}
 		if st.Having != "" {
@@ -761,7 +809,7 @@ func validateMergeStage(stages []Stage, st *Stage, names map[string]bool, where 
 	for ei := range st.Merge[1:] {
 		e := &st.Merge[ei+1]
 		arity, kt, norm := mergeSideSpace(stages, e)
-		if arity != baseArity {
+		if arity != baseArity && arity != KeyArityProducer && baseArity != KeyArityProducer {
 			return fmt.Errorf("%s: merged sides disagree on key arity (%q keys by %d part(s), %q by %d) — merged sides pair by key, so their key spaces must agree", where, baseName, baseArity, mergeSideName(e), arity)
 		}
 		if !equalKeyTypes(baseKT, kt, baseArity) {
@@ -905,6 +953,15 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 		if kerr != nil {
 			return kerr
 		}
+	}
+	var werr error
+	windowKeyPathRefs(st, func(p, pos string) {
+		if werr == nil {
+			werr = check(p, pos)
+		}
+	})
+	if werr != nil {
+		return werr
 	}
 	if err := checkWhens(st.When, "when"); err != nil {
 		return err
@@ -1061,6 +1118,15 @@ func rejectFoldTimeAliasRefs(st *Stage, aliases map[string]bool, where string) e
 			return kerr
 		}
 	}
+	var werr error
+	windowKeyPathRefs(st, func(p, pos string) {
+		if werr == nil {
+			werr = checkPath(p, pos)
+		}
+	})
+	if werr != nil {
+		return werr
+	}
 	if st.ForEach != "" {
 		if err := checkPath(st.ForEach, "forEach"); err != nil {
 			return err
@@ -1130,8 +1196,25 @@ func ResolvedKeySpace(stages []Stage, i int) (arity int, keyType []string, norma
 	if len(st.Merge) > 0 {
 		return mergeSideSpace(stages, &st.Merge[0])
 	}
+	if st.Reduce == "window" {
+		// A window stage's rows key by the INPUT's key: a prior stage's
+		// key space, inherited — or a topic's entity keys, whose shape is
+		// the producer's (KeyArityProducer).
+		if fi := IndexOf(stages, st.From); fi >= 0 && fi < i {
+			return ResolvedKeySpace(stages, fi)
+		}
+		return KeyArityProducer, nil, ""
+	}
 	return len(st.KeyPath), st.KeyType, st.Normalize
 }
+
+// KeyArityProducer is the resolved arity of a key space the PRODUCER
+// shapes — a window stage over a topic keys its rows by the topic's
+// entity keys, single or composite as the producer writes them. Arity
+// checks skip it: as with a topic join's on, the arity is the config
+// author's contract (a composite entity key decodes by the consumer's
+// declared column count).
+const KeyArityProducer = -1
 
 // ProbeKey renders a caller's key parts in stage i's RESOLVED key
 // space — typed per position, normalized, composed through the
@@ -1146,7 +1229,7 @@ func ResolvedKeySpace(stages []Stage, i int) (arity int, keyType []string, norma
 // errors loudly.
 func ProbeKey(sts []Stage, i int, keyParts []string) (string, bool, error) {
 	arity, kts, norm := ResolvedKeySpace(sts, i)
-	if len(keyParts) != arity {
+	if arity != KeyArityProducer && len(keyParts) != arity {
 		return "", false, fmt.Errorf("stage %q keys by %d part(s) but the probe carries %d — pass one probeKey per keyPath position, in order", sts[i].Name, arity, len(keyParts))
 	}
 	parts := make([]string, len(keyParts))

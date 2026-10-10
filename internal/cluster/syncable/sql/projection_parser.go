@@ -193,9 +193,10 @@ type rawProjectionStage struct {
 	When        any            `mapstructure:"when"`
 	DeleteWhen  any            `mapstructure:"deleteWhen"`
 	Reduce      string         `mapstructure:"reduce"`
-	OrderBy     string         `mapstructure:"orderBy"`
+	PartitionBy any            `mapstructure:"partitionBy"`
+	OrderBy     any            `mapstructure:"orderBy"`
 	OrderByType string         `mapstructure:"orderByType"`
-	TieBy       string         `mapstructure:"tieBy"`
+	TieBy       any            `mapstructure:"tieBy"`
 	TieByType   string         `mapstructure:"tieByType"`
 	Join        []rawStageJoin `mapstructure:"joins"`
 	Normalize   string         `mapstructure:"normalize"`
@@ -247,26 +248,44 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 		if err != nil {
 			return nil, fmt.Errorf("stage %d (%q): merge: %w", i+1, rs.Name, err)
 		}
+		// orderBy/tieBy: latest's single path, or a window's list of order
+		// keys (a single string is a one-key list there).
+		reduce := canonicalReduce(rs.Reduce)
+		var orderBy, tieBy string
+		var windowOrderBy, windowTieBy []string
+		if reduce == "window" {
+			windowOrderBy, windowTieBy = pathOrList(rs.OrderBy), pathOrList(rs.TieBy)
+		} else {
+			if orderBy, err = singlePath(rs.OrderBy, "orderBy"); err != nil {
+				return nil, fmt.Errorf("stage %d (%q): %w", i+1, rs.Name, err)
+			}
+			if tieBy, err = singlePath(rs.TieBy, "tieBy"); err != nil {
+				return nil, fmt.Errorf("stage %d (%q): %w", i+1, rs.Name, err)
+			}
+		}
 		stages = append(stages, ProjectionStage{
-			Name:        rs.Name,
-			From:        rs.From,
-			KeyPath:     pathOrList(rs.KeyPath),
-			When:        when,
-			DeleteWhen:  deleteWhen,
-			Reduce:      canonicalReduce(rs.Reduce),
-			OrderBy:     rs.OrderBy,
-			OrderByType: strings.ToLower(rs.OrderByType),
-			TieBy:       rs.TieBy,
-			TieByType:   strings.ToLower(rs.TieByType),
-			Having:      rs.Having,
-			Joins:       stageJoins(rs.Join),
-			Emit:        rs.Emit,
-			ForEach:     rs.ForEach,
-			Fan:         rs.Fan,
-			ElementKey:  rs.ElementKey,
-			Normalize:   strings.ToLower(rs.Normalize),
-			KeyType:     lowerList(pathOrList(rs.KeyType)),
-			Merge:       mergeEntries,
+			Name:          rs.Name,
+			From:          rs.From,
+			KeyPath:       pathOrList(rs.KeyPath),
+			When:          when,
+			DeleteWhen:    deleteWhen,
+			Reduce:        reduce,
+			OrderBy:       orderBy,
+			OrderByType:   strings.ToLower(rs.OrderByType),
+			TieBy:         tieBy,
+			TieByType:     strings.ToLower(rs.TieByType),
+			PartitionBy:   pathOrList(rs.PartitionBy),
+			WindowOrderBy: windowOrderBy,
+			WindowTieBy:   windowTieBy,
+			Having:        rs.Having,
+			Joins:         stageJoins(rs.Join),
+			Emit:          rs.Emit,
+			ForEach:       rs.ForEach,
+			Fan:           rs.Fan,
+			ElementKey:    rs.ElementKey,
+			Normalize:     strings.ToLower(rs.Normalize),
+			KeyType:       lowerList(pathOrList(rs.KeyType)),
+			Merge:         mergeEntries,
 		})
 	}
 	return stages, nil
@@ -571,6 +590,18 @@ func lowerList(in []string) []string {
 // both parse. Unlike GetStringSlice's scalar arm (which whitespace-splits,
 // fine for column names), a scalar stays ONE value: a jsonpath may
 // legitimately contain a space inside a quoted segment.
+// singlePath reads latest's orderBy/tieBy: one path (a list is the window
+// form).
+func singlePath(v any, key string) (string, error) {
+	switch x := v.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return x, nil
+	}
+	return "", fmt.Errorf("%s takes one path here — a list of order keys is the window form (reduce = \"window\")", key)
+}
+
 func pathOrList(v any) []string {
 	switch x := v.(type) {
 	case string:

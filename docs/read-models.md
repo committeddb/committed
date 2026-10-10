@@ -311,7 +311,7 @@ The language: `+ - * /`, comparisons (`= <> < <= > >=` — numbers
 numerically, strings in byte order, `false < true`; ordering a string
 against a number is an error), the boolean
 predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
-`x [not] in (…)`, `x [not] like pattern`, `x is [not] null`, `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
+`x [not] in (…)`, `x [not] like pattern`, `x is [not] null`, `x is [not] distinct from y` (null-safe comparison: two nulls are not distinct, never null), `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
 `round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
 zero), SQL's `case` conditional, `x [not] between a and b`, the string functions, casts, math, and date/time functions below, decimal and `'string'` literals, and `$.…` paths into the
 payload. Connectives follow SQL's three-valued logic — `null or true`
@@ -862,6 +862,78 @@ set = [ { column = "total", from = "$.total" },
   a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose
   numeric vs lexical; text default). `when` filters before the argmax,
   and a retracted winner promotes the runner-up from the retained set.
+- **`reduce = "window"` keeps one row per input** — SQL's window
+  functions, `f(…) OVER (PARTITION BY … ORDER BY …)`, for the
+  computations over an entity's ordered history that keep a row per
+  event: time in each status, a running balance after each transaction,
+  "changed from X to Y" audit rows, the top N per group. The window is
+  declared once on the stage (SQL's named `WINDOW`), and the emit
+  `expr`s call window functions:
+
+  ```toml
+  [[projection.stages]]
+  name        = "spans"
+  from        = "job-status"
+  reduce      = "window"
+  partitionBy = "$.job"                       # path or expression, like keyPath; omit = one partition
+  orderBy     = [ "$.at::timestamptz" ]       # each: expr [asc|desc] [nulls first|last]
+  tieBy       = [ "$.seq" ]
+  emit = [ { field = "job",    from = "$.job" },
+           { field = "status", from = "$.status" },
+           { field = "secs",   expr = "extract(epoch from (lead($.at::timestamptz) - $.at::timestamptz))" },
+           { field = "prev",   expr = "lag($.status)" } ]
+
+  [[projection.stages]]
+  name    = "time-in-status"                  # then fold the spans
+  from    = "spans"
+  keyPath = [ "$.job", "$.status" ]
+  reduce  = "aggregate"
+  emit    = [ { field = "secs", expr = "sum($.secs)" } ]
+  ```
+
+  The functions are `row_number()`, `rank()`, `dense_rank()`,
+  `lag(x [, n [, default]])`, `lead(…)`, `first_value(x)`,
+  `last_value(x)`, and the running aggregates `sum`, `count(*)`,
+  `count(x)`, `min`, `max`, and `avg` (under `round`, like `/`), each
+  with `filter (where …)`. They follow PostgreSQL's default frame — from
+  the partition's first row through the current row's last PEER (rows
+  with equal `orderBy` values) — so peers share `rank`, `dense_rank`,
+  running aggregates, and `last_value`, as in PostgreSQL. Each output is
+  keyed by its input's own key (a topic entity key, or the upstream
+  stage's key, whose key space it inherits); paths outside the calls read
+  the row's own fields, and a named join's row is readable as in any
+  stage. The stage's `when` filters inputs before windowing (SQL's WHERE),
+  and required joins decide membership. Deleting an input retracts its
+  row and its neighbors recompute; an input whose partition or order
+  changes moves. A stage holds one window — for a second, chain another
+  window stage.
+
+  **Ties are deterministic.** Where PostgreSQL (like every other SQL
+  engine) leaves the order within a tie unspecified, committed decides
+  it: `tieBy` orders rows that are equal on `orderBy`, and the input key
+  breaks any tie left after that. `tieBy` is required when a stage uses a
+  function whose result depends on that order (`row_number`, `lag`,
+  `lead`, `first_value`, `last_value`); `rank`, `dense_rank`, and the
+  running aggregates treat ties as peers and need none. Other deliberate
+  differences from PostgreSQL: `lag`/`lead`'s offset is an integer
+  literal from 0 to 1000 (not a per-row expression); running aggregates
+  take no `distinct` or `order by` (PostgreSQL implements neither for
+  window aggregates) and no `array_agg`/`string_agg` — collapse with an
+  aggregate stage; a window stage does not fan (fan in a prior stage
+  keyed by the element, and window its outputs); and window frames
+  (`rows between …`) are not supported yet.
+
+  **Partition by entity.** Rows are kept in business order, and each row
+  stores its running state, so an event appended in order recomputes
+  one or two rows. A late or backfilled event recomputes the rows after
+  it in its partition — their values really change — and a join
+  dimension change recomputes the dependent partitions whole. Partition
+  by the entity whose history you're computing over (an account, a job),
+  not a tenant or the whole stream: the stage warns once when a partition
+  passes 50,000 rows, and `windowRowsRecomputed`/`windowLargestPartition`
+  (below) show the cost. Top N per group is a window plus a filter — emit
+  `row_number()` and keep `$.n <= 3` in a downstream stage's `when`; a row
+  that slides out of the top N retracts.
 - **Stage-fed sources key rows by the stage's key** (no keyPath
   resolution — an aggregate's emit carries folds, never its key). A
   retraction — the stage's key going away, or a live output that stops
@@ -872,7 +944,9 @@ set = [ { column = "total", from = "$.total" },
   each stage's row — `keys` (the store's current output count) plus
   `inputs`/`fanned` flow counters since the worker started, and
   `unkeyedDeletes` (delete-shaped inputs whose key would not resolve or
-  render), `havingRejected` (refolds an aggregate's `having` held back), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
+  render), `havingRejected` (refolds an aggregate's `having` held back),
+  `windowRowsRecomputed`/`windowLargestPartition` (a window stage's
+  recompute cost and its largest partition), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
   arrived but the key is still live" in one read; each also warns once
   in the log). The three
   numbers split every silent-empty state: `inputs` 0 = that topic's log

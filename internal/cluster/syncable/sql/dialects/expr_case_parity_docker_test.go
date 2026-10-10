@@ -67,6 +67,16 @@ func TestPostgreSQLIntegration_ExprCaseParity(t *testing.T) {
 			"coalesce(case when $.status in ('done', 'held') then $.a * 2 end, 0) + 1",
 			"coalesce(case when status in ('done', 'held') then a * 2 end, 0) + 1",
 		},
+		// IS [NOT] DISTINCT FROM: null-safe, never null (row 5's null
+		// hours against its null n are NOT distinct).
+		{
+			"case when $.status is distinct from 'done' then 'd' else 's' end",
+			"case when status is distinct from 'done' then 'd' else 's' end",
+		},
+		{
+			"case when $.hours is not distinct from $.n then 'same' else 'diff' end",
+			"case when hours is not distinct from n then 'same' else 'diff' end",
+		},
 	}
 
 	for _, c := range cases {
