@@ -919,15 +919,42 @@ set = [ { column = "total", from = "$.total" },
   literal from 0 to 1000 (not a per-row expression); running aggregates
   take no `distinct` or `order by` (PostgreSQL implements neither for
   window aggregates) and no `array_agg`/`string_agg` — collapse with an
-  aggregate stage; a window stage does not fan (fan in a prior stage
-  keyed by the element, and window its outputs); and window frames
-  (`rows between …`) are not supported yet.
+  aggregate stage; and a window stage does not fan (fan in a prior stage
+  keyed by the element, and window its outputs).
+
+  **Frames.** A call can narrow or widen its frame with `over (…)` —
+  SQL's `OVER (w frame)`, refining the stage's window (partition and
+  order stay the stage's):
+
+  ```toml
+  emit = [ { field = "balance", expr = "sum($.amount)" },                                   # default frame
+           { field = "ma7",     expr = "round(avg($.reading) over (rows between 6 preceding and current row), 2)" },
+           { field = "hour_n",  expr = "count(*) over (range between interval '1 hour' preceding and current row)" },
+           { field = "final",   expr = "last_value($.status) over (rows between unbounded preceding and unbounded following)" } ]
+  ```
+
+  `rows` counts rows (peers are separate rows, in `tieBy` order);
+  `range` measures by the single `orderBy` value — a number with a number
+  offset, a date/time with an interval offset (calendar months included)
+  — so peers are always in or out together, and a null value's frame is
+  its peers. Bounds are `unbounded preceding|following`, `current row`,
+  or a constant `n preceding|following` (`rows 3 preceding` is short for
+  `between 3 preceding and current row`), with PostgreSQL's rules (a frame
+  cannot start after it ends). Frames apply to the aggregates and
+  `first_value`/`last_value`; an empty frame gives null (`count` 0). A
+  rolling window is anchored to each row's own timestamp, never the
+  clock: "the hour before this login", not "the last hour". Not
+  supported: `groups` frames and `exclude`.
 
   **Partition by entity.** Rows are kept in business order, and each row
   stores its running state, so an event appended in order recomputes
-  one or two rows. A late or backfilled event recomputes the rows after
-  it in its partition — their values really change — and a join
-  dimension change recomputes the dependent partitions whole. Partition
+  only the rows whose frames (or `lag`/`lead`) reach it — usually one or
+  two. A late or backfilled event recomputes the rows after it that
+  really change: under a bounded frame, just the rows whose frames hold
+  it; under a running total, the rest of the partition. A frame ending
+  `unbounded following` makes every row depend on every later one, so
+  each change recomputes its whole partition; and a join dimension
+  change recomputes the dependent partitions whole. Partition
   by the entity whose history you're computing over (an account, a job),
   not a tenant or the whole stream: the stage warns once when a partition
   passes 50,000 rows, and `windowRowsRecomputed`/`windowLargestPartition`

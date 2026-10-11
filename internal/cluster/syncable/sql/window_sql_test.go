@@ -133,7 +133,7 @@ func TestWindowStagesTOML(t *testing.T) {
 	require.NoError(t, bad("tieBy       = \"$.txn_id\"\n", ""), "running sums treat ties as peers: no tieBy needed")
 	require.ErrorContains(t, bad("tieBy       = [ \"$.player\" ]\n", ""), "declare tieBy")
 	require.ErrorContains(t, bad(`partitionBy = "$.account"`, `keyPath = "$.account"`), "keyPath is not used on a window stage")
-	require.ErrorContains(t, bad(`expr = "lag($.status) is distinct from $.status"`, `expr = "lag($.status) over (order by $.at)"`), "declares its window once")
+	require.ErrorContains(t, bad(`expr = "lag($.status) is distinct from $.status"`, `expr = "lag($.status) over (order by $.at)"`), "does not use a frame")
 	// latest keeps its single-path orderBy; a list there names the window form.
 	latest := strings.Replace(windowAcceptanceTOML, `name    = "podium"
 from    = "ranked"
@@ -162,4 +162,75 @@ func TestWindowFingerprint(t *testing.T) {
 	edited, err := parseWindowTOML(t, strings.Replace(windowAcceptanceTOML, `"$.points desc"`, `"$.points"`, 1))
 	require.NoError(t, err)
 	require.NotEqual(t, cfg.projectionShapeFingerprint(), edited.projectionShapeFingerprint())
+}
+
+// The frames ticket's acceptance models, through TOML: a moving average,
+// a login-velocity flag, and a whole-partition last_value.
+const windowFramesTOML = `
+[projection]
+db         = "testdb"
+table      = "fraud_signals"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "hour_n"
+type = "INT"
+
+[[projection.stages]]
+name        = "readings"
+from        = "sensor-readings"
+reduce      = "window"
+partitionBy = "$.sensor"
+orderBy     = "$.at::timestamptz"
+tieBy       = "$.id"
+emit = [ { field = "ma7", expr = "round(avg($.reading) over (rows between 6 preceding and current row), 2)" } ]
+
+[[projection.stages]]
+name        = "velocity"
+from        = "logins"
+reduce      = "window"
+partitionBy = "$.user_id"
+orderBy     = "$.at::timestamptz"
+emit = [ { field = "hour_n", expr = "count(*) over (range between interval '1 hour' preceding and current row)" } ]
+
+[[projection.stages]]
+name    = "fraud"
+from    = "velocity"
+keyPath = "$.hour_n"
+when    = [ { expr = "$.hour_n >= 5" } ]
+emit    = [ { field = "hour_n", from = "$.hour_n" } ]
+
+[[projection.stages]]
+name        = "final"
+from        = "job-status"
+reduce      = "window"
+partitionBy = "$.job"
+orderBy     = "$.at::timestamptz"
+tieBy       = "$.seq"
+emit = [ { field = "final", expr = "last_value($.status) over (rows between unbounded preceding and unbounded following)" } ]
+
+[[projection.sources]]
+from = "fraud"
+[[projection.sources.rules]]
+set = [ { column = "hour_n", from = "$.hour_n" } ]
+`
+
+func TestWindowFramesTOML(t *testing.T) {
+	_, err := parseWindowTOML(t, windowFramesTOML)
+	require.NoError(t, err)
+	bad := func(from, to string) error {
+		t.Helper()
+		require.Contains(t, windowFramesTOML, from, "fixture lacks the text to replace")
+		_, err := parseWindowTOML(t, strings.Replace(windowFramesTOML, from, to, 1))
+		return err
+	}
+	require.ErrorContains(t, bad(`interval '1 hour' preceding`, `1 preceding`), "is an interval")
+	require.ErrorContains(t, bad(`orderBy     = "$.at::timestamptz"
+emit = [ { field = "hour_n"`, `orderBy     = [ "$.at::timestamptz", "$.id" ]
+emit = [ { field = "hour_n"`), "exactly one orderBy key")
+	require.ErrorContains(t, bad(`rows between 6 preceding and current row`, `rows between current row and 6 preceding`), "cannot have preceding rows")
 }

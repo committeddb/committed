@@ -81,3 +81,43 @@ func windowKeyPathRefs(st *Stage, visit func(path, pos string)) {
 		walkWindowKeyPaths(src, func(p string) { visit(p, "tieBy") })
 	}
 }
+
+// validateWindowFrames applies PostgreSQL's RANGE-offset rules at
+// admission: an offset frame measures by exactly one orderBy key, and when
+// that key's type is declared by a cast, the offset must suit it (a number
+// for a number, an interval for a date/time). An undeclared key's type is
+// checked on data.
+func validateWindowFrames(st *Stage, where string) error {
+	for _, s := range st.winSlots {
+		f := s.frame
+		if f == nil || f.rows || (!f.start.offset() && !f.end.offset()) {
+			continue
+		}
+		if len(st.winOrder) != 1 {
+			return fmt.Errorf("%s: %s(…) over (range … preceding|following) needs exactly one orderBy key — the frame measures by it (as in PostgreSQL); use rows, or order by one expression", where, s.fn)
+		}
+		cast, ok := st.winOrder[0].expr.(exprCast)
+		if !ok {
+			continue
+		}
+		for _, b := range []winBound{f.start, f.end} {
+			if !b.offset() {
+				continue
+			}
+			_, isInterval := b.off.(intervalVal)
+			switch cast.typ {
+			case "numeric", "integer", "bigint":
+				if isInterval {
+					return fmt.Errorf("%s: %s(…): a range frame offset over a %s orderBy is a number, not an interval", where, s.fn, cast.typ)
+				}
+			case "timestamptz", "timestamp", "date", "interval":
+				if !isInterval {
+					return fmt.Errorf("%s: %s(…): a range frame offset over a %s orderBy is an interval (interval '1 hour'), not a number", where, s.fn, cast.typ)
+				}
+			default:
+				return fmt.Errorf("%s: %s(…): a range frame offset needs a number or date/time orderBy, not %s", where, s.fn, cast.typ)
+			}
+		}
+	}
+	return nil
+}

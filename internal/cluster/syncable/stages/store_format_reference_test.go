@@ -215,6 +215,17 @@ func storeReferenceFixture() []Stage {
 				{Field: "seq", From: "$.seq"},
 			},
 		},
+		// Window frames: a ROWS moving sum and a RANGE (interval) count —
+		// framed calls keep no prefix accumulators in the row state.
+		{
+			Name: "ledger-frames", From: "ledger", Reduce: "window",
+			PartitionBy: []string{"lower($.acct)"}, WindowOrderBy: []string{"$.at::timestamptz"}, WindowTieBy: []string{"$.seq"},
+			Emit: []Emit{
+				{Field: "ma2", Expr: "sum($.amount) over (rows between 1 preceding and current row)"},
+				{Field: "day_n", Expr: "count(*) over (range between interval '1 day' preceding and current row)"},
+				{Field: "final", Expr: "last_value($.seq) over (rows between unbounded preceding and unbounded following)"},
+			},
+		},
 	}
 }
 

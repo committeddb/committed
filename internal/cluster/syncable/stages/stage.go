@@ -697,6 +697,11 @@ func ValidateShapes(stages []Stage) error {
 				e.compiled = compiled
 			}
 		}
+		if st.Reduce == "window" {
+			if err := validateWindowFrames(st, where); err != nil {
+				return err
+			}
+		}
 		if st.Reduce == "window" && len(st.WindowTieBy) == 0 {
 			for _, w := range st.winSlots {
 				if tieSensitiveFns[w.fn] {
