@@ -241,18 +241,21 @@ func lexExpr(src string) ([]exprToken, error) {
 				i++
 			}
 		case c == ':':
-			if i+1 >= len(src) || src[i+1] != ':' {
-				return nil, fmt.Errorf("unexpected character %q at position %d (a cast is ::type)", ":", i)
+			// :: casts; a single : separates an array slice's bounds.
+			if i+1 < len(src) && src[i+1] == ':' {
+				toks = append(toks, exprToken{"op", "::", i})
+				i += 2
+			} else {
+				toks = append(toks, exprToken{"op", ":", i})
+				i++
 			}
-			toks = append(toks, exprToken{"op", "::", i})
-			i += 2
 		case c == '|':
 			if i+1 >= len(src) || src[i+1] != '|' {
 				return nil, fmt.Errorf("unexpected character %q at position %d (concatenation is ||)", "|", i)
 			}
 			toks = append(toks, exprToken{"op", "||", i})
 			i += 2
-		case strings.ContainsRune("+-*/(),=", rune(c)):
+		case strings.ContainsRune("+-*/(),=[]", rune(c)):
 			toks = append(toks, exprToken{"op", string(c), i})
 			i++
 		default:
@@ -278,6 +281,9 @@ type exprParser struct {
 	// inWin rejects a nested window call.
 	wins  *[]exprWin
 	inWin bool
+	// subscripts counts the open [ … ] a bound is parsed inside (a lone
+	// : is a slice separator there, a mistyped cast anywhere else).
+	subscripts int
 }
 
 func (p *exprParser) peek() exprToken { return p.toks[p.i] }
@@ -319,10 +325,11 @@ var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
 	"date_part":    {2, 2},
 	"to_timestamp": {1, 1},
 	"make_date":    {3, 3},
+	"cardinality":  {1, 1},
 }
 
 // exprFunctionList names the closed set for error messages.
-const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with, abs, ceil, ceiling, floor, mod, greatest, least, date_trunc, date_part, to_timestamp, make_date; extract(field from x)"
+const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with, abs, ceil, ceiling, floor, mod, greatest, least, date_trunc, date_part, to_timestamp, make_date, cardinality; extract(field from x); (array)[i] and (array)[lo:hi]"
 
 // atKeyword reports whether the next token is the given SQL keyword
 // (identifiers double as keywords, matched case-insensitively; a `$`
@@ -871,6 +878,17 @@ func checkMaterializable(n Node, dominated bool) error {
 		return checkMaterializable(x.operand, true)
 	case exprWin:
 		return checkWinMaterializable(x, dominated)
+	case exprSubscript:
+		// The bounds are positions, never stored; the result is the
+		// array's elements, stored as the array would be.
+		for _, b := range []Node{x.lo, x.hi} {
+			if b != nil {
+				if err := checkMaterializable(b, true); err != nil {
+					return err
+				}
+			}
+		}
+		return checkMaterializable(x.operand, dominated)
 	case exprAgg:
 		// avg is an exact quotient (like /); count's argument is only
 		// tested for null; sum/min/max store values derived from theirs.
@@ -1014,6 +1032,8 @@ func Eval(n Node, payload, parent any) (any, error) {
 			return nil, fmt.Errorf("internal: aggregate %s evaluated outside a fold", x.fn)
 		}
 		return res[x.slot], nil
+	case exprSubscript:
+		return evalSubscript(x, payload, parent)
 	case exprWin:
 		row, ok := payload.(windowRow)
 		if !ok {
@@ -1175,6 +1195,8 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 		return sb.String(), nil
 	case "abs", "ceil", "ceiling", "floor", "mod", "greatest", "least":
 		return evalMathCall(x, payload, parent)
+	case "cardinality":
+		return evalCardinality(x, payload, parent)
 	case "date_trunc", "date_part", "to_timestamp", "make_date":
 		return evalTimeCall(x, payload, parent)
 	case "lower", "upper", "trim", "ltrim", "rtrim", "substring", "length", "char_length", "replace", "starts_with":

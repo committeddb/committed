@@ -76,3 +76,41 @@ func TestAggregateExpressionTOML(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, cfg.projectionShapeFingerprint(), edited.projectionShapeFingerprint())
 }
+
+// Collapsed top-N through TOML: the ticket's movie_card columns.
+func TestArraySubscriptTOML(t *testing.T) {
+	src := `
+[projection]
+db         = "testdb"
+table      = "movie_card"
+primaryKey = "movie"
+
+[[projection.columns]]
+name = "movie"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "top_cast"
+type = "JSON"
+
+[[projection.stages]]
+name    = "by-movie"
+from    = "credits"
+keyPath = "$.movie"
+reduce  = "aggregate"
+emit    = [ { field = "top_cast",   expr = "(array_agg($.person_id order by $.billing))[1:5]" },
+            { field = "lead_actor", expr = "(array_agg($.person_id order by $.billing))[1]" },
+            { field = "n",          expr = "cardinality(array_agg($.person_id))" } ]
+
+[[projection.sources]]
+from = "by-movie"
+[[projection.sources.rules]]
+set = [ { column = "top_cast", from = "$.top_cast" } ]
+`
+	v, err := cluster.ParseConfigBytes("toml", []byte(src))
+	require.NoError(t, err)
+	cfg, err := parseProjectionConfigFields(v, nil)
+	require.NoError(t, err)
+	cfg.applyDefaults()
+	require.NoError(t, validateProjectionConfig(cfg))
+}

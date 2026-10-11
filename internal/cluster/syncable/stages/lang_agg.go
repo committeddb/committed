@@ -288,6 +288,8 @@ func exprChildren(n Node) []Node {
 		return out
 	case exprWin:
 		return x.children()
+	case exprSubscript:
+		return x.children()
 	}
 	return nil
 }

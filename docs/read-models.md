@@ -737,6 +737,16 @@ set = [ { column = "total", from = "$.total" },
   (nulls last), so a refold is byte-identical. The `collect` arm is the
   older, unordered form: it skips nulls and yields `[]` for an empty
   set.
+- **Subscripts and slices take the top N as one column** —
+  PostgreSQL's array subscripts on an aggregate's array:
+  `(array_agg($.person_id order by $.billing))[1:5]` is the top five
+  cast, `[1]` the lead, `[2:]` everyone after, and `cardinality(…)` the
+  element count. Positions are 1-based (PostgreSQL's arrays): a subscript
+  outside the array is null, a slice clips to the array and is `[]` when
+  nothing remains, a null array or bound gives null, and a non-integer
+  position rounds. The parentheses are required, as in PostgreSQL. Payload
+  arrays are different: they're addressed by jsonpath, 0-based
+  (`$.items[0]`).
 - **`having` filters the folded keys** — SQL's HAVING: an expression over
   aggregate calls, evaluated after the fold. A key whose `having` is not
   TRUE has no output, so it retracts downstream like an emptied key and

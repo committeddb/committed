@@ -515,6 +515,10 @@ func walkExprPaths(n Node, visit func(string)) {
 		for _, c := range x.children() {
 			walkExprPaths(c, visit)
 		}
+	case exprSubscript:
+		for _, c := range x.children() {
+			walkExprPaths(c, visit)
+		}
 	case exprLike:
 		walkExprPaths(x.operand, visit)
 		walkExprPaths(x.pattern, visit)

@@ -76,12 +76,25 @@ func (p *exprParser) parseCastCall(try bool) (Node, error) {
 // parsePostfix is a primary followed by any number of `::type` casts,
 // which bind tighter than unary minus, as in PG (-'5'::int is -(5)).
 func (p *exprParser) parsePostfix() (Node, error) {
+	parenthesized := p.peek().kind == "op" && p.peek().text == "("
 	n, err := p.parsePrimary()
 	if err != nil {
 		return nil, err
 	}
 	for {
 		t := p.peek()
+		if t.kind == "op" && t.text == "[" {
+			if !parenthesized {
+				return nil, fmt.Errorf("a subscript at position %d needs a parenthesized array, as in PostgreSQL: (array_agg(…))[1] — a payload array is indexed by its path ($.items[0])", t.pos)
+			}
+			if n, err = p.parseSubscript(n); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if t.kind == "op" && t.text == ":" && p.subscripts == 0 {
+			return nil, fmt.Errorf("unexpected character %q at position %d (a cast is ::type; a slice is (array)[lo:hi])", ":", t.pos)
+		}
 		if t.kind != "op" || t.text != "::" {
 			return n, nil
 		}
