@@ -134,7 +134,8 @@ func TestWindowStagesTOML(t *testing.T) {
 	require.ErrorContains(t, bad("tieBy       = [ \"$.player\" ]\n", ""), "declare tieBy")
 	require.ErrorContains(t, bad(`partitionBy = "$.account"`, `keyPath = "$.account"`), "keyPath is not used on a window stage")
 	require.ErrorContains(t, bad(`expr = "lag($.status) is distinct from $.status"`, `expr = "lag($.status) over (order by $.at)"`), "does not use a frame")
-	// latest keeps its single-path orderBy; a list there names the window form.
+	// A list orderBy on latest is latest's list form: both keys become
+	// order-key lists (the single-path tieBy joins as a one-key list).
 	latest := strings.Replace(windowAcceptanceTOML, `name    = "podium"
 from    = "ranked"
 keyPath = [ "$.game", "$.player" ]`, `name    = "podium"
@@ -143,8 +144,12 @@ keyPath = [ "$.game", "$.player" ]
 reduce  = "latest"
 orderBy = [ "$.n" ]
 tieBy   = "$.player"`, 1)
-	_, err = parseWindowTOML(t, latest)
-	require.ErrorContains(t, err, "a list of order keys is the window form")
+	lcfg, err := parseWindowTOML(t, latest)
+	require.NoError(t, err)
+	podium := lcfg.Stages[stages.IndexOf(lcfg.Stages, "podium")]
+	require.Equal(t, []string{"$.n"}, podium.WindowOrderBy)
+	require.Equal(t, []string{"$.player"}, podium.WindowTieBy)
+	require.Empty(t, podium.OrderBy)
 
 	// A stage-fed table keyed by a window inherits the window's input key
 	// space; a topic-fed window's keys are the producer's, so any arity is

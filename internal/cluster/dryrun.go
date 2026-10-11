@@ -126,11 +126,13 @@ type DryRunWindow struct {
 // the first few output objects (the value-shaped bugs — null columns,
 // wrong paths — are invisible in counts).
 type DryRunStage struct {
-	Inputs         int64 `json:"inputs"`
-	Fanned         int64 `json:"fanned,omitempty"`
-	Keys           int   `json:"keys"`
-	UnkeyedDeletes int64 `json:"unkeyedDeletes,omitempty"`
-	HavingRejected int64 `json:"havingRejected,omitempty"`
+	Inputs int64 `json:"inputs"`
+	// InputsBySource: per listed source, for a stage whose from is a list.
+	InputsBySource map[string]int64 `json:"inputsBySource,omitempty"`
+	Fanned         int64            `json:"fanned,omitempty"`
+	Keys           int              `json:"keys"`
+	UnkeyedDeletes int64            `json:"unkeyedDeletes,omitempty"`
+	HavingRejected int64            `json:"havingRejected,omitempty"`
 	// Window stages: rows recomputed, and the largest partition walked.
 	WindowRowsRecomputed   int64             `json:"windowRowsRecomputed,omitempty"`
 	WindowLargestPartition int64             `json:"windowLargestPartition,omitempty"`

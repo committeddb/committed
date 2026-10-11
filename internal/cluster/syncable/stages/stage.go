@@ -2,6 +2,7 @@ package stages
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -80,10 +81,17 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 // chain by name in manifest order; a table source consumes a stage's
 // output via `from = "<stage name>"`.
 type Stage struct {
-	Name    string       `json:"name,omitempty"`
-	From    string       `json:"from,omitempty"`
-	KeyPath []string     `json:"keyPath,omitempty"`
-	When    []WhenClause `json:"when,omitempty"`
+	Name string `json:"name,omitempty"`
+	From string `json:"from,omitempty"`
+	// FromList is SQL's UNION ALL: the stage reads every listed topic or
+	// prior stage as rows of ONE input stream (the TOML spelling is a list
+	// `from`). Each input's identity is (source name, input key), so equal
+	// keys from different sources stay separate rows, and source() names
+	// the input's source. Two or more entries; a single source is From,
+	// whose fingerprint a list never touches.
+	FromList []string     `mapstructure:"fromList" json:"fromList,omitempty"`
+	KeyPath  []string     `json:"keyPath,omitempty"`
+	When     []WhenClause `json:"when,omitempty"`
 	// Reduce: "" (reshape: one input object → one output object),
 	// "aggregate" (fold arms over the key's retained inputs), or "latest"
 	// (argmax: the key's output is the emit of the WINNING input by
@@ -195,6 +203,15 @@ type Stage struct {
 	// any tie left after it. The TOML spelling is orderBy/tieBy; the
 	// field names differ from latest's single-path OrderBy/TieBy so that
 	// existing configs keep their fingerprints.
+	//
+	// WindowOrderBy/WindowTieBy are also latest's LIST form (orderBy/tieBy
+	// written as a list, an expression, or with a direction): the winner
+	// is the input with the greatest (order, tie) sort key in the value
+	// order — so desc means the earliest wins, and, as in PostgreSQL's
+	// DISTINCT ON … ORDER BY … DESC, a null order value is greatest unless
+	// declared nulls first — with the input identity breaking an exact
+	// tie. A single bare path keeps the single-path form and its
+	// comparison (OrderBy/OrderByType), byte-identical.
 	PartitionBy   []string `mapstructure:"partitionBy" json:"partitionBy,omitempty"`
 	WindowOrderBy []string `mapstructure:"windowOrderBy" json:"windowOrderBy,omitempty"`
 	WindowTieBy   []string `mapstructure:"windowTieBy" json:"windowTieBy,omitempty"`
@@ -214,6 +231,61 @@ type FanArm struct {
 // multi-arm fan) — the guards that care about "fanned" care about both.
 func (st *Stage) hasFan() bool {
 	return st.ForEach != "" || len(st.Fan) > 0
+}
+
+// Sources lists the stage's input sources: its From, or every entry of
+// its FromList (nil for a merge).
+func (st *Stage) Sources() []string {
+	if len(st.FromList) > 0 {
+		return st.FromList
+	}
+	if st.From != "" {
+		return []string{st.From}
+	}
+	return nil
+}
+
+// isUnion reports whether the stage reads several sources (FromList).
+func (st *Stage) isUnion() bool { return len(st.FromList) > 0 }
+
+// inputKey is an input's identity in the stage: the source's key
+// verbatim for a single source; for a union, (source name, key) through
+// the composite encoding, so equal keys from different sources stay
+// distinct — and a window stage's rows, which key by this identity,
+// decode as a two-part key (source, input key) at a table.
+func (st *Stage) inputKey(src string, key []byte) []byte {
+	if !st.isUnion() {
+		return key
+	}
+	return []byte(OutKey([]string{src, string(key)}))
+}
+
+// inputSource recovers the source an input came from, given its
+// identity in the stage (inputKey, framed by fanInKey for a fanned
+// element). "" means a merge stage, which has no source.
+func (st *Stage) inputSource(inKey []byte) string {
+	if !st.isUnion() {
+		return st.From
+	}
+	if st.hasFan() {
+		// A fanned element's identity is fanInKey's frame: the parent
+		// input's identity, length-prefixed, then the element key.
+		n64, w := binary.Uvarint(inKey)
+		if w <= 0 {
+			return ""
+		}
+		rest := inKey[w:]
+		n := int(n64) //nolint:gosec // G115: bounds-checked against len(rest) next line; a forged length fails there
+		if n < 0 || n > len(rest) {
+			return ""
+		}
+		inKey = rest[:n]
+	}
+	parts, err := cluster.DecodeCompositeKey(string(inKey), 2)
+	if err != nil {
+		return ""
+	}
+	return parts[0]
 }
 
 // MergeEntry names one merged upstream and its alias in the tuple
@@ -374,14 +446,30 @@ func ValidateShapes(stages []Stage) error {
 		if strings.ContainsAny(st.Name, "[]") {
 			return fmt.Errorf("%s: brackets in stage names are reserved for the engine's synthesized re-key stages (\"<stage>[<field>]\")", where)
 		}
-		if st.From == "" && len(st.Merge) == 0 {
-			return fmt.Errorf("%s: from is required — a topic id, or a prior stage's name (or merge, to combine prior stages by key)", where)
+		if st.From == "" && len(st.FromList) == 0 && len(st.Merge) == 0 {
+			return fmt.Errorf("%s: from is required — a topic id, or a prior stage's name (or a list of them, or merge, to combine prior stages by key)", where)
 		}
-		if st.From != "" && len(st.Merge) > 0 {
+		if st.From != "" && len(st.FromList) > 0 {
+			return fmt.Errorf("%s: from is one source or a list of sources, not both", where)
+		}
+		if len(st.Sources()) > 0 && len(st.Merge) > 0 {
 			return fmt.Errorf("%s: exactly one of from or merge (a stage consumes one input stream, or combines prior stages by key)", where)
 		}
-		if st.From != "" && (st.From == st.Name || (!names[st.From] && IndexOf(stages, st.From) >= 0)) {
-			return fmt.Errorf("%s: from %q references a stage at or after this one — stages chain in manifest order (move the producer above its consumer)", where, st.From)
+		if len(st.FromList) == 1 {
+			return fmt.Errorf("%s: a from list takes two or more sources — one source is from = %q", where, st.FromList[0])
+		}
+		seenSrc := make(map[string]bool, len(st.FromList))
+		for _, src := range st.Sources() {
+			if src == "" {
+				return fmt.Errorf("%s: from lists an empty source name", where)
+			}
+			if seenSrc[src] {
+				return fmt.Errorf("%s: from lists %q twice — a source's rows are already all in the union; listing it again would count each row twice", where, src)
+			}
+			seenSrc[src] = true
+			if src == st.Name || (!names[src] && IndexOf(stages, src) >= 0) {
+				return fmt.Errorf("%s: from %q references a stage at or after this one — stages chain in manifest order (move the producer above its consumer)", where, src)
+			}
 		}
 		names[st.Name] = true
 		if len(st.Merge) > 0 {
@@ -392,8 +480,11 @@ func ValidateShapes(stages []Stage) error {
 		if len(st.KeyPath) == 0 && len(st.Merge) == 0 && st.Reduce != "window" {
 			return fmt.Errorf("%s: keyPath is required (one path per key part; several = a composite key)", where)
 		}
-		if st.Reduce != "window" && (len(st.PartitionBy) > 0 || len(st.WindowOrderBy) > 0 || len(st.WindowTieBy) > 0) {
-			return fmt.Errorf("%s: partitionBy and the orderBy/tieBy lists declare a window — they are only for reduce = \"window\"", where)
+		if st.Reduce != "window" && len(st.PartitionBy) > 0 {
+			return fmt.Errorf("%s: partitionBy declares a window — it is only for reduce = \"window\"", where)
+		}
+		if st.Reduce != "window" && st.Reduce != "latest" && (len(st.WindowOrderBy) > 0 || len(st.WindowTieBy) > 0) {
+			return fmt.Errorf("%s: orderBy/tieBy order a window's rows or choose latest's winner — they are only for reduce = \"window\" or \"latest\"", where)
 		}
 		for _, kp := range st.KeyPath {
 			if err := validateKeyPart(kp, where+": keyPath"); err != nil {
@@ -465,6 +556,12 @@ func ValidateShapes(stages []Stage) error {
 				return fmt.Errorf("%s: orderBy/tieBy are only for reduce = \"latest\"", where)
 			}
 		case "latest":
+			if len(st.WindowOrderBy) > 0 || len(st.WindowTieBy) > 0 {
+				if err := validateLatestOrderList(st, where); err != nil {
+					return err
+				}
+				break
+			}
 			if st.OrderBy == "" {
 				return fmt.Errorf("%s: reduce = \"latest\" needs orderBy — a BUSINESS field; arrival order diverges under backfill", where)
 			}
@@ -566,6 +663,9 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 			if err := RejectParentPaths(j.Where, jw+" where"); err != nil {
+				return err
+			}
+			if err := RejectSourceInWhens(j.Where, jw+" where", "a join's where filters the joined row, which has no source; test the input's source in the stage's when"); err != nil {
 				return err
 			}
 			if j.As != "" {
@@ -719,8 +819,33 @@ func ValidateShapes(stages []Stage) error {
 			}
 			st.havingCompiled = compiled
 		}
+		if len(st.Merge) > 0 && stageUsesSource(st) {
+			return fmt.Errorf("%s: source() names an input's from source — a merge has no from (its sides are aliased: test $.<alias> is not null)", where)
+		}
 	}
 	return nil
+}
+
+// validateLatestOrderList checks a latest stage's list form — orderBy and
+// tieBy as window-style order keys (expressions, each optionally
+// asc|desc and nulls first|last) — and compiles them in place.
+func validateLatestOrderList(st *Stage, where string) error {
+	switch {
+	case st.OrderBy != "" || st.TieBy != "":
+		return fmt.Errorf("%s: orderBy and tieBy are both single paths or both order-key lists", where)
+	case st.OrderByType != "" || st.TieByType != "":
+		return fmt.Errorf("%s: orderByType/tieByType are for single-path orderBy/tieBy; order keys compare in the value order — cast instead ($.ts::numeric, $.at::timestamptz)", where)
+	case len(st.WindowOrderBy) == 0:
+		return fmt.Errorf("%s: reduce = \"latest\" needs orderBy — a BUSINESS field; arrival order diverges under backfill", where)
+	case len(st.WindowTieBy) == 0:
+		return fmt.Errorf("%s: reduce = \"latest\" needs tieBy — ties are real in the field (37 of 276,286 measured) and an unbroken tie folds nondeterministically; an id column is the usual choice", where)
+	}
+	var err error
+	if st.winOrder, err = compileWinKeys(st.WindowOrderBy, where+": orderBy"); err != nil {
+		return err
+	}
+	st.winTie, err = compileWinKeys(st.WindowTieBy, where+": tieBy")
+	return err
 }
 
 // validateMergeStage checks the merge form: at least two prior stages,
@@ -893,12 +1018,26 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 	// inputSet: for a stage-fed, unfanned stage, input-scope paths
 	// address the upstream's emit set. Fanned stages' input paths are
 	// element-scope (dynamic); merges' input is the tuple (aliases).
+	// A union's input is any of its sources' rows, so a path is
+	// unemitted only when NO source can carry it — and any topic source
+	// makes the shape dynamic.
 	var inputSet map[string]bool
 	inputFrom := ""
-	if st.From != "" && !st.hasFan() && len(st.Merge) == 0 {
-		if s, ok := emitSets[st.From]; ok {
-			inputSet = s
-			inputFrom = st.From
+	if len(st.Sources()) > 0 && !st.hasFan() && len(st.Merge) == 0 {
+		union := map[string]bool{}
+		for _, src := range st.Sources() {
+			s, ok := emitSets[src]
+			if !ok {
+				union = nil
+				break
+			}
+			for f := range s {
+				union[f] = true
+			}
+		}
+		if union != nil {
+			inputSet = union
+			inputFrom = strings.Join(st.Sources(), `", "`)
 		}
 	}
 	check := func(path, pos string) error {
@@ -1043,7 +1182,11 @@ func unemittedErr(where, pos, path, producer, field string, set map[string]bool)
 		names = append(names, f)
 	}
 	sort.Strings(names)
-	return fmt.Errorf("%s: %s path [%s] reads field %q which stage %q never emits — a stage's emitted fields {%s} are the whole surface a consumer can address (a missing field here is a config inconsistency, not a null)", where, pos, path, field, producer, strings.Join(names, ", "))
+	who := fmt.Sprintf("stage %q never emits", producer)
+	if strings.Contains(producer, `", "`) {
+		who = fmt.Sprintf(`none of the union's stages "%s" emits`, producer)
+	}
+	return fmt.Errorf("%s: %s path [%s] reads field %q which %s — a stage's emitted fields {%s} are the whole surface a consumer can address (a missing field here is a config inconsistency, not a null)", where, pos, path, field, who, strings.Join(names, ", "))
 }
 
 // pathFirstSegment splits "$.a.b[0].c" into ("a", "b[0].c"); non-$.
@@ -1205,6 +1348,8 @@ func ResolvedKeySpace(stages []Stage, i int) (arity int, keyType []string, norma
 		// A window stage's rows key by the INPUT's key: a prior stage's
 		// key space, inherited — or a topic's entity keys, whose shape is
 		// the producer's (KeyArityProducer).
+		// A union's rows key by (source, input key): two parts, but the
+		// input key's own shape is each source's, so arity is unchecked.
 		if fi := IndexOf(stages, st.From); fi >= 0 && fi < i {
 			return ResolvedKeySpace(stages, fi)
 		}

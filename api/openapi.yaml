@@ -667,6 +667,9 @@ paths:
                       type: object
                       properties:
                         inputs: { type: integer, format: int64 }
+                        inputsBySource:
+                          type: object
+                          additionalProperties: { type: integer, format: int64 }
                         fanned: { type: integer, format: int64 }
                         keys: { type: integer }
                         unkeyedDeletes: { type: integer, format: int64 }
@@ -3305,6 +3308,15 @@ components:
                 type: integer
                 format: int64
                 description: Inputs folded since the worker started.
+              inputsBySource:
+                type: object
+                additionalProperties:
+                  type: integer
+                  format: int64
+                description: |
+                  Inputs per listed source for a stage whose from is a list
+                  (UNION ALL) — a source that never delivered shows as 0.
+                  Omitted for single-source stages.
               fanned:
                 type: integer
                 format: int64

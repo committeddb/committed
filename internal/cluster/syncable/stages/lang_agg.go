@@ -232,6 +232,8 @@ func rejectPathsOutsideAggregates(n Node) error {
 	switch x := n.(type) {
 	case exprPath:
 		return fmt.Errorf("path %s is outside an aggregate — in an aggregate stage every input path sits inside sum/min/max/avg/count (one key folds many inputs; the key itself reaches the table through the stage key)", x.path)
+	case exprSource:
+		return fmt.Errorf("source() is outside an aggregate — it names one input's source, and one key folds many inputs; use it inside an aggregate call (count(*) filter (where source() = 'returns')), or key by it")
 	case exprAgg:
 		return nil
 	}

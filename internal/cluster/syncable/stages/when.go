@@ -569,6 +569,7 @@ func RejectMultiValued(p, where string) error {
 // event); everything else resolves against data. Outside forEach, parent
 // is nil and a $parent path is a loud misconfiguration.
 func ResolvePath(path string, data, parent any) (any, error) {
+	data = unwrapSource(data)
 	if rest, ok := strings.CutPrefix(path, "$parent"); ok {
 		if parent == nil {
 			return nil, fmt.Errorf("path [%s]: $parent is only meaningful inside a forEach source", path)

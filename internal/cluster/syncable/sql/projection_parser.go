@@ -188,7 +188,7 @@ var projectionSectionKeys = map[string]bool{
 // shorthand-or-clauses reasons the source shapes do.
 type rawProjectionStage struct {
 	Name        string         `mapstructure:"name"`
-	From        string         `mapstructure:"from"`
+	From        any            `mapstructure:"from"`
 	KeyPath     any            `mapstructure:"keyPath"`
 	When        any            `mapstructure:"when"`
 	DeleteWhen  any            `mapstructure:"deleteWhen"`
@@ -236,11 +236,19 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 	}
 	stages := make([]ProjectionStage, 0, len(raw))
 	for i, rs := range raw {
-		when, err := normalizeWhen(rs.When, storage, rs.From)
+		from, fromList, err := stageFrom(rs.From)
+		if err != nil {
+			return nil, fmt.Errorf("stage %d (%q): %w", i+1, rs.Name, err)
+		}
+		sources := fromList
+		if from != "" {
+			sources = []string{from}
+		}
+		when, err := normalizeStageWhen(rs.When, storage, sources)
 		if err != nil {
 			return nil, fmt.Errorf("stage %d (%q): when: %w", i+1, rs.Name, err)
 		}
-		deleteWhen, err := normalizeWhen(rs.DeleteWhen, storage, rs.From)
+		deleteWhen, err := normalizeStageWhen(rs.DeleteWhen, storage, sources)
 		if err != nil {
 			return nil, fmt.Errorf("stage %d (%q): deleteWhen: %w", i+1, rs.Name, err)
 		}
@@ -248,12 +256,13 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 		if err != nil {
 			return nil, fmt.Errorf("stage %d (%q): merge: %w", i+1, rs.Name, err)
 		}
-		// orderBy/tieBy: latest's single path, or a window's list of order
-		// keys (a single string is a one-key list there).
+		// orderBy/tieBy: a window's list of order keys (a single string is
+		// a one-key list there); latest's single path, or — written as a
+		// list, an expression, or with a direction — latest's list form.
 		reduce := canonicalReduce(rs.Reduce)
 		var orderBy, tieBy string
 		var windowOrderBy, windowTieBy []string
-		if reduce == "window" {
+		if reduce == "window" || (reduce == "latest" && (!bareOrderPath(rs.OrderBy) || !bareOrderPath(rs.TieBy))) {
 			windowOrderBy, windowTieBy = pathOrList(rs.OrderBy), pathOrList(rs.TieBy)
 		} else {
 			if orderBy, err = singlePath(rs.OrderBy, "orderBy"); err != nil {
@@ -265,7 +274,8 @@ func parseProjectionStages(v *cluster.ParsedConfig, storage cluster.DatabaseStor
 		}
 		stages = append(stages, ProjectionStage{
 			Name:          rs.Name,
-			From:          rs.From,
+			From:          from,
+			FromList:      fromList,
 			KeyPath:       pathOrList(rs.KeyPath),
 			When:          when,
 			DeleteWhen:    deleteWhen,
@@ -599,7 +609,70 @@ func singlePath(v any, key string) (string, error) {
 	case string:
 		return x, nil
 	}
-	return "", fmt.Errorf("%s takes one path here — a list of order keys is the window form (reduce = \"window\")", key)
+	return "", fmt.Errorf("%s takes one path here — a list of order keys is for reduce = \"window\" or \"latest\"", key)
+}
+
+// bareOrderPath reports whether a decoded latest orderBy/tieBy is the
+// single-path form (absent, or one bare path — see stages.IsBareOrderPath).
+func bareOrderPath(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case string:
+		return x == "" || isBareOrderPath(x)
+	}
+	return false
+}
+
+// stageFrom decodes a stage's from: one source name, or a list of them
+// (UNION ALL). A one-entry list is the single form, so its fingerprint is
+// the string's.
+func stageFrom(v any) (string, []string, error) {
+	switch x := v.(type) {
+	case nil:
+		return "", nil, nil
+	case string:
+		return x, nil, nil
+	case []any:
+		names := make([]string, len(x))
+		for i, e := range x {
+			s, ok := e.(string)
+			if !ok {
+				return "", nil, fmt.Errorf("from lists source names (topic ids or prior stage names); entry %d is %T", i+1, e)
+			}
+			names[i] = s
+		}
+		if len(names) == 1 {
+			return names[0], nil, nil
+		}
+		return "", names, nil
+	}
+	return "", nil, fmt.Errorf("from is a source name or a list of them; got %T", v)
+}
+
+// normalizeStageWhen is normalizeWhen over a stage's sources: a when
+// shorthand resolves against the discriminator every listed topic shares.
+func normalizeStageWhen(raw any, storage cluster.DatabaseStorage, sources []string) ([]WhenClause, error) {
+	if _, shorthand := raw.(string); shorthand && len(sources) > 1 {
+		first, err := discriminatorFor(storage, sources[0])
+		if err != nil {
+			return nil, fmt.Errorf("when shorthand %q: %w", raw, err)
+		}
+		for _, src := range sources[1:] {
+			d, err := discriminatorFor(storage, src)
+			if err != nil {
+				return nil, fmt.Errorf("when shorthand %q: %w", raw, err)
+			}
+			if d != first {
+				return nil, fmt.Errorf("when shorthand %q: the sources' discriminators differ (%q declares %s, %q declares %s) — declare the clause explicitly as { path, equals }", raw, sources[0], first, src, d)
+			}
+		}
+	}
+	topic := ""
+	if len(sources) > 0 {
+		topic = sources[0]
+	}
+	return normalizeWhen(raw, storage, topic)
 }
 
 func pathOrList(v any) []string {

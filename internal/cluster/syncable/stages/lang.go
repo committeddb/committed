@@ -329,7 +329,7 @@ var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
 }
 
 // exprFunctionList names the closed set for error messages.
-const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with, abs, ceil, ceiling, floor, mod, greatest, least, date_trunc, date_part, to_timestamp, make_date, cardinality; extract(field from x); (array)[i] and (array)[lo:hi]"
+const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with, abs, ceil, ceiling, floor, mod, greatest, least, date_trunc, date_part, to_timestamp, make_date, cardinality, source() (stages only); extract(field from x); (array)[i] and (array)[lo:hi]"
 
 // atKeyword reports whether the next token is the given SQL keyword
 // (identifiers double as keywords, matched case-insensitively; a `$`
@@ -623,6 +623,9 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		if fn == "extract" {
 			return p.parseExtract()
 		}
+		if fn == "source" && p.peek().kind == "op" && p.peek().text == "(" {
+			return p.parseSource(t.pos)
+		}
 		if windowFns[fn] || (p.wins != nil && aggregateFns[fn]) {
 			if nt := p.peek(); nt.kind == "op" && nt.text == "(" {
 				return p.parseWinCall(fn, t.pos)
@@ -831,7 +834,7 @@ func scaleLiteral(n Node, fn string) (int64, error) {
 // rounding materializes everything beneath it.
 func checkMaterializable(n Node, dominated bool) error {
 	switch x := n.(type) {
-	case exprNum, exprStr, exprPath, exprBool, exprNull:
+	case exprNum, exprStr, exprPath, exprBool, exprNull, exprSource:
 		return nil
 	case exprNeg:
 		return checkMaterializable(x.operand, dominated)
@@ -1034,6 +1037,8 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return res[x.slot], nil
 	case exprSubscript:
 		return evalSubscript(x, payload, parent)
+	case exprSource:
+		return evalSource(payload)
 	case exprWin:
 		row, ok := payload.(windowRow)
 		if !ok {

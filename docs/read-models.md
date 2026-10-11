@@ -856,6 +856,42 @@ set = [ { column = "total", from = "$.total" },
   needed) — the lift stage, synthesized: the engine folds the topic
   through a hidden identity reshape (`<topic>[<keyPath>]` in stats)
   feeding the merge as a normal side.
+- **A list `from` is UNION ALL**: `from = [ "order-placed",
+  "order-shipped", "order-cancelled" ]` folds the rows of every listed
+  topic or prior stage as ONE input stream — for a history split across
+  topics (one topic per event type), or one entity fed by two systems.
+  Every stage kind takes a list, so `avg`, `count(distinct …)`, ordered
+  `array_agg`, `latest` ("last activity of any kind"), a window over a
+  cross-topic timeline, and a `liveSet` whose create and delete events
+  live in different topics all work across the sources. Each input's
+  identity is (source, key), so equal keys from different sources stay
+  separate rows, and each source's tombstones retract its own rows only.
+  `source()` returns the input's source name — SQL's per-branch literal
+  (`SELECT 'placed' AS kind … UNION ALL …`); it has no PostgreSQL
+  counterpart. It reads the input, so it works in `when`, `deleteWhen`,
+  `keyPath`, a window's or latest's order keys, emits, and inside
+  aggregate calls (`count(*) filter (where source() = 'returns')`), but
+  not in a join's `where`, a merge, or a table rule. In a single-source
+  stage it returns that source's name. Inputs keep their own shapes: align
+  them with expressions (`coalesce($.job_id, $.jobId)`), or reshape each
+  source in its own stage and list those. A window over a list keys its
+  rows by (source, input key); a table fed by it decodes that as a
+  two-column `primaryKey`. Stats and the dry-run split inputs per source
+  (`inputsBySource`). Decision rule: SAME-KEY correlation → `merge`
+  (it pairs sides into one tuple); ROWS from several sources → a list
+  `from` (it keeps every row).
+
+  ```toml
+  [[projection.stages]]
+  name        = "order-timeline"
+  from        = [ "order-placed", "order-shipped", "order-cancelled" ]
+  reduce      = "window"
+  partitionBy = "$.order_id"
+  orderBy     = [ "$.at::timestamptz" ]
+  tieBy       = [ "source()" ]
+  emit = [ { field = "kind",            expr = "source()" },
+           { field = "secs_since_prev", expr = "extract(epoch from ($.at::timestamptz - lag($.at::timestamptz)))" } ]
+  ```
 - **Joins can address a PRIOR stage** (`from = "<stage>"` on a join):
   its outputs are the dimension rows, maintained live by the drain — so
   cross-stage correlation is a join, not a second input; heal, flip,
@@ -872,6 +908,16 @@ set = [ { column = "total", from = "$.total" },
   a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose
   numeric vs lexical; text default). `when` filters before the argmax,
   and a retracted winner promotes the runner-up from the retained set.
+  `orderBy`/`tieBy` also take the window's order-key form — a list, an
+  expression, a direction: `orderBy = [ "$.at::timestamptz", "$.priority
+  desc" ]`, `tieBy = [ "$.id" ]`. The winner is then the LAST row in that
+  order, compared in the expression language's value order (timestamps as
+  instants, numbers numerically): `orderBy = [ "$.at::timestamptz desc"
+  ]` keeps the earliest. It is PostgreSQL's `DISTINCT ON (key) … ORDER BY
+  key, <each key reversed>`, nulls included: `$.at` (nulls last) is `at
+  DESC` (nulls first), so a null time wins unless written `$.at nulls
+  first`. In this form, cast instead of `orderByType`. A single bare path
+  keeps the original comparison.
 - **`reduce = "window"` keeps one row per input** — SQL's window
   functions, `f(…) OVER (PARTITION BY … ORDER BY …)`, for the
   computations over an entity's ordered history that keep a row per

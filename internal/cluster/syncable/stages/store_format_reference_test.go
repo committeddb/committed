@@ -226,6 +226,25 @@ func storeReferenceFixture() []Stage {
 				{Field: "final", Expr: "last_value($.seq) over (rows between unbounded preceding and unbounded following)"},
 			},
 		},
+		// UNION ALL of a topic and a prior stage: the (source, key) input
+		// identity, source() in when and in aggregate arguments.
+		{
+			Name: "activity", FromList: []string{"refunds", "props"}, KeyPath: []string{"coalesce($.acct, $.pid)"},
+			When:   []WhenClause{{Expr: "source() = 'props' or $.amount > 0"}},
+			Reduce: "aggregate",
+			Emit: []Emit{
+				{Field: "n", Expr: "count(*)"},
+				{Field: "refunded", Expr: "sum($.amount) filter (where source() = 'refunds')"},
+				{Field: "srcs", Expr: "string_agg(distinct source(), ',' order by source())"},
+			},
+		},
+		// latest's list form over a union: a descending cast order key (the
+		// earliest wins) tied by source().
+		{
+			Name: "first-activity", FromList: []string{"refunds", "refund-notes"}, KeyPath: []string{"lower($.acct)"},
+			Reduce: "latest", WindowOrderBy: []string{"$.at::date desc"}, WindowTieBy: []string{"source()"},
+			Emit: []Emit{{Field: "kind", Expr: "source()"}, {Field: "at", From: "$.at"}},
+		},
 	}
 }
 
@@ -269,6 +288,14 @@ func storeReferenceFeed(fold func(topic, key, payload string, gen uint64), sweep
 	fold("ledger", "l4", `{"acct":"a","at":"2026-01-02","seq":4,"amount":2}`, 0) // a peer of l1
 	fold("ledger", "l3", `{"acct":"a","at":"2026-01-03","seq":3,"amount":1}`, 0) // moves partitions
 	del("ledger", "l2")
+	fold("refunds", "r1", `{"acct":"J1","amount":2,"at":"2026-01-03"}`, 1)
+	fold("refunds", "r2", `{"acct":"J9","amount":0,"at":"2026-01-01"}`, 1) // filtered out of activity by its when
+	fold("refund-notes", "r1", `{"acct":"j1","at":"2026-01-02"}`, 1)       // refunds' key r1 too: a separate row
+	fold("refunds", "r3", `{"acct":"j1","amount":1,"at":"2026-01-02"}`, 2) // ties refund-notes r1; source() breaks it
+	fold("refunds", "r4", `{"acct":"J1","amount":5,"at":"2026-01-04"}`, 2) // joins props' J1 row in activity
+	sweep("refunds", 2)                                                    // r1, r2 retract; refund-notes r1 is another source's
+	fold("refund-notes", "n2", `{"acct":"j1","at":"2026-01-01"}`, 0)
+	del("refund-notes", "n2") // a tombstone retracts its own source's row only
 }
 
 // TestStoreReferenceFixtureCoversTheVocabulary makes the reference's coverage

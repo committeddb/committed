@@ -352,3 +352,42 @@ func requireFinding(t *testing.T, findings []string, substr string) {
 	}
 	t.Fatalf("no finding contains %q; findings: %v", substr, findings)
 }
+
+// A union stage's dry-run splits its inputs per source (a starved source
+// is its own zero), and its when observer judges source() as the stage
+// does.
+func TestDryRunUnionInputsBySource(t *testing.T) {
+	p := dryRunFixture(t, `
+[projection]
+db         = "testdb"
+table      = "t"
+primaryKey = "id"
+
+[[projection.columns]]
+name = "id"
+type = "VARCHAR(64)"
+
+[[projection.columns]]
+name = "v"
+type = "VARCHAR(64)"
+
+[[projection.stages]]
+name    = "u"
+from    = [ "a", "b" ]
+keyPath = "$.id"
+when    = [ { expr = "source() = 'a'" } ]
+emit    = [ { field = "v", expr = "source()" } ]
+
+[[projection.sources]]
+from = "u"
+[[projection.sources.rules]]
+set = [ { column = "v", from = "$.v" } ]
+`)
+	rep, err := p.DryRun(context.Background(), feedOf(nRowActuals("a", `{"id":"x"}`, 60)...), cluster.DryRunOptions{})
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"a": 60, "b": 0}, rep.Stages["u"].InputsBySource)
+	require.Equal(t, []string{"b"}, rep.TopicsUnseen)
+	for _, f := range rep.Findings {
+		require.NotContains(t, f, `stage "u" when`, "source() matched every input")
+	}
+}

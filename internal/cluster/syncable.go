@@ -605,6 +605,9 @@ type StageIntrospector interface {
 type StageStat struct {
 	Keys   int   `json:"keys"`
 	Inputs int64 `json:"inputs"`
+	// InputsBySource splits inputs per listed source for a stage whose
+	// from is a list (UNION ALL); omitted for single-source stages.
+	InputsBySource map[string]int64 `json:"inputsBySource,omitempty"`
 	// Fanned counts elements produced by a forEach stage's fan (omitted
 	// for plain stages).
 	Fanned int64 `json:"fanned,omitempty"`

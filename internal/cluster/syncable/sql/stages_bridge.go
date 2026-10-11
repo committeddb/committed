@@ -1,6 +1,8 @@
 package sql
 
 import (
+	"fmt"
+
 	"github.com/committeddb/committed/internal/cluster/syncable/stages"
 )
 
@@ -33,7 +35,18 @@ func resolveScopedPath(path string, data, parent any) (any, error) {
 	return stages.ResolvePath(path, data, parent)
 }
 
-func compileExpr(src string) (stages.Node, error) { return stages.Compile(src) }
+// tableSourceWhy is why source() has no meaning at table level: a table
+// rule reads one topic's (or stage's) payload, and source() names a
+// stage input's from source.
+const tableSourceWhy = "source() names a stage input's from source; a table rule reads its own source's payload — compute it in a stage (emit field = \"kind\", expr = \"source()\") and read the field"
+
+func compileExpr(src string) (stages.Node, error) {
+	n, err := stages.Compile(src)
+	if err == nil && stages.UsesSource(n) {
+		return nil, fmt.Errorf("%s", tableSourceWhy)
+	}
+	return n, err
+}
 
 func evalExpr(n stages.Node, payload, parent any) (any, error) {
 	return stages.Eval(n, payload, parent)
@@ -41,10 +54,17 @@ func evalExpr(n stages.Node, payload, parent any) (any, error) {
 
 func materializeExprValue(v any) (any, error) { return stages.Materialize(v) }
 
-func validateWhenClauses(c []WhenClause, where string) error { return stages.ValidateWhen(c, where) }
+func validateWhenClauses(c []WhenClause, where string) error {
+	if err := stages.ValidateWhen(c, where); err != nil {
+		return err
+	}
+	return stages.RejectSourceInWhens(c, where, tableSourceWhy)
+}
 
 func stageNamed(c *ProjectionConfig, name string) int { return stages.IndexOf(c.Stages, name) }
 
 func stageFingerprint(c *ProjectionConfig) string { return stages.Fingerprint(c.Stages) }
 
 func decodeStageObject(bs []byte) (any, error) { return stages.DecodeObject(bs) }
+
+func isBareOrderPath(s string) bool { return stages.IsBareOrderPath(s) }

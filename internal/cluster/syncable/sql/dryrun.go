@@ -138,6 +138,7 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 			}
 			rep.Stages[name] = cluster.DryRunStage{
 				Inputs:         fc.Inputs,
+				InputsBySource: fc.InputsBySource,
 				Fanned:         fc.Fanned,
 				Keys:           keys,
 				UnkeyedDeletes: fc.UnkeyedDeletes,
@@ -325,8 +326,10 @@ func newDryRunObserver(cfg *ProjectionConfig) *dryRunObserver {
 	}
 	for i := range cfg.Stages {
 		st := &cfg.Stages[i]
-		if st.From != "" && !names[st.From] {
-			o.topicsSeen[st.From] = 0
+		for _, src := range st.Sources() {
+			if !names[src] {
+				o.topicsSeen[src] = 0
+			}
 		}
 		for j := range st.Joins {
 			if st.Joins[j].Topic != "" {
@@ -346,12 +349,20 @@ func newDryRunObserver(cfg *ProjectionConfig) *dryRunObserver {
 	}
 	for i := range cfg.Stages {
 		st := &cfg.Stages[i]
-		if st.From == "" || names[st.From] || len(st.When) == 0 {
-			continue // merge stages, stage-fed stages, or nothing to observe
+		if len(st.When) == 0 {
+			continue // nothing to observe
 		}
-		w := newWhenObs(fmt.Sprintf("stage %q when", st.Name), st.When)
-		o.stageWhens = append(o.stageWhens, w)
-		o.byTopic[st.From] = append(o.byTopic[st.From], func(data any) { w.observe(data) })
+		var w *whenObs
+		for _, src := range st.Sources() {
+			if names[src] {
+				continue // stage-fed: the observers watch topic inputs only
+			}
+			if w == nil {
+				w = newWhenObs(fmt.Sprintf("stage %q when", st.Name), st.When)
+				o.stageWhens = append(o.stageWhens, w)
+			}
+			o.byTopic[src] = append(o.byTopic[src], func(data any) { w.observe(stages.WithSource(data, src)) })
+		}
 	}
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]

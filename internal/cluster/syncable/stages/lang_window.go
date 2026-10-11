@@ -82,9 +82,9 @@ type windowRow struct {
 // rowObject unwraps a window row for path resolution.
 func rowObject(payload any) any {
 	if w, ok := payload.(windowRow); ok {
-		return w.obj
+		payload = w.obj
 	}
-	return payload
+	return unwrapSource(payload)
 }
 
 // parseWinCall parses a window call after its name.
@@ -500,4 +500,28 @@ func rangeBound(cur, off any, back, desc bool) (any, error) {
 		return timeArith(op, c, off)
 	}
 	return nil, fmt.Errorf("a range frame offset needs an orderBy number, date/time, or interval, got %s", describeValue(cur))
+}
+
+// IsBareOrderPath reports whether a latest stage's orderBy/tieBy string
+// is the single-path form — a bare path with no direction or nulls
+// placement, compared as it always was (OrderByType, nulls lowest), so an
+// existing config's fingerprint and winner never move. An expression or a
+// direction is the list form. A string the expression language cannot
+// read stays the single-path form when the jsonpath library reads it
+// (tenant_id); anything else takes the list form, so admission reports
+// the compile error instead of resolving null.
+func IsBareOrderPath(src string) bool {
+	if toks, err := lexExpr(src); err == nil {
+		p := &exprParser{toks: toks}
+		if n, err := p.parseExpr(); err == nil && p.peek().kind == "eof" {
+			if _, isPath := n.(exprPath); isPath {
+				return true
+			}
+		}
+	}
+	if _, err := compileWinKey(src); err == nil {
+		return false
+	}
+	_, isExpr, err := ClassifyKeyPath(src)
+	return err == nil && !isExpr
 }

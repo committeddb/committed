@@ -274,7 +274,7 @@ func (g *Graph) windowUnplace(tx *stagestore.Tx, n *graphNode, ordKey []byte) er
 		} else if raw != nil {
 			_, payload := decodeRetained(raw)
 			if data, _, err := unpackStageInput(n.def, payload); err == nil {
-				if _, _, first, err := windowSortKey(n.def, data); err == nil {
+				if _, _, first, err := windowSortKey(n.def, withSource(data, n.def.inputSource(e.InKey()))); err == nil {
 					val, valOK = first, true
 				}
 			}
@@ -373,8 +373,12 @@ func (g *Graph) loadWindowRow(tx *stagestore.Tx, n *graphNode, part []byte, row 
 	if ok, err := g.inputQualifies(tx, st, data, nil); err != nil || !ok {
 		return false, err
 	}
-	row.scope, err = g.joinLookupScope(tx, st, data, nil)
-	return err == nil, err
+	scope, err := g.joinLookupScope(tx, st, data, nil)
+	if err != nil {
+		return false, err
+	}
+	row.scope = withSource(scope, st.inputSource(row.inKey))
+	return true, nil
 }
 
 // winState is a row's running state: what the next row continues from.
