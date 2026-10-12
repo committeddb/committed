@@ -267,7 +267,7 @@ func (st *Stage) inputSource(inKey []byte) string {
 	if !st.isUnion() {
 		return st.From
 	}
-	if st.hasFan() {
+	if st.hasFan() || st.fanJoin() >= 0 {
 		// A fanned element's identity is fanInKey's frame: the parent
 		// input's identity, length-prefixed, then the element key.
 		n64, w := binary.Uvarint(inKey)
@@ -280,6 +280,15 @@ func (st *Stage) inputSource(inKey []byte) string {
 			return ""
 		}
 		inKey = rest[:n]
+	}
+	return st.identitySource(inKey)
+}
+
+// identitySource recovers the source of an input identity (inputKey's
+// result, never fan-framed).
+func (st *Stage) identitySource(inKey []byte) string {
+	if !st.isUnion() {
+		return st.From
 	}
 	parts, err := cluster.DecodeCompositeKey(string(inKey), 2)
 	if err != nil {
@@ -381,6 +390,47 @@ type Join struct {
 	// coercion. A stage join INHERITS the joined stage's KeyType
 	// (BuildGraph resolves it) and rejects a declaration here.
 	OnType []string `mapstructure:"onType" json:"onType,omitempty"`
+	// Fan makes a named join MULTIPLY rows, as SQL's join does over a
+	// non-unique column: the stage's fold unit becomes the PAIR (input,
+	// matched row), one per row matching on and where, each its own
+	// element with identity (input key, matched producer key) — a forEach
+	// element's identity. keyPath, when, and emits see the input as $. and
+	// the matched row as $.<as>. (fold time included: the matched row is
+	// part of the fold unit). With optional, an input with no match is one
+	// element with a null alias (LEFT JOIN). Requires as and field (a join
+	// by key matches at most one row); one fan join per stage, and none
+	// beside forEach/fan arms. A topic join may declare field when it
+	// fans: every entity carrying the value matches.
+	Fan bool `mapstructure:"fan" json:"fan,omitempty"`
+}
+
+// fanJoin returns the index of the stage's fan join, or -1.
+func (st *Stage) fanJoin() int {
+	for i := range st.Joins {
+		if st.Joins[i].Fan {
+			return i
+		}
+	}
+	return -1
+}
+
+// validateFanJoin holds a fan join's own rules (see Join.Fan).
+func validateFanJoin(st *Stage, j *Join, jw string) error {
+	switch {
+	case j.As == "":
+		return fmt.Errorf("%s: fan multiplies rows by the matched rows — name them with as", jw)
+	case j.Absent:
+		return fmt.Errorf("%s: fan with absent: an anti-join has no row to fan", jw)
+	case j.Field == "":
+		return fmt.Errorf("%s: fan needs field — a join by key matches at most one row (topic entity keys and stage keys are unique); fan joins on a non-unique field", jw)
+	case st.hasFan():
+		return fmt.Errorf("%s: fan beside forEach/fan arms — one fan per fold unit; fan the payload in a prior stage", jw)
+	case st.Reduce == "window":
+		return fmt.Errorf("%s: fan on a window stage — fan in a prior stage keyed by the pair, and window its outputs", jw)
+	case st.Reduce == "liveSet":
+		return fmt.Errorf("%s: fan on a liveSet: delete evidence would be per pair, and a delete-shaped input with no match would be silently lost — fan in a prior stage and liveSet its outputs", jw)
+	}
+	return nil
 }
 
 // target returns the join's dimension source name (topic or stage).
@@ -604,9 +654,22 @@ func ValidateShapes(stages []Stage) error {
 			return err
 		}
 		joinAliases := make(map[string]bool, len(st.Joins))
+		// foldTimeAliases are the aliases fold-time positions may not
+		// address: every named join's but a fan join's, whose matched row
+		// is part of the fold unit itself.
+		foldTimeAliases := map[string]bool{}
 		fieldJoinSpaces := map[string]string{}
+		fans := 0
 		for ji, j := range st.Joins {
 			jw := fmt.Sprintf("%s join %d (%q)", where, ji+1, j.target())
+			if j.Fan {
+				if err := validateFanJoin(st, &j, jw); err != nil {
+					return err
+				}
+				if fans++; fans > 1 {
+					return fmt.Errorf("%s: a second fan join — two would multiply into a cross product of matches; fan in one stage and join the next downstream", jw)
+				}
+			}
 			if !ValidNormalize(j.Normalize) {
 				return fmt.Errorf("%s: normalize %q is not supported (want %q)", jw, j.Normalize, NormalizeLower)
 			}
@@ -617,7 +680,7 @@ func ValidateShapes(stages []Stage) error {
 				return fmt.Errorf("%s: %q is a stage — join it with from = %q (topic joins address topics)", jw, j.Topic, j.Topic)
 			}
 			if j.Field != "" {
-				if j.From == "" {
+				if j.From == "" && !j.Fan {
 					return fmt.Errorf("%s: field addresses a STAGE's emitted field — a topic join addresses the entity key; drop field, or fold the topic through a stage first", jw)
 				}
 				if len(j.On) != 1 {
@@ -627,10 +690,12 @@ func ValidateShapes(stages []Stage) error {
 					return err
 				}
 				space := j.Normalize + "\x00" + strings.Join(j.OnType, ",")
-				if prior, ok := fieldJoinSpaces[j.From+"\x00"+j.Field]; ok && prior != space {
+				if prior, ok := fieldJoinSpaces[j.From+"\x00"+j.Field]; ok && prior != space && !j.Fan {
 					return fmt.Errorf("%s: two field joins address %s[%s] with different normalize/onType — the synthesized re-key stage has ONE key space; declare them identically", jw, j.From, j.Field)
 				}
-				fieldJoinSpaces[j.From+"\x00"+j.Field] = space
+				if !j.Fan {
+					fieldJoinSpaces[j.From+"\x00"+j.Field] = space
+				}
 			}
 			if j.From != "" {
 				fi := IndexOf(stages, j.From)
@@ -682,6 +747,9 @@ func ValidateShapes(stages []Stage) error {
 					return fmt.Errorf("%s: a second join aliased %q — aliases are unique per stage", jw, j.As)
 				}
 				joinAliases[j.As] = true
+				if !j.Fan {
+					foldTimeAliases[j.As] = true
+				}
 			}
 			if j.Optional && j.As == "" {
 				return fmt.Errorf("%s: optional is only meaningful with as — an unnamed join only filters, and an optional filter is no filter", jw)
@@ -693,8 +761,8 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 		}
-		if len(joinAliases) > 0 {
-			if err := rejectFoldTimeAliasRefs(st, joinAliases, where); err != nil {
+		if len(foldTimeAliases) > 0 {
+			if err := rejectFoldTimeAliasRefs(st, foldTimeAliases, where); err != nil {
 				return err
 			}
 		}

@@ -245,6 +245,13 @@ func storeReferenceFixture() []Stage {
 			Reduce: "latest", WindowOrderBy: []string{"$.at::date desc"}, WindowTieBy: []string{"source()"},
 			Emit: []Emit{{Field: "kind", Expr: "source()"}, {Field: "at", From: "$.at"}},
 		},
+		// An optional fan join on a prior stage's field: the pairs' framed
+		// identities, the mdim/mpos/parent buckets, the null pair.
+		{
+			Name: "member-props", From: "proj-members", KeyPath: []string{"$.user", "coalesce($.pp.amount, 0)"},
+			Joins: []Join{{From: "props", Field: "$.pid", On: []string{"$.project"}, As: "pp", Optional: true, Fan: true}},
+			Emit:  []Emit{{Field: "amount", From: "$.pp.amount"}},
+		},
 	}
 }
 
@@ -295,7 +302,9 @@ func storeReferenceFeed(fold func(topic, key, payload string, gen uint64), sweep
 	fold("refunds", "r4", `{"acct":"J1","amount":5,"at":"2026-01-04"}`, 2) // joins props' J1 row in activity
 	sweep("refunds", 2)                                                    // r1, r2 retract; refund-notes r1 is another source's
 	fold("refund-notes", "n2", `{"acct":"j1","at":"2026-01-01"}`, 0)
-	del("refund-notes", "n2") // a tombstone retracts its own source's row only
+	del("refund-notes", "n2")                                      // a tombstone retracts its own source's row only
+	fold("proj-members", "pm1", `{"user":"u1","project":"J1"}`, 1) // pairs with props' J1 row
+	fold("proj-members", "pm2", `{"user":"u2","project":"J7"}`, 1) // no match: the null pair
 }
 
 // TestStoreReferenceFixtureCoversTheVocabulary makes the reference's coverage

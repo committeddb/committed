@@ -1,4 +1,4 @@
-"meta"	"fingerprint"	a138e4affa81fabc0cf68f967a03dd83647c8ab99eb756c934c944e74566b07e
+"meta"	"fingerprint"	8a0ac215e557219020782f8d9e76dc84f0ae2c3020ac5545fa2e4b81ecff5ecf
 "meta"	"format"	"\x00\x00\x00\x00\x00\x00\x00\x02"
 "meta"	"frontier"	"\x00\x00\x00\x00\x00\x00\x00\x0e"
 "stage:activity:in"	"\x02J1[\"props\",\"5\"]"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
@@ -121,6 +121,20 @@
 "stage:lines:rev:\x00fan"	"\x02r1\x02r1s2"	
 "stage:lines:rev:\x00fan"	"\x02r1\x02r1s3"	
 "stage:lines:src"	"\x02r1s1"	r1
+"stage:member-props:in"	"\n[\"u2\",\"0\"]\x03pm2\x00"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"pp\":null,\"project\":\"J7\",\"user\":\"u2\"}"
+"stage:member-props:in"	"\v[\"u1\",\"11\"]\x03pm1\x015"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"pp\":{\"amount\":11,\"pid\":\"J1\"},\"project\":\"J1\",\"user\":\"u1\"}"
+"stage:member-props:mdim:props"	"\x02J15"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
+"stage:member-props:mpos:props"	"5"	J1
+"stage:member-props:out"	"[\"u1\",\"11\"]"	{"amount":11}
+"stage:member-props:out"	"[\"u2\",\"0\"]"	{"amount":null}
+"stage:member-props:parent"	"pm1"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"project\":\"J1\",\"user\":\"u1\"}"
+"stage:member-props:parent"	"pm2"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"project\":\"J7\",\"user\":\"u2\"}"
+"stage:member-props:rev:\x00fan"	"\x03pm1\x03pm1\x015"	
+"stage:member-props:rev:\x00fan"	"\x03pm2\x03pm2\x00"	
+"stage:member-props:rev:\x00fanon:props"	"\x02J1pm1"	
+"stage:member-props:rev:\x00fanon:props"	"\x02J7pm2"	
+"stage:member-props:src"	"\x03pm1\x015"	["u1","11"]
+"stage:member-props:src"	"\x03pm2\x00"	["u2","0"]
 "stage:monthly:in"	"\x192026-01-01 00:00:00+00:00q1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":10,\"at\":\"2026-01-05T10:00:00Z\",\"payer\":\"Ada\"}"
 "stage:monthly:in"	"\x192026-01-01 00:00:00+00:00q2"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":3,\"at\":\"2026-01-20\",\"payer\":\"ada\"}"
 "stage:monthly:in"	"\x192026-02-01 00:00:00+00:00q3"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":-4,\"at\":\"2026-01-31 20:00:00-05:00\",\"payer\":\"Bea\"}"

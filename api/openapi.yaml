@@ -3320,7 +3320,9 @@ components:
               fanned:
                 type: integer
                 format: int64
-                description: Elements a forEach stage's fan produced (omitted for plain stages).
+                description: |
+                  Elements a forEach stage's fan produced, or the (input, matched row)
+                  pairs a fan join folded (omitted for plain stages).
               unkeyedDeletes:
                 type: integer
                 format: int64

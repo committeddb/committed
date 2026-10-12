@@ -903,6 +903,36 @@ set = [ { column = "total", from = "$.total" },
   bytewise-largest producer key's row, deterministically; with `field`,
   `normalize`/`onType` are declarable (a non-key field is not governed
   by the producer's key space).
+- **`fan = true` makes a named join multiply rows**, as SQL's join does
+  over a non-unique column — for many-to-many, where neither side can key
+  the result: memberships × group permissions = a user-permissions table.
+
+  ```toml
+  [[projection.stages]]
+  name    = "user-perms"
+  from    = "memberships"                     # { user_id, group_id }
+  joins   = [ { from = "group-perms", field = "$.group_id", on = "$.group_id", as = "perm", fan = true } ]
+  keyPath = [ "$.user_id", "$.perm.permission" ]
+  reduce  = "aggregate"                       # two groups granting one permission fold into one row
+  emit    = [ { field = "groups", expr = "string_agg($.group_id, ',' order by $.group_id)" } ]
+  ```
+
+  The stage's fold unit becomes the PAIR (input, matched row): one per
+  row whose `field` matches the input's `on` and passes the join's
+  `where`, so `keyPath`, `when`, and emits read the matched row as
+  `$.<as>.` (at fold time too: the row is part of the pair). An aggregate
+  folds over pairs, double counting included, as SQL's GROUP BY after a
+  join does. With `optional = true`, an input with no match keeps one pair
+  with a null alias (LEFT JOIN; key it with `coalesce`). A fan join needs
+  `as` and `field` (a join by key matches at most one row); `field` works
+  on a topic join when it fans (every entity carrying the value matches).
+  One fan join per stage, none beside `forEach`, and none on window or
+  liveSet stages — fan in a prior stage instead. A matched row arriving,
+  changing, or leaving updates one pair in every input referencing it,
+  and an input's change re-fans its own pairs; stats count pairs as
+  `fanned`. The output is the product of the sides, as in SQL: a value
+  shared by many rows on both sides (one group with thousands of members
+  and permissions) makes that many pairs.
 - **`reduce = "latest"` is argmax by a business field** (`orderBy` — never
   arrival order, so backfills converge with steady state), with `tieBy`
   a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose

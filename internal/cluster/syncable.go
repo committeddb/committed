@@ -608,8 +608,8 @@ type StageStat struct {
 	// InputsBySource splits inputs per listed source for a stage whose
 	// from is a list (UNION ALL); omitted for single-source stages.
 	InputsBySource map[string]int64 `json:"inputsBySource,omitempty"`
-	// Fanned counts elements produced by a forEach stage's fan (omitted
-	// for plain stages).
+	// Fanned counts elements produced by a forEach stage's fan, or the
+	// pairs a fan join folded (omitted for plain stages).
 	Fanned int64 `json:"fanned,omitempty"`
 	// UnkeyedDeletes counts delete-shaped inputs whose key could not
 	// resolve or render — LOST RETRACTIONS: the key each meant to kill

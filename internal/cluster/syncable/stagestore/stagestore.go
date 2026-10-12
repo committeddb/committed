@@ -23,6 +23,15 @@
 //	stage:<name>:ord         window stages: frame(partition)+sortKey+inKey -> order length
 //	stage:<name>:pos         window stages: inKey -> its current ord key
 //	stage:<name>:row         window stages: inKey -> the row's running state
+//	stage:<name>:mdim:<join> fan joins: frame(onKey)+producerKey -> the matched row
+//	stage:<name>:mpos:<join> fan joins: producerKey -> its current onKey
+//	stage:<name>:parent      fan joins: inKey -> the input, for re-fanning
+//
+// The mdim/mpos/parent buckets exist only for stages with a fan join: a
+// fan join resolves EVERY row matching a reference (mdim, scanned by the
+// onKey prefix; mpos finds a producer row's entry when it moves or
+// leaves), and a dimension change re-fans the inputs referencing it from
+// their retained copies (parent).
 //
 // The ord/pos/row buckets exist only for window stages (reduce =
 // "window"): ord walks a partition in business order (the sort key is an
@@ -691,4 +700,141 @@ func hasPrefix(k, prefix []byte) bool {
 		}
 	}
 	return true
+}
+
+func mdimBucket(stage, join string) []byte { return []byte("stage:" + stage + ":mdim:" + join) }
+func mposBucket(stage, join string) []byte { return []byte("stage:" + stage + ":mpos:" + join) }
+func parentBucket(stage string) []byte     { return []byte("stage:" + stage + ":parent") }
+
+// PutMDim stores one matched row of a fan join under the reference value
+// it answers (onKey) and its producer key.
+func (tx *Tx) PutMDim(stage, join string, onKey, producerKey, val []byte) error {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil {
+		return err
+	}
+	return b.Put(frameKey(onKey, producerKey), val)
+}
+
+// GetMDim reads one filed row of a fan join (nil if absent).
+func (tx *Tx) GetMDim(stage, join string, onKey, producerKey []byte) ([]byte, error) {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(frameKey(onKey, producerKey)), nil
+}
+
+// DeleteMDim removes one matched row of a fan join.
+func (tx *Tx) DeleteMDim(stage, join string, onKey, producerKey []byte) error {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(frameKey(onKey, producerKey))
+}
+
+// MDimsFor iterates every row a fan join matches for one reference value,
+// in producer-key order.
+func (tx *Tx) MDimsFor(stage, join string, onKey []byte, fn func(producerKey, val []byte) error) error {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	prefix := framePrefix(onKey)
+	c := b.Cursor()
+	for k, v := c.Seek(prefix); k != nil && hasPrefix(k, prefix); k, v = c.Next() {
+		if err := fn(k[len(prefix):], v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MDimsAll iterates every matched row of a fan join — the epoch sweep's
+// scan.
+func (tx *Tx) MDimsAll(stage, join string, fn func(onKey, producerKey, val []byte) error) error {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		onKey, producerKey, ok := splitFrame(k)
+		if !ok {
+			continue
+		}
+		if err := fn(onKey, producerKey, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PutMPos / GetMPos / DeleteMPos map a fan join's producer row to the
+// reference value it is filed under.
+func (tx *Tx) PutMPos(stage, join string, producerKey, onKey []byte) error {
+	b, err := tx.bucket(mposBucket(stage, join))
+	if err != nil {
+		return err
+	}
+	return b.Put(producerKey, onKey)
+}
+
+func (tx *Tx) GetMPos(stage, join string, producerKey []byte) ([]byte, error) {
+	b, err := tx.bucket(mposBucket(stage, join))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(producerKey), nil
+}
+
+func (tx *Tx) DeleteMPos(stage, join string, producerKey []byte) error {
+	b, err := tx.bucket(mposBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(producerKey)
+}
+
+// PutParent / GetParent / DeleteParent retain a fan-join stage's inputs,
+// which a dimension change re-fans.
+func (tx *Tx) PutParent(stage string, inKey, val []byte) error {
+	b, err := tx.bucket(parentBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(inKey, val)
+}
+
+func (tx *Tx) GetParent(stage string, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(parentBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(inKey), nil
+}
+
+func (tx *Tx) DeleteParent(stage string, inKey []byte) error {
+	b, err := tx.bucket(parentBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(inKey)
+}
+
+// ParentsAll iterates a fan-join stage's retained inputs — the epoch
+// sweep's scan.
+func (tx *Tx) ParentsAll(stage string, fn func(inKey, val []byte) error) error {
+	b, err := tx.bucket(parentBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		if err := fn(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }

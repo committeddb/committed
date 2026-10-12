@@ -92,6 +92,12 @@ type graphNode struct {
 	// mergeConsumers are the merge stages combining THIS stage's outputs
 	// as one aliased side of their tuples.
 	mergeConsumers []mergeRef
+	// mdimConsumers are the fan joins (of LATER stages) matching THIS
+	// stage's outputs by a field: every output is filed in their
+	// multi-match index.
+	mdimConsumers []dimRef
+	// fanJoin is the index of the stage's fan join in def.Joins (-1: none).
+	fanJoin int
 	// win is a window stage's runtime (nil for every other stage).
 	win *windowRuntime
 }
@@ -123,6 +129,10 @@ type Graph struct {
 	// dims routes topics consumed as JOIN DIMENSIONS: rows stored by
 	// entity key, dependents refolded on change (reverse-index fan-out).
 	dims map[string][]dimRef
+	// mdims routes topics consumed as FAN-join dimensions: rows filed by
+	// the join's field in its multi-match index, referencing inputs
+	// re-fanned on change.
+	mdims map[string][]dimRef
 	// OnDelta, when set, observes every stage's post-refold delta — the
 	// chaining terminal's feed (table sources consuming a stage). live=false
 	// is a retraction. Set per Sync call by the single worker goroutine.
@@ -133,7 +143,7 @@ type Graph struct {
 // topology.
 func BuildGraph(stages []Stage) *Graph {
 	stages = expandSynthetic(stages)
-	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}}
+	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}, mdims: map[string][]dimRef{}}
 	nodes := make([]*graphNode, len(stages))
 	// The graph owns a copy of the stage definitions (joins deep-copied):
 	// stage-join normalize is RESOLVED below by inheritance, and that
@@ -149,7 +159,7 @@ func BuildGraph(stages []Stage) *Graph {
 			// partitionBy and the shared fold path places each input.
 			owned[i].KeyPath = append([]string(nil), owned[i].PartitionBy...)
 		}
-		nodes[i] = &graphNode{def: &owned[i], joinFlows: make([]joinFlowCount, len(owned[i].Joins)), keyExprs: compileKeyParts(owned[i].KeyPath)}
+		nodes[i] = &graphNode{def: &owned[i], joinFlows: make([]joinFlowCount, len(owned[i].Joins)), keyExprs: compileKeyParts(owned[i].KeyPath), fanJoin: owned[i].fanJoin()}
 		if owned[i].isUnion() {
 			nodes[i].bySource = make(map[string]*atomic.Int64, len(owned[i].FromList))
 			for _, src := range owned[i].FromList {
@@ -187,6 +197,17 @@ func BuildGraph(stages []Stage) *Graph {
 		}
 		for j := range st.Joins {
 			jn := &st.Joins[j]
+			if jn.Fan {
+				// A fan join matches by its declared field, in its own
+				// key space (normalize/onType as declared, never inherited).
+				ref := dimRef{node: nodes[i], join: jn}
+				if producer, ok := g.byName[jn.From]; ok && jn.From != "" {
+					producer.mdimConsumers = append(producer.mdimConsumers, ref)
+				} else if jn.Topic != "" {
+					g.mdims[jn.Topic] = append(g.mdims[jn.Topic], ref)
+				}
+				continue
+			}
 			if jn.From != "" {
 				if producer, ok := g.byName[jn.From]; ok {
 					// A stage join INHERITS the joined stage's key space:
@@ -235,8 +256,8 @@ func expandSynthetic(sts []Stage) []Stage {
 			st.Joins = append([]Join(nil), st.Joins...)
 			for j := range st.Joins {
 				jn := &st.Joins[j]
-				if jn.Field == "" {
-					continue
+				if jn.Field == "" || jn.Fan {
+					continue // a fan join keeps every match: no collapsing re-key stage
 				}
 				name := jn.From + "[" + jn.Field + "]"
 				if !seen[name] {
@@ -302,7 +323,7 @@ func SyntheticLiftName(topic string, keyPath []string) string {
 // ConsumesTopic reports whether any stage reads this topic — as its
 // input or as a join dimension.
 func (g *Graph) ConsumesTopic(topic string) bool {
-	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0
+	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0 || len(g.mdims[topic]) > 0
 }
 
 // SweepEpochs applies a refresh-boundary marker for one topic: retained
@@ -315,6 +336,14 @@ func (g *Graph) ConsumesTopic(topic string) bool {
 func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirty Dirty) error {
 	for _, n := range g.byTopic[topic] {
 		st := n.def
+		if n.fanJoin >= 0 {
+			// A fan join's pairs carry their input's epoch; the retained
+			// inputs are swept, and each takes its pairs with it.
+			if err := g.sweepFanJoinInputs(tx, n, topic, marker, dirty); err != nil {
+				return err
+			}
+			continue
+		}
 		type stale struct{ outKey, inKey []byte }
 		var stales []stale
 		if err := tx.InputsAll(st.Name, func(outKey, inKey, val []byte) error {
@@ -361,6 +390,11 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 			if err := g.markDimDependents(tx, d, dk, dirty); err != nil {
 				return err
 			}
+		}
+	}
+	for _, d := range g.mdims[topic] {
+		if err := g.sweepMultiDims(tx, d, marker, dirty); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -425,6 +459,11 @@ func (g *Graph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, p
 			return err
 		}
 	}
+	for _, d := range g.mdims[topic] {
+		if err := g.putMultiDim(tx, d, inKey, payload, gen, dirty); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -441,6 +480,11 @@ func (g *Graph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte, d
 			return err
 		}
 		if err := g.markDimDependents(tx, d, dimKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range g.mdims[topic] {
+		if err := g.deleteMultiDim(tx, d, inKey, dirty); err != nil {
 			return err
 		}
 	}
@@ -475,6 +519,9 @@ func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, src string, inKey []
 	inKey = n.def.inputKey(src, inKey)
 	if n.def.hasFan() {
 		return g.foldFan(tx, n, src, inKey, payload, gen, dirty)
+	}
+	if n.fanJoin >= 0 {
+		return g.foldJoinFan(tx, n, src, inKey, payload, gen, dirty)
 	}
 	return g.foldOneInput(tx, n, src, inKey, payload, nil, gen, dirty)
 }
@@ -834,6 +881,9 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey 
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
+		if j.Fan {
+			continue // the pair carries its matched row; the fan's own index re-fans the input
+		}
 		if onKey := joinOnKey(j, data, parent); onKey != nil {
 			if err := tx.PutRev(st.Name, j.target(), onKey, outKey); err != nil {
 				return err
@@ -866,27 +916,35 @@ func (g *Graph) noteUnkeyedDelete(n *graphNode, keyPath string) {
 // fed refolds without it (possibly to deletion), and the delta cascades.
 func (g *Graph) foldDelete(tx *stagestore.Tx, n *graphNode, src string, inKey []byte, dirty Dirty) error {
 	inKey = n.def.inputKey(src, inKey)
+	if n.fanJoin >= 0 {
+		return g.unfanJoin(tx, n, inKey, dirty)
+	}
 	if n.def.hasFan() {
-		// The input's tombstone retracts every element it fanned.
-		st := n.def
-		var elems [][]byte
-		if err := tx.DependentsOf(st.Name, fanJoinName, inKey, func(elemIn []byte) error {
-			elems = append(elems, append([]byte(nil), elemIn...))
-			return nil
-		}); err != nil {
-			return err
-		}
-		for _, elemIn := range elems {
-			if err := g.foldDeleteInput(tx, n, elemIn, dirty); err != nil {
-				return err
-			}
-			if err := tx.DeleteRev(st.Name, fanJoinName, inKey, elemIn); err != nil {
-				return err
-			}
-		}
-		return nil
+		return g.retractElements(tx, n, inKey, dirty)
 	}
 	return g.foldDeleteInput(tx, n, inKey, dirty)
+}
+
+// retractElements retracts every element an input fanned (forEach, fan
+// arms, or a fan join's pairs) — the input's tombstone.
+func (g *Graph) retractElements(tx *stagestore.Tx, n *graphNode, inKey []byte, dirty Dirty) error {
+	st := n.def
+	var elems [][]byte
+	if err := tx.DependentsOf(st.Name, fanJoinName, inKey, func(elemIn []byte) error {
+		elems = append(elems, append([]byte(nil), elemIn...))
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, elemIn := range elems {
+		if err := g.foldDeleteInput(tx, n, elemIn, dirty); err != nil {
+			return err
+		}
+		if err := tx.DeleteRev(st.Name, fanJoinName, inKey, elemIn); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // foldDeleteInput retracts one retained input from a stage.
@@ -1010,6 +1068,11 @@ func (g *Graph) retractOutput(tx *stagestore.Tx, n *graphNode, outKey []byte, di
 			return err
 		}
 	}
+	for _, d := range n.mdimConsumers {
+		if err := g.deleteMultiDim(tx, d, outKey, dirty); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1046,6 +1109,11 @@ func (g *Graph) publishOutput(tx *stagestore.Tx, n *graphNode, outKey, out []byt
 	}
 	for _, m := range n.mergeConsumers {
 		if err := g.foldMergeSide(tx, m.node, m.alias, outKey, obj, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.mdimConsumers {
+		if err := g.putMultiDim(tx, d, outKey, obj, 0, dirty); err != nil {
 			return err
 		}
 	}
@@ -1169,7 +1237,7 @@ func joinOnKey(j *Join, obj, parent any) []byte {
 func (g *Graph) joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (any, error) {
 	named := false
 	for i := range st.Joins {
-		if st.Joins[i].As != "" {
+		if st.Joins[i].As != "" && !st.Joins[i].Fan {
 			named = true
 			break
 		}
@@ -1188,8 +1256,8 @@ func (g *Graph) joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		if j.As == "" {
-			continue
+		if j.As == "" || j.Fan {
+			continue // a fan join's matched row is already in the pair
 		}
 		scope[j.As] = nil
 		onKey := joinOnKey(j, obj, parent)
@@ -1214,7 +1282,7 @@ func (g *Graph) joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		if !j.Optional {
+		if !j.Optional || j.Fan {
 			continue
 		}
 		if scope[j.As] != nil {
@@ -1230,8 +1298,8 @@ func (g *Graph) inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (b
 	n := g.byName[st.Name]
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		if j.Optional {
-			continue // a LEFT lookup never gates membership; absence scopes as null (counted at lookup)
+		if j.Optional || j.Fan {
+			continue // a LEFT lookup never gates membership (counted at lookup); a fan join gated at fan time
 		}
 		// present: a dimension row exists at the input's On value AND
 		// matches the join's Where. A normal join requires it; an Absent
