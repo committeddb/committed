@@ -120,7 +120,7 @@ is tracking the source live. (`lag` is bytes behind the source; `phase` is
   every column 1:1, no per-column boilerplate. `credit` has a **composite key**
   `["movie_id", "billing"]` — many cast/crew per movie — so the rows don't collide.
 
-See [README § API tour](../README.md#api-tour) for the config shapes.
+See the [API tour](api-tour.md) for the config shapes.
 </details>
 
 ## 4. Build the read model — one projection

@@ -5,7 +5,7 @@ committed does with one: take a **census** of an existing table's payload
 shapes so you can draft a contract from evidence; **gate** direct proposals
 against the contract; or run a **tripwire** that lets divergent data commit
 and announces each new divergent shape to a topic you watch. The narrative
-of why these exist is in the [README](../README.md#the-shape-census-drafting-a-contract-from-the-data);
+of why these exist is in the [API tour](api-tour.md#the-shape-census-drafting-a-contract-from-the-data);
 this page is what each knob does.
 
 ## The shape census

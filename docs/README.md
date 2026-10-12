@@ -6,6 +6,11 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
 
 - [Quickstart](quickstart.md) — one `docker compose up` takes a normalized movie
   catalog to a single denormalized table you query with no joins.
+- [Running Committed](running.md) — the binary or the container, a single node
+  or a three-node cluster, and the `COMMITTED_*` variables that configure a node.
+- [API tour](api-tour.md) — a worked example for each endpoint: types and
+  entity kinds, proposals, schema validation, restatements, databases,
+  syncables, ingestables, and membership.
 - [Read models (SQL projections)](read-models.md) — fold CDC topics into
   current-state tables: rules, multi-source rows, aggregates, and enrichment.
 - [Writing a webhook receiver](webhook-receiver.md) — consume a topic over HTTP
