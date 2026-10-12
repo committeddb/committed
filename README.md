@@ -28,34 +28,12 @@ Committed is specifically NOT a databse designed for querying.
 
 ### Concepts
 
-- **[Type](docs/types.md)** — schema/metadata for a topic's payload. Identified by ID;
-  supports explicit-migration versioning.
-- **[Proposal](docs/proposals.md)** — a write *request*: one or more entities (each tagged with
-  a Type ID) offered to the log together. You propose a Proposal; consensus
-  decides its fate. It has no place in the order yet.
-- **[Actual](docs/actuals.md)** — a committed fact: the Proposal that consensus ordered and
-  wrote to the log at a fixed Index. You propose Proposals, you *sync*
-  Actuals — a Syncable is handed Actuals (in Index order), never Proposals.
-- **[Database](docs/databases.md)** — connection config for an external SQL syncable that syncables
-  reference (MySQL or PostgreSQL; ingestables carry their own connection
-  string inline).
+- **[Type](docs/types.md)** — schema/metadata for a topic's payload. Identified by ID; supports explicit-migration versioning.
+- **[Proposal](docs/proposals.md)** — a write *request*: one or more entities (each tagged with a Type ID) offered to the log together. You propose a Proposal; consensus decides its fate. It has no place in the order yet.
+- **[Actual](docs/actuals.md)** — a committed fact: the Proposal that consensus ordered and wrote to the log at a fixed Index. You propose Proposals, you *sync* Actuals — a Syncable is handed Actuals (in Index order), never Proposals.
+- **[Database](docs/databases.md)** — connection config for an external SQL syncable that syncables reference.
 - **[Ingestable](docs/ingestables.md)** — pulls data into the log from an external source.
-  Today: PostgreSQL via logical replication (pgoutput), MySQL via
-  binlog, SQL Server via Change Tracking (every edition — no CDC
-  licensing requirement).
-- **[Syncable](docs/syncables.md)** — projects committed Actuals out to an external system,
-  either as faithful per-table mirrors (`sql`) or by **transforming and
-  folding topics into the denormalized shape you query** —
-  multi-topic BFF rows, collection aggregates, cross-topic enrichment
-  (`projection`, the primary read-model pattern; see
-  [docs/read-models.md](docs/read-models.md)). Destinations today:
-  SQL (MySQL/PostgreSQL), HTTP, Apache Iceberg on S3 (`iceberg` — a
-  current-state warehouse landing zone for Athena/Spectrum/S3 Tables;
-  see [docs/operations/iceberg-syncable.md](docs/operations/iceberg-syncable.md))
-  — and the cluster itself (`loopback`),
-  which derives a new topic from a source topic so one transform serves
-  N dumb consumers ([docs/read-models.md](docs/read-models.md)
-  § Derived topics).
+- **[Syncable](docs/syncables.md)** — projects committed Actuals out to an external system, either as faithful per-table mirrors (`sql`) or by transforming and folding topics into the denormalized shape you query — multi-topic BFF rows, collection aggregates, cross-topic enrichment.
 
 ## Operations
 
