@@ -125,7 +125,7 @@ must discard a failed copy, which can contain a durable prefix. The helper has n
 persisted completion record, digest comparison, activation step, or conversion CLI.
 Tests compare copied bytes, reopen both backends, and continue committed replay.
 
-See the [adapter documentation](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
+See the [legacy copy experiment](../../internal/cluster/db/eventlog/README.md#legacy-copy-experiment)
 for operation contracts and focused tests.
 
 ## Measurements and validation
