@@ -41,6 +41,8 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
 
 ## Design and guarantees
 
+- [Architecture](architecture.md) — how the pieces fit, the node's storage
+  layout, and the design references below.
 - [Consistency model](consistency.md) — what committed guarantees for writes and
   reads, and what it deliberately doesn't.
 - [On-disk and wire compatibility](api-compatibility.md) — the forward/backward

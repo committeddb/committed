@@ -24,6 +24,8 @@ Committed is specifically NOT a databse designed for querying.
 
 [Developing Committed](docs/development.md)
 
+[Architecture](docs/architecture.md)
+
 [API tour](docs/api-tour.md)
 
 ### Concepts
@@ -37,29 +39,7 @@ Committed is specifically NOT a databse designed for querying.
 
 ## Operations
 
-### Storage layout
-
-A Committed node's data directory looks like this:
-
-```
-<datadir>/
-├── raft/
-│   ├── log/         # raft consensus log; bounded (10GB / 1hr)
-│   └── state/       # HardState + ConfState
-├── events/          # permanent event log; infinite retention
-└── metadata/
-    └── bbolt.db     # types, databases, syncables, applied index
-```
-
-The permanent event log under `events/` is the canonical record of
-every write; syncables read from it, and it is never compacted.
-`raft/log/` is consensus transport only and is compacted aggressively.
-See [`docs/event-log-architecture.md`](docs/event-log-architecture.md)
-for the rationale.
-
 ### Runbooks
-
-Operational guides live in [`docs/operations/`](docs/operations/):
 
 - [Ingestables](docs/ingestables.md) — point ingest at your own Postgres,
   MySQL, or SQL Server: the source-side settings, what committed creates for
