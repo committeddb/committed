@@ -4,8 +4,8 @@ How committed persists data on disk, why it is split across four stores, and the
 design decisions behind that split. This is background for anyone reading the
 storage internals — not a how-to. For the *semantics* of the log (entity kinds,
 apply determinism) see [event-log-architecture.md](event-log-architecture.md);
-for recovery procedures see [operations/rebuild.md](operations/rebuild.md) and
-[operations/backup.md](operations/backup.md).
+for recovery procedures see [operations/rebuild.md](../operations/rebuild.md) and
+[operations/backup.md](../operations/backup.md).
 
 ## The four stores
 
@@ -115,7 +115,7 @@ The store-pair invariants today:
 Genuine corruption (a checksum failure or a torn mid-log record, distinct from a
 plausible one-fsync-behind crash) is *not* recoverable in place: it fails loudly
 and the node is rebuilt from a healthy peer — see
-[operations/rebuild.md](operations/rebuild.md).
+[operations/rebuild.md](../operations/rebuild.md).
 
 The lesson generalizes: the fix for a cross-store crash window is an **explicit,
 tested recovery invariant**, not merging the stores. The most robust way to keep
@@ -153,5 +153,5 @@ this.)
 Windows and macOS for development and the CLI, but **Windows is not a supported
 production node** at this point — for example, the disk-usage watcher is
 unavailable there (no `statfs`; see
-[disk-limits.md](operations/disk-limits.md)). Run production nodes on Linux with
+[disk-limits.md](../operations/disk-limits.md)). Run production nodes on Linux with
 a crash-consistent filesystem.

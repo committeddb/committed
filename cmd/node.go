@@ -454,7 +454,7 @@ docs/operations/ it points to.`,
 		// Default (linearizable) GETs run a raft ReadIndex round-trip; this
 		// bounds how long one waits for quorum confirmation before returning
 		// 503, so a partitioned node fails fast instead of holding the
-		// connection until the write timeout. See docs/consistency.md.
+		// connection until the write timeout. See docs/architecture/consistency.md.
 		if d, ok := parseDurationEnv("COMMITTED_HTTP_READ_INDEX_TIMEOUT"); ok {
 			httpOpts = append(httpOpts, http.WithReadIndexTimeout(d))
 		}

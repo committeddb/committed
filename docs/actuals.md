@@ -45,4 +45,4 @@ Entities in one Actual are applied together: a SQL syncable applies them in
 one destination transaction.
 
 For how the log is stored and replicated, see
-[event-log-architecture.md](event-log-architecture.md).
+[event-log-architecture.md](architecture/event-log-architecture.md).

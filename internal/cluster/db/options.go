@@ -72,7 +72,7 @@ type options struct {
 	// compactMaxSize is the on-disk raft log size in bytes that, once
 	// exceeded, triggers a CreateSnapshot + Compact at the end of the
 	// current Ready iteration. 0 disables the size limb of the
-	// compaction policy. See docs/event-log-architecture.md §
+	// compaction policy. See docs/architecture/event-log-architecture.md §
 	// "Compaction policy".
 	compactMaxSize uint64
 	// compactMaxAge is the wall-clock time-since-last-compaction that,
@@ -150,7 +150,7 @@ type options struct {
 	// PII originals are still in the permanent event log). The interval
 	// amortizes the O(N) rewrite over batches of deletes and bounds the
 	// erasure SLA. 0 disables the automatic scheduler entirely (the manual
-	// POST /v1/scrub lever still works). See docs/event-log-architecture.md
+	// POST /v1/scrub lever still works). See docs/architecture/event-log-architecture.md
 	// § "Right-to-be-forgotten / deletes". Tests shorten it via
 	// WithScrubInterval; production leaves the default.
 	scrubInterval time.Duration
@@ -201,7 +201,7 @@ type options struct {
 const defaultSyncStuckThreshold = 30 * time.Second
 
 // DefaultCompactMaxSize is the production default: compact the raft
-// log when it grows past 10 GiB. See docs/event-log-architecture.md §
+// log when it grows past 10 GiB. See docs/architecture/event-log-architecture.md §
 // "Compaction policy".
 const DefaultCompactMaxSize uint64 = 10 * 1024 * 1024 * 1024
 

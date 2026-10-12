@@ -39,7 +39,7 @@ func (s *Storage) newBoltTmpPath(boltPath, prefix string) string {
 // permanent event log and time-series store are NOT in the snapshot —
 // they live on every node's local disk and are too large to ship
 // through raft. This is the "metadata snapshot install" shape from
-// docs/event-log-architecture.md § "Severe lag": a follower that
+// docs/architecture/event-log-architecture.md § "Severe lag": a follower that
 // receives this snapshot and whose permanent event log is already
 // current finishes catchup via normal raft replication; a follower too
 // far behind tripls the storage invariant and fatal-exits.

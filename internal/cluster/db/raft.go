@@ -46,7 +46,7 @@ type Raft struct {
 	leaderState  *LeaderState
 	tickInterval time.Duration
 	// compactMaxSize and compactMaxAge implement the "10GB or 1hr"
-	// policy described in docs/event-log-architecture.md §
+	// policy described in docs/architecture/event-log-architecture.md §
 	// "Compaction policy". maybeCompact fires when either threshold is
 	// crossed; 0 disables that limb. Both zero disables automatic
 	// compaction entirely.
@@ -264,7 +264,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// so a partitioned-then-rejoining node cannot disrupt the cluster
 		// by force-stepping-down a healthy leader with an inflated term.
 		// Recommended by Ongaro's thesis §9.6 and used by every production
-		// etcd-raft deployment. See docs/event-log-architecture.md
+		// etcd-raft deployment. See docs/architecture/event-log-architecture.md
 		// § "PreVote and election timeout".
 		PreVote: true,
 		// CheckQuorum is PreVote's required companion for the DIRECTIONAL
@@ -417,7 +417,7 @@ func (n *Raft) reconcileTransportFromMembership() {
 // raft's c.Applied SUPPRESSES its re-delivery. So a swallowed write error would
 // let the watermark move past a peer URL that is now permanently absent — the
 // exact durability-watermark violation that produced confstate-lost-in-crash-
-// window (docs/event-log-architecture.md § "The central invariant", Face 2). The
+// window (docs/architecture/event-log-architecture.md § "The central invariant", Face 2). The
 // peer URL is out-of-band, re-delivery-suppressed state, so it owes strategy (2):
 // write it atomically with the applied index, or refuse to advance the watermark
 // past a lost write. Crashing does the latter — a restart finds the applied index
@@ -857,7 +857,7 @@ func (n *Raft) serveChannels() {
 			}
 
 			// Storage invariant: P_local == R_local. See
-			// docs/event-log-architecture.md § "The central invariant"
+			// docs/architecture/event-log-architecture.md § "The central invariant"
 			// (Face 1 — the storage highwatermark). A snapshot that would
 			// advance the raft side past the event log is caught up from
 			// a peer before it is saved (above), so a violation here is a
@@ -1114,7 +1114,7 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 }
 
 // checkStorageInvariant enforces P_local == R_local after every Ready
-// iteration. See docs/event-log-architecture.md § "The storage
+// iteration. See docs/architecture/event-log-architecture.md § "The storage
 // invariant" for the full rationale. Briefly:
 //
 //   - P_local is storage.EventIndex() — the highest raft index this
@@ -1157,7 +1157,7 @@ func (n *Raft) checkStorageInvariant() {
 
 // maybeCompact trims the raft log up to a safe point when either
 // compactMaxSize or compactMaxAge is exceeded — the "10GB or 1hr"
-// policy described in docs/event-log-architecture.md § "Compaction
+// policy described in docs/architecture/event-log-architecture.md § "Compaction
 // policy". Safety constraints from the same doc:
 //
 //   - Compact point must be ≤ this node's permanent event log
@@ -1275,7 +1275,7 @@ func (n *Raft) maybeCompact() {
 // A successful restore leaves appliedIndex at snap.Metadata.Index. If
 // this node's permanent event log is behind that index, the Ready
 // loop's checkStorageInvariant fatal-exits at the end of the current
-// iteration — by design. See docs/event-log-architecture.md §
+// iteration — by design. See docs/architecture/event-log-architecture.md §
 // "Severe lag — v1 manual rebuild". A RestoreSnapshot error here is
 // also fatal; a half-applied snapshot leaves the node in a hybrid
 // state that is worse than crashing and letting an operator rebuild.

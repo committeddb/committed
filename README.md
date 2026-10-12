@@ -41,9 +41,6 @@ Committed is specifically NOT a databse designed for querying.
 
 ### Runbooks
 
-- [Ingestables](docs/ingestables.md) — point ingest at your own Postgres,
-  MySQL, or SQL Server: the source-side settings, what committed creates for
-  you, and the failures you're most likely to hit.
 - [Cluster membership](docs/operations/membership.md) — add, remove, and grow
   nodes safely (learner → catch up → promote), and read cluster state.
 - [Disk limits](docs/operations/disk-limits.md) — how the cluster protects
@@ -51,6 +48,24 @@ Committed is specifically NOT a databse designed for querying.
   an incident.
 - [Stuck syncables](docs/operations/stuck-syncables.md) — spot a syncable that's
   wedged or falling behind, skip a bad record, and replay it after a fix.
+- [Metrics & observability](docs/operations/metrics.md) — turn on metrics (OTLP
+  push, no scrape endpoint), bridge to Prometheus, and the full metric catalog.
+- [Zone-pinned syncables](docs/operations/zones.md) — keep sync egress inside a
+  zone, and what a strict pin does when its node is down.
+- [Performance envelope](docs/operations/performance.md) — the
+  write/apply/catch-up rates to plan around, and how to re-measure them on your
+  hardware.
+- [Memory](docs/operations/memory.md) — what drives a node's memory, and how to
+  size and bound it.
+- [Safe mode](docs/operations/safe-mode.md) — boot with workers held to break a
+  crashloop: inspect and delete/fix the offending config over the API, then
+  restart normally.
+- [Right-to-be-forgotten erasure](docs/operations/rtbf.md) — issue subject
+  deletes, expedite the physical scrub, verify completion per node, and what can
+  delay the last identifier's erasure.
+- [Logging & personal data](docs/operations/logging.md) — what committed writes
+  to its logs, why node logs carry customer data by design, and bounding log
+  retention to your right-to-be-forgotten obligations.
 - [Rebuilding a node](docs/operations/rebuild.md) — a node that fell behind
   catches up by itself; replace one whose disk or state cannot be trusted.
 - [Backup and restore](docs/operations/backup.md) — archive a node, stopped or

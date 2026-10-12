@@ -6,7 +6,7 @@ peer — and how. Falling behind is **not** one of those times: a node whose
 permanent event log is behind the cluster catches up by itself (below).
 
 Background: the relevant design lives in
-[`docs/event-log-architecture.md`](../event-log-architecture.md) — read the
+[`docs/architecture/event-log-architecture.md`](../architecture/event-log-architecture.md) — read the
 "Catch-up taxonomy" and "The central invariant" sections first.
 
 ## Falling behind is handled automatically

@@ -202,6 +202,6 @@ docker compose down -v
 
 - [docs/read-models.md](read-models.md) — the full projection / aggregate /
   enrichment / fan-out reference.
-- [docs/event-log-architecture.md](event-log-architecture.md) — why the log is
+- [docs/architecture/event-log-architecture.md](architecture/event-log-architecture.md) — why the log is
   the source of truth and the read model is disposable.
-- [docs/consistency.md](consistency.md) — the consistency model.
+- [docs/architecture/consistency.md](architecture/consistency.md) — the consistency model.

@@ -12,7 +12,7 @@ disposable.
 | `sql` | A MySQL or PostgreSQL table: a keyed mirror, or a keyless history table | [SQL mirrors and history tables](#sql-mirrors-and-history-tables-sql) (below) |
 | `projection` | A current-state SQL table folded from one or more topics | [read-models.md](read-models.md) |
 | `http` | A webhook | [webhook-receiver.md](webhook-receiver.md) |
-| `iceberg` | An Apache Iceberg table on S3 | [iceberg-syncable.md](operations/iceberg-syncable.md) |
+| `iceberg` | An Apache Iceberg table on S3 | [iceberg-syncable.md](iceberg-syncable.md) |
 | `loopback` | A derived topic in the same cluster | [loopback.md](loopback.md) |
 
 SQL kinds write to a [database](databases.md) config by name (`db = "..."`).
@@ -216,7 +216,7 @@ created the table. A worker reads the version before serving, and if a
 newer committed writes rows differently than the note says, the syncable
 stops and tells you how to bring the table forward instead of mixing two
 renderings in one table (see
-[api-compatibility.md](api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+[api-compatibility.md](architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
 
 Whether committed created the table decides what a `DELETE` does. The
 rule is the one committed applies everywhere it touches your systems: it

@@ -70,8 +70,8 @@ Two properties make a rolling upgrade safe:
   reads everything its predecessor wrote, for data dirs created on
   **0.7.3-beta or later** (the supported floor as of 0.8.0; an older dir must
   be recreated, not upgraded — see
-  [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)). This is a contract, documented
-  in [api-compatibility.md → On-disk and wire compatibility](../api-compatibility.md#on-disk-and-wire-compatibility);
+  [api-compatibility.md](../architecture/api-compatibility.md#log-entities-protobuf)). This is a contract, documented
+  in [api-compatibility.md → On-disk and wire compatibility](../architecture/api-compatibility.md#on-disk-and-wire-compatibility);
   read it before upgrading, especially the **one-way transitions** list.
 
 If a node ever *can't* read its on-disk state it fails to start with a
@@ -89,7 +89,7 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 
 1. **Read the release notes** for every version between your current one
    and the target, and the [on-disk compatibility
-   contract](../api-compatibility.md#on-disk-and-wire-compatibility).
+   contract](../architecture/api-compatibility.md#on-disk-and-wire-compatibility).
    Confirm the upgrade does not cross a major version (`/v1` → `/v2`) or
    trigger a one-way transition you can't roll back from.
 2. **Confirm the cluster is healthy first.** `GET /v1/membership` on any
@@ -138,7 +138,7 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 >
 > **It also applies to any 0.7.2 → 0.7.3+ multi-node upgrade**, with a sharper
 > failure mode: 0.7.3 encodes every committed entity in a typed envelope
-> (see [api-compatibility.md → Log entities](../api-compatibility.md#log-entities-protobuf)),
+> (see [api-compatibility.md → Log entities](../architecture/api-compatibility.md#log-entities-protobuf)),
 > which a 0.7.2 node decodes **without error as an empty entity** and silently
 > misapplies — no crash-loop warns you. Never run a mixed 0.7.2/0.7.3 cluster:
 > stop all nodes, replace every binary, restart. Single-node deployments and
@@ -149,7 +149,7 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 > type (the ingest terminal-park record) a 0.7.3 node can't resolve, so it is a
 > full-stop for the same reason. 0.7.4 also lands the **system-type compat
 > namespace** (see
-> [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)): from
+> [api-compatibility.md](../architecture/api-compatibility.md#log-entities-protobuf)): from
 > 0.7.4 forward a new *ungated* internal type — skippable coordination /
 > observability — no longer forces a full-stop, because a node that doesn't know
 > it skips it rather than crashing; only a *gated* (must-understand) type does.
@@ -220,7 +220,7 @@ After the last node:
 > **Feature activation is automatic.** A release may carry features that
 > stay dormant until *every* node is upgraded — anything an older peer
 > would mishandle is held back by the [cluster feature
-> level](../api-compatibility.md#cluster-feature-level-semantic-compatibility-gate)
+> level](../architecture/api-compatibility.md#cluster-feature-level-semantic-compatibility-gate)
 > until the whole cluster advertises support, then activates on its own.
 > You don't enable anything; just finish the roll. The corollary: don't
 > run half-upgraded indefinitely (a stalled roll leaves those features
@@ -295,7 +295,7 @@ or shows a regression — roll that node back the same way you upgraded it:
 directory, wait for `/ready`. The previous binary can read the state the
 new one wrote, **except across a one-way transition** — those are listed
 in the [on-disk compatibility
-contract](../api-compatibility.md#on-disk-and-wire-compatibility) and are
+contract](../architecture/api-compatibility.md#on-disk-and-wire-compatibility) and are
 the reason you check it before upgrading. If you've crossed one, rollback
 of that node is a [rebuild from a healthy peer](rebuild.md) still running
 the old binary, not an in-place binary swap.
@@ -307,7 +307,7 @@ same quorum rule applies in reverse.
 
 - **0.8.0 closes the config vocabulary.** A config key the parser does not
   read — a typo, a misplaced field — is now rejected at POST instead of
-  being silently ignored (see [api-compatibility.md](../api-compatibility.md#config-vocabulary-is-closed)).
+  being silently ignored (see [api-compatibility.md](../architecture/api-compatibility.md#config-vocabulary-is-closed)).
   A *stored* config that carries such a key parks on the upgraded binary
   when its worker is rebuilt (the status and the log name the key: "not
   admissible under this binary"); re-POST it without the key. The setting
@@ -388,7 +388,7 @@ same quorum rule applies in reverse.
 - **0.8.0 leaves a note in each SQL destination** saying which version of
   committed wrote its rows: one row per projected table in a small
   `committed__destinations` table in the destination database (see
-  [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+  [api-compatibility.md](../architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
   Nothing stops on this upgrade: existing tables get the note the first
   time 0.8.0 touches them. The note also records whether committed created
   the table, and a table that exists before the upgrade is recorded as one
@@ -409,7 +409,7 @@ same quorum rule applies in reverse.
   — finish the roll rather than parking the cluster mid-upgrade.
 - **Feature coordination is automatic, not manual.** Committed *does* gate a
   semantically-incompatible feature on the [cluster feature
-  level](../api-compatibility.md#cluster-feature-level-semantic-compatibility-gate):
+  level](../architecture/api-compatibility.md#cluster-feature-level-semantic-compatibility-gate):
   it stays dormant until every node advertises support, then activates on its
   own (see the callout under *Verifying the upgrade*). You never run a manual
   version-bump barrier — just finish the roll. (Introducing the mechanism itself

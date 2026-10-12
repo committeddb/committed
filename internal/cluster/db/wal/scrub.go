@@ -19,7 +19,7 @@ import (
 
 // This file implements the RTBF scrubber: physical removal of already-delete-
 // proposed entities from the permanent event log. The mechanism is documented
-// in docs/event-log-architecture.md § "Right-to-be-forgotten / deletes".
+// in docs/architecture/event-log-architecture.md § "Right-to-be-forgotten / deletes".
 //
 // Flow:
 //   - A Scrub command commits carrying an upper-bound raft index B (the freeze

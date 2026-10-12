@@ -1591,7 +1591,7 @@ func TestAdversarial_DiskFull(t *testing.T) {
 // Invariants protected:
 //
 //   - Storage invariant (P_local == R_local) holds on every node after
-//     the follower rejoins, per docs/event-log-architecture.md
+//     the follower rejoins, per docs/architecture/event-log-architecture.md
 //     § "The central invariant" (Face 1 — the storage highwatermark). If
 //     the invariant breaks on any node, checkStorageInvariant fatal-exits
 //     the Ready loop — every node's logger routes Fatal through a test hook
@@ -1599,7 +1599,7 @@ func TestAdversarial_DiskFull(t *testing.T) {
 //
 //   - Determinism invariant — every node's permanent event log is byte-
 //     identical for the full applied prefix after convergence, per
-//     docs/event-log-architecture.md § "Determinism requirement". The
+//     docs/architecture/event-log-architecture.md § "Determinism requirement". The
 //     caught-up follower's events/ must hash to the same value as the
 //     two peers that stayed online.
 //

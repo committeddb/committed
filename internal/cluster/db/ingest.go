@@ -459,7 +459,7 @@ func (db *DB) newIngestWorker(id string, i cluster.Ingestable) *workerHandle {
 			// (P_local==R_local). Every index <= commit is committed and therefore
 			// guaranteed to apply (or the node fatals), so this returns once the
 			// position reflects all committed data — restoring the effectively-once
-			// ingest contract (docs/event-log-architecture.md) at the one point it
+			// ingest contract (docs/architecture/event-log-architecture.md) at the one point it
 			// can be: before the re-read. It sits here, at the shared freeze exit,
 			// because every ingestExitFreeze path has the same hazard. Fix #1 keeps
 			// the wait short (apply is no longer scrub-starved); a longer wait is the
@@ -882,7 +882,7 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						// commit index before the supervisor re-reads the
 						// position, so a committed batch is never re-emitted into
 						// the permanent event log — the effectively-once contract
-						// (docs/event-log-architecture.md). The drain is central
+						// (docs/architecture/event-log-architecture.md). The drain is central
 						// there because every freeze path shares this hazard.
 						//
 						// ingress.stop (from the defer above) cancels the

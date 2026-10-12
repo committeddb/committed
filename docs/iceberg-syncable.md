@@ -103,7 +103,7 @@ upstream with a `loopback` derived topic and land that instead).
   property flips to `false`, so a later DELETE leaves it too. The table
   also carries `committed.rendering-version`, saying which version of
   committed wrote its rows (see
-  [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings));
+  [api-compatibility.md](architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings));
   if a later committed renders rows differently, the syncable stops rather
   than mixing renderings. The fix is the rebuild pattern above — a second
   syncable into a new table, swap readers when it converges — or delete

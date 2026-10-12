@@ -7,7 +7,7 @@ add or remove can lose a committed entry or split the cluster, regardless
 of timing or failures during the change.
 
 Background on the consensus layer lives in
-[`docs/event-log-architecture.md`](../event-log-architecture.md). The
+[`docs/architecture/event-log-architecture.md`](../architecture/event-log-architecture.md). The
 first-boot peer set is described in the `node` command help
 (`COMMITTED_PEERS`).
 

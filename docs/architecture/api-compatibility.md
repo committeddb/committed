@@ -102,7 +102,7 @@ rather than half applied, which is the safe direction during a rolling
 upgrade. Releases before 0.8.0 accepted and ignored, so the upgrade *to*
 0.8.0 is the one roll during which new vocabulary must wait until every
 member is upgraded — see
-[upgrade.md](operations/upgrade.md#notes-and-limits).
+[upgrade.md](../operations/upgrade.md#notes-and-limits).
 
 ## Operational endpoints are not API surface
 
@@ -131,14 +131,14 @@ change around the array.
 The HTTP contract above is for clients. This section is the contract for
 **operators**: what a node's persisted state and a peer's wire format
 guarantee across an upgrade, which is what makes the [rolling-upgrade
-procedure](operations/upgrade.md) and its rollback safe.
+procedure](../operations/upgrade.md) and its rollback safe.
 
 The guarantee, within a major line: **a newer binary reads everything an
 older binary wrote** (forward compatibility), and — except across the
 one-way transitions listed at the end — an older binary reads what a
 newer one wrote (backward compatibility, i.e. rollback). A node that
 cannot read its on-disk state does not run on it; it fails to start with
-`ErrCorruptEntry` (see [operations/rebuild.md](operations/rebuild.md)).
+`ErrCorruptEntry` (see [operations/rebuild.md](../operations/rebuild.md)).
 
 **Wire-decodable is not the same as semantically compatible.** "An older
 binary can *decode* the bytes" (proto3 ignores unknown fields) does not
@@ -191,7 +191,7 @@ describes, so it moves, drops, and restores with them — restore the
 database from a backup and the note from that backup comes along, still
 correct. The created-by-committed half is what a `DELETE` consults: it
 drops the table committed created and leaves the one it attached to (see
-[syncables.md](syncables.md#history-tables)).
+[syncables.md](../syncables.md#history-tables)).
 
 Every time a worker starts serving a syncable it reads the note first:
 
@@ -256,7 +256,7 @@ Two boundaries the gate cannot cover:
   *cannot* be gated — it is the bootstrap. A node still on a pre-mechanism binary
   **fatal-exits** when it applies that announcement, so upgrading a multi-node
   cluster *into* the first mechanism-carrying release (0.7.2) must be done
-  all-nodes-at-once, not rolling. See [upgrade.md](operations/upgrade.md). ("Safe
+  all-nodes-at-once, not rolling. See [upgrade.md](../operations/upgrade.md). ("Safe
   in both directions" holds only *between* releases that already carry the
   mechanism.)
 - **Rolling back past the mechanism is one-way** — a pre-mechanism binary meets
@@ -325,7 +325,7 @@ The envelope's own introduction is the one deliberate exception to step 2: at
 without a feature gate (gating would have threaded cluster state into
 `Proposal.Marshal`, which is a pure function used far from the db), making
 0.7.2 → 0.7.3 a **full-stop upgrade** (see
-[upgrade.md](operations/upgrade.md)). Every later variant follows the recipe
+[upgrade.md](../operations/upgrade.md)). Every later variant follows the recipe
 and stays rolling-safe.
 
 New entity *types* (a new system type ID) are additive on the wire, but an old
@@ -414,7 +414,7 @@ the old binary cannot read:
   writes a framed (`0xC0…`) entry, a pre-checksum binary — which doesn't
   know the magic byte — can't read it. Upgrading *to* a checksum-aware
   release is therefore one-way; rolling a node back to a pre-checksum
-  binary means a [rebuild](operations/rebuild.md), not a binary swap.
+  binary means a [rebuild](../operations/rebuild.md), not a binary swap.
 - **A frame-version or snapshot-format bump**, when one ships, is called
   out as one-way in that release's notes.
 - **Restoring a backup archive onto an older binary.** The manifest records
@@ -426,7 +426,7 @@ the old binary cannot read:
   pre-0.8.0 binary opens as a partial log rather than failing). The
   downgrade door is a restore on the newer binary followed by `committed
   wal decompress`, not an archive an older binary accepts — see
-  [backup.md](operations/backup.md#version-compatibility).
+  [backup.md](../operations/backup.md#version-compatibility).
 - **Rolling back below a feature whose entries are already on your log.**
   The cluster feature level keeps a feature dormant until every member can
   apply it, but once it activates its entries are committed permanently.
@@ -449,12 +449,12 @@ the old binary cannot read:
   fields are unset) and silently misapplies it — worse than a fatal-exit.
   Rolling back means a rebuild; and the forward upgrade must be **full-stop**,
   not rolling, for the same reason (see
-  [upgrade.md](operations/upgrade.md)).
+  [upgrade.md](../operations/upgrade.md)).
 - **Rolling back below 0.8.0 with compressed event-log segments on disk.**
   0.8.0 compresses sealed segments at rest. A pre-0.8.0 binary does not
   recognize them and — worse than a refusal — silently opens a partial log
   beginning at the first uncompressed segment. Run `committed wal
-  decompress` on the stopped node first ([upgrade.md](operations/upgrade.md#rolling-back));
+  decompress` on the stopped node first ([upgrade.md](../operations/upgrade.md#rolling-back));
   nothing in the old binary can be made to guard this.
 - **Rolling back past the first committed restatement (0.8.0).** The
   restatement record is a gated system type: a pre-0.8.0 binary
@@ -467,7 +467,7 @@ the old binary cannot read:
   lets an older owner re-ingest rows that a keyless destination keeps
   twice. Both are gated on the cluster feature level, so neither door opens
   before the whole cluster is on 0.8.0. Both are described in
-  [upgrade.md](operations/upgrade.md#rolling-back).
+  [upgrade.md](../operations/upgrade.md#rolling-back).
 - **A raft transport `protocolVersion` bump.** The peer transport
   currently accepts only an exact protocol-version match, so a bump is a
   flag-day: it partitions a half-upgraded cluster until every node is on

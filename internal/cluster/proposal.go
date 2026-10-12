@@ -66,13 +66,13 @@ func (v logEntityWireView) isDelete() bool {
 // supported floor of 0.7.3-beta — the pre-envelope FLAT fields (<= 0.7.2-beta,
 // tags 2/3/5/6, an era no deployment ever ran) and the long-removed Timestamp
 // (pre-v0.5, tag 4) are reserved, so their bytes land here as unknowns — see
-// docs/api-compatibility.md. Unknown tags INSIDE a known variant's message are
+// docs/architecture/api-compatibility.md. Unknown tags INSIDE a known variant's message are
 // still fine (adding a field to LogRow stays add-only); only LogEntity-level
 // unknowns trip this.
 func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	if u := le.ProtoReflect().GetUnknown(); len(u) > 0 {
 		return logEntityWireView{}, fmt.Errorf(
-			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.3-beta (recreate it; see docs/api-compatibility.md)",
+			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.3-beta (recreate it; see docs/architecture/api-compatibility.md)",
 			le.Type.GetID())
 	}
 	switch b := le.GetBody().(type) {
@@ -95,7 +95,7 @@ func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 		// field tags were removed from the schema when the floor rose to
 		// 0.7.3-beta, so their bytes trip the unknown-wire-fields guard above.)
 		return logEntityWireView{}, fmt.Errorf(
-			"log entity of type %s carries no body variant: not a legal encoding for any supported era (floor 0.7.3-beta; see docs/api-compatibility.md)",
+			"log entity of type %s carries no body variant: not a legal encoding for any supported era (floor 0.7.3-beta; see docs/architecture/api-compatibility.md)",
 			le.Type.GetID())
 	}
 }

@@ -4,7 +4,7 @@ How to erase a data subject from committed and everything it feeds: issue the
 deletes, let the machinery propagate and physically scrub, verify completion
 with an end condition you can poll, and know what can delay it. This is the
 operator how-to; the design (why the log can be both permanent and erasable)
-is in [event-log-architecture.md](../event-log-architecture.md#right-to-be-forgotten--deletes).
+is in [event-log-architecture.md](../architecture/event-log-architecture.md#right-to-be-forgotten--deletes).
 
 Erasure is three stages, the first yours and the rest committed's:
 

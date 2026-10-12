@@ -33,15 +33,15 @@ rebuilt by replaying the log.
 
 ## Design references
 
-- [Event-log architecture](event-log-architecture.md) — why the permanent log
+- [Event-log architecture](architecture/event-log-architecture.md) — why the permanent log
   is separate from the raft log, entity kinds, apply determinism, and
   right-to-be-forgotten erasure.
-- [Storage architecture](storage-architecture.md) — the four stores, why raft
+- [Storage architecture](architecture/storage-architecture.md) — the four stores, why raft
   persistence is two logs, and the crash-recovery invariants that hold them
   together.
-- [Read consistency](consistency.md) — what committed guarantees for reads and
+- [Read consistency](architecture/consistency.md) — what committed guarantees for reads and
   writes.
-- [API compatibility](api-compatibility.md) — the on-disk and wire
+- [API compatibility](architecture/api-compatibility.md) — the on-disk and wire
   compatibility contract that makes rolling upgrades safe.
-- [Experimental event storage](event-segment-design.md) — the segment-log
+- [Experimental event storage](architecture/event-segment-design.md) — the segment-log
   backend and its current limits.

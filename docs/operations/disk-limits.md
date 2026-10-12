@@ -17,7 +17,7 @@ bigger volume (see [rebuild.md](rebuild.md)).
 Request-size caps and HTTP timeouts live in
 [http-limits.md](http-limits.md); compaction (what actually frees
 disk) is covered in
-[event-log-architecture.md](../event-log-architecture.md).
+[event-log-architecture.md](../architecture/event-log-architecture.md).
 
 ## Event-log compression (0.8.0+)
 
@@ -123,7 +123,7 @@ unreachable). This
 only nudges the existing compaction trigger to free space; it does
 *not* delete WAL segments or event-log data on its own — that remains
 compaction's job (see
-[event-log-architecture.md](../event-log-architecture.md)). The
+[event-log-architecture.md](../architecture/event-log-architecture.md)). The
 watcher is unavailable on Windows (no `statfs`); there it disables
 itself and the node stays fully writable.
 
@@ -257,7 +257,7 @@ verdict or the node-local fallback).
 
 1. **`warn` on any node** — schedule disk expansion; nothing is
    rejected yet. Check compaction is keeping up
-   ([event-log-architecture.md](../event-log-architecture.md)).
+   ([event-log-architecture.md](../architecture/event-log-architecture.md)).
 2. **One node `critical`/`full`, cluster still admitting** — the
    cluster routed around it. Expand the node's disk or replace it via
    [rebuild.md](rebuild.md). Do **not** remove it from the membership

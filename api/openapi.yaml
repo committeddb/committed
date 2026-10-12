@@ -23,7 +23,7 @@ info:
     old prefix is supported for at least one further release. Operational
     endpoints (`/health`, `/ready`, `/version`, `/openapi.yaml`, `/docs`)
     are infrastructure, not API surface, and stay unprefixed. See
-    `docs/api-compatibility.md` for the full contract.
+    `docs/architecture/api-compatibility.md` for the full contract.
 
     ## Authentication
 
@@ -60,7 +60,7 @@ info:
     from the leader returns `503` rather than stale data. Pass
     `?consistency=stale` on any GET to skip that confirmation and serve
     local state immediately, accepting that a lagging node may answer with
-    out-of-date data. See `docs/consistency.md` for the full model.
+    out-of-date data. See `docs/architecture/consistency.md` for the full model.
 servers:
   - url: /
     description: Served from the same origin as this spec
@@ -792,7 +792,7 @@ paths:
         from the node's AWS credential chain / catalog token),
         `iceberg.namespace`, `iceberg.table`, optional `iceberg.warehouse`
         and `[iceberg.props]` FileIO properties (s3.endpoint …). See
-        docs/operations/iceberg-syncable.md.
+        docs/iceberg-syncable.md.
 
         `loopback` derives a topic INSIDE the cluster: it consumes
         `loopback.topic`, applies `[[loopback.mappings]]` (`jsonPath` →
@@ -1884,7 +1884,7 @@ paths:
         every other write, and idempotent. Returns 202 once the scrub is
         submitted and confirmed by consensus.
 
-        See docs/event-log-architecture.md for what the scrub removes (and the
+        See docs/architecture/event-log-architecture.md for what the scrub removes (and the
         delete tombstone it deliberately retains).
       operationId: scrub
       responses:
@@ -2499,7 +2499,7 @@ components:
         reflects every write that completed before it — at the cost of one
         heartbeat round-trip. `stale` skips that confirmation and serves
         local state immediately; a node partitioned from the leader may
-        then return out-of-date data. See docs/consistency.md.
+        then return out-of-date data. See docs/architecture/consistency.md.
       schema:
         type: string
         enum: [linearizable, stale]

@@ -57,7 +57,7 @@ func appendFrame(dst, payload []byte) []byte {
 // checksum, an unknown version, a torn header, or bytes with no frame at
 // all. Unframed bytes can only be corruption or a pre-v0.5-beta log, which
 // sits far below the supported data-dir floor (0.7.3-beta; see
-// docs/api-compatibility.md) — never trusted content.
+// docs/architecture/api-compatibility.md) — never trusted content.
 //
 // The returned payload aliases raw (no copy); callers that retain it past
 // the next Read on a NoCopy log must copy. Today every caller unmarshals

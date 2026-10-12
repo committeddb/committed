@@ -209,7 +209,7 @@ func New(d *db.DB, opts ...Option) *HTTP {
 
 		// Every API endpoint lives under /v1 so a future breaking change
 		// can bump the prefix instead of breaking existing clients. See
-		// docs/api-compatibility.md for the versioning contract.
+		// docs/architecture/api-compatibility.md for the versioning contract.
 		//
 		// The four config resources share a generic handler set (see
 		// config_handlers.go); the route table stays explicit so

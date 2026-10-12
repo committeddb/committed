@@ -63,7 +63,7 @@ seams: `Syncable`, `Ingestable`, `Database`, and their parsers.
 | `make test/ci` | Build, then the full unit suite with `-race` and coverage. |
 | `make test/integration` | Every file tagged `integration`: the HTTP server and the MySQL, Postgres, and SQL Server dialects against real containers, with `-race`. |
 | `make test/cdc` | The end-to-end CDC harness (`e2e/cdc`): a real Postgres and a real committed binary, asserting the exact proposal stream for scripted source changes. |
-| `make test/upgrade` | Rolling-upgrade checks against previously released binaries (`e2e/upgrade`). |
+| `make test/upgrade` | Rolling-upgrade checks against previously released binaries (`e2e/upgrade`); see [how its fixtures are captured](../e2e/upgrade/testdata/README.md). |
 | `make test/multinode` | A real three-node cluster: crash recovery and catch-up (`e2e/multinode`). |
 | `make test/backup` | Backup and restore round-trip with the real binary (`e2e/backup`). |
 | `make test/adversarial` | The Raft adversarial suite (partitions, leader flaps, slow followers, full disks), `-race -count=20`. |
@@ -113,11 +113,12 @@ hand; change the interface or the `.proto` and regenerate.
   (`internal/lint/redaction`) that fails on a bypass; route the text through
   that choke point rather than working around a finding.
 - **Dependencies.** After changing dependencies, run `make
-  third-party-notices` to regenerate `THIRD_PARTY_NOTICES.md`; a test fails
+  third-party-notices` to regenerate [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md); a test fails
   when it drifts.
 - **Forked dependencies.** `go-mysql` and `tidwall/wal` are patched forks under
-  `third_party/forked/`. Each carries a `README.committeddb.md` describing the
-  patch; bumping one means re-applying the patch, not just changing the
+  `third_party/forked/`. Each carries a README describing the patch
+  ([go-mysql](../third_party/forked/go-mysql/README.committeddb.md),
+  [tidwall/wal](../third_party/forked/tidwall-wal/README.committeddb.md)); bumping one means re-applying the patch, not just changing the
   version.
 - **Settings are documented.** Every `COMMITTED_*` variable the binary reads
   must be named in the README or under `docs/`; a test enforces it.

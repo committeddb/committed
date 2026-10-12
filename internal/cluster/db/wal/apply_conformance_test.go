@@ -19,7 +19,7 @@ import (
 // separate ticket fixes that and adds its red case here); this harness is the
 // permanent guard so a future ordering change can't silently diverge the two
 // paths again. See the batch-apply-ordering-conformance ticket and
-// docs/event-log-architecture.md § companion rules.
+// docs/architecture/event-log-architecture.md § companion rules.
 
 // buildEntries wraps each entity as its own single-entity proposal at ascending
 // raft indexes starting at 2 (index 1 is reserved for a type registration the
@@ -212,7 +212,7 @@ func TestReaderWatermark_DoesNotSurfaceUnappliedEntry(t *testing.T) {
 // TestApplyConformance_OutOfBandStateCrashReplay extends the harness to the
 // OUT-OF-BAND applied state produced by raft's conf-change apply (raft.go),
 // which runs outside the ApplyCommittedBatch entity path. It pins the
-// durability-watermark rule (docs/event-log-architecture.md) for both
+// durability-watermark rule (docs/architecture/event-log-architecture.md) for both
 // strategies: the ConfState is staged before the batch and written ATOMICALLY
 // with the applied index (strategy 2); the peer URL is a keyed put written
 // before the index advances and idempotent on replay (strategy 1). Both must

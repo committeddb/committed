@@ -229,7 +229,7 @@ type LogEntity struct {
 	// body variant. Do not add flat fields — add a new body variant instead:
 	// wire-level add-only (an old reader sees body unset), with its EMISSION
 	// feature-gated (db.featureEnabled) so the variant is only committed once
-	// every member can apply it. See docs/api-compatibility.md.
+	// every member can apply it. See docs/architecture/api-compatibility.md.
 	//
 	// generation semantics (LogRow.generation / LogRefresh.generation): the
 	// ingest reconciling-refresh epoch — a per-ingestable monotonic counter
@@ -1826,7 +1826,7 @@ func (x *LogTypeMigrationDeadLetter) GetMessage() string {
 // delete-proposed at a raft index <= B. Pinning B inside the committed
 // command makes every replica remove the identical set, so the rewritten
 // event logs stay byte-identical across nodes (the rsync-rebuild and
-// determinism-test contract). See docs/event-log-architecture.md
+// determinism-test contract). See docs/architecture/event-log-architecture.md
 // § "Right-to-be-forgotten / deletes".
 type LogScrub struct {
 	state         protoimpl.MessageState
@@ -1955,7 +1955,7 @@ func (x *LogNodeAPIURL) GetApiURL() string {
 // system type must not reach an old node, a refresh-boundary marker must not
 // reach a node that can't interpret it). Upsert keyed by node id; the apply
 // path stores it in the memberVersions bucket. See node_version.go and
-// docs/api-compatibility.md.
+// docs/architecture/api-compatibility.md.
 type LogNodeVersion struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

@@ -143,7 +143,7 @@ direction:
   that would reject *every* entry stays transient, so the worker wedges visibly
   and an operator fixes the cause instead of real data being silently shunted.
   (See the Syncable classification rule, mirrored by the SQL dialects and the
-  [webhook receiver](webhook-receiver.md).)
+  [webhook receiver](../webhook-receiver.md).)
 
 **One evolution gate: add-only, behind the cluster feature level.** New durable
 state and new on-disk/wire fields are *added*, never repurposed, and a
@@ -164,7 +164,7 @@ deciding question is always "if I am wrong here, what breaks, and can I recover?
 |-----------|-----------------|
 | One source of truth | Architecture overview · Indexing · Right-to-be-forgotten · Metadata GC |
 | Central invariant / four disciplines | The central invariant · Determinism · Compaction policy |
-| Two boundary contracts | Ingest dedup design · Syncable classification · [webhook-receiver.md](webhook-receiver.md) |
+| Two boundary contracts | Ingest dedup design · Syncable classification · [webhook-receiver.md](../webhook-receiver.md) |
 | One evolution gate | [api-compatibility.md](api-compatibility.md) · Implementation phases |
 | Fail loud, proportional to stakes | The central invariant (fatal-exit) · Commit ambiguity on leadership change |
 
@@ -666,7 +666,7 @@ After the erase, the subject's identifier has no on-disk copy in the
 permanent event log at all. Backups taken **before** the erase still contain
 it — erasure from backups remains the backup-retention process's
 responsibility (the same shared-responsibility split as
-[backups](operations/backup.md) and [logs](operations/logging.md)).
+[backups](../operations/backup.md) and [logs](../operations/logging.md)).
 
 **Triggers.** A `Scrub` command is proposed two ways: automatically by the
 leader on a cadence (`COMMITTED_SCRUB_INTERVAL`, default 1h), and manually
@@ -1094,7 +1094,7 @@ it.)
 ## Rebuild procedure
 
 The operator-facing runbook lives at
-[`docs/operations/rebuild.md`](operations/rebuild.md) — that is the
+[`docs/operations/rebuild.md`](../operations/rebuild.md) — that is the
 canonical reference for anyone actually rebuilding a node, and it covers
 the failure modes ("when to rebuild" / "when not to rebuild"), the
 procedure, and verification. Design-level summary:
@@ -1217,7 +1217,7 @@ see what was deliberately deferred vs. accidentally forgotten.
 - **Read fan-out coordination** — resolved: a syncable's owner is a pure
   function of replicated state (the leader, or the lowest member announcing
   its pinned zone), and the HTTP layer routes owner-local verbs to it. See
-  [zones.md](operations/zones.md).
+  [zones.md](../operations/zones.md).
 - **Custom permanent log format**: when to write our own format with
   sparse indexing, segment GC, etc. Will be driven by performance metrics
   from production.

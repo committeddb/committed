@@ -26,7 +26,7 @@ It preserves original protobuf bytes, including unknown fields.
 The experimental tidwall backend stores dense physical sequences internally and
 translates stable IDs through its own record envelope. Its CURRENT/generation
 container differs from production `events/`; it does not open or convert that
-layout automatically. The [shared contract documentation](../internal/cluster/db/eventlog/README.md)
+layout automatically. The [shared contract documentation](../../internal/cluster/db/eventlog/README.md)
 describes both backends and their conformance tests.
 
 ## Segmented storage behavior
@@ -63,13 +63,13 @@ reduce its size.
 
 The implemented binary layouts and limits are documented in:
 
-- [Segment format and compression](../pkg/segmentlog/README.md).
-- [Active-tail format and recovery](../pkg/segmentlog/tail-format.md).
-- [Catalog metadata and publication](../pkg/segmentlog/bbolt-experiment.md).
-- [Managed lifecycle](../pkg/segmentlog/log-lifecycle.md).
-- [Sealed-range rewriting](../pkg/segmentlog/sealed-rewriting.md).
-- [Whole-log rewriting](../pkg/segmentlog/whole-log-rewriting.md).
-- [Reclamation](../pkg/segmentlog/reclamation.md).
+- [Segment format and compression](../../pkg/segmentlog/README.md).
+- [Active-tail format and recovery](../../pkg/segmentlog/tail-format.md).
+- [Catalog metadata and publication](../../pkg/segmentlog/bbolt-experiment.md).
+- [Managed lifecycle](../../pkg/segmentlog/log-lifecycle.md).
+- [Sealed-range rewriting](../../pkg/segmentlog/sealed-rewriting.md).
+- [Whole-log rewriting](../../pkg/segmentlog/whole-log-rewriting.md).
+- [Reclamation](../../pkg/segmentlog/reclamation.md).
 
 ## Publication, recovery, and current limits
 
@@ -90,7 +90,7 @@ The segmented managed log serializes reads, append, sealing, rewrite, and
 reclamation. Rollover and catalog publication are synchronous, but rollover does
 not convert or compress the old append file. It has no background preparation, pinned
 backup views, or decoded-block cache. The bbolt catalog uses bounded metadata
-queries and active-tail recovery; see [the experiment](../pkg/segmentlog/bbolt-experiment.md).
+queries and active-tail recovery; see [the experiment](../../pkg/segmentlog/bbolt-experiment.md).
 Rewrite publication verifies new or changed sealed references and
 the active tail, reusing prior verification for exact unchanged immutable references.
 Managed rollover separates physical preparation from metadata publication through
@@ -125,18 +125,18 @@ must discard a failed copy, which can contain a durable prefix. The helper has n
 persisted completion record, digest comparison, activation step, or conversion CLI.
 Tests compare copied bytes, reopen both backends, and continue committed replay.
 
-See the [adapter documentation](../internal/cluster/db/wal/segment_eventlog_experiment.md)
+See the [adapter documentation](../../internal/cluster/db/wal/segment_eventlog_experiment.md)
 for operation contracts and focused tests.
 
 ## Measurements and validation
 
-The [rewrite churn experiment](../internal/cluster/db/wal/segment_churn_experiment.md)
+The [rewrite churn experiment](../../internal/cluster/db/wal/segment_churn_experiment.md)
 compares the legacy tidwall copy primitive with segmented rewriting for synthetic
 no-op, isolated, and scattered scrub workloads in plain and zstd modes. It checks
 survivor-byte equivalence and measures retained files, replacement bytes, and new
 content hashes. These measurements are not production backup-cost estimates.
 
-[Compression benchmarks](../pkg/segmentlog/compression-benchmarks.md) report
+[Compression benchmarks](../../pkg/segmentlog/compression-benchmarks.md) report
 synthetic size, CPU, and allocation measurements. Shared backend conformance tests
 cover sparse IDs, strict append batches, rewrite, erased append progress,
 reopen/reclaim, ownership, and failure recovery. Adapter tests cover visibility,

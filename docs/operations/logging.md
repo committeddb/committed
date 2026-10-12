@@ -67,7 +67,7 @@ The vector is narrow — logs are not a copy of your data:
 
 A right-to-be-forgotten delete is scrubbed from the event log within the scrub
 window, and the short-lived consensus buffer self-clears (~1 hour — see
-[event-log architecture](../event-log-architecture.md)). **The scrubber does not
+[event-log architecture](../architecture/event-log-architecture.md)). **The scrubber does not
 reach your logs.** A value written to a log line *before* an erasure request stays
 in whatever store you forwarded that line to, exactly like a [backup](backup.md)
 taken before the delete — committed cannot reach into your log pipeline to remove

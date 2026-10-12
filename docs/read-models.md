@@ -1360,7 +1360,7 @@ accepts the row.
 
 - [Quickstart](quickstart.md) — a working four-topic `movie_card` read model
   (spine + contributor + aggregate + lookup) end to end.
-- [docs/event-log-architecture.md](event-log-architecture.md) — why the log is
+- [docs/architecture/event-log-architecture.md](architecture/event-log-architecture.md) — why the log is
   the source of truth and the read model is disposable.
 - [docs/operations/rebuild.md](operations/rebuild.md) and
   [docs/operations/stuck-syncables.md](operations/stuck-syncables.md) —

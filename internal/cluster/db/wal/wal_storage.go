@@ -268,7 +268,7 @@ type Storage struct {
 	// value after, which a bump before the change could not guarantee.
 	entryLogEpoch atomic.Uint64
 	// eventLog is the permanent event log — the "forever" tier described
-	// in docs/event-log-architecture.md. ApplyCommitted mirrors every
+	// in docs/architecture/event-log-architecture.md. ApplyCommitted mirrors every
 	// committed raft entry into it, keyed by raft index. Unlike EntryLog,
 	// eventLog is never compacted: it is the canonical store that
 	// syncables read from, and the one a rebuild rsync covers.

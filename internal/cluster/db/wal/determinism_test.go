@@ -16,7 +16,7 @@ import (
 
 // TestApplyDeterminism is the load-bearing regression test for the
 // determinism contract documented in
-// docs/event-log-architecture.md § "Determinism requirement". Three
+// docs/architecture/event-log-architecture.md § "Determinism requirement". Three
 // fresh wal.Storage instances are constructed on disjoint temp dirs,
 // the SAME raft entries are applied to each in the same order, and
 // every bbolt bucket's contents are required to match exactly across

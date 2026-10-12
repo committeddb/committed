@@ -21,7 +21,7 @@ import (
 // The pre-namespace built-in types (random UUIDs, no prefix) are grandfathered:
 // every current binary compiles them in, so they always resolve via the registry
 // and never take the unknown path. Only types minted after the namespace shipped
-// carry the prefix. See docs/api-compatibility.md.
+// carry the prefix. See docs/architecture/api-compatibility.md.
 
 const (
 	// reservedSystemStrPrefix is the fixed 112-bit marker (32 chars including
