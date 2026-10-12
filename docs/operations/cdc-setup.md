@@ -436,14 +436,30 @@ plugin.
 
 ### What committed creates for you
 
-On its first streaming connection committed runs, idempotently:
+On its first streaming connection committed creates, idempotently:
 
-- `CREATE PUBLICATION <publication> FOR TABLE <tables>` — only the watched tables
-  are in the publication, so the ingest never sees writes to other tables
-  (including a downstream projection's own destination table).
+- the **publication**, `CREATE PUBLICATION <publication> FOR TABLE <tables>
+  WITH (publish_via_partition_root = true)` (the option on PostgreSQL 13 and
+  later; see [Partitioned tables](#partitioned-tables)). Only the watched
+  tables are in it, so the ingest never sees writes to other tables
+  (including a downstream projection's own destination table). committed
+  records that it owns the publication in the publication's comment, naming
+  the ingestable's slot.
 - the logical replication **slot** (`pgoutput`).
 
-You don't create either by hand.
+You don't create either by hand. committed keeps a publication it owns in
+step with the config: a table added to `tables` is added to the publication
+(and its existing rows backfilled), and a table removed from `tables` is
+removed from it. Deleting the ingestable drops the publication.
+
+If the `publication` option names a publication that already exists and
+committed didn't create, committed treats it as yours: it adds the watched
+tables to it, but never removes a table and never drops the publication.
+Changes to your other tables in it are skipped, logged once at Info.
+
+A publication owned by another ingestable (another slot) is refused: the
+ingestable stops with an error naming the owning slot. Give each ingestable
+its own publication.
 
 ### Configuration
 
@@ -507,6 +523,31 @@ To feed **several topics** from this one ingestable — one slot and publication
 a whole database — see
 [Multiple topics from one ingestable](#multiple-topics-from-one-ingestable-all-sql-engines).
 
+### Partitioned tables
+
+Watch a partitioned table by its **root**: `tables = ["mt_events"]`, not its
+partitions. The snapshot reads every partition through the root, and the
+change stream reports every partition's changes under the root's name, so
+a partition created later (Marten creates one per tenant, for example) is
+covered with no config change. This needs PostgreSQL 13 or later.
+
+- **Key coverage.** A partitioned table's `REPLICA IDENTITY` does not reach its
+  partitions: each partition, including ones created later, sends a
+  `DELETE`'s key under its own replica identity, which by default is the
+  primary key. So `primaryKey` must be covered by the root's `PRIMARY KEY`,
+  which every partition carries; `REPLICA IDENTITY FULL` on the root does not
+  help, and committed refuses the config if the key isn't covered.
+- **Keys that repeat across partitions.** When the primary key includes the
+  partition key (Postgres requires it to) and a column repeats across
+  partitions, as with a per-tenant sequence, set `primaryKey` to the full key,
+  for example `primaryKey = ["seq_id", "tenant_id"]`.
+- **Rows that move between partitions.** An `UPDATE` that changes the partition
+  key arrives as a delete of the old row followed by an insert of the new
+  one, in one transaction.
+- **A single partition** can be watched on its own, by its own name. Watching
+  a partition together with its root is refused, since the root already
+  covers it.
+
 ### Lag and the slot's disk cost
 
 For Postgres, `lag` is real: committed reads it in bytes from
@@ -515,8 +556,8 @@ the slot.
 
 The flip side: **a replication slot retains WAL until its consumer acknowledges
 it.** While committed is running this is bounded (it acks continuously), and
-deleting an ingestable through the API drops its slot and publication for you —
-best-effort, on the owning node, via the ingestable's teardown. The risk is a
+deleting an ingestable through the API drops its slot (and its publication, when
+committed created it) for you — best-effort, on the owning node, via the ingestable's teardown. The risk is a
 **hard-stopped** committed: it acks nothing and never runs teardown, so its slot
 keeps pinning WAL on the source and the source's disk grows without bound until
 it fills. Two consequences:
@@ -538,6 +579,18 @@ it fills. Two consequences:
   IDENTITY FULL` or point `primaryKey` at the real PK.
 - **"permission denied" creating the publication.** The role doesn't own the
   tables. Grant ownership or use a superuser for setup.
+- **Ingest stopped, "belongs to the ingestable using replication slot".** The
+  `publication` option names a publication another ingestable owns. Give this
+  ingestable its own publication and re-POST it.
+- **Ingest stopped, "no watched table matches them".** The publication carries a
+  table this ingestable doesn't watch, and committed stopped before
+  acknowledging its changes rather than drop them. Either watch the table and
+  re-POST, or remove it from the publication (`ALTER PUBLICATION … DROP TABLE`)
+  and re-POST. If the table is a partition of a watched partitioned table, the
+  publication lacks `publish_via_partition_root`: set it with `ALTER
+  PUBLICATION … SET (publish_via_partition_root = true)`, re-POST, and
+  re-snapshot the ingestable, since that partition's earlier changes were never
+  captured.
 - **Source disk filling up.** A slot with no live consumer (committed stopped) is
   pinning WAL — restart committed or drop the slot.
 - **`lag` not dropping to 0 on an idle source.** With no new writes the slot's

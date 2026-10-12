@@ -14,7 +14,7 @@ same, and its on-disk state is reused in place.
 
 Follow the rolling binary-upgrade procedure below; no configuration changes.
 0.8.2 raises the cluster feature level to 3 for one change, which activates
-once every node runs 0.8.2:
+once every node runs 0.8.2; the PostgreSQL change below needs no feature level:
 
 - **SQL Server date and time rendering:** `date`, `time`, and the zone-less
   datetime types render by declared type instead of as RFC 3339 instants
@@ -23,6 +23,13 @@ once every node runs 0.8.2:
   destinations; entries already in the log keep the old renderings, so
   budget for one re-snapshot per SQL Server ingestable and make consumers
   accept both shapes. MySQL and PostgreSQL ingestables are unaffected.
+- **PostgreSQL publications** (no feature level; active on each node as it
+  upgrades): committed now records ownership of the publication it creates
+  (see [cdc-setup.md](cdc-setup.md#what-committed-creates-for-you)). An
+  existing ingestable adopts its publication on its first connection after the
+  upgrade, and from then on removes tables no longer in `tables` from it. A
+  change that arrives for a table in the publication that no watched table
+  matches now stops the ingestable instead of being skipped.
 - **Backups:** an archive taken on 0.8.2 records feature level 3, which a
   0.8.1 binary refuses to restore.
 
