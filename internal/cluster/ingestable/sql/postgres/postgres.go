@@ -208,6 +208,50 @@ func (d *PostgreSQLDialect) Preflight(config *sql.Config) error {
 			return err
 		}
 	}
+	return checkPartitionOverlap(ctx, db, pgCfg.tables)
+}
+
+// checkPartitionOverlap rejects watching a partition together with one of its
+// ancestors. The publication reports the partition's changes under the
+// topmost published ancestor, so the partition's own topic would receive
+// nothing from the stream while its snapshot duplicated rows the ancestor's
+// snapshot already read.
+func checkPartitionOverlap(ctx context.Context, db *gosql.DB, tables []string) error {
+	watched := make(map[uint32]string, len(tables))
+	for _, t := range tables {
+		var oid uint32
+		if err := db.QueryRowContext(ctx, `SELECT $1::regclass::oid`, t).Scan(&oid); err != nil {
+			return fmt.Errorf("resolve table %q: %w", t, err)
+		}
+		watched[oid] = t
+	}
+	for _, t := range tables {
+		rows, err := db.QueryContext(ctx, `SELECT relid::oid FROM pg_partition_ancestors($1::regclass) WHERE relid <> $1::regclass`, t)
+		if err != nil {
+			return fmt.Errorf("read partition ancestors of %q: %w", t, err)
+		}
+		var ancestor string
+		for rows.Next() {
+			var oid uint32
+			if err := rows.Scan(&oid); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if a, ok := watched[oid]; ok && ancestor == "" {
+				ancestor = a
+			}
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return err
+		}
+		if ancestor != "" {
+			return fmt.Errorf("ingest source table %q is a partition of %q, which this ingestable also watches: "+
+				"its changes arrive as %q's, so watching both duplicates its rows; remove %q from tables",
+				t, ancestor, ancestor, t)
+		}
+	}
 	return nil
 }
 
@@ -304,11 +348,25 @@ func checkReplicaIdentity(ctx context.Context, db *gosql.DB, table string, prima
 	fix := fmt.Sprintf("set the table's REPLICA IDENTITY to carry the key "+
 		"(e.g. `ALTER TABLE %s REPLICA IDENTITY FULL`) or add a PRIMARY KEY on the configured column(s)", table)
 
-	var ident string
+	var ident, kind string
 	if err := db.QueryRowContext(ctx,
-		`SELECT relreplident FROM pg_class WHERE oid = $1::regclass`, table,
-	).Scan(&ident); err != nil {
+		`SELECT relreplident, relkind FROM pg_class WHERE oid = $1::regclass`, table,
+	).Scan(&ident, &kind); err != nil {
 		return fmt.Errorf("read replica identity of %q: %w", table, err)
+	}
+
+	// A partitioned table logs nothing itself: each partition logs a DELETE's
+	// old row under its OWN replica identity, and the root's never reaches the
+	// partitions (existing or created later). A DEFAULT partition published via
+	// a FULL root even arrives flagged as a full old row with every non-key
+	// column NULL, so a key relying on FULL would bind the tombstone to NULL
+	// silently. The PRIMARY KEY is the one key every partition carries, present
+	// and future, so it alone counts.
+	if kind == "p" {
+		ident = "d"
+		fix = fmt.Sprintf("%s is partitioned, so its REPLICA IDENTITY does not reach its partitions "+
+			"(each partition, including ones created later, logs its own); "+
+			"include the configured column(s) in its PRIMARY KEY, or set primaryKey to the PRIMARY KEY columns", table)
 	}
 
 	switch ident {
@@ -1189,6 +1247,12 @@ func publicationNamesArg(publication string) string {
 // Table names are quoted via quoteTable (not quoteIdent) so schema-qualified
 // entries like "public.orders" become "public"."orders" — a schema-qualified
 // reference — instead of one literal identifier with a dot in it.
+//
+// The publication publishes via the partition root (PostgreSQL 13+): without
+// it pgoutput reports a change to a partitioned table under the partition's
+// name, which no watched table matches, so every streamed change to the table
+// would be dropped. A partition watched on its own still reports as itself —
+// the option names the topmost PUBLISHED ancestor.
 func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig) ([]string, error) {
 	quoted := make([]string, len(pgCfg.tables))
 	for i, t := range pgCfg.tables {
@@ -1196,6 +1260,9 @@ func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig
 	}
 	tableList := strings.Join(quoted, ", ")
 	create := fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quoteIdent(pgCfg.publication), tableList)
+	if serverMajor(conn.ParameterStatus("server_version")) >= 13 {
+		create += " WITH (publish_via_partition_root = true)"
+	}
 	if _, err := conn.Exec(ctx, create).ReadAll(); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
 			return nil, err
@@ -1220,6 +1287,21 @@ func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig
 	// branch does the full snapshot; if the slot somehow already exists, these
 	// are treated as newly-added and backfilled.
 	return pgCfg.tables, nil
+}
+
+// serverMajor returns the major version from a server_version parameter
+// ("16.4 (Debian 16.4-1.pgdg120+1)", "13.2", "17beta1"), or 0 when it has
+// none — an unknown version takes the conservative path.
+func serverMajor(version string) int {
+	end := 0
+	for end < len(version) && version[end] >= '0' && version[end] <= '9' {
+		end++
+	}
+	major, err := strconv.Atoi(version[:end])
+	if err != nil {
+		return 0
+	}
+	return major
 }
 
 // tupleToEntity converts a pgoutput tuple into a cluster.Entity using the
