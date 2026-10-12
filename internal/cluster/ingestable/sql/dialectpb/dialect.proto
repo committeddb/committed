@@ -84,6 +84,17 @@ message SQLServerPosition {
     // spelled the old way re-snapshots once at a bumped epoch so the sink
     // re-keys. Once canonical, a checkpoint stays canonical.
     uint32 uuid_rendering = 5;
+    // temporal_rendering records how this checkpoint's session rendered the
+    // date/time types (keys and payload fields): 0 = the pre-0.8.2 driver
+    // rendering (every value an RFC 3339 instant: a date as midnight UTC, a
+    // time of day on year 1, a zone-less datetime claiming UTC; also every
+    // checkpoint written before this field existed), 1 = by declared type
+    // (date YYYY-MM-DD, time HH:MM:SS[.f], zone-less datetimes without a
+    // zone, datetimeoffset with its offset; cluster feature level 3). As with
+    // uuid_rendering, a session that renders typed but resumes a legacy
+    // checkpoint re-snapshots once at a bumped epoch, and the promotion is
+    // one-way.
+    uint32 temporal_rendering = 6;
 }
 
 // SnapshotProgress tracks where a chunked (keyset-paginated) snapshot

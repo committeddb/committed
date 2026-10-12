@@ -73,7 +73,18 @@ var (
 //     nonConvertible bump; the checkpoint's interpretation coordinate
 //     (db.featureLevelInterpretationPin) is cleared, since a checkpoint cannot
 //     be refused, and the first bump after the roll records the real one.
-const FeatureLevel uint64 = 2
+//
+// Level 3: 0.8.2.
+//
+//   - Typed date/time rendering on SQL Server ingest
+//     (sqlserver.featureLevelTypedTemporal): a date as YYYY-MM-DD, a time of
+//     day as HH:MM:SS, zone-less datetimes without a zone, datetimeoffset
+//     with its offset. The rendering is in entity KEYS (a temporal primary
+//     key), so, as with the uniqueidentifier spelling, every node keeps the
+//     old RFC 3339 rendering until the minimum reaches 3; then a session
+//     resuming an old-style checkpoint re-snapshots once. Once typed it
+//     stays typed.
+const FeatureLevel uint64 = 3
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

@@ -928,8 +928,44 @@ time its worker starts (a restart or an ownership change): every row
 re-emits at a bumped refresh epoch with canonical keys, and the closing
 refresh-boundary marker sweeps the uppercase rows from keyed syncables. Keyless
 (append) destinations keep both spellings until rebuilt. The worker logs
-`uniqueidentifier rendering changed to canonical lowercase` when it does
-this.
+`value rendering changed` when it does this.
+
+### Date and time rendering
+
+Date and time columns render by their declared type, in entity keys and
+payload fields alike, on the snapshot and the change stream alike — the
+renderings PostgreSQL and MySQL ingest the same values as:
+
+| Type | Renders as |
+|---|---|
+| `date` | `2024-01-15` |
+| `time(n)` | `12:30:45.5` (n fraction digits) |
+| `datetime2(n)` | `2024-01-15 12:30:45.1234567` (n digits; no zone) |
+| `datetime` | `2024-01-15 12:30:45.127` (to the millisecond, as SQL Server shows it) |
+| `smalldatetime` | `2024-01-15 12:31:00` |
+| `datetimeoffset(n)` | `2024-01-15 12:30:45.12+05:30` (its own offset; `+00:00`, never `Z`) |
+
+Fractions carry the column's declared scale, zero-padded (a
+`datetime2(3)` value is `.780`), as SQL Server renders them itself.
+Releases before 0.8.2 rendered every one of these as an RFC 3339 instant: a
+`date` as midnight UTC (`2024-01-15T00:00:00Z`), a `time` on year 1
+(`0001-01-01T12:30:45.5Z`), and the zone-less types with a `Z` they never
+had. That older rendering also kept a table keyed by a date or time column
+from paging its snapshot past the first batch (the key text did not convert
+back in SQL Server), so such an ingestable retried that batch forever.
+
+**Upgrading from 0.8.1:** the change is gated on the cluster feature level
+(every node at 0.8.2) and re-keys exactly as the `uniqueidentifier` change
+did: until the roll completes every node keeps the old rendering; then each
+SQL Server ingestable **re-snapshots once** the next time its worker starts,
+every row re-emitting at a bumped refresh epoch with the new renderings, and
+the closing refresh-boundary marker sweeps the old rows from keyed
+syncables. The log keeps the history it already holds: entries ingested
+before the re-snapshot carry the old renderings, so a destination rebuilt
+from the log replays both shapes before converging, and keyless (append)
+destinations keep both until rebuilt. Consumers parsing these values should
+accept both (the projection language's `::date`, `::timestamp`, and
+`::timestamptz` casts read both).
 
 ### SQL Server troubleshooting
 

@@ -10,6 +10,22 @@ moving on. A node only ever changes its **binary** — its
 `COMMITTED_*` environment (node id, peers, data directory) stays the
 same, and its on-disk state is reused in place.
 
+## Upgrading from 0.8.1 to 0.8.2
+
+Follow the rolling binary-upgrade procedure below; no configuration changes.
+0.8.2 raises the cluster feature level to 3 for one change, which activates
+once every node runs 0.8.2:
+
+- **SQL Server date and time rendering:** `date`, `time`, and the zone-less
+  datetime types render by declared type instead of as RFC 3339 instants
+  (see [cdc-setup.md](cdc-setup.md#date-and-time-rendering)). Each SQL
+  Server ingestable re-snapshots once after the roll, which re-keys keyed
+  destinations; entries already in the log keep the old renderings, so
+  budget for one re-snapshot per SQL Server ingestable and make consumers
+  accept both shapes. MySQL and PostgreSQL ingestables are unaffected.
+- **Backups:** an archive taken on 0.8.2 records feature level 3, which a
+  0.8.1 binary refuses to restore.
+
 ## Upgrading from 0.8.0 to 0.8.1
 
 Keep the existing tidwall event-log backend and legacy authentication settings
@@ -238,10 +254,14 @@ After the last node:
 > spelling in its checkpoint; an older binary would resume it rendering
 > uppercase again and spell new rows differently from the rows on the destination —
 > treat the re-key as a one-way transition and rebuild the destination if you must
-> roll back past it. Finally, do not roll a node back while a
+> roll back past it. The same holds for a SQL Server ingestable that has
+> re-keyed to the typed date and time rendering (feature level 3, 0.8.2,
+> see [cdc-setup.md](cdc-setup.md#date-and-time-rendering)): a 0.8.1 binary
+> would resume it rendering RFC 3339 instants again — treat it as one-way.
+> Finally, do not roll a node back while a
 > re-materialization is in progress (`rematerializing` on the syncable's
 > status): the verb only starts once every member is 0.8.0 (feature level
-> 6), and an older owner resuming the replay would write rows the completion
+> 2), and an older owner resuming the replay would write rows the completion
 > sweep then deletes — let it finish, or run the verb again after upgrading.
 > And a MySQL or PostgreSQL ingestable dedups per source transaction from
 > 0.8.0 on (feature level 2): once every member is 0.8.0, its dedup record

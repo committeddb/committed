@@ -659,7 +659,7 @@ keyed or not — remains a stable function of the subject identifier (a
 brute-forceable membership oracle for low-entropy keys, and a linkage handle
 across topics), while the sentinel leaves nothing derived from the subject.
 The pass is authorized per-command (`Scrub.HashDeleteKeys`), which the
-proposer sets only at cluster feature level ≥ 4 so mixed-version clusters
+proposer sets only at cluster feature level ≥ 2 so mixed-version clusters
 keep computing byte-identical rewrites.
 
 After the erase, the subject's identifier has no on-disk copy in the
@@ -680,7 +680,7 @@ via either of two backlog terms:
 - **RTBF backlog**: a delete-tombstone records a delete committed beyond
   the highest completed scrub bound — there is erasure the next pass would
   physically perform.
-- **Delete-key erase backlog** (feature level ≥ 4): a retained tombstone
+- **Delete-key erase backlog** (feature level ≥ 2): a retained tombstone
   still carries its raw subject key and the live checkpoint evidence says
   its consumption gate has plausibly opened — the next authorized pass
   would rewrite it to the erased sentinel. A delete whose gate is still
