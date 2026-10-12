@@ -13,8 +13,8 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
-// TestRebuild_EndToEnd simulates the operator-facing rebuild
-// procedure from docs/operations/rebuild.md: when a node can't
+// TestRebuild_EndToEnd simulates the documented operator rebuild
+// procedure: when a node can't
 // continue, stop it, blow away its data directory, copy a healthy
 // peer's data directory in place (the rsync step), and restart.
 //

@@ -75,8 +75,7 @@ type ConsensusStorage interface {
 	// written to the permanent event log on this node. This is "P_local"
 	// in the storage invariant P_local == R_local; violation means the
 	// cluster has advanced past this node's recoverable window and is
-	// the trigger for the fatal-exit rebuild path described in
-	// docs/architecture/event-log-architecture.md.
+	// the trigger for the fatal-exit rebuild path.
 	EventIndex() uint64
 	// CreateSnapshot captures the current metadata-bucket state as a
 	// pb.Snapshot keyed at the given raft index. The raft serve loop

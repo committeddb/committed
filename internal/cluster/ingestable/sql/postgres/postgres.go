@@ -1215,9 +1215,7 @@ func (d *PostgreSQLDialect) stream(
 				// committed has no clear-all primitive yet, so a source TRUNCATE is
 				// not propagated: the sink keeps the truncated rows until a
 				// re-snapshot. Do NOT swallow it silently (the old behavior) — name
-				// the affected tables at Warn so an operator can reconcile. Full
-				// propagation is tracked separately; see the TRUNCATE caveat in
-				// docs/ingestables.md.
+				// the affected tables at Warn so an operator can reconcile.
 				names := make([]string, 0, len(m.RelationIDs))
 				for _, relID := range m.RelationIDs {
 					if rel, ok := relations[relID]; ok {

@@ -81,7 +81,7 @@ var ErrCompactionDeferred = errors.New("raft-log compaction deferred: a layout f
 // domain package so the sync worker can classify a corrupt read as fatal without
 // importing the wal package (which imports db — an import cycle). A torn tail is
 // repairable with `committed wal repair`; an in-record bitflip needs a rebuild
-// from a healthy replica. See docs/operations/rebuild.md.
+// from a healthy replica.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
 
 // ErrNotSyncableOwner is returned by RebuildSyncable / RematerializeSyncable
@@ -148,9 +148,7 @@ type ShouldSnapshot bool
 //     dedup key) emits DUPLICATE downstream events. The committed framework
 //     does not prevent that today — sinks that cannot be made idempotent are
 //     the operator's responsibility (wrap in an idempotency-key layer, a
-//     dedup table, or a HEAD-before-POST check). A future opt-in two-phase
-//     mechanism may bound the duplicate window; see
-//     .claude-scratch/tickets/sync-two-phase-syncable.md.
+//     dedup table, or a HEAD-before-POST check).
 //
 //   - An Actual is a TRANSACTION. Sync MUST apply its entities atomically —
 //     all or none, in one destination transaction (or one delivery) — and a

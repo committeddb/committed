@@ -26,8 +26,7 @@ type NodeStatusResponse struct {
 	// SafeMode reports whether this node booted with COMMITTED_SAFE_MODE:
 	// sync/ingest/scrub workers held, raft/apply/API normal. Per-boot and
 	// node-local — the operator's confirmation that the escape hatch is
-	// active (vs. workers being mysteriously absent). See
-	// docs/operations/safe-mode.md.
+	// active (vs. workers being mysteriously absent).
 	SafeMode bool `json:"safeMode"`
 	// Scrub is this node's right-to-be-forgotten scrub progress; erasure
 	// through PendingBound is physically complete on THIS node once

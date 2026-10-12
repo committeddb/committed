@@ -65,9 +65,8 @@ func (v logEntityWireView) isDelete() bool {
 // defense-in-depth behind that gate), and bytes from a data dir OLDER than the
 // supported floor of 0.7.3-beta — the pre-envelope FLAT fields (<= 0.7.2-beta,
 // tags 2/3/5/6, an era no deployment ever ran) and the long-removed Timestamp
-// (pre-v0.5, tag 4) are reserved, so their bytes land here as unknowns — see
-// docs/architecture/api-compatibility.md. Unknown tags INSIDE a known variant's message are
-// still fine (adding a field to LogRow stays add-only); only LogEntity-level
+// (pre-v0.5, tag 4) are reserved, so their bytes land here as unknowns.
+// Unknown tags INSIDE a known variant's message are still fine (adding a field to LogRow stays add-only); only LogEntity-level
 // unknowns trip this.
 func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	if u := le.ProtoReflect().GetUnknown(); len(u) > 0 {
@@ -545,7 +544,7 @@ const (
 	AdmissionConfig AdmissionClass = "config"
 	// AdmissionPosition / AdmissionIndex: the ingest / sync resume
 	// checkpoints. Always admitted — tiny, and blocking them turns
-	// at-most-one-duplicate into a duplicate storm (see disk-limits.md).
+	// at-most-one-duplicate into a duplicate storm.
 	AdmissionPosition AdmissionClass = "position"
 	AdmissionIndex    AdmissionClass = "index"
 	// AdmissionCoordination: the failure-plane records — dead-letters,

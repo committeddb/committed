@@ -11,8 +11,7 @@ import (
 // canonical sentinel lives in cluster so the db sync worker can classify a
 // corrupt read as fatal without importing wal (an import cycle). unframe returns
 // it on a CRC mismatch; openLog wraps it on a corrupt Open. See its cluster
-// definition (and docs/operations/rebuild.md) for the torn-tail-vs-bitflip
-// recovery split.
+// definition for the torn-tail-vs-bitflip recovery split.
 var ErrCorruptEntry = cluster.ErrCorruptEntry
 
 // On-disk frame for a checksummed WAL entry (format v1):
@@ -56,8 +55,8 @@ func appendFrame(dst, payload []byte) []byte {
 // returns the payload, or ErrCorruptEntry for anything else — a mismatched
 // checksum, an unknown version, a torn header, or bytes with no frame at
 // all. Unframed bytes can only be corruption or a pre-v0.5-beta log, which
-// sits far below the supported data-dir floor (0.7.3-beta; see
-// docs/architecture/api-compatibility.md) — never trusted content.
+// sits far below the supported data-dir floor (0.7.3-beta) — never trusted
+// content.
 //
 // The returned payload aliases raw (no copy); callers that retain it past
 // the next Read on a NoCopy log must copy. Today every caller unmarshals

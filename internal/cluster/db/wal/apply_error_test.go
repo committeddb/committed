@@ -11,8 +11,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// TestApplyCommitted_UnmarshalError_FailsAndPreservesAppliedIndex is the
-// regression test for apply-unmarshal-error-handling.md: a committed raft
+// TestApplyCommitted_UnmarshalError_FailsAndPreservesAppliedIndex is a
+// regression test: a committed raft
 // entry whose Data cannot be unmarshaled as a Proposal must propagate the
 // error up to the raft Ready loop (which fatal-exits) rather than silently
 // advancing appliedIndex.
@@ -46,7 +46,7 @@ func TestApplyCommitted_UnmarshalError_FailsAndPreservesAppliedIndex(t *testing.
 }
 
 // TestApplyCommitted_MissingTypeVersion_Fails is the second regression
-// test from apply-unmarshal-error-handling.md. A proposal stamped with a
+// test for the same rule. A proposal stamped with a
 // TypeVersion that storage has no record of fails type resolution during
 // Proposal.Unmarshal; that failure must propagate (via the new fatal-exit
 // policy) rather than silently advancing appliedIndex.

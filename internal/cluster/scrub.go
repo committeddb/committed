@@ -35,7 +35,7 @@ func IsScrub(id string) bool {
 // for entities whose (type, key) was delete-proposed at a raft index <=
 // UpperBound. Pinning B inside the committed command makes every replica remove
 // the identical set, keeping the rewritten event logs byte-identical across
-// nodes. See docs/architecture/event-log-architecture.md § "Right-to-be-forgotten / deletes".
+// nodes.
 //
 // HashDeleteKeys additionally authorizes the delete-key erasure pass: retained
 // user-delete entries whose consumption gate has opened (see the scrubber's

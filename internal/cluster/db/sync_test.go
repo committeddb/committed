@@ -134,9 +134,7 @@ func TestResumeSync(t *testing.T) {
 }
 
 // TestSyncReplaysRangeWhenBumpLost documents the replay behavior the
-// cluster.Syncable contract now spells out (and that
-// sync-fail-fast-bump-tracking.md decided to leave as the framework's
-// behavior for non-two-phase syncables): when the post-Sync index bump does
+// cluster.Syncable contract spells out: when the post-Sync index bump does
 // NOT durably apply — a worker replace/Close cancels it, or a leader flap
 // orphans it and db.Propose returns ErrProposalUnknown/ErrProposalLost — the
 // worker correctly does not advance the persisted SyncableIndex. A

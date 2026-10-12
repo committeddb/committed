@@ -27,7 +27,7 @@ var (
 // Bump this — and add a `featureLevel*` requirement constant at the emitting
 // site — whenever you introduce state an older peer cannot correctly apply (a
 // new built-in system type, a new semantic marker). NEVER renumber or reuse a
-// level; it only ever increases. See docs/architecture/api-compatibility.md.
+// level; it only ever increases.
 //
 // Level 1: the baseline for the first binary carrying this mechanism —
 // includes the refresh-boundary marker (featureLevelRefreshBoundary). A binary

@@ -229,7 +229,7 @@ type LogEntity struct {
 	// body variant. Do not add flat fields — add a new body variant instead:
 	// wire-level add-only (an old reader sees body unset), with its EMISSION
 	// feature-gated (db.featureEnabled) so the variant is only committed once
-	// every member can apply it. See docs/architecture/api-compatibility.md.
+	// every member can apply it.
 	//
 	// generation semantics (LogRow.generation / LogRefresh.generation): the
 	// ingest reconciling-refresh epoch — a per-ingestable monotonic counter
@@ -561,8 +561,8 @@ type LogProposal struct {
 	// transaction produced it. Stamped by the dialect from the change stream
 	// (MySQL binlog event-header timestamp + GTID, Postgres pgoutput
 	// Begin commit-time + xid, SQL Server change-tracking version +
-	// sys.dm_tran_commit_table — fidelity varies by dialect, see
-	// docs/ingestables.md "How ingest works"). Proposal-level because all
+	// sys.dm_tran_commit_table — fidelity varies by dialect). Proposal-level
+	// because all
 	// rows in one emitted proposal come from one source transaction context.
 	// Provenance only — nothing in apply or sync reads them; they preserve
 	// what becomes unrecoverable once the source's binlog/WAL retention
@@ -1826,8 +1826,7 @@ func (x *LogTypeMigrationDeadLetter) GetMessage() string {
 // delete-proposed at a raft index <= B. Pinning B inside the committed
 // command makes every replica remove the identical set, so the rewritten
 // event logs stay byte-identical across nodes (the rsync-rebuild and
-// determinism-test contract). See docs/architecture/event-log-architecture.md
-// § "Right-to-be-forgotten / deletes".
+// determinism-test contract).
 type LogScrub struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -1894,7 +1893,7 @@ func (x *LogScrub) GetHashDeleteKeys() bool {
 // leader-only reads (GET /v1/membership) from a follower. Raft replicates
 // only node ids and raft peer URLs, never API addresses, so each node
 // announces its own once it joins. Upsert keyed by node id; the apply path
-// stores it in the memberAPIURLs bucket. See raft-leader-read-proxy.md.
+// stores it in the memberAPIURLs bucket.
 type LogNodeAPIURL struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -1954,8 +1953,7 @@ func (x *LogNodeAPIURL) GetApiURL() string {
 // until every member can apply them — the fix for semantic version skew (a new
 // system type must not reach an old node, a refresh-boundary marker must not
 // reach a node that can't interpret it). Upsert keyed by node id; the apply
-// path stores it in the memberVersions bucket. See node_version.go and
-// docs/architecture/api-compatibility.md.
+// path stores it in the memberVersions bucket. See node_version.go.
 type LogNodeVersion struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

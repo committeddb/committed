@@ -46,8 +46,7 @@ type Raft struct {
 	leaderState  *LeaderState
 	tickInterval time.Duration
 	// compactMaxSize and compactMaxAge implement the "10GB or 1hr"
-	// policy described in docs/architecture/event-log-architecture.md §
-	// "Compaction policy". maybeCompact fires when either threshold is
+	// compaction policy. maybeCompact fires when either threshold is
 	// crossed; 0 disables that limb. Both zero disables automatic
 	// compaction entirely.
 	compactMaxSize uint64
@@ -264,8 +263,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// so a partitioned-then-rejoining node cannot disrupt the cluster
 		// by force-stepping-down a healthy leader with an inflated term.
 		// Recommended by Ongaro's thesis §9.6 and used by every production
-		// etcd-raft deployment. See docs/architecture/event-log-architecture.md
-		// § "PreVote and election timeout".
+		// etcd-raft deployment.
 		PreVote: true,
 		// CheckQuorum is PreVote's required companion for the DIRECTIONAL
 		// partition case. etcd raft's PreVote grant logic allows peers to
@@ -416,10 +414,9 @@ func (n *Raft) reconcileTransportFromMembership() {
 // the durable applied index, and once the watermark passes the conf-change entry
 // raft's c.Applied SUPPRESSES its re-delivery. So a swallowed write error would
 // let the watermark move past a peer URL that is now permanently absent — the
-// exact durability-watermark violation that produced confstate-lost-in-crash-
-// window (docs/architecture/event-log-architecture.md § "The central invariant", Face 2). The
-// peer URL is out-of-band, re-delivery-suppressed state, so it owes strategy (2):
-// write it atomically with the applied index, or refuse to advance the watermark
+// exact durability-watermark violation: the applied index must never pass
+// state that was not durably written. The peer URL is out-of-band,
+// re-delivery-suppressed state, so it owes strategy (2): write it atomically with the applied index, or refuse to advance the watermark
 // past a lost write. Crashing does the latter — a restart finds the applied index
 // unadvanced, raft re-delivers the conf change, and this re-runs (PutMemberPeerURL
 // is idempotent LWW). Matches the fatal-on-disk-error posture ApplyCommittedBatch
@@ -782,7 +779,7 @@ func (n *Raft) serveChannels() {
 					// this node now proposes v2 exclusively. etcd raft still
 					// applies v1 (ConfChangeI.AsV2 promotes it), so replaying it
 					// keeps an upgraded node consistent with what the old leader
-					// committed. See docs/operations/membership.md.
+					// committed.
 					var cc raftpb.ConfChange
 					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
 						n.sendRaftError(err) // guarded — see the v2 twin above
@@ -856,9 +853,8 @@ func (n *Raft) serveChannels() {
 				}
 			}
 
-			// Storage invariant: P_local == R_local. See
-			// docs/architecture/event-log-architecture.md § "The central invariant"
-			// (Face 1 — the storage highwatermark). A snapshot that would
+			// Storage invariant: P_local == R_local (the event log never trails
+			// the applied index). A snapshot that would
 			// advance the raft side past the event log is caught up from
 			// a peer before it is saved (above), so a violation here is a
 			// storage that cannot catch up or a bug — and this node cannot
@@ -1114,8 +1110,7 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 }
 
 // checkStorageInvariant enforces P_local == R_local after every Ready
-// iteration. See docs/architecture/event-log-architecture.md § "The storage
-// invariant" for the full rationale. Briefly:
+// iteration:
 //
 //   - P_local is storage.EventIndex() — the highest raft index this
 //     node has durably written to its permanent event log.
@@ -1129,8 +1124,7 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 // advanced appliedIndex past the permanent event log highwatermark — and
 // the Ready loop fills the event log from a peer before it saves such a
 // snapshot (catchup.go), so a violation means the storage could not catch
-// up. The node fatal-exits with a pointer to the rebuild runbook; see
-// docs/operations/rebuild.md.
+// up. The node fatal-exits with a pointer to the rebuild runbook.
 func (n *Raft) checkStorageInvariant() {
 	p := n.storage.EventIndex()
 	r := n.storage.AppliedIndex()
@@ -1157,8 +1151,7 @@ func (n *Raft) checkStorageInvariant() {
 
 // maybeCompact trims the raft log up to a safe point when either
 // compactMaxSize or compactMaxAge is exceeded — the "10GB or 1hr"
-// policy described in docs/architecture/event-log-architecture.md § "Compaction
-// policy". Safety constraints from the same doc:
+// compaction policy. Safety constraints:
 //
 //   - Compact point must be ≤ this node's permanent event log
 //     highwatermark (EventIndex), so we never forget a raft entry
@@ -1275,8 +1268,7 @@ func (n *Raft) maybeCompact() {
 // A successful restore leaves appliedIndex at snap.Metadata.Index. If
 // this node's permanent event log is behind that index, the Ready
 // loop's checkStorageInvariant fatal-exits at the end of the current
-// iteration — by design. See docs/architecture/event-log-architecture.md §
-// "Severe lag — v1 manual rebuild". A RestoreSnapshot error here is
+// iteration — by design. A RestoreSnapshot error here is
 // also fatal; a half-applied snapshot leaves the node in a hybrid
 // state that is worse than crashing and letting an operator rebuild.
 func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
@@ -1329,7 +1321,7 @@ type httpTransportRaft struct {
 // the first heartbeat lands evades both the library panic and this guard;
 // closing that needs member-incarnation identity (protocol-level), and the
 // true prevention is operational either way — members are rebuilt, never
-// restored (docs/operations/rebuild.md). A LastIndex read error skips the
+// restored. A LastIndex read error skips the
 // guard rather than fatal-ing on a read; the library panic remains the
 // backstop.
 func (n *httpTransportRaft) Process(ctx context.Context, m *raftpb.Message) error {

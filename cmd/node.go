@@ -340,7 +340,7 @@ docs/operations/ it points to.`,
 		// db.DefaultCompactMaxAge, one hour; whichever fires first compacts).
 		// Lower values trade raft-log disk for a shorter window in which a
 		// lagging member catches up by replication instead of by fetching
-		// the event log from a peer. See docs/operations/disk-limits.md.
+		// the event log from a peer.
 		if n, ok := parseInt64Env("COMMITTED_COMPACT_MAX_BYTES"); ok {
 			dbOpts = append(dbOpts, db.WithCompactMaxSize(uint64(n)))
 		}
@@ -368,8 +368,7 @@ docs/operations/ it points to.`,
 		// still list the existing members (and itself, for the listener URL)
 		// to seed the transport, but it is NOT bootstrapped into a config.
 		// Without this flag a fresh node would StartNode the static peer set
-		// and split-brain against the cluster it meant to join. See
-		// docs/operations/membership.md.
+		// and split-brain against the cluster it meant to join.
 		if boolEnvOrExit("COMMITTED_JOIN") {
 			dbOpts = append(dbOpts, db.WithJoin())
 			zap.L().Info("joining existing cluster (COMMITTED_JOIN set); membership will be learned from the leader")
@@ -454,7 +453,7 @@ docs/operations/ it points to.`,
 		// Default (linearizable) GETs run a raft ReadIndex round-trip; this
 		// bounds how long one waits for quorum confirmation before returning
 		// 503, so a partitioned node fails fast instead of holding the
-		// connection until the write timeout. See docs/architecture/consistency.md.
+		// connection until the write timeout.
 		if d, ok := parseDurationEnv("COMMITTED_HTTP_READ_INDEX_TIMEOUT"); ok {
 			httpOpts = append(httpOpts, http.WithReadIndexTimeout(d))
 		}
@@ -524,7 +523,7 @@ docs/operations/ it points to.`,
 				zap.Bool("clientCertAuth", tlsCfg.ClientAuth == tls.RequireAndVerifyClientCert))
 		}
 		// Security-posture floor: loud Error + startup banner if the write API is
-		// reachable off-host with no auth (see docs/operations/authentication.md).
+		// reachable off-host with no auth.
 		// Deliberately not a refuse-to-boot — self-hosted test use is supported.
 		warnInsecurePosture(addr, tokens.API(), tlsCfg, peerTLS != nil)
 

@@ -45,7 +45,7 @@ const truncateDivergenceMsg = "TRUNCATE on a watched table is not propagated to 
 	"the destination now diverges from the source and must be re-snapshotted to reconcile"
 
 // TestHandleDDL_WatchedTruncateEmitsDivergenceWarn pins the MySQL half of the
-// TRUNCATE-divergence promise (ingestables.md): a TRUNCATE on a WATCHED table logs
+// TRUNCATE-divergence promise: a TRUNCATE on a WATCHED table logs
 // the same specific divergence Warn Postgres emits, naming the table — while a
 // TRUNCATE on an unwatched table (MySQL's binlog is server-wide) and any
 // non-TRUNCATE DDL fall through to the generic DDL warn, so the signal doesn't cry

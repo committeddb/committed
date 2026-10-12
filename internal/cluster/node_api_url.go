@@ -15,8 +15,7 @@ import (
 // node can resolve another's API address — in particular a follower resolving
 // the leader's, to proxy a leader-only read (GET /v1/membership). Hidden from
 // the default Proposals() listing like every other system type, and NOT
-// syncable metadata: it carries nothing a syncable consumes. See
-// raft-leader-read-proxy.md.
+// syncable metadata: it carries nothing a syncable consumes.
 var nodeAPIURLType = registerSystemType(&Type{
 	ID:         "65499eaa-5910-4798-8cc5-0c2d996658e3",
 	Name:       "InternalNodeAPIURL",

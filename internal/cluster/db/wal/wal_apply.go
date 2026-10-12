@@ -238,8 +238,7 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 		// the checkpoint advances in the SAME raft entry as the rows. This closes
 		// the crash window between a committed batch and a separate position
 		// proposal — the gap SourceSeq dedup can't cover, because snapshot rows
-		// carry SourceSeq 0 (see the effectively-once guarantee in
-		// docs/ingestables.md). Before saveAppliedIndex so a replayed
+		// carry SourceSeq 0. Before saveAppliedIndex so a replayed
 		// entry re-applies the idempotent (last-writer-wins) put; guarded on the
 		// config existing, exactly like a standalone position entity.
 		if len(p.Position) > 0 {

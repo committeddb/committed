@@ -170,8 +170,8 @@ func TestMultiNodeRestartAfterGrow_ReformsWithoutPeersUpdate(t *testing.T) {
 // TestMultiNodeThroughput_Report is a MEASUREMENT, not a gate: it bursts
 // data-plane proposals through a real 3-node cluster (round-robin across
 // nodes, so ~2/3 exercise follower→leader forwarding) and reports wall-clock
-// throughput and per-request latency percentiles for the published envelope
-// (docs/operations/performance.md). The only assertion is an
+// throughput and per-request latency percentiles for the published envelope.
+// The only assertion is an
 // order-of-magnitude sanity floor — shared CI runners make percent-level
 // thresholds flake (the lesson of the mysql-speedup incident), so
 // release-to-release comparison happens on the reported numbers, not in an

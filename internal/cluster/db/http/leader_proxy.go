@@ -36,7 +36,7 @@ const forwardedHeader = "X-Committed-Forwarded"
 // COMMITTED_API_URL — the documented degraded path); the request already
 // carries the loop-guard marker; or the leader can't be reached before the
 // deadline. The caller can retry, or use leaderId to target the leader
-// directly. See raft-leader-read-proxy.md.
+// directly.
 // syncableOwnerRoute routes an owner-local syncable verb (rebuild,
 // rematerialize) to the node whose worker serves the syncable. For an
 // unpinned syncable that is the leader — leaderRead exactly, byte-identical

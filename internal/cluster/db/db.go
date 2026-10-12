@@ -173,7 +173,7 @@ type DB struct {
 	// into the replicated memberAPIURLs map by announceAPIURL. Empty disables
 	// the announce. announceInterval is the poll cadence that goroutine uses
 	// while waiting for this node to become a member with a reachable leader
-	// (derived from tickInterval at New time). See raft-leader-read-proxy.md.
+	// (derived from tickInterval at New time).
 	advertisedAPIURL string
 	announceInterval time.Duration
 	// zone is this node's configured placement identity (COMMITTED_ZONE; ""
@@ -1273,7 +1273,7 @@ func (db *DB) IsLeader() bool {
 // conf change Context so every existing node learns the address to dial it
 // (raft replicates only node ids, not addresses). The new node itself must
 // be started in join mode (WithJoin / COMMITTED_JOIN) with a peer set that
-// lets it reach the existing members. See docs/operations/membership.md.
+// lets it reach the existing members.
 //
 // The change is safe under partition: joint consensus requires a majority of
 // both the old and new configurations to agree throughout the transition, so
@@ -1307,7 +1307,7 @@ func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
 // rawURL is the new node's advertised raft peer URL, carried in the conf
 // change Context exactly like AddMember; the new node must be started in join
 // mode and should set COMMITTED_API_URL so it self-announces its API address.
-// Partition-safe and callable on any node. See docs/operations/membership.md.
+// Partition-safe and callable on any node.
 func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
@@ -1336,7 +1336,6 @@ func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 // via GET /v1/membership and decides), the check would be racy regardless (the
 // matched index is a snapshot), and the server has no principled threshold to
 // pick. The caller minimizes the at-quorum window by polling before promoting.
-// See docs/operations/membership.md and the ticket's "Decisions".
 //
 // Promoting a non-learner is rejected with cluster.ErrNotLearner rather than
 // submitted: a ConfChangeAddNode for an unknown id would add a brand-new voter

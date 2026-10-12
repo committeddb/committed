@@ -58,8 +58,7 @@ var (
 	// node's self-announced advertised HTTP API base URL. Written from the
 	// apply path (handleNodeAPIURL) so the mapping replicates to every node and
 	// rides along in snapshots; read by the leader-read proxy to resolve a
-	// peer's (in particular the leader's) API address. See member_api_url.go
-	// and raft-leader-read-proxy.md.
+	// peer's (in particular the leader's) API address. See member_api_url.go.
 	memberAPIURLBucket = []byte("memberAPIURLs")
 	// memberPeerURLBucket maps a raft node id (8 big-endian bytes) to its raft
 	// PEER URL (the address the transport dials for raft messages), stored as the
@@ -267,8 +266,8 @@ type Storage struct {
 	// reader whose window overlaps the change then always sees a different
 	// value after, which a bump before the change could not guarantee.
 	entryLogEpoch atomic.Uint64
-	// eventLog is the permanent event log — the "forever" tier described
-	// in docs/architecture/event-log-architecture.md. ApplyCommitted mirrors every
+	// eventLog is the permanent event log — the "forever" tier. ApplyCommitted
+	// mirrors every
 	// committed raft entry into it, keyed by raft index. Unlike EntryLog,
 	// eventLog is never compacted: it is the canonical store that
 	// syncables read from, and the one a rebuild rsync covers.

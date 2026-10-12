@@ -386,7 +386,7 @@ type TypeSchemaValidator interface {
 // changes how FUTURE Actuals of the type are read, but does NOT re-materialize
 // rows already synced through the previous migration on the type's dependent
 // projections; rebuilding those projections to reach already-synced history is
-// the operator's responsibility (see docs/read-models.md). before is the type as
+// the operator's responsibility. before is the type as
 // it stood before the update (nil for a brand-new type); after is the current
 // type. Returns "" when no advisory is warranted — a new type, a schema/version
 // bump (which forces a new version and its own migration), or a byte-identical

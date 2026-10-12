@@ -380,7 +380,7 @@ func TestSync_RefreshBoundary_OnlyMarker(t *testing.T) {
 	require.Equal(t, "refresh", received.Entities[0].Op)
 	require.Equal(t, uint64(2), received.Entities[0].Generation)
 	// A refresh carries no key, and the wire body omits the field entirely (not
-	// `"key":""`), matching webhook-receiver.md's stated shape — a marker-only
+	// `"key":""`), matching the documented webhook shape — a marker-only
 	// body is the clean case to assert it, having no keyed entity.
 	require.NotContains(t, string(rawBody), `"key"`, "the refresh body must omit the key field")
 }

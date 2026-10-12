@@ -12,8 +12,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/ingestable/sql/sqlfakes"
 )
 
-// Pins decode tolerances deployed ingestable configs may depend on
-// (the reference corpus from .claude-scratch/tickets/viper-containment.md):
+// Pins decode tolerances deployed ingestable configs may depend on:
 // case-variant field names keep decoding, the tables list keeps its
 // order and case (table names are user data), and dialect option keys
 // are matched case-insensitively. Written against the current pipeline;

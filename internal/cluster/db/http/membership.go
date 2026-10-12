@@ -51,8 +51,7 @@ type MemberResponse struct {
 // configuration (voters/learners), each member's leader-observed matched
 // index, and this answer's leader/term/commit/applied context. The route is
 // wrapped in leaderRead so the answer is always leader-truthful even when a
-// caller (behind a load balancer) reaches a follower. See
-// docs/operations/membership.md and raft-leader-read-proxy.md.
+// caller (behind a load balancer) reaches a follower.
 func (h *HTTP) GetMembership(w httpgo.ResponseWriter, r *httpgo.Request) {
 	m := h.db.Membership()
 
@@ -96,8 +95,7 @@ func (h *HTTP) GetMembership(w httpgo.ResponseWriter, r *httpgo.Request) {
 //     later with POST /membership/{id}/promote.
 //
 // The node named here must already be running in join mode (COMMITTED_JOIN)
-// with a peer set that lets it reach the existing cluster. See
-// docs/operations/membership.md.
+// with a peer set that lets it reach the existing cluster.
 type AddMemberRequest struct {
 	ID      uint64 `json:"id"`
 	URL     string `json:"url"`

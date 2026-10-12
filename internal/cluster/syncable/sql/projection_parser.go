@@ -156,12 +156,11 @@ func (p *ProjectionSyncableParser) DatabasesFromConfig(v *cluster.ParsedConfig) 
 // removedProjectionKeys are the 0.7.10 spellings 0.8.0 renamed when the
 // vocabulary settled on plural nouns for arrays of tables. A stored config
 // under an old spelling PARKS on the upgraded binary, so the refusal must
-// name the replacement rather than read as a typo — that is what
-// api-compatibility.md promises ("a spelling the vocabulary refuses on
-// purpose is refused naming its replacement"). The type-level ledger in
-// db/parser only covers documents that still say type = "sql-projection";
-// a 0.7.10 config that already said type = "projection" reaches here
-// instead, which is the common case.
+// name the replacement rather than read as a typo: the compatibility promise
+// is that a spelling the vocabulary refuses on purpose is refused naming its
+// replacement. The type-level ledger in db/parser only covers documents that
+// still say type = "sql-projection"; a 0.7.10 config that already said
+// type = "projection" reaches here instead, which is the common case.
 var removedProjectionKeys = map[string]string{
 	"source": "sources",
 	"stage":  "stages",

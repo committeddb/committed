@@ -26,8 +26,7 @@ func proposalEntry(t *testing.T, term, index, requestID uint64) *pb.Entry {
 // TestTruncationLostCallback drives the wal_storage truncation path
 // directly: write entries [1,2,3], overwrite [2,3] with higher-term
 // conflicting entries, and assert the lost-callback received exactly the
-// non-zero RequestIDs of the overwritten entries (the unit-test success
-// criterion in propose-truncation-detection.md).
+// non-zero RequestIDs of the overwritten entries.
 func TestTruncationLostCallback(t *testing.T) {
 	var got [][]uint64
 	cb := func(ids []uint64) { got = append(got, ids) }

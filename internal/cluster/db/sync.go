@@ -26,8 +26,7 @@ import (
 // exactly this shape: retry, the stuck tracker's replicated + alertable signal,
 // and the operator's manual dead-letter skip + replay. No new operational
 // state, no new escape hatch. Transient — never permanent — because a panic is
-// an unknown, and auto-dead-lettering would skip data on a guess (the
-// stall-visibly posture stuck-syncables.md documents).
+// an unknown, and auto-dead-lettering would skip data on a guess.
 //
 // PII: the returned error carries only the panic's TYPE — sync errors reach
 // replicated stuck records, and a panic value can embed row data. The full
@@ -1404,8 +1403,7 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 // Re-syncing the replayed range is safe ONLY because the Syncable contract
 // requires downstream idempotency under replay (see the cluster.Syncable
 // doc); a non-idempotent sink will double-emit, which is the operator's
-// responsibility today. The opt-in mechanism to bound that is tracked in
-// .claude-scratch/tickets/sync-two-phase-syncable.md.
+// responsibility today.
 //
 // On a successful (durable) bump the round-trip latency is recorded to
 // committed_sync_bump_duration_seconds so the extra cost is observable.
