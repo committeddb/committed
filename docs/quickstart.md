@@ -105,7 +105,7 @@ is tracking the source live. (`lag` is bytes behind the source; `phase` is
 > `wal_level`/role/`REPLICA IDENTITY`, or MySQL binlog settings and grants — what
 > committed creates for you, the snapshot→streaming lifecycle, and the
 > troubleshooting are in
-> [`docs/operations/cdc-setup.md`](operations/cdc-setup.md).
+> [`docs/ingestables.md`](ingestables.md).
 
 <details><summary>What each config is</summary>
 

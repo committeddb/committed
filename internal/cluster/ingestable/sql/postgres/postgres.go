@@ -1217,7 +1217,7 @@ func (d *PostgreSQLDialect) stream(
 				// re-snapshot. Do NOT swallow it silently (the old behavior) — name
 				// the affected tables at Warn so an operator can reconcile. Full
 				// propagation is tracked separately; see the TRUNCATE caveat in
-				// docs/operations/cdc-setup.md.
+				// docs/ingestables.md.
 				names := make([]string, 0, len(m.RelationIDs))
 				for _, relID := range m.RelationIDs {
 					if rel, ok := relations[relID]; ok {

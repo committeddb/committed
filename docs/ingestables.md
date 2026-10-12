@@ -1,16 +1,16 @@
-# CDC setup: Postgres, MySQL, and SQL Server
+# Ingestables
 
-This guide is for operators standing up **change data capture** — ingesting a
-SQL database's inserts, updates, and deletes into a committed topic. It covers
-what the source database needs, what committed sets up for you, the
-snapshot→streaming lifecycle, what to watch, and how to fix the common failures.
-All supported engines are here: PostgreSQL (logical replication), MySQL
-(binlog), and SQL Server (Change Tracking).
+An **ingestable** pulls data into the log from an external source: it
+captures a SQL database's inserts, updates, and deletes (**change data
+capture**) into a committed topic. This page covers what the source database
+needs, what committed sets up for you, the snapshot→streaming lifecycle, what
+to watch, and how to fix the common failures. All supported engines are here:
+PostgreSQL (logical replication), MySQL (binlog), and SQL Server (Change
+Tracking).
 
 For the end-to-end walkthrough (source → ingest → topic → projection → query),
-see the [quickstart](../quickstart.md); this guide is the reference for the
-ingest half. For the output half (projecting a topic to a SQL table), see the
-README § SQL projections.
+see the [quickstart](quickstart.md); this page is the reference for the
+ingest half. For the output half, see [Syncables](syncables.md).
 
 ## How ingest works (all SQL engines)
 
@@ -108,8 +108,8 @@ re-emits that window and rows the crash had already committed appear in the
 log again. That is the same semantics as a reconciling refresh (which
 re-observes every row): keyed upserts, last write wins, consumers converge
 identically. A keyless syncable has no key to converge on, so it appends each
-re-observation as another row — see [History tables vs. read
-models](../read-models.md#history-tables-vs-read-models).
+re-observation as another row — see [History
+tables](syncables.md#history-tables).
 
 ### One writer per topic
 
@@ -229,7 +229,7 @@ two producers would stamp generations independently and sweep each other's rows.
 For a **keyed SQL** syncable committed runs this sweep for you (`DELETE WHERE
 generation < G`). For an **HTTP** syncable the same reconciliation is delivered
 to your endpoint as an `op:"refresh"` carrying `G`, and the receiver runs the
-sweep — see [writing a webhook receiver](../webhook-receiver.md).
+sweep — see [writing a webhook receiver](webhook-receiver.md).
 
 #### Syncables that don't reconcile
 
@@ -260,7 +260,7 @@ if you fan a Postgres topic into a projection or history table.
 > destination's sweep removes. On keyless and projection syncables it is **retained**: the
 > subject's PII lingers with no delete. committed's own RTBF path (a delete
 > proposal + event-log scrub) reaches a projection, and reaches a keyless table
-> only if it declares [`keyColumn`](../read-models.md#history-tables-vs-read-models)
+> only if it declares [`keyColumn`](syncables.md#history-tables)
 > — without one the delete dead-letters and that table is yours to clear. So the
 > exposure is a source-side erasure committed never captured, plus any keyless
 > destination with no delete key. Treat a re-snapshot `WARN` on a PII-bearing
@@ -374,7 +374,7 @@ each is recognized, filtered to watched tables, and logged with the identical
 message above (the `tables` field is the affected `schema.table`).
 
 To reconcile after a truncate, **re-snapshot** the ingestable (rebuild it from
-zero — see [rebuild.md](rebuild.md)). To avoid the divergence entirely, prefer
+zero — see [rebuild.md](operations/rebuild.md)). To avoid the divergence entirely, prefer
 `DELETE FROM <table>` over `TRUNCATE` on watched tables: each row delete
 replicates as a keyed tombstone and clears the destination row-by-row.
 
@@ -512,11 +512,11 @@ the ingestable, or a slot recreate on Postgres).
 > is no shared pool to reference. The two idioms are deliberate, not drift.
 > Write the password as `${VAR}` (as above) — committed **rejects an inline
 > connection-string password** (HTTP 400) so it is never stored in the replicated
-> log or a snapshot. See [secrets.md](secrets.md).
+> log or a snapshot. See [secrets.md](operations/secrets.md).
 
 Give each ingestable its own `slotName` and `publication` so they don't collide.
 A runnable, end-to-end Postgres example lives in
-[`examples/movies/`](../../examples/movies/) (`source.sql`, `ingest-*.toml`,
+[`examples/movies/`](../examples/movies/) (`source.sql`, `ingest-*.toml`,
 `compose.yml`).
 
 To feed **several topics** from this one ingestable — one slot and publication for
@@ -1128,7 +1128,7 @@ that the source still has the data after that position:
   (One transitional exception: after upgrading from a release whose dedup
   was coordinate-keyed, the per-transaction watermark takes effect only once
   every member is on 0.8.0 and one transaction has committed after that
-  (see [upgrade.md](upgrade.md#rolling-back)); a coincident failover before
+  (see [upgrade.md](operations/upgrade.md#rolling-back)); a coincident failover before
   then still **freezes** as a fail-safe — recover by re-POSTing the
   ingestable. With `gtid_mode=OFF` the
   freeze remains the permanent behavior: coordinates are that mode's only
@@ -1165,7 +1165,7 @@ To recover:
      restart does **not** revive it; it comes back parked. **Re-POST the
      ingestable** (its stored config, unchanged) to clear the parked state and
      resume from the durable checkpoint. A park persists until the operator
-     re-POSTs or deletes the resource (see [metrics](metrics.md)) — so a parked
+     re-POSTs or deletes the resource (see [metrics](operations/metrics.md)) — so a parked
      worker whose cap you raised needs **both**: a restart to apply the new cap and
      a re-POST to clear the park.
 

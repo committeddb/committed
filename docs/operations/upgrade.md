@@ -18,14 +18,14 @@ once every node runs 0.8.2; the PostgreSQL change below needs no feature level:
 
 - **SQL Server date and time rendering:** `date`, `time`, and the zone-less
   datetime types render by declared type instead of as RFC 3339 instants
-  (see [cdc-setup.md](cdc-setup.md#date-and-time-rendering)). Each SQL
+  (see [ingestables.md](../ingestables.md#date-and-time-rendering)). Each SQL
   Server ingestable re-snapshots once after the roll, which re-keys keyed
   destinations; entries already in the log keep the old renderings, so
   budget for one re-snapshot per SQL Server ingestable and make consumers
   accept both shapes. MySQL and PostgreSQL ingestables are unaffected.
 - **PostgreSQL publications** (no feature level; active on each node as it
   upgrades): committed now records ownership of the publication it creates
-  (see [cdc-setup.md](cdc-setup.md#what-committed-creates-for-you)). An
+  (see [ingestables.md](../ingestables.md#what-committed-creates-for-you)). An
   existing ingestable adopts its publication on its first connection after the
   upgrade, and from then on removes tables no longer in `tables` from it. A
   change that arrives for a table in the publication that no watched table
@@ -257,13 +257,13 @@ After the last node:
 > already-erased tombstones stay erased, but new erasures resume only when
 > you upgrade again. And a SQL Server ingestable that has already re-keyed
 > to the canonical lowercase `uniqueidentifier` spelling (feature level 2,
-> see [cdc-setup.md](cdc-setup.md#uniqueidentifier-rendering)) keeps that
+> see [ingestables.md](../ingestables.md#uniqueidentifier-rendering)) keeps that
 > spelling in its checkpoint; an older binary would resume it rendering
 > uppercase again and spell new rows differently from the rows on the destination —
 > treat the re-key as a one-way transition and rebuild the destination if you must
 > roll back past it. The same holds for a SQL Server ingestable that has
 > re-keyed to the typed date and time rendering (feature level 3, 0.8.2,
-> see [cdc-setup.md](cdc-setup.md#date-and-time-rendering)): a 0.8.1 binary
+> see [ingestables.md](../ingestables.md#date-and-time-rendering)): a 0.8.1 binary
 > would resume it rendering RFC 3339 instants again — treat it as one-way.
 > Finally, do not roll a node back while a
 > re-materialization is in progress (`rematerializing` on the syncable's

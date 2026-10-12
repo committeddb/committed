@@ -191,7 +191,7 @@ describes, so it moves, drops, and restores with them — restore the
 database from a backup and the note from that backup comes along, still
 correct. The created-by-committed half is what a `DELETE` consults: it
 drops the table committed created and leaves the one it attached to (see
-[read-models.md](read-models.md#history-tables-vs-read-models)).
+[syncables.md](syncables.md#history-tables)).
 
 Every time a worker starts serving a syncable it reads the note first:
 

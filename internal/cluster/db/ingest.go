@@ -326,7 +326,7 @@ func (db *DB) deleteIngest(id string) {
 		// and on a single-node cluster nobody else will tear down either —
 		// warn loudly: an orphaned replication slot pins the source's WAL.
 		if db.safeMode {
-			db.logger.Warn("safe mode: ingestable deleted; source-side teardown skipped (no worker was built) — a replication slot/publication may remain at the source and pin its WAL; drop it manually (see docs/operations/cdc-setup.md)",
+			db.logger.Warn("safe mode: ingestable deleted; source-side teardown skipped (no worker was built) — a replication slot/publication may remain at the source and pin its WAL; drop it manually (see docs/ingestables.md)",
 				zap.String("id", id))
 		}
 		return

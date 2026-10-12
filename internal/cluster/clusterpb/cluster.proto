@@ -125,7 +125,7 @@ message LogProposal {
     // (MySQL binlog event-header timestamp + GTID, Postgres pgoutput
     // Begin commit-time + xid, SQL Server change-tracking version +
     // sys.dm_tran_commit_table — fidelity varies by dialect, see
-    // docs/operations/cdc-setup.md "How ingest works"). Proposal-level because all
+    // docs/ingestables.md "How ingest works"). Proposal-level because all
     // rows in one emitted proposal come from one source transaction context.
     // Provenance only — nothing in apply or sync reads them; they preserve
     // what becomes unrecoverable once the source's binlog/WAL retention

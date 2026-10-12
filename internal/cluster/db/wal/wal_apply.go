@@ -239,7 +239,7 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 		// the crash window between a committed batch and a separate position
 		// proposal — the gap SourceSeq dedup can't cover, because snapshot rows
 		// carry SourceSeq 0 (see the effectively-once guarantee in
-		// docs/operations/cdc-setup.md). Before saveAppliedIndex so a replayed
+		// docs/ingestables.md). Before saveAppliedIndex so a replayed
 		// entry re-applies the idempotent (last-writer-wins) put; guarded on the
 		// config existing, exactly like a standalone position entity.
 		if len(p.Position) > 0 {

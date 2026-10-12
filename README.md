@@ -26,22 +26,22 @@ Committed is specifically NOT a databse designed for querying.
 
 ### Concepts
 
-- **Type** — schema/metadata for a topic's payload. Identified by ID;
+- **[Type](docs/types.md)** — schema/metadata for a topic's payload. Identified by ID;
   supports explicit-migration versioning.
-- **Proposal** — a write *request*: one or more entities (each tagged with
+- **[Proposal](docs/proposals.md)** — a write *request*: one or more entities (each tagged with
   a Type ID) offered to the log together. You propose a Proposal; consensus
   decides its fate. It has no place in the order yet.
-- **Actual** — a committed fact: the Proposal that consensus ordered and
+- **[Actual](docs/actuals.md)** — a committed fact: the Proposal that consensus ordered and
   wrote to the log at a fixed Index. You propose Proposals, you *sync*
   Actuals — a Syncable is handed Actuals (in Index order), never Proposals.
-- **Database** — connection config for an external SQL syncable that syncables
+- **[Database](docs/databases.md)** — connection config for an external SQL syncable that syncables
   reference (MySQL or PostgreSQL; ingestables carry their own connection
   string inline).
-- **Ingestable** — pulls data into the log from an external source.
+- **[Ingestable](docs/ingestables.md)** — pulls data into the log from an external source.
   Today: PostgreSQL via logical replication (pgoutput), MySQL via
   binlog, SQL Server via Change Tracking (every edition — no CDC
   licensing requirement).
-- **Syncable** — projects committed Actuals out to an external system,
+- **[Syncable](docs/syncables.md)** — projects committed Actuals out to an external system,
   either as faithful per-table mirrors (`sql`) or by **transforming and
   folding topics into the denormalized shape you query** —
   multi-topic BFF rows, collection aggregates, cross-topic enrichment
@@ -54,45 +54,6 @@ Committed is specifically NOT a databse designed for querying.
   which derives a new topic from a source topic so one transform serves
   N dumb consumers ([docs/read-models.md](docs/read-models.md)
   § Derived topics).
-
-### Syncable checkpoint cadence
-
-After each successful sync a syncable durably checkpoints its progress
-(`SyncableIndex`) through raft, so recovery is deterministic — but that is one
-raft round-trip per checkpoint. Two optional `[syncable]` fields tune how often
-it happens, trading that round-trip against how many already-synced proposals a
-crash re-delivers:
-
-```toml
-[syncable]
-name = "warehouse"
-type = "sql"
-checkpointEvery   = 500      # checkpoint once per 500 successful syncs (default 1)
-checkpointMaxAge  = "1s"     # ...or once 1s elapses since the first pending one
-```
-
-- **`checkpointEvery`** — persist the checkpoint once per this many successful
-  syncs. Default `1` for a single syncable (`http`) and `2500` for a batch
-  syncable (`sql`, `projection`). The worker always also flushes when it
-  catches up (reaches the end of the log), so a low-traffic syncable never
-  lags its checkpoint regardless of this value.
-- **`checkpointMaxAge`** (a duration like `"500ms"`; default: no age bound for
-  single syncables, 50ms for batch) — flush a pending checkpoint after this
-  long even if `checkpointEvery` hasn't been reached.
-
-Both keys apply to the kinds that batch or checkpoint per sync — `sql`,
-`projection`, and `http`. `iceberg` batches by its own `flushRows` /
-`flushInterval`, and `loopback` checkpoints per Actual; both **refuse** these
-keys rather than accepting and ignoring them.
-
-**Duplicate bound:** a crash re-delivers already-synced proposals — at most
-`checkpointEvery` for a single syncable, and up to `checkpointEvery` plus the
-batch cap for a batch syncable, since the two are sized separately. Keep it at
-`1` for **non-idempotent** destinations (an HTTP webhook, an event stream:
-every duplicate is externally visible). Raise it only for **idempotent**
-destinations (the `sql` and `projection` kinds upsert, so a replay is a
-harmless no-op), where it trades that bounded duplicate exposure for
-substantially fewer raft round-trips on a fast destination.
 
 ### Testing
 
@@ -134,7 +95,7 @@ for the rationale.
 
 Operational guides live in [`docs/operations/`](docs/operations/):
 
-- [CDC setup](docs/operations/cdc-setup.md) — point ingest at your own Postgres,
+- [Ingestables](docs/ingestables.md) — point ingest at your own Postgres,
   MySQL, or SQL Server: the source-side settings, what committed creates for
   you, and the failures you're most likely to hit.
 - [Cluster membership](docs/operations/membership.md) — add, remove, and grow

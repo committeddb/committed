@@ -8,19 +8,36 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   catalog to a single denormalized table you query with no joins.
 - [Running Committed](running.md) — the binary or the container, a single node
   or a three-node cluster, and the `COMMITTED_*` variables that configure a node.
-- [API tour](api-tour.md) — a worked example for each endpoint: types and
-  entity kinds, proposals, schema validation, restatements, databases,
-  syncables, ingestables, and membership.
-- [Read models (SQL projections)](read-models.md) — fold CDC topics into
-  current-state tables: rules, multi-source rows, aggregates, and enrichment.
-- [Writing a webhook receiver](webhook-receiver.md) — consume a topic over HTTP
-  instead of SQL: the request/payload contract, the upsert/delete/refresh ops,
-  and the idempotency and sweep responsibilities you own on the receiver side.
-- [Schema contracts](schema-contracts.md) — take a shape census of an existing
-  table, draft a type from it, and choose the gate or the tripwire
-  (`schemaChangeTopic`) for payloads that diverge from the contract.
+- [API tour](api-tour.md) — a short example for each endpoint, linking to the
+  concept docs below.
 
-## Concepts
+## Core concepts
+
+- [Types](types.md) — a topic's schema and metadata: entity kinds, versions
+  and migrations, the shape census, the gate and the tripwire, and
+  restatements.
+- [Proposals](proposals.md) — the write request: proposing over HTTP,
+  deletes, and what can refuse one.
+- [Actuals](actuals.md) — the committed fact a syncable consumes: index order,
+  permanence, and delivery.
+- [Databases](databases.md) — the connection config SQL syncables write
+  through.
+- [Ingestables](ingestables.md) — change data capture from Postgres, MySQL,
+  or SQL Server: the source-side settings, what committed creates, and
+  common failures.
+- [Syncables](syncables.md) — writing topics out: the kinds, SQL mirrors and
+  history tables, consumer stances, and checkpoint cadence. Per kind:
+  - [Read models (SQL projections)](read-models.md) — fold topics into
+    current-state tables: rules, multi-source rows, aggregates, enrichment,
+    and stages.
+  - [Writing a webhook receiver](webhook-receiver.md) — the `http` kind's
+    request contract, and the idempotency and sweep work the receiver owns.
+  - [Iceberg syncable](operations/iceberg-syncable.md) — a current-state
+    Iceberg table on S3: config, catalogs, and maintenance.
+  - [Loopback syncables](loopback.md) — derive a topic once inside the
+    cluster for many consumers.
+
+## Design and guarantees
 
 - [Consistency model](consistency.md) — what committed guarantees for writes and
   reads, and what it deliberately doesn't.
@@ -39,13 +56,8 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
 
 ## Operations
 
-- [CDC setup](operations/cdc-setup.md) — point ingest at your own Postgres,
-  MySQL, or SQL Server: the source-side settings, what committed creates, and
-  common failures.
 - [Zone-pinned syncables](operations/zones.md) — keep sync egress inside a
   zone, and what a strict pin does when its node is down.
-- [Iceberg syncable](operations/iceberg-syncable.md) — a current-state
-  Iceberg table on S3 as a destination: config, catalogs, and maintenance.
 - [Cluster membership](operations/membership.md) — add, remove, and grow nodes
   safely, and read cluster state.
 - [Performance envelope](operations/performance.md) — the write/apply/catch-up

@@ -14,25 +14,6 @@ enrichment, delete lifecycles, and dimension fan-out.
 > read model in one `docker compose up`. This guide explains the mechanics
 > behind it.
 
-## Choosing your read-model shape (read this first)
-
-committed gives you three ways to serve queries, and **the projection is the
-primary pattern** — reach for the others when their specific reason applies,
-not by default:
-
-| You want | Use | Why |
-|---|---|---|
-| A derived/denormalized table you query directly — a BFF row, a flat table replacing a complex join, current state per entity | **`projection`** | It maintains the table *incrementally, per event*: continuously current (no refresh step), folds **multiple topics into one row**, aggregates children into array columns, enriches from other topics. This is committed's centerpiece use case. |
-| Raw per-table replicas — ad-hoc SQL, joins you own, feeding views/BI on your terms | plain **`sql`** syncable with a `primaryKey` (a mirror) | Faithful keyed copies of source tables. If you build a materialized view over mirrors, *you* own its refresh cost and staleness — committed keeps only the mirrors current. |
-| One row per **event** — an audit/history log | plain **`sql`** syncable with no `primaryKey` | Append-only, replay-safe history. Add `keyColumn` if the topic can carry deletes — without it they dead-letter (below). |
-
-The trade to understand: a materialized view over mirrors is stale from the
-moment its (often expensive) refresh completes; a projection is current
-within seconds of the source commit, forever, with no refresh to schedule.
-If the table you're building is *the thing the application reads*, start
-from `projection` and use mirrors only for the parts a projection
-cannot yet express.
-
 One projection scope line to know before you design: a projection's
 `primaryKey` takes one column or a list (`primaryKey = ["visit_id",
 "workarea_id"]` — a latest-event-wins fold on a composite identity). A
@@ -49,115 +30,12 @@ data").
 
 ## History tables vs. read models
 
-The plain `sql` syncable lands a *history* table: one row per event.
-Applications usually query *current state*: one row per entity, which
-requires folding each entity's events in log order. A
-`type = "projection"` syncable expresses that fold declaratively —
-in the one place that sees every event exactly in order — so the log
-stays the source of truth, the rules live in version-controlled TOML,
-reads are O(1), and the table is disposable: rebuild it by replaying
-from index 0. Use `sql` for event-log/history tables (and for
-`snapshot`-kind topics, which are total updates with nothing to fold);
-use `projection` to maintain current-state tables from an
-`event`-kind topic. One topic typically feeds both.
-
-> **The former `sql-projection` spelling was removed in 0.8.0.** The type
-> is `projection` with a `[projection]` section, and the array tables are
-> plural (`[[projection.sources]]`, `[[projection.stages]]`,
-> `[[…aggregate.fields]]`, `[[…aggregate.scalars]]`, `[[…lookup.fields]]`,
-> `[[…stages.joins]]`). Posting the old spelling is
-> refused with a message naming the rename, and a config stored under it
-> parks on an upgraded node until re-POSTed renamed — its declared content is
-> unchanged, so it resumes with its stores and checkpoint (see
-> [upgrade.md](operations/upgrade.md#before-you-upgrade)).
-
-A keyless history table (no `primaryKey`) is **replay-safe**: committed dedups
-each appended row on a hidden sidecar (`<table>__committed_applied`, keyed by the
-event's raft index and its ordinal within the proposal), so a crash mid-batch, a
-leader-change re-sync, or a corrupt-checkpoint restart re-applies as a no-op
-rather than duplicating rows. The sidecar is committed-managed and never queried
-by the application — your history table keeps exactly the columns you mapped. (A
-`snapshot`-kind or otherwise keyed `sql` syncable needs none of this: its upsert
-is already idempotent on the key.) Because the sidecar name is derived from the
-table name, a keyless syncable's table must be short enough that
-`<table>__committed_applied` fits the database's 63-char identifier limit;
-committed rejects a longer one at config time.
-
-**A keyless table cannot honor a delete unless you tell it where the key is.**
-A keyed syncable deletes by its `primaryKey`; a keyless one has no key to bind,
-so a delete tombstone — including a
-[right-to-be-forgotten erasure](operations/rtbf.md) — **dead-letters** rather
-than being silently dropped, and the syncable keeps running. Set `keyColumn` to
-the column whose value equals the entity's key and deletes translate to
-`DELETE FROM <table> WHERE <keyColumn> = ?`, removing the subject's whole
-history from the table:
-
-```toml
-[sql]
-db = "bff"; table = "order_events"      # no primaryKey: append-only history
-keyColumn = "order_id"                  # ...but deletes still erase by this column
-[[sql.mappings]]
-jsonPath = "$.order_id"; column = "order_id"; type = "TEXT"
-```
-
-`keyColumn` is single-column and cannot be combined with a composite
-`primaryKey`. Leaving it unset is a legitimate choice for a topic that never
-receives deletes — committed logs a warning at config time naming the
-consequence, so the decision is yours and visible. If you leave it unset on a
-topic that may carry erasures, erasing that table is your responsibility.
-
-You will also find a small table called `committed__destinations` in the
-destination database: one row per projected table, a note saying which
-rendering version of committed wrote its rows and whether committed
-created the table. A worker reads the version before serving, and if a
-newer committed writes rows differently than the note says, the syncable
-stops and tells you how to bring the table forward instead of mixing two
-renderings in one table (see
-[api-compatibility.md](api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
-
-Whether committed created the table decides what a `DELETE` does. The
-rule is the one committed applies everywhere it touches your systems: it
-removes what it created and leaves what it did not. A table committed
-created (there was none when the syncable was first POSTed) is dropped
-with the syncable. A table you created first and pointed a syncable at
-stays, rows and all. The helper tables are always committed's and always
-go. `?keepData=true` on the DELETE hands a table committed created over
-to you: nothing is removed, and committed stops counting the table as
-its own, so a later DELETE leaves it too.
-
-The sidecar keys on the event's *raft index*, so it makes re-applying the **same
-committed event** a no-op — but each *distinct* event is still its own row. A
-history table records one row per event by design, so the same logical data
-committed as two separate events lands as two rows. That happens two ways:
-
-- **You propose the same unkeyed data more than once.** Direct proposals are
-  yours to control, and committed faithfully appends each.
-- **An ingestable re-emits a row.** A snapshot is at-least-once at the source-row
-  level: a crash mid-snapshot re-reads the current window, and a *full
-  re-snapshot* — a Postgres replication-slot recreate, deleting and recreating
-  the ingestable, or a node rebuild — re-reads the whole source table, so one
-  source row can arrive as several events. (CDC *stream* changes are deduplicated
-  by source sequence and do not duplicate this way; only the snapshot phase
-  does.)
-
-Either way the history table faithfully records each event — that is what an
-append log is. If you want one row per logical entity instead, give the `sql`
-syncable a `primaryKey` (its upsert then converges on the key) or maintain a
-current-state table with `projection`.
-
-`primaryKey` takes one column or a list: `primaryKey = ["tenant_id",
-"project_id"]` declares a real composite `PRIMARY KEY (tenant_id,
-project_id)` — upserts converge on the combination and a source delete
-removes the row matching every key column. **The columns and their order
-must match the producing ingestable's `primaryKey`**: a delete tombstone
-carries only the encoded key, and its values decode positionally in the
-producer's column order — a mismatched order mis-addresses rows, and nothing
-can detect it mechanically (topics decouple the two configs on purpose).
-A mismatched column COUNT, by contrast, is caught at delete-apply time and
-dead-letters loudly — a composite tombstone hitting a single-key destination (or
-the reverse) would otherwise execute a WHERE that matches nothing and
-silently strand the deleted row. Every key column must also appear in the
-mappings; the parser rejects a config where it doesn't.
+The plain `sql` syncable lands a *history* table: one row per event, or a
+keyed mirror of a source table; see
+[syncables.md](syncables.md#sql-mirrors-and-history-tables-sql), which also
+covers [choosing between them and a projection](syncables.md#choosing-a-shape).
+A projection maintains a *current-state* table: one row per entity, folding
+each entity's events in log order.
 
 ## A single-source projection
 
@@ -1333,116 +1211,17 @@ stays consistent at every checkpoint. One syncable fills one table — a
 dimension is its own internal housekeeping, so two syncables that need the same
 data each keep their own copy.
 
-## Derived topics: transform once, N dumb consumers (loopback)
+## Derived topics (loopback)
 
-When several syncables need the same cleanup — a jsonPath projection to a
-canonical shape, version normalization via `mode = "always-current"` — the
-transform logic is repeated N times and drifts. A `loopback` syncable applies
-it ONCE, inside the cluster: it consumes a source topic, transforms each
-entity, and proposes the result to a **derived topic** under that topic's own
-type. Downstream syncables then consume the derived topic with dumb mappings.
+A `loopback` syncable applies one transform inside the cluster and proposes
+the result to a derived topic that downstream syncables consume; see
+[loopback.md](loopback.md).
 
-```toml
-[syncable]
-name = "canonical-photos"
-type = "loopback"
-mode = "always-current"        # normalize versions before deriving (optional)
+## Consumer stances
 
-[loopback]
-topic  = "photos-raw"          # source topic
-target = "photos"              # derived topic (its type must exist)
-
-[[loopback.mappings]]
-jsonPath = "$.id"
-jsonName    = "photo_id"
-
-[[loopback.mappings]]
-jsonPath = "$.meta.title"
-jsonName    = "title"
-```
-
-No mappings means whole-payload passthrough — with `always-current`, that is
-the version-normalization shape: the derived topic carries every entity
-re-written at the current type version. Because the loopback sits behind the
-same interpretation machinery as every syncable, restatements are folded in too —
-**the derived topic is the cache of the source's current interpretation**,
-and its status (`GET /v1/syncable/{id}/status`) shows `derivedFrom` /
-`derivesInto` plus `interpretationStale` when a later restatement supersedes the
-reading it was materialized under. Re-derivation is operator-triggered, never
-automatic: `POST /v1/syncable/{id}/rematerialize` replays the source from
-index 0 (a snapshot-kind derived topic converges by key).
-
-The rules that keep the chain safe:
-
-- **The derived topic is a materialization, never a source of truth.** The raw
-  topic stays sacred; the derived one is rebuildable from it forever.
-- **Keys are preserved** (re-keying is refused at POST): a delete proposed to
-  the source — including an RTBF delete — forwards as a tombstone with the
-  same key, so erasure chases the derivation chain. Generations and
-  refresh-boundary markers forward verbatim too, so an ingest full-refresh of
-  the source reconciles all the way through to the derived topic's destinations.
-- **The derivation graph is a DAG with one producer per derived topic** —
-  checked at POST and re-checked deterministically at apply (a config that
-  races past admission is persisted but loudly degraded, never run). A cycle
-  would re-derive its own output forever; a second producer would interleave
-  two refresh-epoch spaces on one topic.
-- **Producer handover must not regress the epoch space.** A loopback targeting
-  a topic whose committed refresh epochs exceed its source's is refused at
-  POST: forwarded sweeps could never reconcile the previous producer's
-  higher-stamped rows, which would linger stale on downstream keyed syncables.
-  Derive into a fresh topic instead — the old topic's log carries its history
-  permanently. A source at or *above* the target's highwater is fine (its
-  first refresh reconciles the handover), and replacing any producer with an
-  **ingestable** is always safe: the ingest epoch floor is topic-keyed and
-  sees every committed generation, forwarded ones included.
-- **Declare the derived topic's type `entityKind = "snapshot"`** (recommended):
-  replays then converge by key. Any other kind appends on replay and requires
-  an explicit `acknowledgeAppendSemantics = true`.
-- **Transforms are stateless per-entity** — no cross-entity aggregation,
-  no filtering. Sequence-context analysis belongs offline; its output lands
-  as restatements or as proposals to a topic of its own.
-
-Chains (`raw → canonical → per-team`) are fine — each hop is its own loopback.
-
-## Consumer stances: how a syncable meets a versioned topic
-
-The log is permanently heterogeneous: entities carry the type version that was
-current when they were written, and there is no ALTER TABLE — only new writes
-under new versions. Every syncable takes one of three stances toward that:
-
-- **Version-pinned** (`mode = "as-stored"`, handling one version): the syncable
-  sees the exact bytes written, and its mappings target one version's shape.
-  Nothing pins it, though: there is no version selector in the vocabulary, so
-  entities written under a later version still arrive, as written, and the
-  mappings meet a shape they were not written for. Take this stance for a
-  topic whose version is frozen; a topic that will move needs one of the two
-  below.
-- **Version-aware** (`mode = "as-stored"`, dispatching on version): the
-  syncable sees raw bytes plus each entity's stamped version and handles the
-  differences itself — the stance for consumers that genuinely want each era's
-  shape.
-- **Always-current** (`mode = "always-current"`): committed runs each entity
-  through the type's migration chain (older-version data upgraded step by step)
-  before the syncable sees it, so mappings only ever target the current shape.
-
-Always-current is a **promise, and it is checked at admission**: it is only
-admissible when the migration chain can actually carry every version's data to
-the current shape. A version declared `nonConvertible = true` in its
-`[migration]` section — meaning that version requires information older data
-never contained — breaks the chain: `POST /v1/syncable/{id}` refuses an
-always-current syncable over such a topic, naming the gap, and
-`POST /v1/type/{id}` refuses a nonConvertible bump that would strand *existing*
-always-current syncables, naming them (re-POST with `?force=true` to
-acknowledge the stranding deliberately). A force-stranded syncable does not
-silently receive unconverted data, and it does not shunt the whole topic to
-dead letters either. The first entities below the break dead-letter at the
-migration chain (replayable); once ten consecutive distinct rows have failed
-there, the failure is established as config-shaped and the worker **wedges**
-on the next one, visibly, rather than dead-lettering everything older than
-the break (see [stuck-syncables.md](operations/stuck-syncables.md)). The
-repair is the reading, not the syncable: a restatement rebinding the
-below-break range lets the wedged worker resume on its own, after which the
-dead letters replay.
+How a syncable meets a versioned topic — version-pinned, version-aware, or
+always-current — is common to every kind; see
+[syncables.md](syncables.md#consumer-stances-how-a-syncable-meets-a-versioned-topic).
 ## Rehearsing a config before it exists (dry-run)
 
 `POST /v1/syncable/dryrun` takes the same document a syncable POST
@@ -1482,64 +1261,11 @@ Authoring loop: dry-run until the findings list is empty, then POST
 for real — "valid config, wrong result, no error" costs minutes
 instead of a full replay against an oracle.
 
-## Restatements: changing how history is read — rehearse first
+## Restatements
 
-A **restatement** is an append-only, consensus-ordered statement that rebinds
-how already-committed entities are *read* — never their bytes: entities of a
-type committed in an index range (optionally narrowed to one stamped version
-and a deterministic jq predicate) read as a different declared version from
-the moment the restatement commits. The facts never change; the reading does
-— same facts, stated a different way. That covers repairs (an unannounced
-writer that produced v2-shaped data under v1 stamps, a nonConvertible break
-whose below-range data turns out readable after all) and equally
-understanding that simply evolved — no error anywhere, just a better reading
-of the same range. Either way it feeds the same interpretation fold every
-syncable reads through.
-
-```toml
-[restatement]
-topic = "photos"           # the type (topic) whose readings rebind
-fromIndex = 100           # inclusive raft-index range of EXISTING actuals
-toIndex = 250
-readAsVersion = 2       # the version matching entities read as
-# fromVersion = 1         # optional: only entities STAMPED v1
-# predicate = '.license == "cc"'   # optional deterministic jq narrowing
-```
-
-Restatements are the highest-blast-radius config in committed: they are
-**append-only** (a wrong one cannot be edited, only corrected by another —
-later in the log wins), and admitting one instantly marks every consumer of
-the topic `interpretationStale` — rows materialized before it keep the
-superseded reading until you re-materialize each syncable. So the workflow is
-**rehearse, then author**:
-
-1. `POST /v1/restatement/dryrun` with the exact body you intend to admit. Nothing
-   is admitted or stored; the rehearsal runs the restatement's own index range
-   through the *real* interpretation fold and reports what the selectors
-   actually catch (`stampEligible`, `matched`, broken down `byStampedVersion`),
-   what the restatement really *changes* (`rebound`, with before/after reading
-   `samples`), rows its predicate cannot evaluate (`predicateErrors` — each of
-   these would dead-letter or wedge a live consumer), already-applied restatements it
-   composes with (`overlaps`), and the re-materialization bill
-   (`affectedSyncables`, with each consumer's current interpretation pin).
-   Auto-generated `findings` name the authoring signatures: a restatement that
-   matches nothing, one that changes no readings, a predicate that filtered
-   nothing. Admission-level validation runs in full, with the same words the
-   real POST would refuse with — and a rehearsal works even mid-rolling-upgrade,
-   when the real POST would still be refused by the feature gate (the report
-   says so).
-2. Iterate until the findings list is empty and `matched`/`rebound` are the
-   numbers you expected.
-3. `POST /v1/restatement/{id}` with the same body — then re-materialize the
-   affected syncables (`POST /v1/syncable/{id}/rematerialize`) when you want
-   the corrected reading to reach their already-synced rows.
-
-Like the syncable dry-run, the scan is budgeted (`?maxEntries`, default 100k)
-and time-bounded (`?timeoutSeconds`); an exhausted budget yields a **partial**
-report that says so (`coverage`, `truncated`) — never a silently-complete-
-looking one. Sample rows quote entity keys verbatim (that precision is the
-diagnostic point; the trusted-appliance caveat from the syncable dry-run
-applies).
+A restatement rebinds how already-committed entities are read, and marks
+every consumer of the topic `interpretationStale`; see
+[types.md](types.md#restatements-changing-how-history-is-read).
 
 ## Changing the rules after a projection is live
 
@@ -1550,18 +1276,9 @@ that point on*; it does **not** retroactively re-render rows already written to
 the destination. Correcting history is a deliberate rebuild, and running it is your
 responsibility.
 
-**Re-materializing a plain keyed `sql` mirror — in place.** For a plain
-keyed `sql` syncable, `POST /v1/syncable/{id}/rematerialize` converges the
-live table without dropping it: the worker replays from index 0 through the
-current mappings + type migrations + restatements, keyed upserts overwrite rows in
-place while the table keeps serving reads, and a completion sweep removes
-rows the replay never re-emitted. Restart-resumable, and it refreshes the
-syncable's `interpretationPin` (clearing `interpretationStale`). Projections
-and keyless syncables refuse the verb — for those, use the patterns below. The
-verb also needs every member of the cluster on 0.8.0 or later: on a
-mixed-version cluster it answers 503 `cluster_below_feature_level` until the
-rolling upgrade completes, because an older node taking ownership
-mid-replay would write rows the completion sweep then deletes.
+A plain keyed `sql` mirror can instead be re-materialized in place; see
+[syncables.md](syncables.md#re-materializing-a-keyed-mirror-in-place).
+Projections refuse that verb.
 
 **Changing one projection's own rules — blue-green.** Because a projection
 replays from index 0 and the log stays the source of truth, the clean way to fix
@@ -1580,38 +1297,13 @@ This is the recommended pattern precisely because the view is disposable: you
 never mutate a live table in place, and you get to *verify* the fix before
 trusting it.
 
-**Fixing a type's migration — the fan-out case.** A type's `[migration]` jq (the
-transform that brings older-version Actuals up to the current schema) is read by
-**every** projection on that topic. Committed lets you correct a buggy migration
-in place, at the same version — but that edit, too, changes only how *future*
-reads transform the data. Every row already synced through the old migration
-stays as it was, on **all** dependent projections, and committed does not
-currently tell you which projections are now stale or rebuild them for you.
-
-**After an in-place migration fix, rebuilding the dependent projections is your
-responsibility** — blue-green each one as above — for the correction to reach
-already-synced history. Treat a migration edit as "applies going forward;
-rebuild the dependents to fix the past." If you only need the correction for new
-data and accept the historical rows as-is, that is a valid choice — just make it
-knowingly, because nothing rebuilds them on your behalf.
+**Fixing a type's migration** changes only future reads on every projection of
+the topic; rebuilding the dependents is yours. See
+[types.md](types.md#versions-and-migrations).
 
 ## Checkpoint cadence and replay throughput
 
-A syncable's `checkpointEvery` (TOML, `[syncable]` section) is its **checkpoint
-cadence**: how many synced records may accumulate before the resume checkpoint
-is durably persisted. It is also the crash re-delivery bound — a restart
-re-delivers at most that many already-synced records, rounded up to the
-internal batch cap, which keyed syncables absorb idempotently. It does **not**
-control destination transaction size: the sink transaction is sized separately
-and capped internally (a few hundred rows) regardless of cadence.
-
-The cadence matters most during **replays** (initial destination builds, rebuilds):
-every checkpoint persist is a consensus round trip, and many syncables replaying
-with a tight cadence can bottleneck on checkpoint traffic rather than data.
-The default (2500) keeps replays fast out of the box; raising it further
-(e.g. 5000) buys a little more replay throughput at a proportionally larger
-re-delivery window. Caught-up syncables persist on catch-up regardless of
-cadence, so steady-state checkpoint freshness does not depend on this value.
+See [syncables.md](syncables.md#checkpoint-cadence).
 
 ## Destination limits: when a row cannot fit the destination
 

@@ -42,7 +42,7 @@ for the verification loop below.
 
 > **One shape cannot.** A keyless (append/history) `sql` syncable has no key to
 > bind a delete against. Unless it declares
-> [`keyColumn`](../read-models.md#history-tables-vs-read-models), the delete
+> [`keyColumn`](../syncables.md#history-tables), the delete
 > **dead-letters** instead of being silently dropped: the erasure does not
 > reach that table, and clearing it is yours. committed warns about this at
 > config time, and the dead-letter is visible on
@@ -125,7 +125,7 @@ Erasure in committed does not reach copies it doesn't manage:
   ([logging.md](logging.md)).
 - **Databases you point syncables at** got real `DELETE`s, but their own
   backups/replicas/logs are your domain.
-- **The [shape census](../schema-contracts.md#the-shape-census) with value
+- **The [shape census](../types.md#the-shape-census) with value
   tracking on.** `censusValues = true` keeps up to `censusValueLimit`
   distinct source values per string field in the replicated census record,
   and erasure does not scrub it. Do not turn value tracking on for a topic

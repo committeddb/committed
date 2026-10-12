@@ -13,7 +13,7 @@ import (
 // (Proposal.Position), so the rows and the checkpoint commit in one raft entry.
 // These tests exercise that apply-path bundling — the fix for the snapshot
 // effectively-once gap. The docs promise "you do not get duplicates in the topic
-// across a restart" (docs/operations/cdc-setup.md), but SourceSeq dedup can't
+// across a restart" (docs/ingestables.md), but SourceSeq dedup can't
 // cover snapshot rows (they carry SourceSeq 0); bundling closes the crash window
 // between a committed batch and a separate position proposal at the source.
 
