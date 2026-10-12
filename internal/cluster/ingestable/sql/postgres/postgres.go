@@ -261,10 +261,10 @@ func (d *PostgreSQLDialect) OptionKeys() []string {
 	return []string{sql.OptionSlotName, sql.OptionPublication, sql.OptionBatchSize}
 }
 
-// TeardownSource drops the replication slot and publication this ingestable
-// created on the source. The slot is what pins the source's WAL (its restart_lsn
-// holds WAL back), so an orphaned slot from a deleted ingestable grows the
-// source's disk without bound — this releases it. Called by the ingest delete
+// TeardownSource drops the replication slot this ingestable created on the
+// source, and its publication when committed owns it. The slot is what pins
+// the source's WAL (its restart_lsn holds WAL back), so an orphaned slot from
+// a deleted ingestable grows the source's disk without bound — this releases it. Called by the ingest delete
 // path on the owner node only, AFTER the worker has stopped, so the slot is
 // inactive and droppable. Idempotent: the slot drop is guarded on existence
 // (pg_drop_replication_slot errors on a missing name) and the publication uses IF
@@ -309,6 +309,17 @@ func (d *PostgreSQLDialect) TeardownSource(config *sql.Config) error {
 		return fmt.Errorf("drop replication slot %q: %w", pgCfg.slotName, err)
 	}
 	// Then the publication — it pins no WAL, but leaving it clutters the source.
+	// Only a publication committed owns is dropped; one the user had is left as
+	// it was found (see publication.go).
+	owned, err := ownsPublication(ctx, db, pgCfg)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		zap.L().Info("leaving the source publication in place: committed did not create it",
+			zap.String("publication", pgCfg.publication))
+		return nil
+	}
 	if _, err := db.ExecContext(ctx,
 		fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", quoteIdent(pgCfg.publication))); err != nil {
 		return fmt.Errorf("drop publication %q: %w", pgCfg.publication, err)
@@ -443,6 +454,15 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 			// so it is the authoritative detail — no separate primary_key field,
 			// which would show only the first topic's key on a multi-topic ingestable.
 			zap.L().Error("ingest stopping: a primaryKey column is missing from the source schema (renamed or dropped) — worker will park until the ingestable is re-POSTed or the column restored",
+				zap.Error(err),
+			)
+			return err
+		}
+		if errors.Is(err, errSourceMisconfigured) {
+			// The publication itself is wrong for this ingestable (another
+			// ingestable's, or carrying a table no watched table routes);
+			// reconnecting meets the same publication. Park, loud, until a re-POST.
+			zap.L().Error("ingest stopping: the source publication does not match this ingestable — worker will park until the ingestable is re-POSTed",
 				zap.Error(err),
 			)
 			return err
@@ -792,10 +812,14 @@ func (d *PostgreSQLDialect) stream(
 		return out, nil
 	}
 
-	addedTables, err := ensurePublication(ctx, conn, pgCfg)
+	// A held position means this ingestable has streamed before, so an
+	// uncommented publication is the one an earlier version created for it.
+	resumed := *lastLSN != 0 || *resumeProgress != nil || *intent != nil
+	pub, err := ensurePublication(ctx, sqlDB, pgCfg, resumed)
 	if err != nil {
 		return err
 	}
+	addedTables := pub.added
 
 	// Create the replication slot if it doesn't already exist. The result's
 	// ConsistentPoint is the new slot's starting LSN — the earliest point from
@@ -1014,10 +1038,15 @@ func (d *PostgreSQLDialect) stream(
 				// but tuples stay correctly keyed — so warn and continue. A
 				// RelationMessage is pgoutput's schema-change boundary (one per relation
 				// per schema version), so the warn needs no dedup. Reconcile against the
-				// spec that routes this relation (one for the flat config); a relation
-				// the config does not watch has no spec — none should reach here, as the
-				// publication is scoped to watched tables — so skip it.
-				if spec := specForRelation(config, m); spec != nil {
+				// spec that routes this relation (one for the flat config). A relation
+				// no spec routes is either a fault — the stream stops here, before any
+				// of its changes could be acknowledged — or knowingly skipped; see
+				// unroutableRelation.
+				if spec := specForRelation(config, m); spec == nil {
+					if err := unroutableRelation(ctx, sqlDB, pgCfg, pub.owned, m.Namespace, m.RelationName); err != nil {
+						return err
+					}
+				} else {
 					observed := make(map[string]bool, len(m.Columns))
 					for _, c := range m.Columns {
 						observed[strings.ToLower(c.Name)] = true
@@ -1228,80 +1257,6 @@ func quoteIdent(s string) string {
 // surrounding quotes.
 func publicationNamesArg(publication string) string {
 	return fmt.Sprintf("publication_names '%s'", sqlident.EscapeStringLiteral(publication))
-}
-
-// ensurePublication creates the publication if it does not exist, or — if it
-// already exists — reconciles its table set so every configured table is
-// published. It returns the tables that were (re-)added, so the caller can
-// backfill just those on a resumed slot. The connection must be in
-// replication=database mode which allows SQL.
-//
-// Without reconciliation, pgoutput only streams the tables the publication had
-// when first created, so two silent-row-loss cases slip through: (a) a re-POST
-// adds a table to sql.tables — the publication is untouched, and because the
-// slot already exists no snapshot runs either, so the table is never streamed;
-// (b) a watched table is DROPped + reCREATEd on the source — Postgres auto-drops
-// it from the publication and the recreated table (new OID) is never re-added.
-// ADD-ing each configured table (skipping "already member") covers both.
-//
-// Table names are quoted via quoteTable (not quoteIdent) so schema-qualified
-// entries like "public.orders" become "public"."orders" — a schema-qualified
-// reference — instead of one literal identifier with a dot in it.
-//
-// The publication publishes via the partition root (PostgreSQL 13+): without
-// it pgoutput reports a change to a partitioned table under the partition's
-// name, which no watched table matches, so every streamed change to the table
-// would be dropped. A partition watched on its own still reports as itself —
-// the option names the topmost PUBLISHED ancestor.
-func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig) ([]string, error) {
-	quoted := make([]string, len(pgCfg.tables))
-	for i, t := range pgCfg.tables {
-		quoted[i] = quoteTable(t)
-	}
-	tableList := strings.Join(quoted, ", ")
-	create := fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quoteIdent(pgCfg.publication), tableList)
-	if serverMajor(conn.ParameterStatus("server_version")) >= 13 {
-		create += " WITH (publish_via_partition_root = true)"
-	}
-	if _, err := conn.Exec(ctx, create).ReadAll(); err != nil {
-		if !strings.Contains(err.Error(), "already exists") {
-			return nil, err
-		}
-		// Publication exists — reconcile. ADD each configured table; Postgres
-		// reports the ones already present ("already member"), which we skip. The
-		// ones that ADD accepts are new to the publication and need a backfill.
-		var added []string
-		for _, t := range pgCfg.tables {
-			alter := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", quoteIdent(pgCfg.publication), quoteTable(t))
-			if _, err := conn.Exec(ctx, alter).ReadAll(); err != nil {
-				if strings.Contains(err.Error(), "already member") {
-					continue
-				}
-				return nil, fmt.Errorf("reconcile publication: add table %s: %w", t, err)
-			}
-			added = append(added, t)
-		}
-		return added, nil
-	}
-	// Freshly created with every configured table. The caller's slot-is-new
-	// branch does the full snapshot; if the slot somehow already exists, these
-	// are treated as newly-added and backfilled.
-	return pgCfg.tables, nil
-}
-
-// serverMajor returns the major version from a server_version parameter
-// ("16.4 (Debian 16.4-1.pgdg120+1)", "13.2", "17beta1"), or 0 when it has
-// none — an unknown version takes the conservative path.
-func serverMajor(version string) int {
-	end := 0
-	for end < len(version) && version[end] >= '0' && version[end] <= '9' {
-		end++
-	}
-	major, err := strconv.Atoi(version[:end])
-	if err != nil {
-		return 0
-	}
-	return major
 }
 
 // tupleToEntity converts a pgoutput tuple into a cluster.Entity using the
