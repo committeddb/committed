@@ -8,6 +8,8 @@ A map of the docs. Start with the quickstart; reach for the rest as you need the
   catalog to a single denormalized table you query with no joins.
 - [Running Committed](running.md) — the binary or the container, a single node
   or a three-node cluster, and the `COMMITTED_*` variables that configure a node.
+- [Developing Committed](development.md) — build from source, the repository
+  layout, the test suites and their build tags, lint, and generated code.
 - [API tour](api-tour.md) — a short example for each endpoint, linking to the
   concept docs below.
 

@@ -22,6 +22,8 @@ Committed is specifically NOT a databse designed for querying.
 
 [Running Committed](docs/running.md)
 
+[Developing Committed](docs/development.md)
+
 [API tour](docs/api-tour.md)
 
 ### Concepts
@@ -54,20 +56,6 @@ Committed is specifically NOT a databse designed for querying.
   which derives a new topic from a source topic so one transform serves
   N dumb consumers ([docs/read-models.md](docs/read-models.md)
   § Derived topics).
-
-### Testing
-
-| Target | Scope |
-|---|---|
-| `make test` | Fast unit tests (`-short`) |
-| `make test/ci` | Full unit suite with `-race` and coverage |
-| `make test/integration` | `-tags integration` (HTTP server, MySQL/Postgres/SQL Server dialects) |
-| `make test/cdc` | End-to-end CDC pressure-test harness (`e2e/cdc/`) |
-| `make test/adversarial` | Multi-node raft adversarial suite, `-race -count=20` |
-| `make test-all` | Everything (docker + integration tags) |
-
-All five are wired into CI on every push and PR except `test/adversarial`,
-which runs on pushes to `main` only because of its multi-minute runtime.
 
 ## Operations
 
