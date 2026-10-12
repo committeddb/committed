@@ -173,7 +173,7 @@ func joinStats(flows []stages.JoinFlow) []cluster.JoinStat {
 	}
 	out := make([]cluster.JoinStat, len(flows))
 	for i, f := range flows {
-		out[i] = cluster.JoinStat{Target: f.Target, Alias: f.Alias, Absent: f.Absent, Optional: f.Optional, Hits: f.Hits, Misses: f.Misses}
+		out[i] = cluster.JoinStat{Target: f.Target, Alias: f.Alias, Absent: f.Absent, Optional: f.Optional, Hits: f.Hits, Misses: f.Misses, Reresolved: f.Reresolved}
 	}
 	return out
 }

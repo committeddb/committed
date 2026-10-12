@@ -98,6 +98,12 @@ type graphNode struct {
 	mdimConsumers []dimRef
 	// fanJoin is the index of the stage's fan join in def.Joins (-1: none).
 	fanJoin int
+	// odimConsumers are the ordered joins (of LATER stages) whose versions
+	// are THIS stage's outputs.
+	odimConsumers []dimRef
+	// orderWarned one-shots the warning for a version whose orderBy/tieBy
+	// cannot evaluate (worker goroutine only).
+	orderWarned bool
 	// win is a window stage's runtime (nil for every other stage).
 	win *windowRuntime
 }
@@ -113,11 +119,16 @@ type mergeRef struct {
 	alias string
 }
 
-type joinFlowCount struct{ hits, misses atomic.Int64 }
+// joinFlowCount is one join's resolution counters; reresolved counts the
+// dependent keys an ordered join's version changes re-resolved.
+type joinFlowCount struct{ hits, misses, reresolved atomic.Int64 }
 
 type dimRef struct {
 	node *graphNode
 	join *Join
+	// index is the join's position in the stage (an ordered join's index
+	// is per join: two may share a target with different fields).
+	index int
 }
 
 type Graph struct {
@@ -133,6 +144,8 @@ type Graph struct {
 	// the join's field in its multi-match index, referencing inputs
 	// re-fanned on change.
 	mdims map[string][]dimRef
+	// odims routes topics consumed as ORDERED-join versions.
+	odims map[string][]dimRef
 	// OnDelta, when set, observes every stage's post-refold delta — the
 	// chaining terminal's feed (table sources consuming a stage). live=false
 	// is a retraction. Set per Sync call by the single worker goroutine.
@@ -143,7 +156,7 @@ type Graph struct {
 // topology.
 func BuildGraph(stages []Stage) *Graph {
 	stages = expandSynthetic(stages)
-	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}, mdims: map[string][]dimRef{}}
+	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}, mdims: map[string][]dimRef{}, odims: map[string][]dimRef{}}
 	nodes := make([]*graphNode, len(stages))
 	// The graph owns a copy of the stage definitions (joins deep-copied):
 	// stage-join normalize is RESOLVED below by inheritance, and that
@@ -197,6 +210,17 @@ func BuildGraph(stages []Stage) *Graph {
 		}
 		for j := range st.Joins {
 			jn := &st.Joins[j]
+			if jn.ordered() {
+				// An ordered join keeps every version of a reference in its
+				// own index, in its declared key space (never inherited).
+				ref := dimRef{node: nodes[i], join: jn, index: j}
+				if producer, ok := g.byName[jn.From]; ok && jn.From != "" {
+					producer.odimConsumers = append(producer.odimConsumers, ref)
+				} else if jn.Topic != "" {
+					g.odims[jn.Topic] = append(g.odims[jn.Topic], ref)
+				}
+				continue
+			}
 			if jn.Fan {
 				// A fan join matches by its declared field, in its own
 				// key space (normalize/onType as declared, never inherited).
@@ -256,8 +280,8 @@ func expandSynthetic(sts []Stage) []Stage {
 			st.Joins = append([]Join(nil), st.Joins...)
 			for j := range st.Joins {
 				jn := &st.Joins[j]
-				if jn.Field == "" || jn.Fan {
-					continue // a fan join keeps every match: no collapsing re-key stage
+				if jn.Field == "" || jn.Fan || jn.ordered() {
+					continue // fan and ordered joins keep every match: no collapsing re-key stage
 				}
 				name := jn.From + "[" + jn.Field + "]"
 				if !seen[name] {
@@ -323,7 +347,7 @@ func SyntheticLiftName(topic string, keyPath []string) string {
 // ConsumesTopic reports whether any stage reads this topic — as its
 // input or as a join dimension.
 func (g *Graph) ConsumesTopic(topic string) bool {
-	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0 || len(g.mdims[topic]) > 0
+	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0 || len(g.mdims[topic]) > 0 || len(g.odims[topic]) > 0
 }
 
 // SweepEpochs applies a refresh-boundary marker for one topic: retained
@@ -397,6 +421,11 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 			return err
 		}
 	}
+	for _, d := range g.odims[topic] {
+		if err := g.sweepVersions(tx, d, marker, dirty); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -464,6 +493,11 @@ func (g *Graph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, p
 			return err
 		}
 	}
+	for _, d := range g.odims[topic] {
+		if err := g.putVersion(tx, d, inKey, payload, gen, dirty); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -485,6 +519,11 @@ func (g *Graph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte, d
 	}
 	for _, d := range g.mdims[topic] {
 		if err := g.deleteMultiDim(tx, d, inKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range g.odims[topic] {
+		if err := g.putVersion(tx, d, inKey, nil, 0, dirty); err != nil {
 			return err
 		}
 	}
@@ -637,7 +676,7 @@ func (g *Graph) FlowCounts() map[string]FlowCount {
 			if target == "" {
 				target = j.From
 			}
-			fc.Joins = append(fc.Joins, JoinFlow{Target: target, Alias: j.As, Absent: j.Absent, Optional: j.Optional, Hits: n.joinFlows[ji].hits.Load(), Misses: n.joinFlows[ji].misses.Load()})
+			fc.Joins = append(fc.Joins, JoinFlow{Target: target, Alias: j.As, Absent: j.Absent, Optional: j.Optional, Hits: n.joinFlows[ji].hits.Load(), Misses: n.joinFlows[ji].misses.Load(), Reresolved: n.joinFlows[ji].reresolved.Load()})
 		}
 		out[n.def.Name] = fc
 	}
@@ -675,6 +714,9 @@ type JoinFlow struct {
 	Optional bool
 	Hits     int64
 	Misses   int64
+	// Reresolved: dependent keys an ordered join's version changes
+	// re-resolved.
+	Reresolved int64
 }
 
 // stageForEachNonArrayWarnRun is how many CONSECUTIVE non-array forEach
@@ -884,6 +926,14 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey 
 		if j.Fan {
 			continue // the pair carries its matched row; the fan's own index re-fans the input
 		}
+		if j.asOfExpr != nil {
+			// An as-of dependent is indexed by its bound, so a version
+			// re-resolves only the inputs in its range.
+			if err := g.putAsOfDependent(tx, st, i, j, scoped, parent, outKey); err != nil {
+				return err
+			}
+			continue
+		}
 		if onKey := joinOnKey(j, data, parent); onKey != nil {
 			if err := tx.PutRev(st.Name, j.target(), onKey, outKey); err != nil {
 				return err
@@ -1073,6 +1123,11 @@ func (g *Graph) retractOutput(tx *stagestore.Tx, n *graphNode, outKey []byte, di
 			return err
 		}
 	}
+	for _, d := range n.odimConsumers {
+		if err := g.putVersion(tx, d, outKey, nil, 0, dirty); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1114,6 +1169,11 @@ func (g *Graph) publishOutput(tx *stagestore.Tx, n *graphNode, outKey, out []byt
 	}
 	for _, d := range n.mdimConsumers {
 		if err := g.putMultiDim(tx, d, outKey, obj, 0, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.odimConsumers {
+		if err := g.putVersion(tx, d, outKey, obj, 0, dirty); err != nil {
 			return err
 		}
 	}
@@ -1259,26 +1319,11 @@ func (g *Graph) joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (
 		if j.As == "" || j.Fan {
 			continue // a fan join's matched row is already in the pair
 		}
-		scope[j.As] = nil
-		onKey := joinOnKey(j, obj, parent)
-		if onKey == nil {
-			continue
-		}
-		stored, err := tx.GetDim(st.Name, j.target(), onKey)
+		row, err := g.joinRow(tx, st, i, j, obj, parent)
 		if err != nil {
 			return nil, err
 		}
-		if stored == nil {
-			continue
-		}
-		_, payload := decodeRetained(stored)
-		dimObj, err := DecodeObject(payload)
-		if err != nil {
-			return nil, err
-		}
-		if Match(j.Where, dimObj) {
-			scope[j.As] = dimObj
-		}
+		scope[j.As] = row
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
@@ -1304,21 +1349,11 @@ func (g *Graph) inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (b
 		// present: a dimension row exists at the input's On value AND
 		// matches the join's Where. A normal join requires it; an Absent
 		// (anti-)join forbids it — one rule: fail when present == Absent.
-		present := false
-		if onKey := joinOnKey(j, obj, parent); onKey != nil {
-			stored, err := tx.GetDim(st.Name, j.target(), onKey)
-			if err != nil {
-				return false, err
-			}
-			if stored != nil {
-				_, payload := decodeRetained(stored)
-				dimObj, err := DecodeObject(payload)
-				if err != nil {
-					return false, err
-				}
-				present = Match(j.Where, dimObj)
-			}
+		row, err := g.joinRow(tx, st, i, j, obj, parent)
+		if err != nil {
+			return false, err
 		}
+		present := row != nil
 		if present {
 			n.joinFlows[i].hits.Add(1)
 		} else {

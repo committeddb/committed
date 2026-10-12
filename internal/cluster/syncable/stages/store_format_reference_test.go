@@ -252,6 +252,17 @@ func storeReferenceFixture() []Stage {
 			Joins: []Join{{From: "props", Field: "$.pid", On: []string{"$.project"}, As: "pp", Optional: true, Fan: true}},
 			Emit:  []Emit{{Field: "amount", From: "$.pp.amount"}},
 		},
+		// An as-of join on a topic's field: the version index (a date
+		// order key, a tie, the producer key), each version's position, and
+		// the dependents indexed by their bound.
+		{
+			Name: "fx-usd", From: "fx-payments", KeyPath: []string{"$.id"},
+			Joins: []Join{{
+				Topic: "fx-rates", Field: "$.ccy", On: []string{"$.ccy"}, Normalize: NormalizeLower,
+				OrderBy: []string{"$.day::date"}, TieBy: []string{"$.seq"}, AsOf: "$.paid::date", As: "fx", Optional: true,
+			}},
+			Emit: []Emit{{Field: "usd", Expr: "round($.amount * $.fx.rate, 2)"}},
+		},
 	}
 }
 
@@ -305,6 +316,12 @@ func storeReferenceFeed(fold func(topic, key, payload string, gen uint64), sweep
 	del("refund-notes", "n2")                                      // a tombstone retracts its own source's row only
 	fold("proj-members", "pm1", `{"user":"u1","project":"J1"}`, 1) // pairs with props' J1 row
 	fold("proj-members", "pm2", `{"user":"u2","project":"J7"}`, 1) // no match: the null pair
+	fold("fx-rates", "r1", `{"ccy":"EUR","day":"2026-01-01","seq":1,"rate":1.1}`, 1)
+	fold("fx-rates", "r2", `{"ccy":"eur","day":"2026-01-10","seq":2,"rate":1.2}`, 2)
+	fold("fx-payments", "x1", `{"id":"x1","ccy":"EUR","amount":100,"paid":"2026-01-05"}`, 0)
+	fold("fx-payments", "x2", `{"id":"x2","ccy":"EUR","amount":100,"paid":"2025-12-31"}`, 0) // before any version
+	sweep("fx-rates", 2)                                                                     // r1 retracts: x1 falls to nothing
+	fold("fx-rates", "r0", `{"ccy":"EUR","day":"2025-12-01","seq":0,"rate":1.05}`, 2)        // backfill: x1 and x2 resolve to it
 }
 
 // TestStoreReferenceFixtureCoversTheVocabulary makes the reference's coverage

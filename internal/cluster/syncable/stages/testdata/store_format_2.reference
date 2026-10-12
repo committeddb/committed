@@ -1,4 +1,4 @@
-"meta"	"fingerprint"	8a0ac215e557219020782f8d9e76dc84f0ae2c3020ac5545fa2e4b81ecff5ecf
+"meta"	"fingerprint"	66b2a26de9e652bdb2807a7a290a9d20280299960316fdea8d72b88c79be7e54
 "meta"	"format"	"\x00\x00\x00\x00\x00\x00\x00\x02"
 "meta"	"frontier"	"\x00\x00\x00\x00\x00\x00\x00\x0e"
 "stage:activity:in"	"\x02J1[\"props\",\"5\"]"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
@@ -67,6 +67,18 @@
 "stage:first-activity:src"	"[\"refund-notes\",\"r1\"]"	j1
 "stage:first-activity:src"	"[\"refunds\",\"r3\"]"	j1
 "stage:first-activity:src"	"[\"refunds\",\"r4\"]"	j1
+"stage:fx-usd:arev:0:fx-rates"	"\x03eur@\x80\x06G4(H\xe0\x00x2"	"\r"
+"stage:fx-usd:arev:0:fx-rates"	"\x03eur@\x80\x06G\x98\xbd}\xc0\x00x1"	"\r"
+"stage:fx-usd:in"	"\x02x1x1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":100,\"ccy\":\"EUR\",\"id\":\"x1\",\"paid\":\"2026-01-05\"}"
+"stage:fx-usd:in"	"\x02x2x2"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":100,\"ccy\":\"EUR\",\"id\":\"x2\",\"paid\":\"2025-12-31\"}"
+"stage:fx-usd:odim:0:fx-rates"	"\x03eur@\x80\x06Dة\v\xa0\x00\x10\x02r0"	"\r\x00\x00\x00\x00\x00\x00\x00\x02{\"ccy\":\"EUR\",\"day\":\"2025-12-01\",\"rate\":1.05,\"seq\":0}"
+"stage:fx-usd:odim:0:fx-rates"	"\x03eur@\x80\x06G\xfdR\xb2\xa0\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x03\x00r2"	"\r\x00\x00\x00\x00\x00\x00\x00\x02{\"ccy\":\"eur\",\"day\":\"2026-01-10\",\"rate\":1.2,\"seq\":2}"
+"stage:fx-usd:opos:0:fx-rates"	"r0"	"\x03eur@\x80\x06Dة\v\xa0\x00\x10\x02r0"
+"stage:fx-usd:opos:0:fx-rates"	"r2"	"\x03eur@\x80\x06G\xfdR\xb2\xa0\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x03\x00r2"
+"stage:fx-usd:out"	"x1"	{"usd":105}
+"stage:fx-usd:out"	"x2"	{"usd":105}
+"stage:fx-usd:src"	"x1"	x1
+"stage:fx-usd:src"	"x2"	x2
 "stage:job:in"	"\x02j1c\x00j1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"owner\":null}"
 "stage:job:in"	"\x02j1wa\x00j1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"Id\":\"J1\",\"name\":\"east\"}"
 "stage:job:in"	"\x02j4c\x00j4"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":0,\"owner\":null}"

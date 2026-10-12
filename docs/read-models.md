@@ -933,6 +933,50 @@ set = [ { column = "total", from = "$.total" },
   `fanned`. The output is the product of the sides, as in SQL: a value
   shared by many rows on both sides (one group with thousands of members
   and permissions) makes that many pairs.
+- **`orderBy`/`tieBy` choose which matching row a join resolves to, and
+  `asOf` bounds it in business time** — SQL's ASOF JOIN (PostgreSQL's
+  `LEFT JOIN LATERAL (… WHERE p.product_id = o.product_id AND
+  p.effective_from <= o.ordered_at ORDER BY p.effective_from DESC,
+  p.change_id DESC LIMIT 1)`). An order prices at the rate in effect at
+  its own time, not today's:
+
+  ```toml
+  joins = [ { topic = "price-changes", field = "$.product_id", on = "$.product_id",
+              orderBy = [ "$.effective_from::timestamptz" ], tieBy = [ "$.change_id" ],
+              asOf = "$.ordered_at::timestamptz", as = "price", optional = true } ]
+  ```
+
+  Among the rows whose `field` matches the input's `on` (and that pass the
+  join's `where`), the join resolves to the greatest by `orderBy`, then
+  `tieBy` (required), then the producer key. Both take the window's
+  order-key form and read the JOINED row. With `asOf` (an expression over
+  the input; no aliases), only rows whose single, ascending `orderBy`
+  value is at or before the input's bound are eligible: inclusive and
+  backward only. A null bound or a null version time is never eligible,
+  and comparing different kinds (a time against a number) is a data error,
+  so cast both sides alike. A version is valid until the next version for
+  the same reference (there is no `validTo`). All join modes compose:
+  - inner drops an input before any version;
+  - `optional` scopes it null;
+  - `absent` keeps exactly the inputs with no version in effect.
+
+  Without `asOf`, an ordered join is "the latest by business order" (a
+  ticket's current assignee by assignment time, not by key bytes); without
+  `orderBy`, a `field` join keeps its original rule (the bytewise-largest
+  producer key's row). `field` is declarable on a topic join when the join
+  orders. Corrections propagate exactly: a version inserted, corrected,
+  moved, or deleted at time T re-resolves only the inputs bounded in
+  [T, the next version), and an input whose own time changes re-resolves
+  just itself. Stats and the dry-run count them per join (`reresolved`).
+  Transaction-time as-of ("what the log believed then") is deliberately
+  not offered: it is arrival order, which a backfill or an ingest snapshot
+  makes meaningless.
+
+  As-of versus copying the value into the event: copying a price or rate
+  into the event at command time works only for data the command side
+  had, and it freezes mistakes. An as-of join resolves at fold time from
+  the versions themselves, so a backfilled or corrected version reaches
+  every event in its range.
 - **`reduce = "latest"` is argmax by a business field** (`orderBy` — never
   arrival order, so backfills converge with steady state), with `tieBy`
   a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose

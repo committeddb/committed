@@ -26,6 +26,16 @@
 //	stage:<name>:mdim:<join> fan joins: frame(onKey)+producerKey -> the matched row
 //	stage:<name>:mpos:<join> fan joins: producerKey -> its current onKey
 //	stage:<name>:parent      fan joins: inKey -> the input, for re-fanning
+//	stage:<name>:odim:<join> ordered joins: frame(onKey)+sortKey+producerKey -> order end + row
+//	stage:<name>:opos:<join> ordered joins: producerKey -> its current odim key
+//	stage:<name>:arev:<join> as-of joins: frame(onKey)+asOf sort key+outKey -> asOf end
+//
+// The odim/opos buckets exist only for joins declaring orderBy: every
+// matching row (version) of a reference, in business order, so the join
+// resolves by one seek — the greatest version, or for asOf the greatest at
+// or below the input's bound. arev indexes an as-of join's dependents by
+// their bound, so a version at T re-resolves only the inputs in [T, next
+// version).
 //
 // The mdim/mpos/parent buckets exist only for stages with a fan join: a
 // fan join resolves EVERY row matching a reference (mdim, scanned by the
@@ -838,3 +848,118 @@ func (tx *Tx) ParentsAll(stage string, fn func(inKey, val []byte) error) error {
 	}
 	return nil
 }
+
+// Join index kinds: an ordered join's versions (odim), each producer row's
+// current version key (opos), and an as-of join's dependents (arev).
+const (
+	JoinIndexVersions   = "odim"
+	JoinIndexPositions  = "opos"
+	JoinIndexDependents = "arev"
+)
+
+func joinIndexBucket(stage, kind, join string) []byte {
+	return []byte("stage:" + stage + ":" + kind + ":" + join)
+}
+
+// PutJoinIndex / GetJoinIndex / DeleteJoinIndex address one entry of an
+// ordered join's index of the given kind.
+func (tx *Tx) PutJoinIndex(stage, kind, join string, key, val []byte) error {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil {
+		return err
+	}
+	return b.Put(key, val)
+}
+
+func (tx *Tx) GetJoinIndex(stage, kind, join string, key []byte) ([]byte, error) {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(key), nil
+}
+
+func (tx *Tx) DeleteJoinIndex(stage, kind, join string, key []byte) error {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(key)
+}
+
+// ScanJoinIndex walks the entries starting with prefix: forward from the
+// first key >= from, or backward from the last key < from (from nil = the
+// prefix's last entry). fn returns false to stop.
+func (tx *Tx) ScanJoinIndex(stage, kind, join string, prefix, from []byte, backward bool, fn func(key, val []byte) (bool, error)) error {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	var k, v []byte
+	switch {
+	case !backward:
+		start := prefix
+		if from != nil && string(from) > string(prefix) {
+			start = from
+		}
+		k, v = c.Seek(start)
+	default:
+		upper := from
+		if upper == nil {
+			upper = PrefixEnd(prefix)
+		}
+		if upper == nil {
+			k, v = c.Last()
+		} else if k, _ = c.Seek(upper); k == nil {
+			k, v = c.Last()
+		} else {
+			k, v = c.Prev()
+		}
+	}
+	for k != nil && hasPrefix(k, prefix) {
+		more, err := fn(k, v)
+		if err != nil || !more {
+			return err
+		}
+		if backward {
+			k, v = c.Prev()
+		} else {
+			k, v = c.Next()
+		}
+	}
+	return nil
+}
+
+// AllJoinIndex iterates every entry of one join index — the epoch sweep.
+func (tx *Tx) AllJoinIndex(stage, kind, join string, fn func(key, val []byte) error) error {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		if err := fn(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PrefixEnd is the least key greater than every key starting with prefix
+// (nil: no such key — the prefix is all 0xFF, so its range runs to the
+// end).
+func PrefixEnd(prefix []byte) []byte {
+	end := append([]byte(nil), prefix...)
+	for i := len(end) - 1; i >= 0; i-- {
+		if end[i] < 0xFF {
+			end[i]++
+			return end[:i+1]
+		}
+	}
+	return nil
+}
+
+// SplitFrame undoes a framed key: the first (length-prefixed) key and the
+// rest.
+func SplitFrame(k []byte) (first, rest []byte, ok bool) { return splitFrame(k) }

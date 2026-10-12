@@ -689,6 +689,7 @@ paths:
                               optional: { type: boolean }
                               hits: { type: integer, format: int64 }
                               misses: { type: integer, format: int64 }
+                              reresolved: { type: integer, format: int64 }
                         samples:
                           type: array
                           items: { type: object }

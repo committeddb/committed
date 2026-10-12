@@ -224,6 +224,9 @@ type rawStageJoin struct {
 	Optional  bool         `mapstructure:"optional"`
 	Field     string       `mapstructure:"field"`
 	Fan       bool         `mapstructure:"fan"`
+	OrderBy   any          `mapstructure:"orderBy"`
+	TieBy     any          `mapstructure:"tieBy"`
+	AsOf      string       `mapstructure:"asOf"`
 }
 
 // parseProjectionStages decodes the [[{section}.stages]] blocks.
@@ -582,7 +585,10 @@ func stageJoins(raw []rawStageJoin) []StageJoin {
 	}
 	out := make([]StageJoin, len(raw))
 	for i, rj := range raw {
-		out[i] = StageJoin{Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize), OnType: lowerList(pathOrList(rj.OnType)), As: rj.As, Optional: rj.Optional, Field: rj.Field, Fan: rj.Fan}
+		out[i] = StageJoin{
+			Topic: rj.Topic, From: rj.From, On: pathOrList(rj.On), Absent: rj.Absent, Where: rj.Where, Normalize: strings.ToLower(rj.Normalize), OnType: lowerList(pathOrList(rj.OnType)), As: rj.As, Optional: rj.Optional, Field: rj.Field, Fan: rj.Fan,
+			OrderBy: pathOrList(rj.OrderBy), TieBy: pathOrList(rj.TieBy), AsOf: rj.AsOf,
+		}
 	}
 	return out
 }

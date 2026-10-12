@@ -152,6 +152,10 @@ type JoinStat struct {
 	Optional bool   `json:"optional,omitempty"`
 	Hits     int64  `json:"hits"`
 	Misses   int64  `json:"misses"`
+	// Reresolved counts the dependent keys an ordered join's version
+	// changes re-resolved (an as-of join: only those in each version's
+	// range). Omitted for other joins and while zero.
+	Reresolved int64 `json:"reresolved,omitempty"`
 }
 
 // DryRunSource is one table source's matching row. Hints carry the

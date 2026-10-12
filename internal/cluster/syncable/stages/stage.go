@@ -402,6 +402,108 @@ type Join struct {
 	// beside forEach/fan arms. A topic join may declare field when it
 	// fans: every entity carrying the value matches.
 	Fan bool `mapstructure:"fan" json:"fan,omitempty"`
+	// OrderBy and TieBy choose WHICH matching row a join resolves to: the
+	// greatest by orderBy, then tieBy (both window-style order keys —
+	// expressions over the JOINED row, each optionally asc|desc and nulls
+	// first|last), with the producer key as a hidden floor. SQL's LATERAL
+	// (… ORDER BY … DESC LIMIT 1). Without orderBy a field join resolves
+	// to the bytewise-largest producer key's row, as before. Requires
+	// field (a join by key matches at most one row) and tieBy; a topic
+	// join may declare field when it orders.
+	OrderBy []string `mapstructure:"orderBy" json:"orderBy,omitempty"`
+	TieBy   []string `mapstructure:"tieBy" json:"tieBy,omitempty"`
+	// AsOf bounds an ordered join in business time — SQL's ASOF JOIN: only
+	// rows whose (single, ascending) orderBy value is <= the input's asOf
+	// value are eligible, so an order prices at the rate in effect at its
+	// own time, and a backfilled or corrected version re-resolves exactly
+	// the inputs in [its time, the next version). An expression over the
+	// INPUT (fold-time scope: no aliases). A null asOf, or a null orderBy
+	// value, is never eligible; comparing different families (a time
+	// against a number) is a data error.
+	AsOf string `mapstructure:"asOf" json:"asOf,omitempty"`
+
+	// orderKeys/tieKeys/asOfExpr are the compiled OrderBy/TieBy/AsOf
+	// (validateOrderedJoin).
+	orderKeys, tieKeys []winKey
+	asOfExpr           Node
+}
+
+// ordered reports whether a join resolves through its ordered index.
+func (j *Join) ordered() bool { return len(j.OrderBy) > 0 }
+
+// validateOrderedJoin holds an ordered join's rules (OrderBy/TieBy/AsOf)
+// and compiles them in place.
+func validateOrderedJoin(j *Join, jw string) error {
+	switch {
+	case len(j.OrderBy) == 0 && len(j.TieBy) > 0:
+		return fmt.Errorf("%s: tieBy breaks orderBy's ties — declare orderBy", jw)
+	case len(j.OrderBy) == 0 && j.AsOf != "":
+		return fmt.Errorf("%s: asOf bounds the join's orderBy — declare orderBy (the version's business time) and tieBy", jw)
+	case len(j.OrderBy) == 0:
+		return nil
+	case j.Field == "":
+		return fmt.Errorf("%s: orderBy chooses among the rows matching a field — a join by key matches at most one row; declare field", jw)
+	case len(j.TieBy) == 0:
+		return fmt.Errorf("%s: an ordered join needs tieBy — two versions with equal orderBy values would otherwise resolve by key bytes; a version id is the usual choice", jw)
+	case j.Fan:
+		return fmt.Errorf("%s: fan keeps every match, so orderBy has nothing to choose — drop one", jw)
+	}
+	var err error
+	if j.orderKeys, err = compileWinKeys(j.OrderBy, jw+": orderBy"); err != nil {
+		return err
+	}
+	if j.tieKeys, err = compileWinKeys(j.TieBy, jw+": tieBy"); err != nil {
+		return err
+	}
+	for _, k := range append(append([]winKey(nil), j.orderKeys...), j.tieKeys...) {
+		if UsesSource(k.expr) || exprReferencesParent(k.expr) {
+			return fmt.Errorf("%s: orderBy/tieBy read the joined row — source() and $parent have no meaning there", jw)
+		}
+	}
+	if j.AsOf == "" {
+		j.asOfExpr = nil
+		return nil
+	}
+	switch {
+	case len(j.orderKeys) != 1:
+		return fmt.Errorf("%s: asOf compares against ONE orderBy key (the version's time) — got %d", jw, len(j.orderKeys))
+	case j.orderKeys[0].desc:
+		return fmt.Errorf("%s: asOf finds the latest version at or before the input's time, so its orderBy key ascends — drop desc (a forward as-of is not supported)", jw)
+	case j.orderKeys[0].nullsFirst:
+		return fmt.Errorf("%s: a null orderBy value is never eligible under asOf — drop nulls first", jw)
+	}
+	if j.asOfExpr, err = Compile(j.AsOf); err != nil {
+		return fmt.Errorf("%s: asOf: %w", jw, err)
+	}
+	if UsesSource(j.asOfExpr) || exprReferencesParent(j.asOfExpr) {
+		return fmt.Errorf("%s: asOf reads the input — source() and $parent are not supported there", jw)
+	}
+	if a, b := castFamily(j.asOfExpr), castFamily(j.orderKeys[0].expr); a != "" && b != "" && a != b {
+		return fmt.Errorf("%s: asOf is a %s but orderBy is a %s — the bound compares within one family; cast both alike", jw, a, b)
+	}
+	return nil
+}
+
+// castFamily names the comparison family a cast declares ("" when the
+// expression's type is not declared by a cast).
+func castFamily(n Node) string {
+	c, ok := n.(exprCast)
+	if !ok {
+		return ""
+	}
+	switch c.typ {
+	case "numeric", "integer", "bigint":
+		return "number"
+	case "timestamptz", "timestamp", "date":
+		return "date/time"
+	case "text":
+		return "text"
+	case "interval":
+		return "interval"
+	case "boolean":
+		return "boolean"
+	}
+	return ""
 }
 
 // fanJoin returns the index of the stage's fan join, or -1.
@@ -662,6 +764,9 @@ func ValidateShapes(stages []Stage) error {
 		fans := 0
 		for ji, j := range st.Joins {
 			jw := fmt.Sprintf("%s join %d (%q)", where, ji+1, j.target())
+			if err := validateOrderedJoin(&st.Joins[ji], jw); err != nil {
+				return err
+			}
 			if j.Fan {
 				if err := validateFanJoin(st, &j, jw); err != nil {
 					return err
@@ -680,7 +785,7 @@ func ValidateShapes(stages []Stage) error {
 				return fmt.Errorf("%s: %q is a stage — join it with from = %q (topic joins address topics)", jw, j.Topic, j.Topic)
 			}
 			if j.Field != "" {
-				if j.From == "" && !j.Fan {
+				if j.From == "" && !j.Fan && !j.ordered() {
 					return fmt.Errorf("%s: field addresses a STAGE's emitted field — a topic join addresses the entity key; drop field, or fold the topic through a stage first", jw)
 				}
 				if len(j.On) != 1 {
@@ -690,10 +795,10 @@ func ValidateShapes(stages []Stage) error {
 					return err
 				}
 				space := j.Normalize + "\x00" + strings.Join(j.OnType, ",")
-				if prior, ok := fieldJoinSpaces[j.From+"\x00"+j.Field]; ok && prior != space && !j.Fan {
+				if prior, ok := fieldJoinSpaces[j.From+"\x00"+j.Field]; ok && prior != space && !j.Fan && !j.ordered() {
 					return fmt.Errorf("%s: two field joins address %s[%s] with different normalize/onType — the synthesized re-key stage has ONE key space; declare them identically", jw, j.From, j.Field)
 				}
-				if !j.Fan {
+				if !j.Fan && !j.ordered() {
 					fieldJoinSpaces[j.From+"\x00"+j.Field] = space
 				}
 			}
@@ -1360,6 +1465,17 @@ func rejectFoldTimeAliasRefs(st *Stage, aliases map[string]bool, where string) e
 		for _, on := range st.Joins[ji].On {
 			if err := checkPath(on, "join on"); err != nil {
 				return err
+			}
+		}
+		if n := st.Joins[ji].asOfExpr; n != nil {
+			var aerr error
+			walkExprPaths(n, func(p string) {
+				if aerr == nil {
+					aerr = checkPath(p, "join asOf")
+				}
+			})
+			if aerr != nil {
+				return aerr
 			}
 		}
 	}
