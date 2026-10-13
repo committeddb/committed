@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/PaesslerAG/jsonpath"
+	"github.com/committeddb/committed/internal/cluster/jsonpaths"
 )
 
 // WhenClause is one match condition: exactly one of Equals (the value
@@ -574,7 +574,7 @@ func ResolvePath(path string, data, parent any) (any, error) {
 		if parent == nil {
 			return nil, fmt.Errorf("path [%s]: $parent is only meaningful inside a forEach source", path)
 		}
-		return jsonpath.Get("$"+rest, parent)
+		return jsonpaths.Get("$"+rest, parent)
 	}
-	return jsonpath.Get(path, data)
+	return jsonpaths.Get(path, data)
 }

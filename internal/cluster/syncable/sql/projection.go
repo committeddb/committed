@@ -9,10 +9,10 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/jsonpaths"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	"github.com/committeddb/committed/internal/cluster/syncable/stages"
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
@@ -1277,14 +1277,14 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 		return err
 	}
 
-	elementKey, err := jsonpath.Get(ag.elementKey, jsonData)
+	elementKey, err := jsonpaths.Get(ag.elementKey, jsonData)
 	if err != nil {
 		return ag.elementKeyTracker.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
 	}
 	ag.elementKeyTracker.Succeeded()
 	element := make(map[string]any, len(ag.fields))
 	for _, f := range ag.fields {
-		v, err := jsonpath.Get(f.From, jsonData)
+		v, err := jsonpaths.Get(f.From, jsonData)
 		if err != nil {
 			return f.tracker.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
 		}
@@ -1790,7 +1790,7 @@ func (p *Projection) applyLookup(ctx context.Context, tx *gosql.Tx, src *project
 
 	fields := make(map[string]any, len(lk.fields))
 	for _, f := range lk.fields {
-		v, err := jsonpath.Get(f.From, jsonData)
+		v, err := jsonpaths.Get(f.From, jsonData)
 		if err != nil {
 			return f.tracker.Classify(p.syncIndex, fmt.Errorf("[projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
 		}

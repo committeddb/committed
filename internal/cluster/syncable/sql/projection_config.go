@@ -899,9 +899,9 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 // is rejected at ParseSyncable (a clean 400) instead of failing per-row at
 // runtime — where an extraction path dead-letters every row (config-shaped, but
 // classified permanent) and a when-clause path silently never matches (the rule
-// never fires → wrong/empty output, no error anywhere). jsonpath.Get compiles the
-// path internally on every call; jsonpath.New is the same compile without the
-// evaluation. The path is config, not secret, so it may appear in the error.
+// never fires → wrong/empty output, no error anywhere). jsonpaths.Get compiles
+// with the same jsonpath.New at first use. The path is config, not secret, so
+// it may appear in the error.
 func validateJSONPath(path, where string) error {
 	// A `$parent.` prefix is the forEach element scope's way of reaching the
 	// enclosing event payload; validate the remainder as a rooted path (the

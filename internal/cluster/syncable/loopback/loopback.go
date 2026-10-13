@@ -41,9 +41,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/PaesslerAG/jsonpath"
-
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/jsonpaths"
 )
 
 // Proposer is the loopback's write seam back into the cluster: db.DB
@@ -204,7 +203,7 @@ func Transform(data []byte, mappings []Mapping) ([]byte, error) {
 	}
 	out := make(map[string]any, len(mappings))
 	for _, m := range mappings {
-		v, err := jsonpath.Get(m.JsonPath, doc)
+		v, err := jsonpaths.Get(m.JsonPath, doc)
 		if err != nil {
 			return nil, fmt.Errorf("jsonpath %q for jsonName %q: %w", m.JsonPath, m.JsonName, err)
 		}

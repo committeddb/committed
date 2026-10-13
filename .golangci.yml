@@ -47,11 +47,13 @@ linters:
   settings:
     forbidigo:
       # Providing our own forbid list REPLACES forbidigo's default (which bans
-      # fmt.Print*); we only want the url.Parse rule, scoped by the exclusions
-      # below to the SQL subsystem.
+      # fmt.Print*). The url.Parse rule is scoped by the exclusions below to
+      # the SQL subsystem; the jsonpath.Get rule applies everywhere.
       forbid:
         - pattern: '^url\.Parse$'
           msg: "parse connection strings with sql.ParseConnString, not url.Parse: url.Parse's error embeds the raw (secret-bearing) URL. See internal/cluster/ingestable/sql/connstring.go."
+        - pattern: '^jsonpath\.Get$'
+          msg: "use jsonpaths.Get: jsonpath.Get recompiles the path on every call. See internal/cluster/jsonpaths."
     staticcheck:
       # Start from golangci-lint's default set (which omits the
       # opinionated ST* "stylecheck" family), then drop QF1008 —
@@ -89,10 +91,17 @@ linters:
       - linters:
           - forbidigo
         path-except: internal/cluster/(ingestable|syncable)/sql/
+        text: url\.Parse
       # connstring.go IS the one sanctioned url.Parse call site (sql.ParseConnString).
       - linters:
           - forbidigo
         path: internal/cluster/ingestable/sql/connstring\.go
+        text: url\.Parse
+      # The jsonpaths test compares against jsonpath.Get.
+      - linters:
+          - forbidigo
+        path: internal/cluster/jsonpaths/jsonpaths_test\.go
+        text: jsonpath\.Get
 
 formatters:
   enable:

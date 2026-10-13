@@ -10,10 +10,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/jsonpaths"
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
@@ -632,7 +632,7 @@ func fanPathDesc(st *Stage) string {
 // shape).
 func FanMiss(path string, payload any, elems *[]any) string {
 	miss := "unresolved"
-	if v, err := jsonpath.Get(path, payload); err == nil {
+	if v, err := jsonpaths.Get(path, payload); err == nil {
 		if list, ok := v.([]any); ok {
 			*elems = list
 			miss = ""
@@ -642,7 +642,7 @@ func FanMiss(path string, payload any, elems *[]any) string {
 	}
 	if miss == "" && len(*elems) == 0 {
 		if container, ok := strings.CutSuffix(path, "[*]"); ok {
-			if cv, err := jsonpath.Get(container, payload); err != nil {
+			if cv, err := jsonpaths.Get(container, payload); err != nil {
 				miss = "unresolved"
 			} else if _, isList := cv.([]any); !isList {
 				miss = fmt.Sprintf("%T", cv)

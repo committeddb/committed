@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/jsonpaths"
 )
 
 type Syncable struct {
@@ -424,7 +424,7 @@ func (c *Syncable) applyEntity(ctx context.Context, tx *sql.Tx, e *cluster.Entit
 			continue
 		}
 		tr := c.insert.Trackers.At(i)
-		res, err := jsonpath.Get(path, jsonData)
+		res, err := jsonpaths.Get(path, jsonData)
 		if err != nil {
 			// A syntactically invalid path cannot reach here (validateMappings
 			// compiles every mapping jsonpath at ParseSyncable — a broken path
