@@ -62,17 +62,27 @@ the commands shown.
 
 `BenchmarkProposeApplyRoundTrip` relaxes bbolt's fsync (the raft log is still
 fsynced), so it isolates raft from the metadata store; a running node fsyncs
-both. Measured 2026-10-13 on the same laptop against a running single node
-with default settings:
+both. Measured 2026-10-13 on the same laptop: the
+`BenchmarkAggregateLargeGroup` rows with `make bench`, the rest against a
+running single node with default settings:
 
 | Measurement | Result | Derived rate |
 |---|---|---|
 | Serial `POST /v1/proposal`, one entity each | median 30 ms | ~31 proposals/sec |
 | PostgreSQL ingestable streaming one-row transactions | ~50 ms per transaction | ~20 transactions/sec |
+| `BenchmarkAggregateLargeGroup`, five emits, 1,000-input group | 3.1 ms per input | ~320 inputs/sec into that group |
+| `BenchmarkAggregateLargeGroup`, five emits, 10,000-input group | 32 ms per input | ~31 inputs/sec into that group |
+| Source commit to read-model row, aggregate stage, 40-event group | median 69 ms | — |
+| Source commit to read-model row, aggregate stage, 10,000-event group | median 108 ms | — |
 
 The streaming figure commits one-row transactions to PostgreSQL 16 faster
 than the ingestable applies them and reads the rate from `appliedIndex` on
-`GET /v1/node/status`.
+`GET /v1/node/status`. The commit-to-row figures run the
+[event-store recipe](../recipes/event-store-read-models.md) against
+PostgreSQL 16, appending one event at a time to one stream and timing
+until its row updates. A 10,000-event stream appended at ~80 events/sec
+caught up ~6.5 minutes after the last append, at the streaming rate: the
+refold was not the limit.
 
 The 3-node HTTP number is the most conservative of all: real processes, real
 HTTP, follower→leader forwarding, quorum replication, and three nodes

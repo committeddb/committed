@@ -1015,11 +1015,27 @@ set = [ { column = "total", from = "$.total" },
   says so: `workerState: "re-deriving"` with `stageRecovery {folded,
   target}` progress on the default call — lag climbs by design until
   the fold-only pass reaches the checkpoint.
+- **An aggregate's cost grows with its largest group.** Each input that
+  reaches a key refolds the key from every input it holds, so one input's
+  cost is proportional to its group's size, and the projection applies
+  inputs in log order: while a large group refolds, the inputs behind it
+  wait. On the reference machine
+  ([performance.md](operations/performance.md#reference-measurements)), a
+  five-emit aggregate refolds a 1,000-input group in about 3 ms and a
+  10,000-input group in about 32 ms. Group by the entity whose history you
+  are aggregating (an order, an account, a device), not a tenant or a
+  whole topic, and give the stage a `when` that drops inputs no emit
+  reads: a rejected input is not retained, so it costs neither refold
+  time nor disk.
 - Stage state lives in one bbolt file per syncable under
   `<dataDir>/projections/` — derived, node-local, rebuildable from the
-  log. **Editing stage definitions requires a rebuild** (the
-  config-change guard enforces it): changed stages must re-derive from
-  index 0, exactly like a changed table schema.
+  log. It retains every input of every key, so it grows with the topics
+  it reads, in proportion to the number and size of inputs and the
+  number of stages that keep them: one aggregate stage over 1,000,000
+  events of about 260 bytes held 841 MB. **Editing stage definitions
+  requires a rebuild** (the config-change guard enforces it): changed
+  stages must re-derive from index 0, exactly like a changed table
+  schema.
 
 ### Row ownership (`rowOwner`)
 

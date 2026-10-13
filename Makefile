@@ -170,7 +170,7 @@ BENCH_WORKLOAD_COUNT ?= 1
 
 .PHONY: bench bench/workloads
 bench:
-	go test -bench=. -skip='$(WORKLOAD_BENCHMARKS)' -benchtime=1s -run='^$$' ./internal/cluster/db/wal/ ./internal/cluster/db/ ./internal/cluster/ ./internal/cluster/interpretation/
+	go test -bench=. -skip='$(WORKLOAD_BENCHMARKS)' -benchtime=1s -run='^$$' ./internal/cluster/db/wal/ ./internal/cluster/db/ ./internal/cluster/ ./internal/cluster/interpretation/ ./internal/cluster/syncable/stages/
 	$(MAKE) bench/workloads
 
 # Each iteration creates and validates a complete durable workload.

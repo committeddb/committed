@@ -166,11 +166,18 @@ right shape for an event store:
   a stream and recomputes the row from them, so an event deleted at the
   source leaves the totals and the status as if it had never been appended.
 
-The cost of the second property is disk: the stage keeps each stream's
-events on the node, under the data directory. The expression language
-follows PostgreSQL; see [Staged computation](../read-models.md#staged-computation-internal-stages)
+The expression language follows PostgreSQL; see
+[Staged computation](../read-models.md#staged-computation-internal-stages)
 for everything a stage can do, including joins to other topics and window
-functions over a stream's history.
+functions over a stream's history, and for what it costs.
+
+The cost of the second property is disk and time. The stage keeps each
+stream's events on the node, under the data directory, and recomputes a
+stream from all of its events on every new one, so a stream with thousands
+of events costs more per event than a short one. Separately, an events
+table that commits one event per transaction streams in at the
+[per-transaction rate](../operations/performance.md#the-envelope); a
+source that appends faster than that for long falls behind.
 
 ## 3. Rehearse a change, then roll it out without downtime
 
