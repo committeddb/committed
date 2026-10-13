@@ -205,6 +205,33 @@ curl localhost:8080/v1/syncable/orders/status
 Alert on the `committed.sync.stuck` and `committed.sync.lag` metrics; see
 [Stuck syncables](../operations/stuck-syncables.md) for clearing one.
 
+## If your store compacts streams
+
+Some event stores can compact a long stream: they delete its earlier events
+and keep one snapshot event that carries the stream's state at that point.
+Each deleted event reaches the log as a delete, so the stage recomputes the
+stream from what is left: the snapshot event and anything appended after it.
+A projection that only knows the ordinary event types sees none of them and
+blanks the row.
+
+Read the snapshot event as the starting point and add the later events to it.
+With a snapshot event of type `order_snapshot` whose `data` holds `customer`,
+`status`, `items`, and `total`, the stage's emits become:
+
+```toml
+emit = [
+  { field = "customer", expr = "coalesce((array_agg($.data.customer) filter (where $.type = 'order_placed'))[1], (array_agg($.data.customer) filter (where $.type = 'order_snapshot'))[1])" },
+  { field = "status",   expr = "(array_agg(case when $.type = 'order_snapshot' then $.data.status else $.type end order by $.version desc) filter (where $.type in ('order_placed', 'order_shipped', 'order_cancelled', 'order_snapshot')))[1]" },
+  { field = "items",    expr = "coalesce(sum($.data.items) filter (where $.type = 'order_snapshot'), 0) + coalesce(sum($.data.qty) filter (where $.type = 'item_added'), 0)" },
+  { field = "total",    expr = "coalesce(sum($.data.total) filter (where $.type = 'order_snapshot'), 0) + coalesce(sum($.data.qty * $.data.price) filter (where $.type = 'item_added'), 0)" },
+  { field = "version",  expr = "max($.version)" },
+]
+```
+
+The row is the same before and after a compaction, and events appended after
+it add to the snapshot's totals. Deploy these emits before the store first
+compacts a stream.
+
 ## Erasure
 
 Deleting a subject's events from your events table is still yours to do.
