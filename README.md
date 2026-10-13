@@ -14,7 +14,7 @@ Committed is specifically NOT a database designed for querying.
 
 ## What makes it distinctive
 
-- **vs. an event store's projection layer**: keep your write side. Committed reads the events table you already have in Postgres, MySQL, or SQL Server and builds the read models: quickly, without downtime, failing loudly, and with no plumbing code.
+- **vs. an event store's projection layer**: keep your write side. Committed reads the events table you already have in Postgres, MySQL, or SQL Server and [builds the read models](docs/recipes/event-store-read-models.md): quickly, without downtime, failing loudly, and with no plumbing code.
 - **vs. Kafka**: a single replicated log instead of partitioned topics, with built-in *output-side* projection (syncables) rather than consumer offsets. Configs live in the log, not ZooKeeper/KRaft.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the destination.
@@ -43,6 +43,10 @@ Committed is specifically NOT a database designed for querying.
 - **[Database](docs/databases.md)** — connection config for an external SQL syncable that syncables reference.
 - **[Ingestable](docs/ingestables.md)** — pulls data into the log from an external source.
 - **[Syncable](docs/syncables.md)** — projects committed Actuals out to an external system, either as faithful per-table mirrors (`sql`) or by transforming and folding topics into the denormalized shape you query — multi-topic BFF rows, collection aggregates, cross-topic enrichment.
+
+## Recipes
+
+- **[Read models from your event store](docs/recipes/event-store-read-models.md)** — keep your event store; Committed ingests its events table and builds the read models.
 
 ## Runbooks
 
