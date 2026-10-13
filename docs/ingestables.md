@@ -514,6 +514,12 @@ the ingestable, or a slot recreate on Postgres).
 > connection-string password** (HTTP 400) so it is never stored in the replicated
 > log or a snapshot. See [secrets.md](operations/secrets.md).
 
+**Key column types.** Keep `boolean`, `char(n)`, and `inet` columns out of
+`primaryKey`. The snapshot renders these types differently from the change
+stream (`false` vs `f`, for example), so a later update or delete of a
+snapshotted row arrives under a different key: the row is duplicated or never
+removed.
+
 Give each ingestable its own `slotName` and `publication` so they don't collide.
 A runnable, end-to-end Postgres example lives in
 [`examples/movies/`](../examples/movies/) (`source.sql`, `ingest-*.toml`,
@@ -525,10 +531,10 @@ a whole database — see
 
 ### Partitioned tables
 
-Watch a partitioned table by its **root**: `tables = ["mt_events"]`, not its
+Watch a partitioned table by its **root**: `tables = ["events"]`, not its
 partitions. The snapshot reads every partition through the root, and the
 change stream reports every partition's changes under the root's name, so
-a partition created later (Marten creates one per tenant, for example) is
+a partition created later (one per new tenant, for example) is
 covered with no config change. This needs PostgreSQL 13 or later.
 
 - **Key coverage.** A partitioned table's `REPLICA IDENTITY` does not reach its
@@ -545,6 +551,10 @@ covered with no config change. This needs PostgreSQL 13 or later.
   application that moves a row by inserting the new copy before deleting the
   old one would lose the row, since the delete arrives last under the same
   key.
+- **A partition key of type boolean, `char(n)`, or `inet`** is in the full
+  key, so it hits the key-column limit in
+  [Configuration](#configuration): a table partitioned on such a column (for
+  example, active and archived rows) is not supported yet.
 - **Rows that move between partitions.** An `UPDATE` that changes the partition
   key arrives as a delete of the old row followed by an insert of the new
   one, in one transaction.

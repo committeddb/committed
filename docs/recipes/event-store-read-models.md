@@ -1,10 +1,10 @@
 # Read models from your event store
 
 Keep your event store. If your events already live in a SQL table (a
-homegrown events or outbox table, Marten's `mt_events`, or any store built
-on Postgres, MySQL, or SQL Server), Committed can build the read models from
-it. Nothing on the write side changes: your application keeps appending
-events exactly as it does now.
+homegrown events or outbox table, or any event store built on Postgres,
+MySQL, or SQL Server), Committed can build the read models from it. Nothing
+on the write side changes: your application keeps appending events exactly
+as it does now.
 
 The trial is one ingestable, one projection, and one read model. If it isn't
 better than what you have, delete them and the source is as you found it.
@@ -73,7 +73,9 @@ by `seq_id`, with `data` decoded as JSON.
   read into it. See [`jsonColumns`](../ingestables.md#configuration).
 - **Partitioned tables.** Watch the partitioned root and set `primaryKey` to
   the table's full primary key; see
-  [Partitioned tables](../ingestables.md#partitioned-tables).
+  [Partitioned tables](../ingestables.md#partitioned-tables). A table
+  partitioned on a boolean column (for example, active and archived events)
+  is not supported yet.
 
 ## 2. Build the read model
 
