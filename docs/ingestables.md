@@ -540,7 +540,11 @@ covered with no config change. This needs PostgreSQL 13 or later.
 - **Keys that repeat across partitions.** When the primary key includes the
   partition key (Postgres requires it to) and a column repeats across
   partitions, as with a per-tenant sequence, set `primaryKey` to the full key,
-  for example `primaryKey = ["seq_id", "tenant_id"]`.
+  for example `primaryKey = ["seq_id", "tenant_id"]`. A narrower key is safe
+  only if no two partitions ever hold the same key at once, even briefly: an
+  application that moves a row by inserting the new copy before deleting the
+  old one would lose the row, since the delete arrives last under the same
+  key.
 - **Rows that move between partitions.** An `UPDATE` that changes the partition
   key arrives as a delete of the old row followed by an insert of the new
   one, in one transaction.
