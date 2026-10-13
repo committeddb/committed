@@ -155,7 +155,7 @@ func TestScrub_OnSupersedeManyDistinctKeys(t *testing.T) {
 // TestScrubBacklog_OnSupersedeCeiling: a write to a scrub-declared event type
 // does not count toward the metadata volume gate; it starts the supersede
 // ceiling, and the scheduler reports backlog once the ceiling has elapsed since
-// the last completed scrub.
+// the last scrub was proposed.
 func TestScrubBacklog_OnSupersedeCeiling(t *testing.T) {
 	restoreThreshold := wal.SetMetadataBacklogThresholdForTest(1)
 	defer restoreThreshold()
@@ -166,18 +166,18 @@ func TestScrubBacklog_OnSupersedeCeiling(t *testing.T) {
 	defer s.Cleanup()
 
 	saveEntity(t, declaredType(t, "u", cluster.EntityKindEvent, cluster.OnSupersedeScrub), s, 1, 1)
-	require.True(t, s.HasScrubBacklog(), "no scrub has ever completed: the ceiling has elapsed")
-	require.Nil(t, s.RunScrubForTest(1))
+	require.True(t, s.HasScrubBacklog(), "no scrub has ever run: the ceiling has elapsed")
+	applyScrub(t, s, 1, 2, false)
 	require.False(t, s.HasScrubBacklog())
 
-	saveEntity(t, userUpsert("u", "1", `{"v":1}`), s, 1, 2)
-	require.False(t, s.HasScrubBacklog(), "a scrub completed within the ceiling, and the write is not metadata")
+	saveEntity(t, userUpsert("u", "1", `{"v":1}`), s, 1, 3)
+	require.False(t, s.HasScrubBacklog(), "a scrub ran within the ceiling, and the write is not metadata")
 
 	restoreShort := wal.SetSupersedeScrubCeilingForTest(0)
 	defer restoreShort()
 	require.True(t, s.HasScrubBacklog(), "the ceiling elapsed with a write pending")
 
-	require.Nil(t, s.RunScrubForTest(2))
+	applyScrub(t, s, 3, 4, false)
 	require.False(t, s.HasScrubBacklog(), "nothing written since the scrub")
 }
 
@@ -198,23 +198,48 @@ func TestScrubBacklog_OnSupersedeKeepDoesNotTrigger(t *testing.T) {
 
 // TestScrubBacklog_OnSupersedeSurvivesRestart: the in-memory record of pending
 // corrections does not survive a restart, so Open re-seeds it from the live
-// types, and the completion time is persisted, so the ceiling still runs from
-// the last completed scrub rather than from the restart.
+// types, and the scrub time is persisted, so the ceiling still runs from the
+// last scrub rather than from the restart.
 func TestScrubBacklog_OnSupersedeSurvivesRestart(t *testing.T) {
 	restoreCeiling := wal.SetSupersedeScrubCeilingForTest(time.Hour)
 	defer restoreCeiling()
 
 	s := NewStorage(t, nil)
 	saveEntity(t, declaredType(t, "u", cluster.EntityKindEvent, cluster.OnSupersedeScrub), s, 1, 1)
-	require.Nil(t, s.RunScrubForTest(1))
-	saveEntity(t, userUpsert("u", "1", `{"v":1}`), s, 1, 2)
+	applyScrub(t, s, 1, 2, false)
+	saveEntity(t, userUpsert("u", "1", `{"v":1}`), s, 1, 3)
 
 	reopened, err := s.CloseAndReopen()
 	require.NoError(t, err)
 	defer reopened.Cleanup()
-	require.False(t, reopened.HasScrubBacklog(), "the last scrub completed within the ceiling")
+	require.False(t, reopened.HasScrubBacklog(), "the last scrub ran within the ceiling")
 
 	restoreShort := wal.SetSupersedeScrubCeilingForTest(0)
 	defer restoreShort()
 	require.True(t, reopened.HasScrubBacklog(), "the pending write is re-seeded after the restart")
+}
+
+// TestScrubDeterminism_ScrubCommandTime: one stamped Scrub command applied on
+// three nodes, completed at different wall-clock moments, leaves byte-identical
+// bbolt. The ceiling's start comes from the command, not from each node's clock.
+func TestScrubDeterminism_ScrubCommandTime(t *testing.T) {
+	const nodes = 3
+	scrub, err := cluster.NewScrubEntity(2, false)
+	require.NoError(t, err)
+	buckets := make([][]string, nodes)
+	for i := range nodes {
+		s := NewStorage(t, nil)
+		defer s.Cleanup()
+		saveEntity(t, declaredType(t, "u", cluster.EntityKindEvent, cluster.OnSupersedeScrub), s, 1, 1)
+		saveEntity(t, userUpsert("u", "1", `{"v":1}`), s, 1, 2)
+		time.Sleep(1100 * time.Millisecond) // a second apart, as nodes finish in practice
+		saveEntity(t, scrub, s, 1, 3)
+		require.Eventually(t, func() bool { return s.ScrubCompletedBound() >= 2 },
+			10*time.Second, 5*time.Millisecond)
+		buckets[i], err = s.BucketSnapshot()
+		require.NoError(t, err)
+	}
+	for i := 1; i < nodes; i++ {
+		require.Equalf(t, buckets[0], buckets[i], "bbolt differs: node %d vs 0", i)
+	}
 }

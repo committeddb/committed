@@ -521,6 +521,11 @@ message LogScrub {
     // rewrite. Old binaries ignore the field and never see it set to true (the
     // feature gate holds it until they are gone).
     bool hashDeleteKeys = 2;
+    // timestampUnixNano is the wall-clock time the proposer issued the
+    // command. Stamped once at propose time so apply is content-deterministic
+    // on every replica; it starts the onSupersede scrub ceiling. Zero from a
+    // binary that predates it, which leaves the recorded time unchanged.
+    int64 timestampUnixNano = 3;
 }
 
 // LogNodeAPIURL is a node's self-announcement of its advertised HTTP API

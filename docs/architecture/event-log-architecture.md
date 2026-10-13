@@ -867,10 +867,12 @@ A write to a type declaring `onSupersede = "scrub"` on another kind does not
 count toward that threshold: it is usually an append, not a supersession, and
 counting it would rewrite the log on every tick of a busy events table. It
 starts a ceiling instead. Once such a type has been written since the last
-completed scrub, the scheduler scrubs when 7 days have passed since that scrub,
-so a correction's superseded version leaves the log within a published bound.
-The record of such writes is in memory and re-seeded at open from the live
-types; the completion time is persisted beside the completed bound.
+completed scrub, the scheduler scrubs when 7 days have passed since the last
+scrub was proposed, so a correction's superseded version leaves the log within
+a published bound. The record of such writes is in memory and re-seeded at
+open from the live types. The scrub time is the proposer's timestamp carried
+in the Scrub command, recorded on apply, so every replica holds the same
+value.
 
 ---
 

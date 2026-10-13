@@ -423,9 +423,9 @@ type Storage struct {
 	// Non-durable and leader-local like metadataBacklog; Open and a restore
 	// re-seed it conservatively (seedCorrectionWrite).
 	correctionWrite atomic.Uint64
-	// scrubCompletedAt mirrors the persisted time of this node's last
-	// completed scrub (unix seconds; 0 if none), the ceiling's start.
-	scrubCompletedAt atomic.Int64
+	// scrubRequestedAt mirrors the persisted proposer time of the latest
+	// applied Scrub command (unix nanoseconds; 0 if none), the ceiling's start.
+	scrubRequestedAt atomic.Int64
 	// StateLog persists raft's HardState and snapshot. Records are written
 	// only when the state actually changes, and appendState truncates behind
 	// the newest Snapshot + HardState records, so the log holds a handful of
@@ -1117,7 +1117,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 	}
 	ws.lastScrubbedBound.Store(completed)
 	if err := ws.view(func(tx *bolt.Tx) error {
-		ws.scrubCompletedAt.Store(loadScrubCompletedAt(tx))
+		ws.scrubRequestedAt.Store(loadScrubRequestedAt(tx))
 		return ws.seedCorrectionWrite(tx, ws.AppliedIndex())
 	}); err != nil {
 		return nil, fmt.Errorf("load supersede scrub state: %w", err)

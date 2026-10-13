@@ -419,9 +419,12 @@ func (s *Storage) refreshAfterRestore() {
 	// adopting the completed bound above, so runPendingScrub compares against the
 	// fresh value).
 	s.signalScrub()
-	// The swapped-in bbolt carries the leader's type registrations; re-seed the
-	// in-memory correction record from them, as Open does.
-	if err := s.view(func(tx *bolt.Tx) error { return s.seedCorrectionWrite(tx, s.AppliedIndex()) }); err != nil {
+	// The swapped-in bbolt carries the leader's type registrations and scrub
+	// time; re-seed the in-memory supersede state from them, as Open does.
+	if err := s.view(func(tx *bolt.Tx) error {
+		s.scrubRequestedAt.Store(loadScrubRequestedAt(tx))
+		return s.seedCorrectionWrite(tx, s.AppliedIndex())
+	}); err != nil {
 		s.logger.Warn("restore: seed supersede scrub state", zap.Error(err))
 	}
 	if err := s.validateConfigSecrets(); err != nil {

@@ -51,6 +51,15 @@ func applyScrub(t *testing.T, s *StorageWrapper, bound, idx uint64, hash bool) {
 	t.Helper()
 	e, err := cluster.NewScrubEntity(bound, hash)
 	require.NoError(t, err)
+	applyScrubEntity(t, s, e, bound, idx)
+}
+
+// applyScrubEntity commits an already-built Scrub command at idx and waits for
+// the worker to complete bound. Replica-determinism tests build the command
+// once and apply it everywhere: under raft every replica applies the same
+// bytes, proposer timestamp included.
+func applyScrubEntity(t *testing.T, s *StorageWrapper, e *cluster.Entity, bound, idx uint64) {
+	t.Helper()
 	saveEntity(t, e, s, 1, idx)
 	require.Eventually(t, func() bool { return s.ScrubCompletedBound() >= bound },
 		10*time.Second, 5*time.Millisecond, "the scrub worker never completed bound %d", bound)
@@ -271,10 +280,12 @@ func lineForIdx(t *testing.T, lines []string, idx uint64) string {
 // committed sequence — including the authorized Scrub command — end with
 // byte-identical event logs, the invariant every rewrite must preserve.
 func TestDeleteKeyErase_DeterministicAcrossReplicas(t *testing.T) {
+	scrub, err := cluster.NewScrubEntity(6, true)
+	require.NoError(t, err)
 	run := func() ([]string, func()) {
 		s := eraseHarness(t)
 		applyCheckpoint(t, s, "sink", 5, 6)
-		applyScrub(t, s, 6, 7, true)
+		applyScrubEntity(t, s, scrub, 6, 7)
 		snap, err := s.EventLogSnapshot()
 		require.NoError(t, err)
 		return snap, s.Cleanup

@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"time"
+
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/clusterpb"
@@ -43,13 +45,18 @@ func IsScrub(id string) bool {
 // The proposer sets it only once the cluster minimum feature level supports
 // the pass (version.FeatureLevel 2), so every replica computes the identical
 // rewrite — carried in the committed command for the same reason UpperBound is.
+//
+// TimestampUnixNano is the proposer's wall-clock time, stamped once at propose
+// time so every replica records the same scrub time (the onSupersede ceiling's
+// start). Zero means a proposer that predates it.
 type Scrub struct {
-	UpperBound     uint64
-	HashDeleteKeys bool
+	UpperBound        uint64
+	HashDeleteKeys    bool
+	TimestampUnixNano int64
 }
 
 func (s *Scrub) Marshal() ([]byte, error) {
-	return proto.Marshal(&clusterpb.LogScrub{UpperBound: s.UpperBound, HashDeleteKeys: s.HashDeleteKeys})
+	return proto.Marshal(&clusterpb.LogScrub{UpperBound: s.UpperBound, HashDeleteKeys: s.HashDeleteKeys, TimestampUnixNano: s.TimestampUnixNano})
 }
 
 func (s *Scrub) Unmarshal(bs []byte) error {
@@ -59,6 +66,7 @@ func (s *Scrub) Unmarshal(bs []byte) error {
 	}
 	s.UpperBound = ls.UpperBound
 	s.HashDeleteKeys = ls.HashDeleteKeys
+	s.TimestampUnixNano = ls.TimestampUnixNano
 	return nil
 }
 
@@ -67,9 +75,10 @@ func (s *Scrub) Unmarshal(bs []byte) error {
 // node's apply records a pending scrub and kicks its background scrubber.
 // hashDeleteKeys authorizes the delete-key erasure pass for the rewrite; pass
 // it true only when the cluster minimum feature level is at least
-// version.FeatureLevel 2 (see Scrub.HashDeleteKeys).
+// version.FeatureLevel 2 (see Scrub.HashDeleteKeys). The command is stamped
+// with the current time (Scrub.TimestampUnixNano).
 func NewScrubEntity(b uint64, hashDeleteKeys bool) (*Entity, error) {
-	bs, err := (&Scrub{UpperBound: b, HashDeleteKeys: hashDeleteKeys}).Marshal()
+	bs, err := (&Scrub{UpperBound: b, HashDeleteKeys: hashDeleteKeys, TimestampUnixNano: time.Now().UnixNano()}).Marshal()
 	if err != nil {
 		return nil, err
 	}

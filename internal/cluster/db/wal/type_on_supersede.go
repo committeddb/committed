@@ -30,14 +30,15 @@ var typeOnSupersedeBucket = []byte("typeOnSupersede")
 
 // supersedeScrubCeiling bounds how long a superseded version of a scrub-declared
 // type stays in the log: once a scrub-declared type has been written since the
-// last completed scrub, the automatic scheduler scrubs at least this often. A
-// var so tests can shrink it.
+// last completed scrub, the automatic scheduler proposes a scrub once this long
+// has passed since the last one was proposed. A var so tests can shrink it.
 var supersedeScrubCeiling = 7 * 24 * time.Hour
 
-// scrubCompletedAtKey (in pendingScrubBucket) holds the unix time, in seconds,
-// at which this node last completed a scrub. Node-local, like the completed
-// bound beside it; it only paces the scheduler.
-var scrubCompletedAtKey = []byte("completedAt")
+// scrubRequestedAtKey (in pendingScrubBucket) holds the latest proposer time,
+// in unix nanoseconds, of any applied Scrub command (Scrub.TimestampUnixNano).
+// Written on the apply path from the command's content, so every replica holds
+// the same bytes; it only paces the scheduler.
+var scrubRequestedAtKey = []byte("requestedAt")
 
 // declaresScrub reports whether a type registration declares onSupersede =
 // "scrub". Snapshot types scrub by default either way; this is the explicit
@@ -123,12 +124,14 @@ func (s *Storage) noteCorrectionWrite(index uint64) {
 }
 
 // hasSupersedeBacklog reports whether a scrub-declared type has been written
-// since the last completed scrub and the ceiling has elapsed since that scrub.
+// since the last completed scrub and the ceiling has elapsed since the last
+// scrub was proposed. Counting from the proposal keeps the time identical on
+// every replica and keeps the scheduler from re-proposing while one is pending.
 func (s *Storage) hasSupersedeBacklog() bool {
 	if s.correctionWrite.Load() <= s.lastScrubbedBound.Load() {
 		return false
 	}
-	last := time.Unix(s.scrubCompletedAt.Load(), 0)
+	last := time.Unix(0, s.scrubRequestedAt.Load())
 	return time.Since(last) >= supersedeScrubCeiling
 }
 
@@ -157,21 +160,31 @@ func (s *Storage) seedCorrectionWrite(tx *bolt.Tx, applied uint64) error {
 	})
 }
 
-// loadScrubCompletedAt reads the persisted completion time (0 if none).
-func loadScrubCompletedAt(tx *bolt.Tx) int64 {
+// loadScrubRequestedAt reads the recorded scrub time (0 if none).
+func loadScrubRequestedAt(tx *bolt.Tx) int64 {
 	bkt := tx.Bucket(pendingScrubBucket)
 	if bkt == nil {
 		return 0
 	}
-	if b := bkt.Get(scrubCompletedAtKey); len(b) == 8 {
-		return int64(binary.BigEndian.Uint64(b)) //nolint:gosec // G115: a unix time in seconds
+	if b := bkt.Get(scrubRequestedAtKey); len(b) == 8 {
+		return int64(binary.BigEndian.Uint64(b)) //nolint:gosec // G115: a unix time in nanoseconds
 	}
 	return 0
 }
 
-// putScrubCompletedAt persists the completion time in the caller's transaction.
-func putScrubCompletedAt(bkt *bolt.Bucket, at time.Time) error {
+// recordScrubRequestedAt raises the recorded scrub time to at, in the caller's
+// transaction. Monotonic, so a command stamped by a leader with a slower clock
+// never moves it back; zero (a proposer that predates the stamp) is ignored.
+func recordScrubRequestedAt(tx *bolt.Tx, at int64) (int64, error) {
+	cur := loadScrubRequestedAt(tx)
+	if at <= cur {
+		return cur, nil
+	}
+	bkt := tx.Bucket(pendingScrubBucket)
+	if bkt == nil {
+		return 0, ErrBucketMissing
+	}
 	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], uint64(at.Unix())) //nolint:gosec // G115: a unix time in seconds
-	return bkt.Put(scrubCompletedAtKey, buf[:])
+	binary.BigEndian.PutUint64(buf[:], uint64(at)) //nolint:gosec // G115: at > 0 here
+	return at, bkt.Put(scrubRequestedAtKey, buf[:])
 }
