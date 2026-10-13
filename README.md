@@ -14,6 +14,7 @@ Committed is specifically NOT a database designed for querying.
 
 ## What makes it distinctive
 
+- **vs. an event store's projection layer**: keep your write side. Committed reads the events table you already have in Postgres, MySQL, or SQL Server and builds the read models: quickly, without downtime, failing loudly, and with no plumbing code.
 - **vs. Kafka**: a single replicated log instead of partitioned topics, with built-in *output-side* projection (syncables) rather than consumer offsets. Configs live in the log, not ZooKeeper/KRaft.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the destination.
