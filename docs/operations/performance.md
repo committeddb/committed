@@ -19,15 +19,25 @@ machines:
 | Apply rate (batched) | ≥ 1,000 entries/sec | How fast committed entries become readable/syncable |
 | Syncable catch-up read rate | ≥ 500,000 entries/sec | Rebuild, re-materialization, new consumer of an old topic |
 | Ingest snapshot rate | ≥ 5,000 rows/sec | Initial snapshot of a source table (pipelined) |
+| Ingest streaming rate | 10–20 source transactions/sec per ingestable | Change capture after the snapshot; one source transaction at a time |
 
 Two shapes matter more than any single number:
 
-- **Latency and throughput diverge by ~50×.** A serial caller pays a full
-  fsync per proposal (~14 ms on the reference machine → ~70/sec). Concurrent
-  callers share fsyncs through raft's Ready batching (~300 µs/op at 8-way →
-  ~3,400/sec). If a load generator sees double-digit throughput, it is
-  measuring its own serial round-trips, not the cluster's capacity — add
-  concurrency or batch entities into fewer proposals.
+- **Latency and throughput diverge by well over an order of magnitude.** A
+  serial caller pays the whole write path per proposal, several fsyncs (~30
+  ms on the reference machine → ~30/sec). Concurrent callers share fsyncs
+  through raft's Ready batching (~300 µs/op at 8-way → ~3,400/sec). If a load
+  generator sees double-digit throughput, it is measuring its own serial
+  round-trips, not the cluster's capacity — add concurrency or batch entities
+  into fewer proposals.
+- **An ingestable streams one source transaction at a time.** It keeps the
+  source's commit order, so it waits for each transaction to be durable
+  before sending the next: its rate is one transaction per write round-trip
+  (~50 ms on the reference machine → ~20/sec). The limit is per transaction,
+  not per row: rows committed in one source transaction travel together. A
+  source that sustains more transactions per second than this falls behind
+  and stays behind; watch `lag` on `GET /v1/ingestable/{id}/status`.
+  Separate ingestables stream in parallel.
 - **Reads are not the bottleneck.** Catch-up drains the log ~500× faster
   than the write path fills it, so a rebuilt destination converges quickly; sync
   throughput in practice is bounded by the destination database, not the
@@ -49,6 +59,20 @@ the commands shown.
 | `BenchmarkReaderCatchUp` | 0.57 µs/entry | ~1.7M entries/sec |
 | `BenchmarkIngestShape/batch` | 62 µs/row | ~16,000 rows/sec |
 | 3-node HTTP burst (`TestMultiNodeThroughput_Report`, 8 workers) | p50 204 ms, p99 345 ms | ~37 proposals/sec |
+
+`BenchmarkProposeApplyRoundTrip` relaxes bbolt's fsync (the raft log is still
+fsynced), so it isolates raft from the metadata store; a running node fsyncs
+both. Measured 2026-10-13 on the same laptop against a running single node
+with default settings:
+
+| Measurement | Result | Derived rate |
+|---|---|---|
+| Serial `POST /v1/proposal`, one entity each | median 30 ms | ~31 proposals/sec |
+| PostgreSQL ingestable streaming one-row transactions | ~50 ms per transaction | ~20 transactions/sec |
+
+The streaming figure commits one-row transactions to PostgreSQL 16 faster
+than the ingestable applies them and reads the rate from `appliedIndex` on
+`GET /v1/node/status`.
 
 The 3-node HTTP number is the most conservative of all: real processes, real
 HTTP, follower→leader forwarding, quorum replication, and three nodes
