@@ -100,11 +100,31 @@ func (db *DB) MigrationEditDependents(typeID string) []cluster.DependentSyncable
 //     for the cluster instead (the same posture as a zone-pinned syncable).
 const featureLevelTypeRecord uint64 = 2
 
+// featureLevelOnSupersede gates the type record's onSupersede field (level 3,
+// 0.8.2). Same record hazard as featureLevelTypeRecord, and the field changes
+// the scrub's deterministic rewrite, which every replica must compute alike.
+// Below the level a declaration that changes the kind's default is REFUSED (a
+// member that dropped it would keep entities the others scrub, and the logs
+// would diverge); one that restates the default is cleared, since storing it
+// as absent means the same thing.
+const featureLevelOnSupersede uint64 = 3
+
 func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ...cluster.ProposeTypeOption) error {
 	o := cluster.ResolveProposeTypeOptions(opts)
 	_, t, err := ParseType(c, db.storage)
 	if err != nil {
 		return cluster.NewConfigError(err)
+	}
+	if t.OnSupersede != cluster.OnSupersedeUnspecified && !db.featureEnabled(featureLevelOnSupersede) {
+		declared := t.ScrubsSuperseded()
+		t.OnSupersede = cluster.OnSupersedeUnspecified
+		if declared != t.ScrubsSuperseded() {
+			return &cluster.ClusterBelowFeatureLevelError{
+				Feature:    "onSupersede",
+				Required:   featureLevelOnSupersede,
+				ClusterMin: db.clusterMinFeatureLevel(),
+			}
+		}
 	}
 	if !db.featureEnabled(featureLevelTypeRecord) {
 		// Cosmetic: the read-back synthesizes without it.
@@ -221,6 +241,10 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 		// re-pointing it changes where FUTURE divergences announce, not the
 		// shape data is written in.
 		schemaChangeTopicChanged := existing.SchemaChangeTopic != t.SchemaChangeTopic
+		// onSupersede is mutable in both directions. Switching to scrub is
+		// one-way in effect: the next scrub removes every superseded version
+		// already in the log, and switching back restores none of them.
+		onSupersedeChanged := existing.OnSupersede != t.OnSupersede
 		// A nonConvertible flip on an unchanged schema is never a no-op: it
 		// must fall through to the intent-immutability checks below, which
 		// refuse it (retroactive declaration) rather than silently absorbing
@@ -234,7 +258,7 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 		// changed the type, not the last one seen.
 		documentAdopted := len(existing.Document) == 0 && len(t.Document) > 0
 
-		if !schemaChanged && !migrationChanged && !entityKindChanged && !discriminatorChanged && !schemaChangeTopicChanged && !nonConvertibleChanged && !documentAdopted {
+		if !schemaChanged && !migrationChanged && !entityKindChanged && !discriminatorChanged && !schemaChangeTopicChanged && !onSupersedeChanged && !nonConvertibleChanged && !documentAdopted {
 			return nil // byte-identical, no-op
 		}
 
@@ -308,7 +332,7 @@ func (db *DB) ProposeType(ctx context.Context, c *cluster.Configuration, opts ..
 // typeKeys and migrationKeys are the type document's vocabulary (ParseType's
 // reads), pinned by the vocabulary conformance test.
 var (
-	typeKeys      = []string{"name", "version", "schemaType", "schema", "validate", "schemaChangeTopic", "entityKind", "discriminator"}
+	typeKeys      = []string{"name", "version", "schemaType", "schema", "validate", "schemaChangeTopic", "entityKind", "discriminator", "onSupersede"}
 	migrationKeys = []string{"transform", "none", "nonConvertible", "validateAgainst"}
 )
 
@@ -412,6 +436,21 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		return "", nil, fmt.Errorf("discriminator is only valid for entityKind = \"event\" (got entityKind %q)", entityKind)
 	}
 
+	// onSupersede declares whether the scrub removes a key's superseded
+	// versions. Two pairings contradict their kind and are refused: a
+	// snapshot that keeps every prior state is a revision, and a revision's
+	// prior versions are its data.
+	onSupersede, err := cluster.ParseOnSupersede(v.GetString("type.onSupersede"))
+	if err != nil {
+		return "", nil, err
+	}
+	if onSupersede == cluster.OnSupersedeKeep && entityKind == cluster.EntityKindSnapshot {
+		return "", nil, fmt.Errorf("onSupersede = \"keep\" is not valid for entityKind = \"snapshot\": a snapshot type keeps only each key's latest state; to keep every prior state, declare entityKind = \"revision\"")
+	}
+	if onSupersede == cluster.OnSupersedeScrub && entityKind == cluster.EntityKindRevision {
+		return "", nil, fmt.Errorf("onSupersede = \"scrub\" is not valid for entityKind = \"revision\": a revision type's prior versions are its data")
+	}
+
 	// [migration] section. Exactly one of these must be present for
 	// every type version after v1:
 	//  - transform = "<jq>" — a jq program upgrading v(N-1) data to vN.
@@ -468,6 +507,7 @@ func ParseType(c *cluster.Configuration, s cluster.DatabaseStorage) (string, *cl
 		Migration:         migration,
 		EntityKind:        entityKind,
 		Discriminator:     discriminator,
+		OnSupersede:       onSupersede,
 		SchemaChangeTopic: schemaChangeTopic,
 		NonConvertible:    hasNonConvertible,
 		Document:          c.Data,

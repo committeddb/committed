@@ -390,7 +390,7 @@ Replicated metadata lives in named BoltDB buckets: `types`, `databases`,
 `memberPeerURLs`, `memberVersions`, `memberZones`, `syncables`,
 `syncableIndexes`, `syncableCreateIndexes`, `syncableDeadLetters`,
 `syncableStuck`, `syncableSkipRequests`, `syncableRematerializations`,
-`typeMigrationDeadLetters`, `typeMigrationEdits`, `contractFingerprints`,
+`typeMigrationDeadLetters`, `typeMigrationEdits`, `typeOnSupersede`, `contractFingerprints`,
 `restatements`, `scrubHistory`, `unhashedDeletes`, `pendingScrub`,
 `appliedIndex`, `confState`, `versions`. Adding a bucket is additive (a new binary
 creates it on open; an old binary ignores it). **Renaming or removing** a
@@ -460,6 +460,11 @@ the old binary cannot read:
   restatement record is a gated system type: a pre-0.8.0 binary
   fatal-exits applying it. Emission waits for every member to reach feature
   level 2, so this door only opens once you have used the feature.
+- **Rolling back below 0.8.2 once a type declares `onSupersede = "scrub"`.**
+  The declaration is admitted only at feature level 3. A 0.8.1 binary drops it
+  when it applies the type record and does not scrub the superseded versions
+  the other members do, so its rewritten log diverges from theirs. Rolling
+  back means a rebuild.
 - **Rolling back an owner mid-re-materialization (0.8.0)**, or an owner of
   an ingestable whose dedup record has become transaction-scoped (feature
   level 2, 0.8.0): neither loses data on its own, but the first lets an

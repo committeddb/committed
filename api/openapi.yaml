@@ -1609,6 +1609,17 @@ paths:
         version in place — no version bump, no `[migration]` section
         needed.
 
+        `onSupersede = "keep" | "scrub"` declares whether the scrub removes
+        a key's superseded versions, keeping only its latest (see
+        docs/types.md § Superseded versions). The default is `"scrub"` for
+        `snapshot` and `"keep"` for every other kind; `"keep"` on a
+        `snapshot` and `"scrub"` on a `revision` fail with 400. Changing it
+        updates the current version in place, like the discriminator.
+        Switching to `"scrub"` is one-way in effect: the next scrub removes
+        every superseded version already in the log. A non-default value
+        fails with 503 (`cluster_below_feature_level`) until every member
+        runs a binary at feature level 3.
+
         `validate` selects the validation strategy: `"none"` (the
         default), `"schema"` (the gate — a proposal whose payload violates
         the schema is rejected with 400), or `"announce"` (the tripwire:

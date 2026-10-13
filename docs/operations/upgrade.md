@@ -13,7 +13,7 @@ same, and its on-disk state is reused in place.
 ## Upgrading from 0.8.1 to 0.8.2
 
 Follow the rolling binary-upgrade procedure below; no configuration changes.
-0.8.2 raises the cluster feature level to 3 for one change, which activates
+0.8.2 raises the cluster feature level to 3 for two changes, which activate
 once every node runs 0.8.2; the PostgreSQL change below needs no feature level:
 
 - **SQL Server date and time rendering:** `date`, `time`, and the zone-less
@@ -23,6 +23,10 @@ once every node runs 0.8.2; the PostgreSQL change below needs no feature level:
   destinations; entries already in the log keep the old renderings, so
   budget for one re-snapshot per SQL Server ingestable and make consumers
   accept both shapes. MySQL and PostgreSQL ingestables are unaffected.
+- **`onSupersede` on types** (see
+  [types.md](../types.md#superseded-versions-onsupersede)): a type that
+  declares `onSupersede = "scrub"` on a kind other than `snapshot` is refused
+  until every node runs 0.8.2.
 - **PostgreSQL publications** (no feature level; active on each node as it
   upgrades): committed now records ownership of the publication it creates
   (see [ingestables.md](../ingestables.md#what-committed-creates-for-you)). An
@@ -265,6 +269,10 @@ After the last node:
 > re-keyed to the typed date and time rendering (feature level 3, 0.8.2,
 > see [ingestables.md](../ingestables.md#date-and-time-rendering)): a 0.8.1 binary
 > would resume it rendering RFC 3339 instants again — treat it as one-way.
+> Once a type declares `onSupersede = "scrub"` (feature level 3, 0.8.2), do
+> not roll a node back to 0.8.1: the older binary drops the declaration and
+> keeps the superseded versions every 0.8.2 node scrubs, so that node's log
+> stops matching the others'. Roll back by rebuilding the node from a peer.
 > Finally, do not roll a node back while a
 > re-materialization is in progress (`rematerializing` on the syncable's
 > status): the verb only starts once every member is 0.8.0 (feature level

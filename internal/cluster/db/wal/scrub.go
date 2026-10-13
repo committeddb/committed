@@ -370,7 +370,17 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64, eraseMax uint64) 
 // handled by RTBF, not here). Runs in scrub phase A under the event publication read lock. Appends
 // can continue; entries at index > bound are excluded.
 func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error) {
-	selection := newMetadataSelection()
+	scrubTypes, err := s.scrubTypesAt(bound)
+	if err != nil {
+		return nil, err
+	}
+	return s.selectSupersessions(bound, scrubTypes)
+}
+
+// selectSupersessions is metadataSupersessions' scan, given the types declared
+// scrub as of bound.
+func (s *Storage) selectSupersessions(bound uint64, scrubTypes map[string]bool) (map[string]uint64, error) {
+	selection := newMetadataSelection(scrubTypes)
 	err := s.scanEventEntries(bound, selection.observe)
 	if err != nil {
 		return nil, err
@@ -469,6 +479,7 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 	defer s.kvMu.Unlock()
 
 	var pruned bool
+	completedAt := time.Now()
 	err := s.keyValueStorage.Update(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(pendingScrubBucket)
 		if bkt == nil {
@@ -498,6 +509,9 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 				return err
 			}
 		}
+		if err := putScrubCompletedAt(bkt, completedAt); err != nil {
+			return err
+		}
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], bound)
 		return bkt.Put(scrubCompletedKey, buf[:])
@@ -505,6 +519,7 @@ func (s *Storage) markScrubComplete(bound uint64) error {
 	if err != nil {
 		return err
 	}
+	s.scrubCompletedAt.Store(completedAt.Unix())
 	// Still under kvMu.Lock: compact away the freed tombstone pages before any
 	// reader (CreateSnapshot) can observe them. Only when something was pruned —
 	// compaction is an O(bbolt) rewrite. On success this clears the owed marker;
@@ -642,14 +657,15 @@ func (s *Storage) hasMetadataBacklog() bool {
 }
 
 // HasScrubBacklog reports whether the next scrub has anything to physically
-// remove — either RTBF erasure (a delete-tombstone beyond the highest completed
-// bound) or enough accumulated superseded metadata to be worth an O(N) rewrite.
+// remove — RTBF erasure (a delete-tombstone beyond the highest completed
+// bound), enough accumulated superseded metadata to be worth an O(N) rewrite,
+// or a write to a scrub-declared type once the supersede ceiling has elapsed.
 // It is the single "is there scrubbable work?" signal the automatic scheduler
 // (db.scrubScheduler) consults, deliberately covering both jobs the one rewrite
 // pass does, so an idle cadence tick skips the rewrite. A metadata-heavy,
 // RTBF-free cluster triggers via the metadata term (see metadata-gc-scrubber).
 func (s *Storage) HasScrubBacklog() bool {
-	return s.hasRTBFBacklog() || s.hasMetadataBacklog()
+	return s.hasRTBFBacklog() || s.hasMetadataBacklog() || s.hasSupersedeBacklog()
 }
 
 // hasRTBFBacklog reports whether any tombstone records a delete at an index

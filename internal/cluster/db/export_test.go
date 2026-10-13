@@ -694,6 +694,7 @@ func (db *DB) ProposeSyncableIndexWithPinForTest(ctx context.Context, id string,
 const (
 	FeatureLevelTypeRecordForTest        = featureLevelTypeRecord
 	FeatureLevelInterpretationPinForTest = featureLevelInterpretationPin
+	FeatureLevelOnSupersedeForTest       = featureLevelOnSupersede
 )
 
 // ScrubIntervalForTest exposes the resolved automatic-scrub cadence, so a

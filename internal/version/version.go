@@ -84,6 +84,10 @@ var (
 //     old RFC 3339 rendering until the minimum reaches 3; then a session
 //     resuming an old-style checkpoint re-snapshots once. Once typed it
 //     stays typed.
+//   - The type record's onSupersede field (db.featureLevelOnSupersede): it
+//     changes which entities the scrub's rewrite removes, and an older binary
+//     re-marshals the type without it, so a declaration that changes the
+//     kind's default is refused until every member is at level 3.
 const FeatureLevel uint64 = 3
 
 // Info is the JSON shape returned by /version and printed by the

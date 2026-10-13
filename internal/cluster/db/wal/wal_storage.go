@@ -230,7 +230,7 @@ var buckets = func() [][]byte {
 		bs = append(bs, ie.bucket)
 	}
 	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
-		scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
+		typeOnSupersedeBucket, scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
 }()
 
 type StateType int
@@ -416,6 +416,16 @@ type Storage struct {
 	// O(total-log) rewrite only fires when it reclaims a meaningful fraction
 	// of what it rewrites. Reset with metadataBacklog.
 	metadataBacklogBytes atomic.Int64
+	// correctionWrite is the highest raft index at which a write to a type
+	// declaring onSupersede = "scrub" (on a kind the volume gate doesn't count)
+	// applied. Above lastScrubbedBound it means superseded versions may be
+	// waiting; hasSupersedeBacklog paces their scrub by supersedeScrubCeiling.
+	// Non-durable and leader-local like metadataBacklog; Open and a restore
+	// re-seed it conservatively (seedCorrectionWrite).
+	correctionWrite atomic.Uint64
+	// scrubCompletedAt mirrors the persisted time of this node's last
+	// completed scrub (unix seconds; 0 if none), the ceiling's start.
+	scrubCompletedAt atomic.Int64
 	// StateLog persists raft's HardState and snapshot. Records are written
 	// only when the state actually changes, and appendState truncates behind
 	// the newest Snapshot + HardState records, so the log holds a handful of
@@ -1106,6 +1116,12 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		return nil, fmt.Errorf("recover fetched event generation: %w", err)
 	}
 	ws.lastScrubbedBound.Store(completed)
+	if err := ws.view(func(tx *bolt.Tx) error {
+		ws.scrubCompletedAt.Store(loadScrubCompletedAt(tx))
+		return ws.seedCorrectionWrite(tx, ws.AppliedIndex())
+	}); err != nil {
+		return nil, fmt.Errorf("load supersede scrub state: %w", err)
+	}
 	if ws.safeMode {
 		// Safe mode (see WithSafeMode): no background scrub — a pending bound
 		// stays durably recorded and resumes on the next normal open. Close

@@ -95,6 +95,47 @@ carry or clobbers columns it didn't mean to write. The
 [whole-payload `"$"` mapping](syncables.md#landing-a-whole-payload-in-one-column) is the right way to land an event topic in
 SQL and is exempt from the warning.
 
+## Superseded versions (`onSupersede`)
+
+A later entity with the same key as an earlier one supersedes it. By
+default the log keeps both. `onSupersede` declares whether the scrub
+removes the superseded versions instead, keeping only each key's latest:
+
+```toml
+[type]
+name          = "order-events"
+entityKind    = "event"
+discriminator = "$.type"
+onSupersede   = "scrub"
+```
+
+| Entity kind | Default | The other value |
+|---|---|---|
+| `snapshot` | `"scrub"` | `"keep"` is refused: a snapshot that keeps every prior state is a `revision` |
+| `revision` | `"keep"` | `"scrub"` is refused: a revision's prior versions are its data |
+| `event`, `standalone`, `command`, unspecified | `"keep"` | `"scrub"` |
+
+Declare `"scrub"` on a type whose key names one entity, so that a later
+write to the key is a correction of that entity rather than a new one:
+an events table ingested with its event id as the key, where the source
+masks or replaces an event in place. The scrub then removes the original
+from the log, which is how field-level erasure at the source reaches
+committed (see [rtbf.md](operations/rtbf.md#masking-or-correcting-at-the-source)).
+Do not declare it on a type whose key groups many entities, such as
+events proposed under their stream's id: every event but the stream's
+last would be scrubbed.
+
+- **Changing it.** `onSupersede` can change in either direction on a
+  re-POST, in place, with no version bump. Switching to `"scrub"` is
+  one-way in effect: the next scrub removes every superseded version
+  already in the log, including those written before the switch, and
+  switching back to `"keep"` restores none of them.
+- **When versions leave the log.** Every scrub removes them, and the
+  automatic scheduler runs one at least weekly while a type declared
+  `"scrub"` has been written since the last scrub.
+- **Cluster version.** A non-default value is accepted once every node
+  runs 0.8.2 or later (feature level 3).
+
 ## Versions and migrations
 
 The log is permanently heterogeneous: there is no ALTER TABLE, only new writes

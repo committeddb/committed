@@ -239,6 +239,24 @@ Each delete reaches the log as a tombstone, every read model built from the
 topic recomputes without the event, and the scrub removes the event from the
 log. See [Right-to-be-forgotten erasure](../operations/rtbf.md).
 
+If your store erases by masking fields in place instead, each masked event
+reaches the log as a new version of the same `seq_id`, and the read models
+show the masked values. To have the scrub remove the unmasked originals from
+the log too, declare it on the type:
+
+```toml
+# POST /v1/type/order-events
+[type]
+name          = "order-events"
+entityKind    = "event"
+discriminator = "$.type"
+onSupersede   = "scrub"
+```
+
+This is safe here because the key is `seq_id`, one event per key, so a later
+version of a key is always a correction. See
+[Masking or correcting at the source](../operations/rtbf.md#masking-or-correcting-at-the-source).
+
 ## Where this fits
 
 - **Not a fit yet:** event stores that are not SQL tables (Kurrent, Axon

@@ -54,7 +54,8 @@ This document describes how that separation works.
 - **Infinite retention of application events.** Every event committed to
   the cluster lives forever, with two exceptions (both below):
   right-to-be-forgotten deletes, and topics declared `EntityKind =
-  snapshot`, which the metadata GC compacts to the latest event **per key**
+  snapshot` or `onSupersede = "scrub"`, which the metadata GC compacts to the
+  latest event **per key**
   (a later write supersedes earlier ones, so replay still yields the correct
   final state — but the intermediate history of a snapshot topic is not
   retained, so don't model a topic as `snapshot` if you need to replay its
@@ -798,9 +799,9 @@ never the latest value of anything.*
 
 **Gating: last-writer-wins only (`EntityKindSnapshot`).** Compacting a key to its
 latest is sound only when a later write fully *implies* the earlier one — i.e.
-snapshot (LWW) semantics, where superseded copies are disposable. So the gate is
-exactly **`EntityKind == EntityKindSnapshot`**, for internal *and* user-defined
-types alike: an internal Snapshot built-in (`SyncableIndex`, ingestable position,
+snapshot (LWW) semantics, where superseded copies are disposable. So the gate,
+absent a declaration, is **`EntityKind == EntityKindSnapshot`**, for internal
+*and* user-defined types alike (a user type can also declare it, below): an internal Snapshot built-in (`SyncableIndex`, ingestable position,
 stuck, skip) or a user Snapshot topic is compacted to its latest-per-key.
 Everything else is retained, by kind — and the held-back built-ins are
 deliberately classified, not special-cased. The one built-in category held back
@@ -813,6 +814,31 @@ their upsert and clearing-delete entities are both keyed by the record's full
 `id + index` identity, so each is a distinct, symmetric key that keep-latest
 compacts correctly (distinct dead letters survive; a re-propose or clear of the
 same record collapses to its latest).
+
+**Declared supersession: `onSupersede = "scrub"`.** A user type of any other
+kind may opt into the same keep-latest rule by declaring `onSupersede =
+"scrub"` ([types.md](../types.md#superseded-versions-onsupersede)): its key names
+one entity, so a later write to the key is a correction and the earlier one is
+redundant by the same invariant. `revision` refuses it, and `snapshot` scrubs
+by default and refuses `"keep"`. The declaration is mutable, and switching to
+scrub applies to the whole prefix `<= B`, including entries written before the
+switch. Two consequences shape the selection:
+
+- *The setting is resolved as of B, before the pass.* A forward scan cannot
+  know that a type will switch to scrub further on, so each registration
+  records its declaration at its raft index in the replicated
+  `typeOnSupersede` bucket, written on the apply path; the selection reads the
+  latest row `<= B` per type. Rows exist only for registrations a level-3
+  binary applied, and a non-default declaration is admitted only at cluster
+  feature level 3, so every replica resolves the same set.
+- *Most keys appear once.* An events table keyed by event id writes nearly
+  every key once, so remembering every key would grow with the log. Keys of a
+  declared type pass through a membership filter (a scalable Bloom filter,
+  rebuilt per scrub) and enter the exact per-key map only on a probable
+  repeat. A filter never misses a key it has seen, so every key written twice
+  is mapped at its latest index; a false positive maps a key whose only entry
+  is its own latest, which removes nothing. The removal set is therefore
+  exact, and identical on every replica, whatever each replica's filter does.
 
 **Resolving the kind deterministically.** An internal type's kind is a constant.
 A *user* type's kind lives in mutable, deletable state, so reading the live type
@@ -836,6 +862,15 @@ superseded metadata?", so a metadata-heavy, RTBF-free cluster still triggers the
 automatic scrubber and the one rewrite pass does both jobs. Because metadata GC
 only reclaims space (unlike legally-urgent erasure), it batches behind a small
 threshold rather than firing on every superseded write.
+
+A write to a type declaring `onSupersede = "scrub"` on another kind does not
+count toward that threshold: it is usually an append, not a supersession, and
+counting it would rewrite the log on every tick of a busy events table. It
+starts a ceiling instead. Once such a type has been written since the last
+completed scrub, the scheduler scrubs when 7 days have passed since that scrub,
+so a correction's superseded version leaves the log within a published bound.
+The record of such writes is in memory and re-seeded at open from the live
+types; the completion time is persisted beside the completed bound.
 
 ---
 

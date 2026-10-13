@@ -191,6 +191,18 @@ enum LogEntityKind {
     EntityKindRevision = 6;
 }
 
+// LogOnSupersede is what the scrub does with an entity that a later entity
+// for the same (type, key) supersedes. Unspecified resolves per entity kind
+// (cluster.Type.ScrubsSuperseded): scrub for snapshot, keep for every other
+// kind.
+enum LogOnSupersede {
+    OnSupersedeUnspecified = 0;
+    // Keep every version of every key.
+    OnSupersedeKeep = 1;
+    // Keep only each key's latest version: the scrub removes the rest.
+    OnSupersedeScrub = 2;
+}
+
 message LogType {
     string ID = 1;
     string Name = 2;
@@ -248,6 +260,13 @@ message LogType {
     // above until a document is re-submitted for it.
     bytes Document = 12;
     string DocumentMimeType = 13;
+    // OnSupersede declares whether the scrub removes a key's superseded
+    // versions (see LogOnSupersede). Mutable in place, in both directions.
+    // Add-only, and gated on cluster feature level 3 at the proposer, for the
+    // same reason as Document: a pre-level-3 binary re-marshals the type from
+    // its own struct on apply and would drop the field, and the scrub's
+    // rewrite must be identical on every replica.
+    LogOnSupersede OnSupersede = 14;
 }
 
 message LogConfiguration {

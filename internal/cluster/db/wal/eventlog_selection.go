@@ -22,7 +22,9 @@ func (l *eventLogAdapter) metadataSupersessions(ctx context.Context, bound uint6
 
 // metadataSupersessionsLocked requires the adapter read or write lock.
 func (l *eventLogAdapter) metadataSupersessionsLocked(ctx context.Context, bound uint64) (map[string]uint64, error) {
-	selection := newMetadataSelection()
+	// The experimental adapter applies the kind-based rules only; it is not
+	// wired to production and has no bbolt for the onSupersede history.
+	selection := newMetadataSelection(nil)
 	end := bound
 	if end < ^uint64(0) {
 		end++

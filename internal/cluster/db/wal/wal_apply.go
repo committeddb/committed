@@ -200,6 +200,13 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 				// Approximate the reclaimable bytes: the superseded prior entry
 				// is ~the size of this, its same-key successor (+ framing).
 				s.metadataBacklogBytes.Add(int64(len(entity.Key)+len(entity.Data)) + metadataEntryOverhead)
+			} else if tracksCorrections(entity.Type) {
+				// A write to a scrub-declared type of another kind is usually an
+				// append, not a supersession, so it does not count toward the
+				// volume gate; it starts the supersede ceiling instead
+				// (hasSupersedeBacklog), which bounds how long a correction's
+				// superseded version stays in the log.
+				s.noteCorrectionWrite(entry.GetIndex())
 			}
 
 			// Raise the per-topic refresh-epoch floor to the highest generation
