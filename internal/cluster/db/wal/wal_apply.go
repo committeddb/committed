@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -75,6 +76,9 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 // the recovery today's per-entry window uses, now proven whole-batch by
 // wal/apply_conformance_test.go.
 func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
+	if d := s.applyDelayForTest.Load(); d > 0 {
+		time.Sleep(time.Duration(d))
+	}
 	fresh := entries[:0:0]
 	for _, e := range entries {
 		if e.GetIndex() > s.appliedIndex.Load() {
@@ -537,6 +541,12 @@ func (s *Storage) durableConfState() *pb.ConfState {
 		return nil
 	})
 	return out
+}
+
+// SetApplyDelayForTest makes every ApplyCommittedBatch take at least d (zero
+// restores normal apply), so a test can hold a node in apply.
+func (s *Storage) SetApplyDelayForTest(d time.Duration) {
+	s.applyDelayForTest.Store(int64(d))
 }
 
 // SetAppliedIndexForTest rewinds the applied index (in memory and in bbolt) to

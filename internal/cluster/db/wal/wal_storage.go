@@ -628,6 +628,10 @@ type Storage struct {
 	// ingestRejectedTotal counts those rejections since Open.
 	ingestRejectedTotal atomic.Int64
 
+	// applyDelayForTest, when non-zero, delays each ApplyCommittedBatch:
+	// the adversarial suite's slow apply. Zero in production.
+	applyDelayForTest atomic.Int64
+
 	// interpretationRegistry is the compiled restatements snapshot — immutable,
 	// swapped whole by handleRestatement / Open (reloadInterpretationRegistry),
 	// read lock-free on every sync read (see restatement.go and the

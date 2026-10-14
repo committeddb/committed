@@ -711,6 +711,10 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 	if err := db.disk.checkWritable(kind); err != nil {
 		return 0, nil, err
 	}
+	// Backpressure: wait while this node's apply is far behind its commit.
+	if err := db.waitApplyBacklog(ctx); err != nil {
+		return 0, nil, err
+	}
 
 	p.RequestID = db.nextRequestID.Add(1)
 

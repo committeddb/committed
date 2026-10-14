@@ -228,13 +228,14 @@ func WithTransportWrapperForTest(w func(Transport) Transport) Option {
 // of Storage, so a test double need only satisfy what the Raft holds.
 // Production callers must continue to use NewRaft.
 func NewRaftForCompactionTest(s raftStorage, maxSize uint64, maxAge time.Duration, logger *zap.Logger) *Raft {
-	return &Raft{
-		storage:         s,
-		compactMaxSize:  maxSize,
-		compactMaxAge:   maxAge,
-		lastCompactTime: time.Now(),
-		logger:          logger,
+	n := &Raft{
+		storage:        s,
+		compactMaxSize: maxSize,
+		compactMaxAge:  maxAge,
+		logger:         logger,
 	}
+	n.lastCompactTime.Store(time.Now().UnixNano())
+	return n
 }
 
 // MaybeCompactForTest exposes maybeCompact so unit tests can drive the
@@ -302,7 +303,7 @@ func (n *Raft) LastCompactedIndexForTest() uint64 {
 // age limb of the compaction policy fires without sleeping. A raw
 // time setter is the simplest way to drive that path deterministically.
 func (n *Raft) SetLastCompactTimeForTest(t time.Time) {
-	n.lastCompactTime = t
+	n.lastCompactTime.Store(t.UnixNano())
 }
 
 // SetLeaderIDForTest drives a leader-ID observation through this DB's
