@@ -11,9 +11,9 @@ import (
 )
 
 // TestFlushPendingStampsProvenance proves a transaction's capture provenance
-// (the Begin message's commit time + xid) lands on every per-topic proposal
-// of the flush — the co-transaction evidence a mixed-table transaction's
-// groups share — alongside the LSN+sub SourceSeq.
+// (the Begin message's commit time + xid) lands on its proposal — one for the
+// whole transaction, whatever topics it touched — alongside the LSN+sub
+// SourceSeq and the bundled post-transaction position.
 func TestFlushPendingStampsProvenance(t *testing.T) {
 	ch := make(chan *cluster.Proposal, 4)
 	ta := &cluster.Type{ID: "topic-a"}
@@ -33,20 +33,18 @@ func TestFlushPendingStampsProvenance(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, emitted)
 
-	pa, pb := <-ch, <-ch
-	for _, p := range []*cluster.Proposal{pa, pb} {
-		require.Equal(t, commitTS, p.SourceCommitUnixNano)
-		require.Equal(t, "770123", p.SourceTxnID, "per-topic groups of one transaction share its xid")
-		require.True(t, p.TxnScopedDedup, "the bundling dialect opts every transaction proposal into txn-scoped dedup")
-	}
-	require.Equal(t, uint64(1000), pa.SourceSeq)
-	require.Equal(t, uint64(1001), pb.SourceSeq)
-	require.Empty(t, pa.Position, "only the transaction's final group carries the watermark")
-	require.Equal(t, cluster.Position(watermark), pb.Position,
-		"the final group bundles the post-transaction position — the watermark commits atomically with the entities")
-	require.Nil(t, pa.OnDurable, "an earlier group's commit does not make the transaction durable")
-	pb.Durable()
-	require.Equal(t, 1, durable, "the final group reports the transaction durable")
+	p := <-ch
+	require.Len(t, ch, 0, "a two-topic transaction is ONE proposal")
+	require.Len(t, p.Entities, 2)
+	require.Equal(t, commitTS, p.SourceCommitUnixNano)
+	require.Equal(t, "770123", p.SourceTxnID)
+	require.True(t, p.TxnScopedDedup, "the bundling dialect opts every transaction proposal into txn-scoped dedup")
+	require.Equal(t, uint64(1001), p.SourceSeq,
+		"the SourceSeq of the last per-topic part a split flush used, so a resume across the upgrade is never dropped as a duplicate")
+	require.Equal(t, cluster.Position(watermark), p.Position,
+		"the transaction bundles the post-transaction position — the watermark commits atomically with the entities")
+	p.Durable()
+	require.Equal(t, 1, durable, "the proposal reports the transaction durable")
 
 	require.Empty(t, pending, "flush resets the buffer")
 	require.Zero(t, pendingBytes)
