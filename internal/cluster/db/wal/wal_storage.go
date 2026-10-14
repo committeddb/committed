@@ -512,14 +512,9 @@ type Storage struct {
 	// stateIndex.
 	lastSnapSeq      uint64
 	lastHardStateSeq uint64
-	// persistedTerm / persistedVote are the term and vote of the newest
-	// HardState record on disk. Save writes a HardState record only when they
-	// change (raft's MustSync rule: term and vote must be durable before the
-	// Ready's messages go out; a commit index that only advanced need not —
-	// raft relearns it from the leader after a restart). Every Snapshot record
-	// is followed by the current HardState (appendState), so the stored commit
-	// is never below the stored snapshot's index, which raft requires on load.
-	// Same goroutine discipline as lastHardStateSeq.
+	// persistedTerm / persistedVote / persistedCommit are the newest HardState
+	// record on disk, so flushHardState can tell whether the in-memory one is
+	// newer. Same goroutine discipline as lastHardStateSeq.
 	persistedTerm   uint64
 	persistedVote   uint64
 	persistedCommit uint64

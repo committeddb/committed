@@ -130,10 +130,11 @@ func (s *Storage) Save(st *pb.HardState, ents []*pb.Entry, snap *pb.Snapshot) er
 		return fmt.Errorf("[wal.storage] appendEntries: %w", err)
 	}
 
-	// A HardState whose term and vote are unchanged moved only its commit
-	// index: kept in memory, not written (see persistedTerm).
-	mustPersist := !raft.IsEmptyHardState(st) && (st.GetTerm() != s.persistedTerm || st.GetVote() != s.persistedVote)
-	if err := s.appendState(hardCopy, snapCopy, mustPersist, snapDirty); err != nil {
+	// Every changed HardState is written, commit index included: the node
+	// starts raft with Applied = its applied index (raft.go), and raft panics
+	// at start if that is above the stored commit, so the stored commit must
+	// never trail what this node applies.
+	if err := s.appendState(hardCopy, snapCopy, !raft.IsEmptyHardState(st), snapDirty); err != nil {
 		return fmt.Errorf("[wal.storage] appendState: %w", err)
 	}
 

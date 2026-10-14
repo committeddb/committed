@@ -28,63 +28,14 @@ func crashCopy(t *testing.T, s *StorageWrapper) *StorageWrapper {
 	return c
 }
 
-func stateRecords(t *testing.T, s *StorageWrapper) uint64 {
-	t.Helper()
-	li, err := s.StateLog.LastIndex()
-	require.NoError(t, err)
-	return li
-}
-
-// TestHardState_CommitOnlyIsNotWritten: a Ready whose HardState moved only
-// its commit index writes no state record (and so no state-log fsync); a
-// term or vote change does, as raft requires before its messages go out.
-func TestHardState_CommitOnlyIsNotWritten(t *testing.T) {
-	s := NewStorageWithParser(t, nil, parser.New())
-	defer s.Cleanup()
-	require.NoError(t, s.Save(hardState(1, 1, 0), nil, &defaultSnap))
-	before := stateRecords(t, s)
-	for c := uint64(1); c <= 20; c++ {
-		require.NoError(t, s.Save(hardState(1, 1, c), nil, &defaultSnap))
-	}
-	require.Equal(t, before, stateRecords(t, s), "commit-only HardStates are not written")
-
-	require.NoError(t, s.Save(hardState(2, 0, 20), nil, &defaultSnap))
-	require.Equal(t, before+1, stateRecords(t, s), "a term change is written")
-	require.NoError(t, s.Save(hardState(2, 3, 20), nil, &defaultSnap))
-	require.Equal(t, before+2, stateRecords(t, s), "a vote change is written")
-}
-
-// TestHardState_CrashKeepsTheLastWrittenCommit: after a crash the node
-// starts from the commit index written with the last term or vote change —
-// raft relearns the rest from the leader — while a clean Close writes the
-// current one.
-func TestHardState_CrashKeepsTheLastWrittenCommit(t *testing.T) {
-	s := NewStorageWithParser(t, nil, parser.New())
-	defer s.Cleanup()
-	require.NoError(t, s.Save(hardState(1, 1, 2), nil, &defaultSnap))
-	for c := uint64(3); c <= 9; c++ {
-		require.NoError(t, s.Save(hardState(1, 1, c), nil, &defaultSnap))
-	}
-
-	crashed := crashCopy(t, s)
-	hs, _, err := crashed.InitialState()
-	require.NoError(t, err)
-	require.Equal(t, uint64(1), hs.GetTerm())
-	require.Equal(t, uint64(1), hs.GetVote())
-	require.Equal(t, uint64(2), hs.GetCommit())
-
-	reopened := s.CloseAndReopenStorage(t)
-	defer reopened.Cleanup()
-	hs, _, err = reopened.InitialState()
-	require.NoError(t, err)
-	require.Equal(t, uint64(9), hs.GetCommit(), "a clean Close writes the current commit")
-}
-
-// TestHardState_SnapshotRecordCarriesTheCommit: raft refuses to load a
-// HardState whose commit is below the snapshot's index, so every snapshot
-// record is followed by the current HardState, even when the commit was
-// otherwise held in memory.
-func TestHardState_SnapshotRecordCarriesTheCommit(t *testing.T) {
+// TestHardState_CrashKeepsCommitAtOrAboveApplied pins the invariant raft
+// needs at start: the node starts raft with Applied = its applied index, and
+// raft panics ("applied is out of range") if the stored commit is below it.
+// So after a crash — no Close, nothing held in memory reaches disk — the
+// stored commit must cover everything applied, however the Readies were cut
+// (commit-only HardState changes included, which raft's own MustSync would
+// let a node skip writing).
+func TestHardState_CrashKeepsCommitAtOrAboveApplied(t *testing.T) {
 	s := NewStorageWithParser(t, nil, parser.New())
 	defer s.Cleanup()
 	tp := &cluster.Type{ID: "hs-topic", Name: "hs", Version: 1}
@@ -93,7 +44,30 @@ func TestHardState_SnapshotRecordCarriesTheCommit(t *testing.T) {
 	saveEntity(t, reg, s, 1, 1)
 	ents := batchEntries(t, tp, 2, 9)
 	require.NoError(t, s.Save(hardState(1, 1, 1), ents, &defaultSnap))
-	require.NoError(t, s.Save(hardState(1, 1, 10), nil, &defaultSnap)) // commit-only: held in memory
+	for c := uint64(2); c <= 10; c++ {
+		require.NoError(t, s.Save(hardState(1, 1, c), nil, &defaultSnap)) // commit-only changes
+		require.NoError(t, s.ApplyCommittedBatch(ents[c-2:c-1]))
+	}
+	require.Equal(t, uint64(10), s.AppliedIndex())
+
+	crashed := crashCopy(t, s)
+	hs, _, err := crashed.InitialState()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, hs.GetCommit(), crashed.AppliedIndex(), "the stored commit must cover the applied index")
+}
+
+// TestHardState_SnapshotRecordCarriesTheCommit: raft refuses to load a
+// HardState whose commit is below the snapshot's index, so every snapshot
+// record is followed by the current HardState.
+func TestHardState_SnapshotRecordCarriesTheCommit(t *testing.T) {
+	s := NewStorageWithParser(t, nil, parser.New())
+	defer s.Cleanup()
+	tp := &cluster.Type{ID: "hs-topic", Name: "hs", Version: 1}
+	reg, err := cluster.NewUpsertTypeEntity(tp)
+	require.NoError(t, err)
+	saveEntity(t, reg, s, 1, 1)
+	ents := batchEntries(t, tp, 2, 9)
+	require.NoError(t, s.Save(hardState(1, 1, 10), ents, &defaultSnap))
 	require.NoError(t, s.ApplyCommittedBatch(ents))
 	_, err = s.CreateSnapshot(10, nil)
 	require.NoError(t, err)
