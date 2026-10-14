@@ -52,6 +52,7 @@ type options struct {
 	readyTimeout  time.Duration
 	catchUpLimit  time.Duration
 	rebuildLimit  time.Duration
+	stallLimit    time.Duration
 	latencyBar    time.Duration
 	catchUpBar    time.Duration
 	label         string
@@ -81,6 +82,7 @@ func main() {
 	flag.DurationVar(&o.readyTimeout, "ready-timeout", 5*time.Minute, "how long to wait for the cluster and the ingestable")
 	flag.DurationVar(&o.catchUpLimit, "catch-up-limit", 30*time.Minute, "give up waiting for the read model after this")
 	flag.DurationVar(&o.rebuildLimit, "rebuild-limit", 60*time.Minute, "give up waiting for the rebuilt projection after this")
+	flag.DurationVar(&o.stallLimit, "stall-limit", 2*time.Minute, "give up waiting for a read model that has not changed for this long")
 	flag.DurationVar(&o.latencyBar, "latency-bar", time.Second, "the bar for p99 commit-to-row")
 	flag.DurationVar(&o.catchUpBar, "catch-up-bar", 5*time.Second, "the bar for catch-up after the last append")
 	flag.StringVar(&o.label, "label", "", "a name for this run in the report (e.g. the commit)")

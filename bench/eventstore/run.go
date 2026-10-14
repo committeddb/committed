@@ -78,18 +78,13 @@ func run(ctx context.Context, o options) (*Report, error) {
 
 	// Catch-up and correctness.
 	want := wl.expectedRows()
-	matched, wrong, extra, examples := waitMatch(ctx, read, "orders", want, o.catchUpLimit, 50*time.Millisecond)
-	if !matched.IsZero() {
-		rep.CatchUpSeconds = matched.Sub(lastCommit).Seconds()
-	} else {
-		rep.CatchUpSeconds = -1
-	}
-	rep.Rows, rep.WrongRows, rep.ExtraRows, rep.WrongExamples = len(want), wrong, extra, examples
+	m := waitMatch(ctx, read, "orders", want, o.catchUpLimit, o.stallLimit, 50*time.Millisecond)
+	rep.recordCatchUp(m, lastCommit, len(want))
 	_ = sleep(ctx, 500*time.Millisecond) // let the tracker see the last rows
 	stopMeasure()
 	rep.recordLatency(tr)
 	rep.MaxSyncLag = smp.maxLag()
-	logf("caught up in %.1fs; %d rows, %d wrong, %d extra", rep.CatchUpSeconds, rep.Rows, wrong, extra)
+	logf("caught up in %.1fs; %d rows, %d wrong, %d extra", rep.CatchUpSeconds, rep.Rows, rep.WrongRows, rep.ExtraRows)
 
 	// Single appends into a quiet system.
 	if o.idleProbes > 0 {
@@ -112,8 +107,7 @@ func run(ctx context.Context, o options) (*Report, error) {
 			return rep, err
 		}
 		logf("building orders_v2 from the log")
-		done, wrong, extra, ex := waitMatch(ctx, read, "orders_v2", want, o.rebuildLimit, time.Second)
-		rep.recordRebuild(t0, done, wrong, extra, ex)
+		rep.recordRebuild(t0, waitMatch(ctx, read, "orders_v2", want, o.rebuildLimit, o.stallLimit, time.Second))
 		logf("orders_v2: %.1fs", rep.Rebuild.Seconds)
 	}
 	rep.judge(o)

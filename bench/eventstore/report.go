@@ -36,6 +36,7 @@ type Report struct {
 	Rebuild    rebuild  `json:"rebuild"`
 
 	CatchUpSeconds float64  `json:"catchUpSeconds"` // -1: never caught up
+	CatchUpStalled bool     `json:"catchUpStalled,omitempty"`
 	Rows           int      `json:"rows"`
 	WrongRows      int      `json:"wrongRows"`
 	ExtraRows      int      `json:"extraRows"`
@@ -62,10 +63,12 @@ type minute struct {
 }
 
 type rebuild struct {
-	Seconds      float64 `json:"seconds"` // -1: never matched
-	EventsPerSec float64 `json:"eventsPerSec"`
-	WrongRows    int     `json:"wrongRows"`
-	ExtraRows    int     `json:"extraRows"`
+	Seconds       float64  `json:"seconds"` // -1: never matched
+	Stalled       bool     `json:"stalled,omitempty"`
+	EventsPerSec  float64  `json:"eventsPerSec"`
+	WrongRows     int      `json:"wrongRows"`
+	ExtraRows     int      `json:"extraRows"`
+	WrongExamples []string `json:"wrongExamples,omitempty"`
 }
 
 // ms is a duration that marshals as milliseconds.
@@ -129,13 +132,20 @@ func (r *Report) recordIdle(lat []time.Duration) {
 	r.Idle = summarize(lat)
 }
 
-func (r *Report) recordRebuild(t0, done time.Time, wrong, extra int, ex []string) {
-	r.Rebuild = rebuild{Seconds: -1, WrongRows: wrong, ExtraRows: extra}
-	if !done.IsZero() {
-		r.Rebuild.Seconds = done.Sub(t0).Seconds()
+func (r *Report) recordCatchUp(m match, lastCommit time.Time, rows int) {
+	r.CatchUpSeconds = -1
+	if !m.at.IsZero() {
+		r.CatchUpSeconds = m.at.Sub(lastCommit).Seconds()
+	}
+	r.CatchUpStalled = m.stalled
+	r.Rows, r.WrongRows, r.ExtraRows, r.WrongExamples = rows, m.wrong, m.extra, m.examples
+}
+
+func (r *Report) recordRebuild(t0 time.Time, m match) {
+	r.Rebuild = rebuild{Seconds: -1, Stalled: m.stalled, WrongRows: m.wrong, ExtraRows: m.extra, WrongExamples: m.examples}
+	if !m.at.IsZero() {
+		r.Rebuild.Seconds = m.at.Sub(t0).Seconds()
 		r.Rebuild.EventsPerSec = float64(r.Appended) / r.Rebuild.Seconds
-	} else if len(ex) > 0 {
-		r.WrongExamples = append(r.WrongExamples, ex...)
 	}
 }
 
@@ -147,7 +157,9 @@ func (r *Report) judge(o options) {
 	if r.AchievedRate < 0.98*o.rate {
 		fail("the source took %.0f/s, under the offered %.0f/s: the run does not test the bar", r.AchievedRate, o.rate)
 	}
-	if r.CatchUpSeconds < 0 {
+	if r.CatchUpSeconds < 0 && r.CatchUpStalled {
+		fail("the read model stopped changing for %s without matching the source", o.stallLimit)
+	} else if r.CatchUpSeconds < 0 {
 		fail("the read model never matched the source within %s", o.catchUpLimit)
 	} else if r.CatchUpSeconds > o.catchUpBar.Seconds() {
 		fail("caught up %.1fs after the last append, over the %s bar: the read model fell behind", r.CatchUpSeconds, o.catchUpBar)
@@ -165,7 +177,13 @@ func (r *Report) judge(o options) {
 		fail("idle p99 commit-to-row %s, over the %s bar", r.Idle.P99, o.latencyBar)
 	}
 	if r.Rebuild.Seconds < 0 && !o.skipRebuild {
-		fail("orders_v2 never matched within %s", o.rebuildLimit)
+		if r.Rebuild.Stalled {
+			fail("orders_v2 stopped changing for %s without matching the source: %d rows wrong or missing, %d unexpected",
+				o.stallLimit, r.Rebuild.WrongRows, r.Rebuild.ExtraRows)
+		} else {
+			fail("orders_v2 never matched within %s: %d rows wrong or missing, %d unexpected",
+				o.rebuildLimit, r.Rebuild.WrongRows, r.Rebuild.ExtraRows)
+		}
 	}
 	r.Pass = len(r.Failures) == 0
 }
@@ -200,7 +218,10 @@ func (r *Report) Summary() string {
 		p("  - %s", f)
 	}
 	for _, e := range r.WrongExamples {
-		p("    %s", e)
+		p("    orders %s", e)
+	}
+	for _, e := range r.Rebuild.WrongExamples {
+		p("    orders_v2 %s", e)
 	}
 	return b.String()
 }

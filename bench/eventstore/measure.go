@@ -4,6 +4,7 @@ import (
 	"context"
 	gosql "database/sql"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
 	"sync"
@@ -194,17 +195,35 @@ func compare(want map[string]expected, got map[string]row) (wrong, extra int, ex
 	return wrong, extra, examples
 }
 
-// waitMatch polls until table holds exactly want, or limit passes. It
-// returns when it matched (zero if it never did) and the last comparison.
-func waitMatch(ctx context.Context, db *gosql.DB, table string, want map[string]expected, limit time.Duration, every time.Duration) (time.Time, int, int, []string) {
+// match is the outcome of waiting for a table to hold the expected rows.
+type match struct {
+	at       time.Time // when it matched; zero if it never did
+	stalled  bool      // gave up because the table stopped changing
+	wrong    int
+	extra    int
+	examples []string
+}
+
+// waitMatch polls until table holds exactly want. It gives up after limit,
+// or once the table has not changed for stall: a row that can never match
+// (a lost or wrong event) otherwise holds the run until the limit.
+func waitMatch(ctx context.Context, db *gosql.DB, table string, want map[string]expected, limit, stall, every time.Duration) match {
 	deadline := time.Now().Add(limit)
-	var wrong, extra int
-	var ex []string
+	var m match
+	var last uint64
+	lastChange := time.Now()
 	for time.Now().Before(deadline) && ctx.Err() == nil {
 		got, err := readRows(ctx, db, table)
 		if err == nil {
-			if wrong, extra, ex = compare(want, got); wrong == 0 && extra == 0 {
-				return time.Now(), 0, 0, nil
+			if m.wrong, m.extra, m.examples = compare(want, got); m.wrong == 0 && m.extra == 0 {
+				m.at = time.Now()
+				return m
+			}
+			if f := fingerprint(got); f != last {
+				last, lastChange = f, time.Now()
+			} else if time.Since(lastChange) >= stall {
+				m.stalled = true
+				return m
 			}
 		}
 		select {
@@ -212,7 +231,18 @@ func waitMatch(ctx context.Context, db *gosql.DB, table string, want map[string]
 		case <-time.After(every):
 		}
 	}
-	return time.Time{}, wrong, extra, ex
+	return m
+}
+
+// fingerprint is an order-independent hash of a table's rows.
+func fingerprint(rows map[string]row) uint64 {
+	var sum uint64
+	for id, r := range rows {
+		h := fnv.New64a()
+		_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s", id, r.customer, r.status, r.items, r.total, r.version)
+		sum += h.Sum64()
+	}
+	return sum
 }
 
 func percentile(sorted []time.Duration, p float64) time.Duration {
