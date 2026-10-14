@@ -86,6 +86,21 @@ func (q *applyQueue) drain() bool {
 	return !q.stopped
 }
 
+// ifIdle runs fn, and returns true, only if nothing is queued or being
+// applied; the apply goroutine cannot start a batch while fn runs. The Ready
+// loop uses it for work that needs the state to match the applied index
+// exactly, when no batch will come along to do it (an idle cluster's
+// compaction snapshot).
+func (q *applyQueue) ifIdle(fn func()) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.batches) > 0 || q.busy || q.stopped {
+		return false
+	}
+	fn()
+	return true
+}
+
 // stop wakes every waiter; queued batches are dropped (they are durable in
 // the raft log, and a restart replays them from the durable applied index).
 func (q *applyQueue) stop() {

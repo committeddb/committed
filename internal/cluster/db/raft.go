@@ -669,6 +669,11 @@ func (n *Raft) serveChannels() {
 		select {
 		case <-ticker.C:
 			n.node.Tick()
+			// An idle node applies no batches, so the apply goroutine never
+			// gets to prepare a compaction; do it here while apply is idle
+			// (the age limb must fire on an idle cluster too: a member added
+			// to it is sent the latest snapshot, which must include it).
+			n.applyQ.ifIdle(n.prepareCompaction)
 			n.finishCompaction()
 		case rd := <-n.node.Ready():
 			status := n.node.Status()

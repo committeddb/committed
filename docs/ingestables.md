@@ -41,14 +41,20 @@ checkpoint and de-duplicates any re-delivered changes by source transaction
 and sequence. You do not get duplicate stream changes in the topic across a
 restart.
 
-A change-stream transaction lands in the topic as **one atomic unit**: syncables
-apply all of its rows in a single destination transaction, so consumers never
-observe a partial source transaction — with one bounded exception. A source
-transaction too large to fit a single committed proposal (larger than the
-~12MiB soft-flush budget) is applied as ordered contiguous parts; a consumer
-can transiently observe such a giant transaction partially applied, and
-converges as the parts complete. This exception exists because the only
-alternative is refusing to ingest oversized transactions.
+On PostgreSQL and MySQL, a change-stream transaction lands in the log as **one
+atomic unit**, including a transaction that touches tables feeding several
+topics (see [Multiple topics from one ingestable](#multiple-topics-from-one-ingestable-all-sql-engines)):
+syncables apply all of its rows in a single destination transaction, so
+consumers never observe a partial source transaction — with one bounded
+exception. A source transaction too large to fit a single committed proposal
+(larger than the ~12MiB soft-flush budget) is applied as ordered contiguous
+parts; a consumer can transiently observe such a giant transaction partially
+applied, and converges as the parts complete. This exception exists because
+the only alternative is refusing to ingest oversized transactions.
+
+SQL Server's Change Tracking reports net changes per table rather than
+transactions, so it has no transaction boundary to keep: each poll's changes
+land table by table (see [SQL Server](#sql-server)).
 
 Every change-stream proposal carries **capture provenance**: the timestamp at
 which the source committed the change and an identity for the source

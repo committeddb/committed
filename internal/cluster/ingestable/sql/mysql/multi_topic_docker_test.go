@@ -102,7 +102,7 @@ func TestMysqlMultiTopicRoutesAndSplitsByTopic(t *testing.T) {
 	require.Equal(t, mtOrdersType.ID, sentinelTopic["o_sentinel"], "orders sentinel under the orders topic")
 	require.Equal(t, mtCustomersType.ID, sentinelTopic["c_sentinel"], "customers sentinel under the customers topic")
 
-	// Phase 2 (flush partition): one transaction, both tables.
+	// Phase 2: one transaction, both tables.
 	db = createDB(t)
 	tx, err := db.Begin()
 	require.NoError(t, err)
@@ -114,7 +114,7 @@ func TestMysqlMultiTopicRoutesAndSplitsByTopic(t *testing.T) {
 	db.Close()
 
 	var cdc []*cluster.Proposal
-	seen := map[string]*cluster.Entity{}
+	seen := map[string]bool{}
 	deadline = time.After(30 * time.Second)
 	for len(seen) < 2 {
 		select {
@@ -122,19 +122,14 @@ func TestMysqlMultiTopicRoutesAndSplitsByTopic(t *testing.T) {
 			if isRefreshMarkerProposal(p) {
 				continue
 			}
-			topic := mtRequireHomogeneous(t, p)
-			// A snapshot row from an earlier table could still be buffered; only the
-			// CDC rows carry the o9/c9 keys we assert on. Skip anything else.
 			relevant := false
 			for _, e := range p.Entities {
 				if k := string(e.Key); k == "o9" || k == "c9" {
 					relevant = true
-					require.Equal(t, topic, e.Type.ID)
-					seen[k] = e
+					seen[k] = true
 				}
 			}
 			if relevant {
-				require.NotZero(t, p.SourceSeq, "a CDC proposal carries a non-zero SourceSeq")
 				cdc = append(cdc, p)
 			}
 		case <-po:
@@ -143,24 +138,19 @@ func TestMysqlMultiTopicRoutesAndSplitsByTopic(t *testing.T) {
 		}
 	}
 
-	// The mixed transaction produced at least two proposals — one per topic — each
-	// homogeneous, with strictly-increasing SourceSeqs at one binlog coordinate.
-	require.GreaterOrEqual(t, len(cdc), 2, "a two-topic transaction emits at least one proposal per topic")
-	topics := map[string]bool{}
-	for i, p := range cdc {
-		topics[p.Entities[0].Type.ID] = true
-		if i > 0 {
-			require.Greater(t, p.SourceSeq, cdc[i-1].SourceSeq,
-				"per-topic proposals at one coordinate must get strictly-increasing SourceSeqs")
-		}
-	}
-	require.True(t, topics[mtOrdersType.ID] && topics[mtCustomersType.ID],
-		"both topics must appear as their own homogeneous proposal")
-
-	require.Equal(t, mtOrdersType.ID, seen["o9"].Type.ID)
-	require.JSONEq(t, `{"id":"o9","amount":"999"}`, string(seen["o9"].Data))
-	require.Equal(t, mtCustomersType.ID, seen["c9"].Type.ID)
-	require.JSONEq(t, `{"cust_id":"c9","name":"Zoe"}`, string(seen["c9"].Data))
+	// The two-table transaction lands as ONE proposal, rows in source order,
+	// with the transaction's bundled resume position.
+	require.Len(t, cdc, 1, "a two-table transaction must land as ONE proposal")
+	p := cdc[0]
+	require.Len(t, p.Entities, 2)
+	require.Equal(t, "o9", string(p.Entities[0].Key), "rows keep source order")
+	require.Equal(t, mtOrdersType.ID, p.Entities[0].Type.ID)
+	require.JSONEq(t, `{"id":"o9","amount":"999"}`, string(p.Entities[0].Data))
+	require.Equal(t, "c9", string(p.Entities[1].Key))
+	require.Equal(t, mtCustomersType.ID, p.Entities[1].Type.ID)
+	require.JSONEq(t, `{"cust_id":"c9","name":"Zoe"}`, string(p.Entities[1].Data))
+	require.NotZero(t, p.SourceSeq, "a CDC proposal carries a non-zero SourceSeq")
+	require.NotEmpty(t, p.Position, "the transaction's resume position rides the proposal")
 
 	cancel()
 }
