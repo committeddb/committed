@@ -83,7 +83,7 @@ type Raft struct {
 	// so blocking db.Propose can release waiters once their proposal has
 	// been applied. nil disables the callback (used by raft_test which
 	// constructs Raft directly without a db.DB).
-	applyNotifier func(data []byte)
+	applyNotifier func(index uint64, data []byte)
 
 	// appliedIndexNotifier is invoked once per Ready iteration that
 	// applied at least one committed entry (i.e. AppliedIndex advanced).
@@ -163,7 +163,7 @@ func NewRaft(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, p
 	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(index uint64, data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
@@ -828,7 +828,7 @@ func (n *Raft) serveChannels() {
 				// proposal's RequestID is 0 (system-internal proposers
 				// or pre-PR2 entries).
 				if n.applyNotifier != nil && entry.GetType() == raftpb.EntryNormal && entry.Data != nil {
-					n.applyNotifier(entry.Data)
+					n.applyNotifier(entry.GetIndex(), entry.Data)
 				}
 			}
 

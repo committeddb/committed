@@ -198,6 +198,12 @@ func (ms *MemoryStorage) IngestSourceDedup(id string) (string, uint64) {
 	return "", 0
 }
 
+// IngestOrder is a stub: no apply path, so no proposal was ever accepted.
+func (ms *MemoryStorage) IngestOrder(id string) (uint64, uint64) { return 0, 0 }
+
+// TakeIngestRejected is a stub: no apply path rejects anything.
+func (ms *MemoryStorage) TakeIngestRejected(index uint64) bool { return false }
+
 // TopicRefreshEpoch is a stub: this in-memory test double has no apply path to
 // advance the per-topic refresh-epoch highwater, so it always reports 0 (a fresh
 // snapshot starts at epoch 1). Tests that exercise the recreate-bumps-epoch path
@@ -297,6 +303,8 @@ type StorageStubs struct{}
 func (StorageStubs) DatabaseVersions(id string) ([]cluster.VersionInfo, error) { return nil, nil }
 func (StorageStubs) ProducerEdges() ([]db.DerivationEdge, error)               { return nil, nil }
 func (StorageStubs) IngestSourceDedup(id string) (string, uint64)              { return "", 0 }
+func (StorageStubs) IngestOrder(id string) (uint64, uint64)                    { return 0, 0 }
+func (StorageStubs) TakeIngestRejected(index uint64) bool                      { return false }
 func (StorageStubs) DatabaseVersion(id string, version uint64) (*cluster.Configuration, error) {
 	return nil, nil
 }

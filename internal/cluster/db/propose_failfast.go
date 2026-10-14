@@ -140,9 +140,14 @@ func (db *DB) signalAfterGrace(atRisk map[uint64]*waiter) {
 // db.Propose call by RequestID, and signals the waiter. Entries with
 // RequestID == 0 are system-internal proposals (or pre-PR2 entries) that
 // have no waiter; for those this is a no-op.
-func (db *DB) notifyApplied(data []byte) {
+func (db *DB) notifyApplied(index uint64, data []byte) {
 	if data == nil {
 		return
+	}
+	// Taken for every entry, waiter or not, so the set stays bounded.
+	var result error
+	if db.storage.TakeIngestRejected(index) {
+		result = ErrIngestOutOfOrder
 	}
 	p := &cluster.Proposal{}
 	if err := p.Unmarshal(data, db.storage); err != nil {
@@ -172,7 +177,7 @@ func (db *DB) notifyApplied(data []byte) {
 	// treating ErrProposalUnknown as "unknown outcome, must confirm"
 	// will just re-read and find the entry applied, which is safe.
 	select {
-	case w.ack <- nil:
+	case w.ack <- result:
 	default:
 	}
 }

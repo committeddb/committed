@@ -35,7 +35,20 @@ import (
 // Errors here are treated as fatal by raft.go; see the apply error policy
 // comment in raft.go's Ready loop.
 func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
-	advanced, err := s.applyCommitted(entry)
+	rejected, err := s.orderVerdicts([]*pb.Entry{entry})
+	if err != nil {
+		return fmt.Errorf("[wal.storage] %w", err)
+	}
+	if entry.GetIndex() > s.appliedIndex.Load() && entry.GetIndex() > s.eventIndex.Load() {
+		stored := entry
+		if rejected[entry.GetIndex()] {
+			stored = withoutData(entry)
+		}
+		if err := s.appendEvent(stored); err != nil {
+			return fmt.Errorf("[wal.storage] %w", err)
+		}
+	}
+	advanced, err := s.applyCommitted(entry, rejected[entry.GetIndex()])
 	if err != nil || !advanced {
 		return err
 	}
@@ -78,11 +91,27 @@ func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
 		s.snapMu.Unlock()
 		return nil
 	}
-	if err := s.appendEvents(fresh); err != nil {
+	// Sequenced ingest proposals are decided before the append: a rejected
+	// one is stored without its data (see ingest_order.go).
+	rejected, err := s.orderVerdicts(fresh)
+	if err != nil {
+		return fmt.Errorf("[wal.storage] %w", err)
+	}
+	stored := fresh
+	if len(rejected) > 0 {
+		stored = make([]*pb.Entry, len(fresh))
+		for i, e := range fresh {
+			stored[i] = e
+			if rejected[e.GetIndex()] {
+				stored[i] = withoutData(e)
+			}
+		}
+	}
+	if err := s.appendEvents(stored); err != nil {
 		return fmt.Errorf("[wal.storage] %w", err)
 	}
 	for _, e := range fresh {
-		if _, err := s.applyCommitted(e); err != nil {
+		if _, err := s.applyCommitted(e, rejected[e.GetIndex()]); err != nil {
 			return err
 		}
 	}
@@ -91,8 +120,11 @@ func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
 
 // applyCommitted applies one committed entry WITHOUT persisting appliedIndex
 // (the caller owns that — per entry via ApplyCommitted, per batch via
-// ApplyCommittedBatch). Reports whether the entry advanced appliedIndex.
-func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
+// ApplyCommittedBatch) and after the caller has mirrored it into the event
+// log. Reports whether the entry advanced appliedIndex. A rejected entry (a
+// sequenced ingest proposal out of order, see ingest_order.go) advances
+// appliedIndex and applies nothing.
+func (s *Storage) applyCommitted(entry *pb.Entry, rejected bool) (bool, error) {
 	// Skip already-applied entries (replay-on-restart safety). A bare
 	// EntryNormal with nil data (e.g. the leader's post-election no-op
 	// entry from raft) still counts as applied — we bump appliedIndex so
@@ -101,15 +133,10 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 		return false, nil
 	}
 
-	// Mirror the raw raft entry into the permanent event log. The guard
-	// against entry.GetIndex() <= eventIndex covers the crash window where
-	// appendEvent succeeded but saveAppliedIndex didn't persist:
-	// without it, replay would try to append the same entry again and
-	// diverge seq vs. raft index on disk.
-	if entry.GetIndex() > s.eventIndex.Load() {
-		if err := s.appendEvent(entry); err != nil {
-			return false, fmt.Errorf("[wal.storage] %w", err)
-		}
+	if rejected {
+		s.noteIngestRejected(entry)
+		s.appliedIndex.Store(entry.GetIndex())
+		return true, nil
 	}
 
 	// For EntryNormal with data, apply entities to bucket state and the
@@ -236,7 +263,7 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 		if p.TxnScopedDedup {
 			dedupTxn = p.SourceTxnID
 		}
-		if err := s.advanceIngestSourceSeq(p.IngestableID, p.SourceSeq, dedupTxn); err != nil {
+		if err := s.advanceIngestSourceSeq(p.IngestableID, p.SourceSeq, dedupTxn, p.IngestSeq, p.IngestSession); err != nil {
 			return false, fmt.Errorf("[wal.storage] advanceIngestSourceSeq: %w", err)
 		}
 

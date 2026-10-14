@@ -146,6 +146,16 @@ message LogProposal {
     // Provenance (sourceTxnID) is thus decoupled from dedup scope: stamping
     // an identity never changes dedup behavior without this flag.
     bool txnScopedDedup = 8;
+    // ingestSeq, ingestSession and ingestSessionStart order an ingest
+    // worker's pipelined proposals. ingestSeq is dense per ingestable; the
+    // apply path accepts a sequenced proposal only if it is the next number
+    // and continues the last accepted session (or starts a new one), and
+    // stores a rejected one in the event log as an empty entry. Zero means
+    // "not sequenced" (snapshot rows, every pre-feature entry, non-ingest
+    // proposals). Emitted only at cluster feature level 3.
+    uint64 ingestSeq = 9;
+    uint64 ingestSession = 10;
+    bool ingestSessionStart = 11;
 }
 
 enum LogValidationStrategy {

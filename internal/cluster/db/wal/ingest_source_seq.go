@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 // The ingest dedup record, keyed by ingestable id: the source-transaction
@@ -87,11 +89,21 @@ func (s *Storage) IngestSourceSeqHighwater(id string) uint64 {
 //
 // Deterministic: a pure fold of (stored record, proposal) applied in log
 // order — every node computes the same record.
-func (s *Storage) advanceIngestSourceSeq(id string, seq uint64, txnID string) error {
-	if id == "" || seq == 0 {
+//
+// The same bbolt transaction records an accepted sequenced proposal's
+// (ingestSeq, session) in the ingest order record (ingest_order.go), so
+// sequencing adds no commit per entry.
+func (s *Storage) advanceIngestSourceSeq(id string, seq uint64, txnID string, ingestSeq, session uint64) error {
+	if id == "" || (seq == 0 && ingestSeq == 0) {
 		return nil
 	}
 	return s.update(func(tx *bolt.Tx) error {
+		if err := advanceIngestOrder(tx, id, ingestSeq, session); err != nil {
+			return err
+		}
+		if seq == 0 {
+			return nil
+		}
 		b := tx.Bucket(ingestSourceSeqBucket)
 		if b == nil {
 			return ErrBucketMissing
@@ -108,18 +120,11 @@ func (s *Storage) advanceIngestSourceSeq(id string, seq uint64, txnID string) er
 			return b.Delete([]byte(id))
 		}
 		curSeq, curTxn := decodeSourceDedup(b.Get([]byte(id)))
-		if txnID == curTxn && seq <= curSeq {
+		newTxn, newSeq := cluster.FoldSourceDedup(curTxn, curSeq, txnID, seq)
+		if newTxn == curTxn && newSeq == curSeq {
 			return nil
 		}
-		if txnID == curTxn {
-			// Same transaction: advance the part highwater in place.
-			if err := b.Put([]byte(id), encodeSourceDedup(seq, txnID)); err != nil {
-				return fmt.Errorf("[wal.ingest-source-seq] put: %w", err)
-			}
-			return nil
-		}
-		// New transaction: reset the record to it.
-		if err := b.Put([]byte(id), encodeSourceDedup(seq, txnID)); err != nil {
+		if err := b.Put([]byte(id), encodeSourceDedup(newSeq, newTxn)); err != nil {
 			return fmt.Errorf("[wal.ingest-source-seq] put: %w", err)
 		}
 		return nil

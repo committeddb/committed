@@ -219,6 +219,13 @@ type IngestStateStorage interface {
 	// pre-raft skip decision consults this, never the bare highwater —
 	// dedup comparisons are only meaningful within one source transaction.
 	IngestSourceDedup(id string) (txnID string, seq uint64)
+	// IngestOrder returns the (IngestSeq, IngestSession) of the last
+	// sequenced ingest proposal the apply path accepted for id. A worker
+	// numbers a new session's proposals from seq+1.
+	IngestOrder(id string) (seq, session uint64)
+	// TakeIngestRejected reports, once, whether the entry at index was a
+	// sequenced ingest proposal the apply path rejected as out of order.
+	TakeIngestRejected(index uint64) bool
 	// IngestableCensus returns the latest applied JSON shape census for the
 	// ingestable (published by its worker during the snapshot pass), or
 	// (nil, false) when none exists. Replicated state, so any node's status

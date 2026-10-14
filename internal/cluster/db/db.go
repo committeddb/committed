@@ -60,6 +60,14 @@ var ErrProposalUnknown = fmt.Errorf("db: proposal status unknown after leader ch
 // arrives.
 var ErrProposalLost = fmt.Errorf("db: proposal truncated before commit: %w", cluster.ErrProposalUnconfirmed)
 
+// ErrIngestOutOfOrder is returned to an ingest worker whose sequenced
+// proposal committed but was rejected at apply: an earlier proposal of its
+// session never committed (a gap), or it belongs to a session another one
+// has superseded. Nothing of it applied, so it is safe to retry, which the
+// worker does by restarting from its durable position. See
+// cluster.Proposal.IngestSeq.
+var ErrIngestOutOfOrder = errors.New("db: ingest proposal rejected at apply: out of order")
+
 // defaultProposeTimeout is the backstop db.Propose applies when a waiter is
 // never signaled — the state a raft-dropped proposal reaches when no leader
 // change follows (forwardProposeErr absorbs ErrProposalDropped). Set well beyond

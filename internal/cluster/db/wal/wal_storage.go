@@ -42,6 +42,10 @@ var (
 	// uint64 highwater of the highest applied source sequence. Drives
 	// effectively-once ingest dedup — see ingest_source_seq.go.
 	ingestSourceSeqBucket = []byte("ingestSourceSeq")
+	// ingestOrderBucket maps an ingestable id to the (IngestSeq,
+	// IngestSession) of its last accepted sequenced proposal. Never swept.
+	// See ingest_order.go.
+	ingestOrderBucket = []byte("ingestOrder")
 	// eventTombstoneBucket records, per user-defined (topic) (type, key), the
 	// raft indices at which it was delete-proposed. The RTBF scrubber consults
 	// it to physically remove a subject's PII from the permanent event log. See
@@ -229,7 +233,7 @@ var buckets = func() [][]byte {
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
+	return append(bs, ingestSourceSeqBucket, ingestOrderBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
 		typeOnSupersedeBucket, scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
 }()
 
@@ -612,6 +616,11 @@ type Storage struct {
 	// (ApplyCommitted) and Open; the atomic is for race-free reads from the
 	// HTTP status path on other goroutines, not CAS.
 	dataEventIndex atomic.Uint64
+
+	// ingestRejected holds the raft indexes of sequenced ingest proposals
+	// rejected at apply, until the apply notifier takes them (see
+	// TakeIngestRejected). Node-local and transient.
+	ingestRejected sync.Map
 
 	// interpretationRegistry is the compiled restatements snapshot — immutable,
 	// swapped whole by handleRestatement / Open (reloadInterpretationRegistry),
