@@ -512,6 +512,21 @@ type Storage struct {
 	// stateIndex.
 	lastSnapSeq      uint64
 	lastHardStateSeq uint64
+	// persistedTerm / persistedVote are the term and vote of the newest
+	// HardState record on disk. Save writes a HardState record only when they
+	// change (raft's MustSync rule: term and vote must be durable before the
+	// Ready's messages go out; a commit index that only advanced need not —
+	// raft relearns it from the leader after a restart). Every Snapshot record
+	// is followed by the current HardState (appendState), so the stored commit
+	// is never below the stored snapshot's index, which raft requires on load.
+	// Same goroutine discipline as lastHardStateSeq.
+	persistedTerm   uint64
+	persistedVote   uint64
+	persistedCommit uint64
+	// stateMu serializes state-log writes (appendState): Save and
+	// persistPendingSnapshot run on the raft goroutine, flushHardState on a
+	// live backup's and Close's.
+	stateMu sync.Mutex
 	// hardStateBytesSinceSnap accumulates the bytes of HardState records
 	// written since lastSnapSeq. When they outgrow one snapshot record
 	// (lastSnapBytes, floored at stateLogReanchorFloor), appendState
@@ -1008,6 +1023,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		return nil, err
 	}
 	ws.hardState = st
+	ws.persistedTerm, ws.persistedVote, ws.persistedCommit = st.GetTerm(), st.GetVote(), st.GetCommit()
 	ws.snapshot = snap
 	// The membership the next snapshot stamps: the crash-authoritative copy,
 	// else the persisted snapshot's (a data dir from before confStateBucket).
@@ -1195,6 +1211,13 @@ func (s *Storage) Close() error {
 		// Likewise the sealer: it compresses sealed event-log segments and must
 		// not be mid-swap when the handle closes.
 		s.stopSealer()
+
+		// A clean shutdown records the current commit index, which Save
+		// writes only with a term or vote change (see persistedTerm): a
+		// restart, or an offline backup of this directory, starts from it.
+		if err := s.flushHardState(); err != nil {
+			s.logger.Warn("persist the commit index at close", zap.Error(err))
+		}
 
 		finalErr = s.EntryLog.Close()
 

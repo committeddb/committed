@@ -102,6 +102,12 @@ func (s *Storage) CaptureBackup(visit func(name string, size int64, write func(i
 
 	// 2. State log. Its re-anchoring truncation is not held; a file it
 	// removes under the read fails the read, and the backup starts over.
+	// The node writes its HardState only on a term or vote change, so record
+	// the current commit first: the archive's commit must cover its applied
+	// index (C ≥ A above).
+	if err := s.flushHardState(); err != nil {
+		return info, fmt.Errorf("live backup: record the commit index: %w", err)
+	}
 	if err := s.captureLog(s.StateLog, root, visit); err != nil {
 		return info, fmt.Errorf("live backup: raft state log: %w", err)
 	}

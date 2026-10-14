@@ -55,8 +55,8 @@ func newDataRunStorage(t *testing.T) (*StorageWrapper, *cluster.Type) {
 }
 
 // TestApplyDataRun_OneCommitPerReady pins the apply-side write batching: a
-// Ready of N CDC transactions makes one bbolt commit for all their data
-// writes, plus the applied-index save, not up to three commits per entry.
+// Ready of N CDC transactions makes ONE bbolt commit for all their data
+// writes and the applied-index save, not up to three commits per entry.
 // Each bbolt commit is two fsyncs, and they ran on the raft goroutine.
 func TestApplyDataRun_OneCommitPerReady(t *testing.T) {
 	s, tp := newDataRunStorage(t)
@@ -66,8 +66,8 @@ func TestApplyDataRun_OneCommitPerReady(t *testing.T) {
 
 	before := s.KVWriteOpsForTest()
 	require.NoError(t, s.ApplyCommittedBatch(ents))
-	require.Equal(t, int64(2), s.KVWriteOpsForTest()-before,
-		"one commit for the run's data writes, one for the applied index")
+	require.Equal(t, int64(1), s.KVWriteOpsForTest()-before,
+		"one commit for the run's data writes and the applied index together")
 
 	require.Equal(t, fmt.Sprintf("p-%d", n), string(s.Position("ing")))
 	require.Equal(t, uint64(n), s.IngestSourceSeqHighwater("ing"))

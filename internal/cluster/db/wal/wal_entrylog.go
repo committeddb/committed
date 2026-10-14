@@ -130,7 +130,10 @@ func (s *Storage) Save(st *pb.HardState, ents []*pb.Entry, snap *pb.Snapshot) er
 		return fmt.Errorf("[wal.storage] appendEntries: %w", err)
 	}
 
-	if err := s.appendState(hardCopy, snapCopy, !raft.IsEmptyHardState(st), snapDirty); err != nil {
+	// A HardState whose term and vote are unchanged moved only its commit
+	// index: kept in memory, not written (see persistedTerm).
+	mustPersist := !raft.IsEmptyHardState(st) && (st.GetTerm() != s.persistedTerm || st.GetVote() != s.persistedVote)
+	if err := s.appendState(hardCopy, snapCopy, mustPersist, snapDirty); err != nil {
 		return fmt.Errorf("[wal.storage] appendState: %w", err)
 	}
 
@@ -612,6 +615,8 @@ var stateLogReanchorFloor = 64 * 1024
 // The Snapshot record is written before the HardState record, matching the
 // raft Ready contract's persist-the-snapshot-first ordering.
 func (s *Storage) appendState(cur *pb.HardState, snap *pb.Snapshot, hardChanged, snapChanged bool) error {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	writeSnap := snapChanged
 	if !writeSnap && hardChanged && s.lastSnapSeq > 0 &&
 		s.hardStateBytesSinceSnap > max(s.lastSnapBytes, stateLogReanchorFloor) {
@@ -647,6 +652,7 @@ func (s *Storage) appendState(cur *pb.HardState, snap *pb.Snapshot, hardChanged,
 			return err
 		}
 		s.lastHardStateSeq = s.stateIndex
+		s.persistedTerm, s.persistedVote, s.persistedCommit = cur.GetTerm(), cur.GetVote(), cur.GetCommit()
 		s.hardStateBytesSinceSnap += n
 	}
 
@@ -666,6 +672,26 @@ func (s *Storage) appendState(cur *pb.HardState, snap *pb.Snapshot, hardChanged,
 	}
 
 	return nil
+}
+
+// flushHardState writes the current HardState when it is newer than the one
+// on disk — a commit index Save left in memory (see persistedTerm). A live
+// backup calls it before reading the state log, so the archive's commit
+// covers its applied index; Close calls it so a clean restart does too.
+func (s *Storage) flushHardState() error {
+	s.snapMu.Lock()
+	hard, snap := s.hardState, s.snapshot
+	s.snapMu.Unlock()
+	if hard == nil || raft.IsEmptyHardState(hard) {
+		return nil
+	}
+	s.stateMu.Lock()
+	fresh := hard.GetTerm() == s.persistedTerm && hard.GetVote() == s.persistedVote && hard.GetCommit() == s.persistedCommit
+	s.stateMu.Unlock()
+	if fresh {
+		return nil
+	}
+	return s.appendState(hard, snap, true, false)
 }
 
 func (s *Storage) writeStateRecord(typ StateType, data []byte) (int, error) {

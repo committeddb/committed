@@ -50,7 +50,7 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 		}
 	}
 	before := s.appliedIndex.Load()
-	if err := s.applyEntries([]*pb.Entry{entry}, rejected); err != nil || s.appliedIndex.Load() == before {
+	if _, err := s.applyEntries([]*pb.Entry{entry}, rejected, 0); err != nil || s.appliedIndex.Load() == before {
 		return err
 	}
 	return s.saveAppliedIndex(entry.GetIndex())
@@ -114,8 +114,13 @@ func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
 	if err := s.appendEvents(stored); err != nil {
 		return fmt.Errorf("[wal.storage] %w", err)
 	}
-	if err := s.applyEntries(fresh, rejected); err != nil {
+	last := fresh[len(fresh)-1].GetIndex()
+	merged, err := s.applyEntries(fresh, rejected, last)
+	if err != nil {
 		return err
+	}
+	if merged {
+		return nil // the final run saved the applied index with its writes
 	}
 	return s.saveAppliedIndex(fresh[len(fresh)-1].GetIndex())
 }
@@ -142,23 +147,45 @@ func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
 // Crash semantics are unchanged: the run's writes commit atomically, before
 // saveAppliedIndex, and every one is replay-idempotent (monotonic folds,
 // config-guarded last-writer-wins positions, the tombstone's index scan).
-func (s *Storage) applyEntries(entries []*pb.Entry, rejected map[uint64]bool) error {
+//
+// With finalIdx set (the batch path), a run that ends the batch commits in
+// the SAME transaction as the applied index (saveAppliedIndexTx), one bbolt
+// commit for both; the result reports whether that happened, so the caller
+// does not save the applied index again.
+func (s *Storage) applyEntries(entries []*pb.Entry, rejected map[uint64]bool, finalIdx uint64) (bool, error) {
 	type decoded struct {
 		index uint64
 		p     *cluster.Proposal
 	}
 	var run []decoded
 	write := false
-	flush := func() error {
+	flush := func(withApplied bool) error {
 		if len(run) == 0 {
 			return nil
 		}
-		if write {
+		var pending *pb.ConfState
+		var pendingData []byte
+		if withApplied {
+			var err error
+			if pending, pendingData, err = s.pendingConfStateBytes(); err != nil {
+				return err
+			}
+			s.appliedIndexPersists.Add(1)
+		}
+		if write || withApplied {
+			// Every run entry carries user-topic data, so the data head after
+			// the run is its last index.
+			dataHead := max(s.dataEventIndex.Load(), run[len(run)-1].index)
 			if err := s.update(func(tx *bolt.Tx) error {
-				for _, d := range run {
-					if err := s.applyDataTx(tx, d.index, d.p); err != nil {
-						return err
+				if write {
+					for _, d := range run {
+						if err := s.applyDataTx(tx, d.index, d.p); err != nil {
+							return err
+						}
 					}
+				}
+				if withApplied {
+					return saveAppliedIndexTx(tx, finalIdx, dataHead, pendingData)
 				}
 				return nil
 			}); err != nil {
@@ -167,6 +194,9 @@ func (s *Storage) applyEntries(entries []*pb.Entry, rejected map[uint64]bool) er
 		}
 		for _, d := range run {
 			s.noteDataApplied(d.index, d.p)
+		}
+		if withApplied {
+			s.clearPendingConfState(pending)
 		}
 		run, write = run[:0], false
 		return nil
@@ -189,14 +219,15 @@ func (s *Storage) applyEntries(entries []*pb.Entry, rejected map[uint64]bool) er
 			// Undecodable here: applyCommitted decodes again and owns the
 			// skip-or-fatal decision.
 		}
-		if err := flush(); err != nil {
-			return err
+		if err := flush(false); err != nil {
+			return false, err
 		}
 		if _, err := s.applyCommitted(e, rejected[idx]); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return flush()
+	merged := finalIdx > 0 && len(run) > 0 && run[len(run)-1].index == finalIdx
+	return merged, flush(merged)
 }
 
 // isDataProposal reports whether every entity is user-topic data, so the
@@ -469,55 +500,79 @@ func (s *Storage) saveAppliedIndex(idx uint64) error {
 	// past the conf) or neither (membership stale/missing, applied index
 	// behind the conf → raft re-delivers and applies it fresh). There is no
 	// window where the applied index leads a stale ConfState.
+	pending, pendingData, err := s.pendingConfStateBytes()
+	if err != nil {
+		return err
+	}
+	err = s.update(func(tx *bolt.Tx) error {
+		return saveAppliedIndexTx(tx, idx, s.dataEventIndex.Load(), pendingData)
+	})
+	if err == nil {
+		s.clearPendingConfState(pending)
+	}
+	return err
+}
+
+// pendingConfStateBytes snapshots the ConfState staged this Ready and
+// marshals it BEFORE the bbolt write lock is taken, so snapMu is never
+// nested inside kvMu.
+func (s *Storage) pendingConfStateBytes() (*pb.ConfState, []byte, error) {
 	s.snapMu.Lock()
 	pending := s.pendingConfState
 	s.snapMu.Unlock()
-	var pendingData []byte
-	if pending != nil {
-		d, err := proto.Marshal(pending)
-		if err != nil {
-			return fmt.Errorf("marshal conf state: %w", err)
-		}
-		pendingData = d
+	if pending == nil {
+		return nil, nil, nil
 	}
+	d, err := proto.Marshal(pending)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal conf state: %w", err)
+	}
+	return pending, d, nil
+}
 
-	err := s.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(appliedIndexBucket)
-		if b == nil {
+// clearPendingConfState drops the staged ConfState once it is durable,
+// unless a newer one was staged meanwhile.
+func (s *Storage) clearPendingConfState(pending *pb.ConfState) {
+	if pending == nil {
+		return
+	}
+	s.snapMu.Lock()
+	if s.pendingConfState == pending {
+		s.pendingConfState = nil
+	}
+	s.snapMu.Unlock()
+}
+
+// saveAppliedIndexTx writes the applied index, the data head, and a staged
+// ConfState in the caller's transaction.
+func saveAppliedIndexTx(tx *bolt.Tx, idx, dataHead uint64, pendingData []byte) error {
+	b := tx.Bucket(appliedIndexBucket)
+	if b == nil {
+		return ErrBucketMissing
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], idx)
+	if err := b.Put(appliedIndexKey, buf[:]); err != nil {
+		return err
+	}
+	// The data head rides the same transaction: it is applied state, and
+	// restart must restore it exactly (the Open-time backscan is a capped
+	// fallback the field defeated — see dataEventIndexKey).
+	var dbuf [8]byte
+	binary.BigEndian.PutUint64(dbuf[:], dataHead)
+	if err := b.Put(dataEventIndexKey, dbuf[:]); err != nil {
+		return err
+	}
+	if pendingData != nil {
+		cb := tx.Bucket(confStateBucket)
+		if cb == nil {
 			return ErrBucketMissing
 		}
-		var buf [8]byte
-		binary.BigEndian.PutUint64(buf[:], idx)
-		if err := b.Put(appliedIndexKey, buf[:]); err != nil {
+		if err := cb.Put(confStateKey, pendingData); err != nil {
 			return err
 		}
-		// The data head rides the same transaction: it is applied state, and
-		// restart must restore it exactly (the Open-time backscan is a capped
-		// fallback the field defeated — see dataEventIndexKey).
-		var dbuf [8]byte
-		binary.BigEndian.PutUint64(dbuf[:], s.dataEventIndex.Load())
-		if err := b.Put(dataEventIndexKey, dbuf[:]); err != nil {
-			return err
-		}
-		if pendingData != nil {
-			cb := tx.Bucket(confStateBucket)
-			if cb == nil {
-				return ErrBucketMissing
-			}
-			if err := cb.Put(confStateKey, pendingData); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err == nil && pending != nil {
-		s.snapMu.Lock()
-		if s.pendingConfState == pending {
-			s.pendingConfState = nil
-		}
-		s.snapMu.Unlock()
 	}
-	return err
+	return nil
 }
 
 // durableConfState reads the ConfState written atomically with appliedIndex,
