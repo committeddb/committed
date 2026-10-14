@@ -29,6 +29,7 @@
 //	stage:<name>:odim:<join> ordered joins: frame(onKey)+sortKey+producerKey -> order end + row
 //	stage:<name>:opos:<join> ordered joins: producerKey -> its current odim key
 //	stage:<name>:arev:<join> as-of joins: frame(onKey)+asOf sort key+outKey -> asOf end
+//	stage:<name>:acc         aggregate stages without joins: output key -> its fold state
 //
 // The odim/opos buckets exist only for joins declaring orderBy: every
 // matching row (version) of a reference, in business order, so the join
@@ -42,6 +43,11 @@
 // onKey prefix; mpos finds a producer row's entry when it moves or
 // leaves), and a dimension change re-fans the inputs referencing it from
 // their retained copies (parent).
+//
+// The acc bucket holds an aggregate key's fold state (counts, exact sums,
+// extremes, ordered item lists), kept in step with its retained inputs so a
+// changed input updates the state instead of refolding every input. It is
+// derived state: a key without one refolds from its inputs and writes it.
 //
 // The ord/pos/row buckets exist only for window stages (reduce =
 // "window"): ord walks a partition in business order (the sort key is an
@@ -68,7 +74,7 @@ import (
 
 // formatVersion is bumped when the layout changes incompatibly; an old
 // store is then reset and rebuilt from the log rather than migrated.
-const formatVersion uint64 = 2 // 2: numeric key parts render canonically (5.0000 ≡ 5)
+const formatVersion uint64 = 3 // 2: numeric key parts render canonically (5.0000 ≡ 5); 3: aggregate fold state (acc)
 
 var (
 	metaBucket      = []byte("meta")
@@ -408,6 +414,36 @@ func (tx *Tx) GetIn(stage string, outKey, inKey []byte) ([]byte, error) {
 		return nil, err
 	}
 	return b.Get(frameKey(outKey, inKey)), nil
+}
+
+func accBucket(stage string) []byte { return []byte("stage:" + stage + ":acc") }
+
+// PutAcc records an aggregate key's fold state.
+func (tx *Tx) PutAcc(stage string, outKey, val []byte) error {
+	b, err := tx.bucket(accBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(outKey, val)
+}
+
+// GetAcc reads an aggregate key's fold state (nil if absent). The returned
+// bytes are only valid within the transaction.
+func (tx *Tx) GetAcc(stage string, outKey []byte) ([]byte, error) {
+	b, err := tx.bucket(accBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(outKey), nil
+}
+
+// DeleteAcc removes an aggregate key's fold state.
+func (tx *Tx) DeleteAcc(stage string, outKey []byte) error {
+	b, err := tx.bucket(accBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(outKey)
 }
 
 func ordBucket(stage string) []byte { return []byte("stage:" + stage + ":ord") }

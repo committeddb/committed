@@ -70,6 +70,10 @@ type graphNode struct {
 	// back (since the worker started) — "folded but filtered" told apart
 	// from "no inputs". Same atomicity contract as inputs/fanned.
 	havingRejected atomic.Int64
+	// aggIncremental and aggFull count an aggregate stage's refolds from
+	// its fold state and in full (agg_incremental.go).
+	aggIncremental atomic.Int64
+	aggFull        atomic.Int64
 	// keyExprs are the compiled keyPath expressions, parallel to
 	// def.KeyPath (nil for a plain path); keyExprWarned one-shots the
 	// warning for a key expression's data error (worker goroutine only).
@@ -388,6 +392,9 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 				}
 				continue
 			}
+			if err := g.noteIn(tx, n, sl.outKey, sl.inKey, nil, dirty); err != nil {
+				return err
+			}
 			if err := tx.DeleteIn(st.Name, sl.outKey, sl.inKey); err != nil {
 				return err
 			}
@@ -434,15 +441,66 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 // and Drain refolds each dirty key ONCE per batch (the 87-minutes-vs-
 // 5-seconds field lesson), suppressing cascades whose output bytes did
 // not change (sound because folds are deterministic).
-type Dirty map[*graphNode]map[string]bool
+//
+// For an aggregate stage keeping a fold state (agg_incremental.go), it also
+// carries each key's input changes within the batch, so the drain can update
+// the state rather than refold every input. A key marked without them
+// refolds in full.
+type Dirty map[*graphNode]*dirtyNode
+
+type dirtyNode struct {
+	keys   map[string]bool
+	deltas map[string]*aggDelta
+}
+
+func (d Dirty) node(n *graphNode) *dirtyNode {
+	dn, ok := d[n]
+	if !ok {
+		dn = &dirtyNode{keys: map[string]bool{}}
+		d[n] = dn
+	}
+	return dn
+}
 
 func (d Dirty) Mark(n *graphNode, outKey []byte) {
-	m, ok := d[n]
-	if !ok {
-		m = map[string]bool{}
-		d[n] = m
+	d.node(n).keys[string(outKey)] = true
+}
+
+// delta is a key's recorded input changes (nil: none recorded).
+func (d Dirty) delta(n *graphNode, outKey []byte) *aggDelta {
+	if dn := d[n]; dn != nil {
+		return dn.deltas[string(outKey)]
 	}
-	m[string(outKey)] = true
+	return nil
+}
+
+// noteIn records, for a stage keeping a fold state, that one retained input
+// of outKey changes to cur (nil: removed). Called BEFORE the store write, so
+// the first call for an input in the batch captures its bytes before it.
+func (g *Graph) noteIn(tx *stagestore.Tx, n *graphNode, outKey, inKey, cur []byte, dirty Dirty) error {
+	if !n.def.incrementalAggregate() {
+		return nil
+	}
+	dn := dirty.node(n)
+	if dn.deltas == nil {
+		dn.deltas = map[string]*aggDelta{}
+	}
+	d := dn.deltas[string(outKey)]
+	if d == nil {
+		d = &aggDelta{inputs: map[string]*inputChange{}}
+		dn.deltas[string(outKey)] = d
+	}
+	ch := d.inputs[string(inKey)]
+	if ch == nil {
+		old, err := tx.GetIn(n.def.Name, outKey, inKey)
+		if err != nil {
+			return err
+		}
+		ch = &inputChange{old: bytes.Clone(old)}
+		d.inputs[string(inKey)] = ch
+	}
+	ch.cur = bytes.Clone(cur)
+	return nil
 }
 
 // FoldTopicUpsertNow folds one entity and drains immediately — the
@@ -573,6 +631,33 @@ func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, src string, inKey []
 // bookkeeping.
 func (g *Graph) FoldActual(tx *stagestore.Tx, a *cluster.Actual) error {
 	dirty := Dirty{}
+	if err := g.foldEntities(tx, a, dirty); err != nil {
+		return err
+	}
+	return g.Drain(tx, dirty)
+}
+
+// FoldActuals folds a run of committed Actuals, in order, and drains ONCE:
+// a key touched by several of them refolds once, over the retained set
+// they leave, instead of once per Actual. The result is the full keyed
+// refold over the same final retained state, so the outputs are the ones
+// per-Actual draining ends at; only the intermediate outputs between the
+// Actuals are never computed or emitted. A caller whose sink must see each
+// Actual's deltas in step with other writes (a projection with
+// topic-fed table sources) folds one Actual at a time instead.
+func (g *Graph) FoldActuals(tx *stagestore.Tx, as []*cluster.Actual) error {
+	dirty := Dirty{}
+	for _, a := range as {
+		if err := g.foldEntities(tx, a, dirty); err != nil {
+			return err
+		}
+	}
+	return g.Drain(tx, dirty)
+}
+
+// foldEntities updates retention for one Actual's entities, marking the
+// keys it dirties.
+func (g *Graph) foldEntities(tx *stagestore.Tx, a *cluster.Actual, dirty Dirty) error {
 	for _, e := range a.Entities {
 		if !g.ConsumesTopic(e.Type.ID) {
 			continue
@@ -603,7 +688,7 @@ func (g *Graph) FoldActual(tx *stagestore.Tx, a *cluster.Actual) error {
 			// dead-letters them loudly.
 		}
 	}
-	return g.Drain(tx, dirty)
+	return nil
 }
 
 // fanPathDesc names the fan declaration for logs: the single forEach
@@ -902,6 +987,9 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey 
 		return err
 	}
 	if prior != nil && !bytes.Equal(prior, outKey) {
+		if err := g.noteIn(tx, n, prior, inKey, nil, dirty); err != nil {
+			return err
+		}
 		if err := tx.DeleteIn(st.Name, prior, inKey); err != nil {
 			return err
 		}
@@ -915,7 +1003,11 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey 
 	if err != nil {
 		return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
 	}
-	if err := tx.PutIn(st.Name, outKey, inKey, encodeRetained(gen, inputBytes)); err != nil {
+	retained := encodeRetained(gen, inputBytes)
+	if err := g.noteIn(tx, n, outKey, inKey, retained, dirty); err != nil {
+		return err
+	}
+	if err := tx.PutIn(st.Name, outKey, inKey, retained); err != nil {
 		return err
 	}
 	if err := tx.PutSrc(st.Name, inKey, outKey); err != nil {
@@ -1009,6 +1101,9 @@ func (g *Graph) foldDeleteInput(tx *stagestore.Tx, n *graphNode, inKey []byte, d
 			return err
 		}
 	}
+	if err := g.noteIn(tx, n, outKey, inKey, nil, dirty); err != nil {
+		return err
+	}
 	if err := tx.DeleteIn(st.Name, outKey, inKey); err != nil {
 		return err
 	}
@@ -1038,10 +1133,11 @@ func (g *Graph) Drain(tx *stagestore.Tx, dirty Dirty) error {
 		}
 	}()
 	for _, n := range g.order {
-		keys := dirty[n]
-		if len(keys) == 0 {
+		dn := dirty[n]
+		if dn == nil || len(dn.keys) == 0 {
 			continue
 		}
+		keys := dn.keys
 		if n.win != nil {
 			if err := g.drainWindow(tx, n, keys, dirty); err != nil {
 				return err
@@ -1071,7 +1167,7 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 	if err != nil {
 		return err
 	}
-	out, live, err := g.refoldOutput(tx, st, outKey)
+	out, live, err := g.refoldOutput(tx, st, outKey, dirty.delta(n, outKey))
 	if err != nil {
 		return err
 	}
@@ -1218,9 +1314,12 @@ func mergeInKey(alias string, key []byte) []byte {
 // refoldOutput computes a key's output object from its retained inputs.
 // live=false means the key has no qualifying inputs and its output (and
 // downstream memberships) retract.
-func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live bool, err error) {
+func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) (out []byte, live bool, err error) {
 	if len(st.Merge) > 0 {
 		return g.refoldMerge(tx, st, outKey)
+	}
+	if st.incrementalAggregate() {
+		return g.refoldAggregateIncremental(tx, st, outKey, delta)
 	}
 	if st.Reduce == "aggregate" {
 		return g.refoldAggregate(tx, st, outKey)
@@ -1750,6 +1849,24 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 	for k := range st.aggSlots {
 		results[k] = st.aggSlots[k].result(&accs[k])
 	}
+	return g.aggregateOutput(st, results, legacyFolds{sums: sums, mins: mins, maxs: maxs, counts: counts, collects: collects})
+}
+
+// legacyFolds are a key's folded legacy emit arms, by emit index.
+type legacyFolds struct {
+	sums     []*big.Rat
+	mins     []any
+	maxs     []any
+	counts   []int
+	collects [][]any // in input-key order (distinct and sort apply here)
+}
+
+// aggregateOutput renders an aggregate key's output from its folded slot
+// results and legacy arms: having, then each emit. The one rendering both
+// the full refold and the fold state (agg_incremental.go) go through.
+func (g *Graph) aggregateOutput(st *Stage, results aggResults, lf legacyFolds) ([]byte, bool, error) {
+	sums, mins, maxs, counts, collects := lf.sums, lf.mins, lf.maxs, lf.counts, lf.collects
+	var err error
 	if st.havingCompiled != nil {
 		// SQL's HAVING: only TRUE keeps the key (false, null, and a data
 		// error hold it back, as a when arm does).
@@ -1869,20 +1986,7 @@ func distinctCollectValues(vals []any) []any {
 	seen := make(map[string]bool, len(vals))
 	out := vals[:0]
 	for _, v := range vals {
-		var key string
-		switch t := v.(type) {
-		case *big.Rat:
-			key = "n|" + t.RatString()
-		case string:
-			key = "s|" + t
-		case bool:
-			key = fmt.Sprintf("b|%t", t)
-		case timestampVal, dateVal:
-			us, _ := timeInstantUs(t)
-			key = fmt.Sprintf("t|%d", us)
-		case intervalVal:
-			key = "i|" + intervalCmpValue(t).String()
-		}
+		key := collectDistinctKey(v)
 		if seen[key] {
 			continue
 		}
@@ -1890,6 +1994,24 @@ func distinctCollectValues(vals []any) []any {
 		out = append(out, v)
 	}
 	return out
+}
+
+// collectDistinctKey is a value's identity for a distinct collect.
+func collectDistinctKey(v any) string {
+	switch t := v.(type) {
+	case *big.Rat:
+		return "n|" + t.RatString()
+	case string:
+		return "s|" + t
+	case bool:
+		return fmt.Sprintf("b|%t", t)
+	case timestampVal, dateVal:
+		us, _ := timeInstantUs(t)
+		return fmt.Sprintf("t|%d", us)
+	case intervalVal:
+		return "i|" + intervalCmpValue(t).String()
+	}
+	return ""
 }
 
 // fanJoinName is the reserved reverse-index name a forEach stage uses to

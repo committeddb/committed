@@ -824,6 +824,24 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	if p.stages != nil {
 		committed := false
 		berr := p.stageStore.Update(func(stx *stagestore.Tx) error {
+			if len(p.sources) == 0 {
+				// Every table source reads a stage: fold the batch and
+				// drain once, so a key the batch touches many times
+				// refolds once (see stages.Graph.FoldActuals). With
+				// topic-fed sources too, each Actual's stage deltas must
+				// land in step with its direct writes, so fold one at a
+				// time below.
+				p.syncIndex = as[len(as)-1].Index
+				if err := p.foldStagesBatchTx(ctx, tx, stx, as); err != nil {
+					return err
+				}
+				zap.L().Debug("sql projection batch committing", zap.Int("batch_size", len(as)))
+				if err := tx.Commit(); err != nil {
+					return execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
+				}
+				committed = true
+				return nil
+			}
 			for _, a := range as {
 				p.syncIndex = a.Index
 				if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
@@ -1546,6 +1564,24 @@ func (p *Projection) foldStagesTx(ctx context.Context, tx *gosql.Tx, stx *stages
 	return p.foldEntitiesTx(stx, a)
 }
 
+// foldStagesBatchTx is foldStagesTx for a run of Actuals drained once
+// (stages.Graph.FoldActuals); the frontier advances to the last.
+func (p *Projection) foldStagesBatchTx(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, as []*cluster.Actual) error {
+	p.stages.OnDelta = func(stage string, outKey []byte, obj any, live bool) error {
+		for _, src := range p.stageSinks[stage] {
+			if err := p.applyStageDelta(ctx, tx, stx, src, outKey, obj, live); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	defer func() { p.stages.OnDelta = nil }()
+	if err := p.stages.FoldActuals(stx, as); err != nil {
+		return err
+	}
+	return stx.SetFrontier(as[len(as)-1].Index)
+}
+
 // StageStats implements cluster.StageIntrospector: each declared stage's
 // current out-key count (store truth) plus its in-memory flow counters.
 func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
@@ -1620,13 +1656,19 @@ func (p *Projection) StageFrontier() (uint64, bool, error) {
 	return f, true, err
 }
 
-// FoldStagesOnly implements cluster.StageRecoverer: fold one Actual into
-// stage state with sink emission suppressed (OnDelta stays nil) — the
-// recovery pass below the checkpoint, where every output is already
-// durably applied.
-func (p *Projection) FoldStagesOnly(a *cluster.Actual) error {
+// FoldStagesOnly implements cluster.StageRecoverer: fold a run of Actuals
+// into stage state, draining once, with sink emission suppressed (OnDelta
+// stays nil) — the recovery pass below the checkpoint, where every output
+// is already durably applied, so only the state the run ends at matters.
+func (p *Projection) FoldStagesOnly(as []*cluster.Actual) error {
+	if len(as) == 0 {
+		return nil
+	}
 	return p.stageStore.Update(func(stx *stagestore.Tx) error {
-		return p.foldEntitiesTx(stx, a)
+		if err := p.stages.FoldActuals(stx, as); err != nil {
+			return err
+		}
+		return stx.SetFrontier(as[len(as)-1].Index)
 	})
 }
 

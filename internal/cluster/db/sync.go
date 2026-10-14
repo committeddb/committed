@@ -81,17 +81,35 @@ func (db *DB) callSyncBatch(ctx context.Context, id string, bs cluster.BatchSync
 // every consecutive idle iteration and caps at Max; any progress
 // (state change, successful read, successful sync) resets it to Min.
 //
-// Trade-off: a freshly-committed entry takes up to syncBackoffMax to
-// be picked up by an already-idle worker, but actively-syncing
-// workers stay at syncBackoffMin and pay no measurable latency.
-// 500ms is fine for the current "syncs trail the log by some bounded
-// amount" semantics; if a future caller needs sub-millisecond sync
-// latency, the right answer is option 3 from the audit (notification
-// channel from ApplyCommitted), not lowering this constant.
+// A worker idle because it is CAUGHT UP also wakes the moment an entry
+// applies (idleWait, on the applied broadcast), so a fresh entry reaches an
+// idle worker at once rather than after up to syncBackoffMax. A worker idle
+// for any other reason — retrying a failed sync or checkpoint, not the
+// owner — waits out the backoff only, so a failing destination is never
+// retried at the apply rate.
 const (
 	syncBackoffMin = 1 * time.Millisecond
 	syncBackoffMax = 500 * time.Millisecond
 )
+
+// idleWait waits out an idle worker's backoff. A worker that is caught up
+// also wakes when wake closes (the applied broadcast, taken before the read
+// that found the end of the log); any other idle worker waits out the
+// backoff only. Reports false when ctx ends.
+func idleWait(ctx context.Context, backoff time.Duration, caughtUp bool, wake <-chan struct{}) bool {
+	if !caughtUp {
+		wake = nil // a nil channel never fires
+	}
+	t := time.NewTimer(backoff)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-wake:
+	case <-ctx.Done():
+		return false
+	}
+	return true
+}
 
 // Batch limits when the Syncable implements BatchSyncable: proposals buffer
 // until min(Every, syncBatchCap) accumulate or MaxAge elapses since the first
@@ -153,6 +171,24 @@ func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.Stag
 	defer releaseFromZero()
 	r := db.storage.Reader("") // from index 0; entries ≤ frontier are skipped below
 	folded := 0
+	// Fold in runs: a key the run touches many times refolds once (a long
+	// stream's recovery would otherwise refold it once per input).
+	const recoveryRun = 1000
+	run := make([]*cluster.Actual, 0, recoveryRun)
+	flush := func() error {
+		if len(run) == 0 {
+			return nil
+		}
+		if err := rec.FoldStagesOnly(run); err != nil {
+			return err
+		}
+		folded += len(run)
+		if handle != nil {
+			handle.stageRecoveryFolded.Store(run[len(run)-1].Index)
+		}
+		run = run[:0]
+		return nil
+	}
 	for {
 		// The scan can cover the whole log; without this check a
 		// delete/replace's cancel cannot interrupt it, the drain times
@@ -173,13 +209,15 @@ func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.Stag
 		if a.Index > checkpoint {
 			break
 		}
-		if err := rec.FoldStagesOnly(a); err != nil {
-			return err
+		run = append(run, a)
+		if len(run) == recoveryRun {
+			if err := flush(); err != nil {
+				return err
+			}
 		}
-		folded++
-		if handle != nil {
-			handle.stageRecoveryFolded.Store(a.Index)
-		}
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 	db.logger.Info("stage state re-derived to the checkpoint", zap.String("id", id),
 		zap.Int("actuals_folded", folded), zap.Uint64("checkpoint", checkpoint))
@@ -613,6 +651,10 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			return nil
 		default:
 		}
+		// Taken before this iteration reads, so an entry applied after
+		// the read found the end of the log still wakes the idle wait.
+		wake := db.appliedNotify()
+		caughtUp := false
 
 		// Run one iteration of the state machine and decide whether
 		// the iteration made progress. Progress is defined as: state
@@ -792,6 +834,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 				// Caught up: if a re-materialization's replay has covered its
 				// target, sweep and clear.
 				db.completeRematerializationIfDone(ctx, id, s, &remat, lastSeen)
+				caughtUp = lastBumped == lastSeen
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)
 			default:
@@ -929,12 +972,10 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			continue
 		}
 
-		// Idle iteration. Sleep with backoff, but stay interruptible
-		// by ctx cancellation so registry replace and Close get prompt
-		// shutdowns.
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
+		// Idle iteration. Sleep with backoff — or, caught up, until an
+		// entry applies — but stay interruptible by ctx cancellation so
+		// registry replace and Close get prompt shutdowns.
+		if !idleWait(ctx, backoff, caughtUp, wake) {
 			return nil
 		}
 		backoff *= 2
@@ -1113,6 +1154,9 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		if db.syncBreaker.tripped(id) {
 			return nil
 		}
+		// Taken before this iteration reads; see syncSingle.
+		wake := db.appliedNotify()
+		caughtUp := false
 		select {
 		case <-ctx.Done():
 			return nil
@@ -1250,6 +1294,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				if !retryBatch {
 					db.completeRematerializationIfDone(ctx, id, s, &remat, pendingBumpIndex)
 				}
+				caughtUp = !retryBatch && len(batch) == 0 && pendingBumpIndex == 0
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)
 			default:
@@ -1292,9 +1337,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			continue
 		}
 
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
+		if !idleWait(ctx, backoff, caughtUp, wake) {
 			return nil
 		}
 		backoff *= 2

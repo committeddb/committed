@@ -62,16 +62,16 @@ the commands shown.
 
 `BenchmarkProposeApplyRoundTrip` relaxes bbolt's fsync (the raft log is still
 fsynced), so it isolates raft from the metadata store; a running node fsyncs
-both. Measured 2026-10-13 on the same laptop: the
-`BenchmarkAggregateLargeGroup` rows with `make bench`, the rest against a
-running single node with default settings:
+both. Measured on the same laptop: the `BenchmarkAggregateLargeGroup`
+rows with `make bench` (2026-10-14), the rest against a running single node
+with default settings (2026-10-13):
 
 | Measurement | Result | Derived rate |
 |---|---|---|
 | Serial `POST /v1/proposal`, one entity each | median 30 ms | ~31 proposals/sec |
 | PostgreSQL ingestable streaming one-row transactions | ~50 ms per transaction | ~20 transactions/sec |
-| `BenchmarkAggregateLargeGroup`, five emits, 1,000-input group | 3.1 ms per input | ~320 inputs/sec into that group |
-| `BenchmarkAggregateLargeGroup`, five emits, 10,000-input group | 32 ms per input | ~31 inputs/sec into that group |
+| `BenchmarkAggregateLargeGroup`, five emits, append into a 1,000-input group | 0.13 ms per input | ~7,500 inputs/sec into that group |
+| `BenchmarkAggregateLargeGroup`, five emits, append into a 10,000-input group | 0.06 ms per input | ~16,500 inputs/sec into that group |
 | Source commit to read-model row, aggregate stage, 40-event group | median 69 ms | — |
 | Source commit to read-model row, aggregate stage, 10,000-event group | median 108 ms | — |
 

@@ -552,8 +552,12 @@ set = [ { column = "total", from = "$.total" },
 ```
 
 - **Every stage is a keyed refold**: an input lands in its key's retained
-  set and the key recomputes from that set — never delta arithmetic — so
-  redelivery, rekeying, and replay converge to identical bytes. Key
+  set and the key's output is what recomputing from that set gives, so
+  redelivery, rekeying, and replay converge to identical bytes. An
+  aggregate stage without joins also keeps each key's fold state (exact
+  counts and sums, the current extremes, ordered value lists) and updates
+  it from the inputs that changed rather than re-reading the set; wherever
+  that state cannot show the same result, the key recomputes from its set. Key
   comparisons are byte-exact; when two producers render the same logical
   key differently (SQL Server CDC writes GUIDs UPPERCASE, most JSON
   serializers lowercase), declare `normalize = "lower"` on the
@@ -1015,18 +1019,26 @@ set = [ { column = "total", from = "$.total" },
   says so: `workerState: "re-deriving"` with `stageRecovery {folded,
   target}` progress on the default call — lag climbs by design until
   the fold-only pass reaches the checkpoint.
-- **An aggregate's cost grows with its largest group.** Each input that
-  reaches a key refolds the key from every input it holds, so one input's
-  cost is proportional to its group's size, and the projection applies
-  inputs in log order: while a large group refolds, the inputs behind it
-  wait. On the reference machine
-  ([performance.md](operations/performance.md#reference-measurements)), a
-  five-emit aggregate refolds a 1,000-input group in about 3 ms and a
-  10,000-input group in about 32 ms. Group by the entity whose history you
-  are aggregating (an order, an account, a device), not a tenant or a
-  whole topic, and give the stage a `when` that drops inputs no emit
-  reads: a rejected input is not retained, so it costs neither refold
-  time nor disk.
+- **An aggregate's cost per input does not depend on its group's size,
+  for most arms.** In an aggregate stage without joins, an input updates
+  its key's fold state: `count`, `sum` and `avg` adjust a running total,
+  `min` and `max` move the extreme, and `array_agg`, `string_agg`,
+  `collect` and any `distinct` insert into an ordered list (so they cost
+  in proportion to that list, which a `filter` keeps short). On the
+  reference machine
+  ([performance.md](operations/performance.md#reference-measurements)) the
+  event-store recipe's five-emit aggregate takes about 0.06 ms per
+  appended event at both 1,000 and 10,000 events per key. A key recomputes
+  from every input it holds — a cost proportional to its group's size —
+  when: the input that held a `min` or `max` leaves or moves the wrong way;
+  two values tie for an extreme but print differently (a date and its
+  midnight timestamp); an `interval` sum changes; or the stage has joins
+  (every change refolds the key). Inputs apply in log order, so a large
+  recompute holds up the inputs behind it. Group by the entity whose
+  history you are aggregating (an order, an account, a device), not a
+  tenant or a whole topic, and give the stage a `when` that drops inputs
+  no emit reads: a rejected input is not retained, so it costs neither
+  refold time nor disk.
 - Stage state lives in one bbolt file per syncable under
   `<dataDir>/projections/` — derived, node-local, rebuildable from the
   log. It retains every input of every key, so it grows with the topics

@@ -668,10 +668,11 @@ type StageRecoverer interface {
 	// StageFrontier reports the highest log index folded into the local
 	// stage state, and whether this syncable carries stage state at all.
 	StageFrontier() (uint64, bool, error)
-	// FoldStagesOnly folds one Actual into stage state with sink emission
-	// suppressed (everything at or below the checkpoint is already
-	// durably applied).
-	FoldStagesOnly(a *Actual) error
+	// FoldStagesOnly folds a run of Actuals, in order, into stage state
+	// with sink emission suppressed (everything at or below the checkpoint
+	// is already durably applied), refolding each touched key once for the
+	// run, and advances the frontier to the last.
+	FoldStagesOnly(as []*Actual) error
 }
 
 type SyncableParser interface {
