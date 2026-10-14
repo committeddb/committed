@@ -940,7 +940,8 @@ func createTestIngestableConfig(id string) *cluster.Configuration {
 // and grace overrides the leader-change fail-fast grace period —
 // truncation-detection tests set it large so the conservative
 // ErrProposalUnknown can't preempt the definitive ErrProposalLost they assert.
-func newFaultyMultiDBHarness(t *testing.T, replicas int, tick, grace time.Duration) (*multiDBHarness, *FaultyCluster) {
+// extra options apply to every node.
+func newFaultyMultiDBHarness(t *testing.T, replicas int, tick, grace time.Duration, extra ...db.Option) (*multiDBHarness, *FaultyCluster) {
 	t.Helper()
 
 	ports := pickFreePorts(replicas)
@@ -968,11 +969,12 @@ func newFaultyMultiDBHarness(t *testing.T, replicas int, tick, grace time.Durati
 			t.Fatalf("wal.Open for node %d: %v", id, err)
 		}
 
-		d := db.New(id, peers, storage, p, syncCh, ingestCh,
+		opts := append([]db.Option{
 			db.WithTickInterval(tick),
 			db.WithTransportWrapperForTest(fc.Wrap(id)),
 			db.WithLeaderChangeGracePeriod(grace),
-		)
+		}, extra...)
+		d := db.New(id, peers, storage, p, syncCh, ingestCh, opts...)
 
 		h.nodes = append(h.nodes, &multiDBNode{
 			id:      id,

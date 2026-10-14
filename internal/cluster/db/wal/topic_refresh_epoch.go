@@ -68,21 +68,29 @@ func (s *Storage) bumpTopicRefreshEpoch(topic string, gen uint64) error {
 	if gen <= s.TopicRefreshEpoch(topic) {
 		return nil
 	}
-	return s.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(topicRefreshEpochBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		if raw := b.Get([]byte(topic)); len(raw) == 8 {
-			if cur := binary.BigEndian.Uint64(raw); gen <= cur {
-				return nil
-			}
-		}
-		var buf [8]byte
-		binary.BigEndian.PutUint64(buf[:], gen)
-		if err := b.Put([]byte(topic), buf[:]); err != nil {
-			return fmt.Errorf("[wal.topic-refresh-epoch] put: %w", err)
-		}
+	return s.update(func(tx *bolt.Tx) error { return bumpTopicRefreshEpochTx(tx, topic, gen) })
+}
+
+// bumpTopicRefreshEpochTx is bumpTopicRefreshEpoch within the caller's
+// transaction. Inside an open write transaction the no-op raise costs only
+// the in-transaction read, so it needs no fast path.
+func bumpTopicRefreshEpochTx(tx *bolt.Tx, topic string, gen uint64) error {
+	if topic == "" || gen == 0 {
 		return nil
-	})
+	}
+	b := tx.Bucket(topicRefreshEpochBucket)
+	if b == nil {
+		return ErrBucketMissing
+	}
+	if raw := b.Get([]byte(topic)); len(raw) == 8 {
+		if cur := binary.BigEndian.Uint64(raw); gen <= cur {
+			return nil
+		}
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], gen)
+	if err := b.Put([]byte(topic), buf[:]); err != nil {
+		return fmt.Errorf("[wal.topic-refresh-epoch] put: %w", err)
+	}
+	return nil
 }

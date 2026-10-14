@@ -558,6 +558,10 @@ type Storage struct {
 	// regression test: a Ready batch of N entries must cost 1+1 ops, not N+N.
 	eventLogWriteOps     atomic.Int64
 	appliedIndexPersists atomic.Int64
+	// kvWriteOps counts every bbolt write transaction (each commit is two
+	// syncs when fsync is on), for the same regression tests: a Ready of N
+	// data entries must cost one data commit, not one per entry.
+	kvWriteOps atomic.Int64
 
 	// appliedIndex is the highest raft entry index that ApplyCommitted has
 	// fully applied. Bumped after each successful per-entry apply (and
@@ -621,6 +625,8 @@ type Storage struct {
 	// rejected at apply, until the apply notifier takes them (see
 	// TakeIngestRejected). Node-local and transient.
 	ingestRejected sync.Map
+	// ingestRejectedTotal counts those rejections since Open.
+	ingestRejectedTotal atomic.Int64
 
 	// interpretationRegistry is the compiled restatements snapshot — immutable,
 	// swapped whole by handleRestatement / Open (reloadInterpretationRegistry),
@@ -1322,6 +1328,7 @@ func (s *Storage) view(fn func(tx *bolt.Tx) error) error {
 // calls proceed in parallel (bbolt itself serializes writers) and
 // RestoreSnapshot waits for them all to drain.
 func (s *Storage) update(fn func(tx *bolt.Tx) error) error {
+	s.kvWriteOps.Add(1)
 	s.kvMu.RLock()
 	defer s.kvMu.RUnlock()
 	return s.keyValueStorage.Update(fn)

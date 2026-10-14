@@ -97,15 +97,19 @@ func recordScrubHistory(tx *bolt.Tx, cmdIndex, bound uint64) error {
 // recordUnhashedDelete tracks a newly applied user-delete's raft index for the
 // erasure cadence. Apply-path, replay-idempotent (keyed overwrite).
 func (s *Storage) recordUnhashedDelete(index uint64) error {
-	return s.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(unhashedDeleteBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		var k [8]byte
-		binary.BigEndian.PutUint64(k[:], index)
-		return b.Put(k[:], nil)
-	})
+	return s.update(func(tx *bolt.Tx) error { return recordUnhashedDeleteTx(tx, index) })
+}
+
+// recordUnhashedDeleteTx is recordUnhashedDelete within the caller's
+// transaction.
+func recordUnhashedDeleteTx(tx *bolt.Tx, index uint64) error {
+	b := tx.Bucket(unhashedDeleteBucket)
+	if b == nil {
+		return ErrBucketMissing
+	}
+	var k [8]byte
+	binary.BigEndian.PutUint64(k[:], index)
+	return b.Put(k[:], nil)
 }
 
 // scrubFloor returns the highest scrub bound among commands recorded strictly

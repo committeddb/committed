@@ -88,6 +88,12 @@ var (
 //     changes which entities the scrub's rewrite removes, and an older binary
 //     re-marshals the type without it, so a declaration that changes the
 //     kind's default is refused until every member is at level 3.
+//   - Ordered, pipelined ingest (db.featureLevelIngestOrder): an ingest
+//     worker numbers its ordered proposals (cluster.Proposal.IngestSeq) and
+//     keeps many in flight, and apply rejects one that is out of order,
+//     storing it in the event log as an empty entry. An older binary would
+//     apply it, so a worker numbers nothing until every member is at level
+//     3, and its ordered proposals stay one at a time meanwhile.
 const FeatureLevel uint64 = 3
 
 // Info is the JSON shape returned by /version and printed by the

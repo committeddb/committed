@@ -391,6 +391,9 @@ func (s *Storage) ApplyFsyncOpsForTest() (eventLogWrites, appliedIndexPersists i
 	return s.eventLogWriteOps.Load(), s.appliedIndexPersists.Load()
 }
 
+// KVWriteOpsForTest is the number of bbolt write transactions so far.
+func (s *Storage) KVWriteOpsForTest() int64 { return s.kvWriteOps.Load() }
+
 // AppendEventsForTest publishes entries to the event log WITHOUT applying their
 // entities to bbolt — reproducing the mid-batch / p>r state where a committed
 // entry is durable and reader-visible but its type is not yet applied. Used to

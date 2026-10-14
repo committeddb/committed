@@ -73,7 +73,7 @@ func (s *Storage) IngestSourceSeqHighwater(id string) uint64 {
 	return seq
 }
 
-// advanceIngestSourceSeq folds one applied ingest proposal into the dedup
+// advanceIngestSourceSeqTx folds one applied ingest proposal into the dedup
 // record. Called from ApplyCommitted for every applied ingest proposal,
 // BEFORE saveAppliedIndex, so a crash that replays the entry re-applies
 // idempotently. Semantics:
@@ -93,40 +93,38 @@ func (s *Storage) IngestSourceSeqHighwater(id string) uint64 {
 // The same bbolt transaction records an accepted sequenced proposal's
 // (ingestSeq, session) in the ingest order record (ingest_order.go), so
 // sequencing adds no commit per entry.
-func (s *Storage) advanceIngestSourceSeq(id string, seq uint64, txnID string, ingestSeq, session uint64) error {
+func advanceIngestSourceSeqTx(tx *bolt.Tx, id string, seq uint64, txnID string, ingestSeq, session uint64) error {
 	if id == "" || (seq == 0 && ingestSeq == 0) {
 		return nil
 	}
-	return s.update(func(tx *bolt.Tx) error {
-		if err := advanceIngestOrder(tx, id, ingestSeq, session); err != nil {
-			return err
-		}
-		if seq == 0 {
-			return nil
-		}
-		b := tx.Bucket(ingestSourceSeqBucket)
-		if b == nil {
-			return ErrBucketMissing
-		}
-		// Invariant: the record tracks a live ingestable only. An ingest proposal
-		// can apply after the config was deleted (an in-flight proposal committing
-		// post-delete, or an old proposal replayed from the log before a same-id
-		// recreate). Without this guard it re-establishes an orphaned record that
-		// makes a same-id recreate's re-emitted CDC proposals get dropped pre-raft.
-		// So if the config is gone, drop the advance and reap any lingering value.
-		// Deterministic: config existence is replicated state applied in identical
-		// log order.
-		if !configExists(tx, ingestableBucket, []byte(id)) {
-			return b.Delete([]byte(id))
-		}
-		curSeq, curTxn := decodeSourceDedup(b.Get([]byte(id)))
-		newTxn, newSeq := cluster.FoldSourceDedup(curTxn, curSeq, txnID, seq)
-		if newTxn == curTxn && newSeq == curSeq {
-			return nil
-		}
-		if err := b.Put([]byte(id), encodeSourceDedup(newSeq, newTxn)); err != nil {
-			return fmt.Errorf("[wal.ingest-source-seq] put: %w", err)
-		}
+	if err := advanceIngestOrder(tx, id, ingestSeq, session); err != nil {
+		return err
+	}
+	if seq == 0 {
 		return nil
-	})
+	}
+	b := tx.Bucket(ingestSourceSeqBucket)
+	if b == nil {
+		return ErrBucketMissing
+	}
+	// Invariant: the record tracks a live ingestable only. An ingest proposal
+	// can apply after the config was deleted (an in-flight proposal committing
+	// post-delete, or an old proposal replayed from the log before a same-id
+	// recreate). Without this guard it re-establishes an orphaned record that
+	// makes a same-id recreate's re-emitted CDC proposals get dropped pre-raft.
+	// So if the config is gone, drop the advance and reap any lingering value.
+	// Deterministic: config existence is replicated state applied in identical
+	// log order.
+	if !configExists(tx, ingestableBucket, []byte(id)) {
+		return b.Delete([]byte(id))
+	}
+	curSeq, curTxn := decodeSourceDedup(b.Get([]byte(id)))
+	newTxn, newSeq := cluster.FoldSourceDedup(curTxn, curSeq, txnID, seq)
+	if newTxn == curTxn && newSeq == curSeq {
+		return nil
+	}
+	if err := b.Put([]byte(id), encodeSourceDedup(newSeq, newTxn)); err != nil {
+		return fmt.Errorf("[wal.ingest-source-seq] put: %w", err)
+	}
+	return nil
 }

@@ -66,6 +66,10 @@ func (s *Storage) IngestOrder(id string) (seq, session uint64) {
 	return seq, session
 }
 
+// IngestRejectedTotal is the number of sequenced ingest proposals this node
+// has rejected at apply since it opened.
+func (s *Storage) IngestRejectedTotal() int64 { return s.ingestRejectedTotal.Load() }
+
 // TakeIngestRejected reports whether the entry at index was a sequenced
 // ingest proposal rejected at apply, and forgets it. The apply notifier
 // calls it for every applied entry, so the set holds at most one Ready's
@@ -169,6 +173,7 @@ func withoutData(e *pb.Entry) *pb.Entry {
 // notifier.
 func (s *Storage) noteIngestRejected(e *pb.Entry) {
 	s.ingestRejected.Store(e.GetIndex(), struct{}{})
+	s.ingestRejectedTotal.Add(1)
 	po, _ := cluster.IngestOrderFromProposal(e.Data)
 	s.logger.Info("ingest: rejected an out-of-order proposal at apply; stored as an empty entry, the worker restarts from its durable position",
 		zap.String("ingestable", po.IngestableID),
