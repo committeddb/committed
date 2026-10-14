@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -36,6 +37,9 @@ type PostgreSQLDialect struct {
 	// non-nil error aborts the snapshot as if the source connection failed.
 	// Always nil in production (set via SetSnapshotBatchHookForTest).
 	snapshotBatchHook func(table string, batch int) error
+	// partitions holds each running ingestable's partitionWatch, keyed by its
+	// *sql.Config (see partitionWatch).
+	partitions sync.Map
 }
 
 // snapshotIntent records a snapshot stream() has decided to run but not yet
@@ -425,6 +429,7 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	if err != nil {
 		return err
 	}
+	defer d.partitions.Delete(config)
 
 	startLSN, resumeProgress, epoch, err := decodePosition(pos)
 	if err != nil {
@@ -576,7 +581,14 @@ func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos 
 			status.CaughtUp = lag == 0
 		}
 	}
-	return sql.RenderStatus(ctx, config, pos, decode, probe)
+	status, err := sql.RenderStatus(ctx, config, pos, decode, probe)
+	if err != nil {
+		return status, err
+	}
+	if w, ok := d.partitions.Load(config); ok {
+		status.RemovedPartitions = w.(*partitionWatch).removedPartitions()
+	}
+	return status, nil
 }
 
 // replicationLag returns how many bytes the source's write head is ahead of the
@@ -770,6 +782,19 @@ func (d *PostgreSQLDialect) stream(
 		return err
 	}
 	defer func() { _ = sqlDB.Close() }()
+
+	// Watch the watched tables' partitions on the same conn; stopped before the
+	// conn closes.
+	pollCtx, stopPoll := context.WithCancel(ctx)
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		d.partitionWatch(config).run(pollCtx, sqlDB, config.Tables)
+	}()
+	defer func() {
+		stopPoll()
+		<-pollDone
+	}()
 
 	// Resolves relation-message type OIDs to JSON categories, following user
 	// DOMAIN types to their base type so a domain column classifies the same as

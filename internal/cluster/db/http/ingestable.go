@@ -5,6 +5,7 @@ import (
 	"errors"
 	httpgo "net/http"
 	"sort"
+	"time"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -46,6 +47,12 @@ type IngestableStatusResponse struct {
 	// a distinct state, not a lag number. Recovery is a fresh snapshot. Always
 	// false for Postgres.
 	ReSnapshotRequired bool `json:"reSnapshotRequired"`
+	// RemovedPartitions lists partitions of a watched Postgres table that the
+	// worker saw detached or dropped, oldest first (the 20 most recent). Their
+	// rows left the source with no deletes in the stream, so they stay in the
+	// log and destinations (a reconciling refresh sweeps keyed SQL syncables
+	// only). Omitted when none.
+	RemovedPartitions []RemovedPartitionResponse `json:"removedPartitions,omitempty"`
 	// Census is the JSON shape census the worker took during its snapshot
 	// pass, per topic — the type-drafting bootstrap. Omitted until a census
 	// has been published (census opted out, or no snapshot yet). Types and
@@ -73,6 +80,14 @@ type ShapeCensusResponse struct {
 	Count       uint64   `json:"count"`
 	FirstRow    uint64   `json:"firstRow"`
 	LastRow     uint64   `json:"lastRow"`
+}
+
+// RemovedPartitionResponse is one partition the worker saw leave a watched
+// table.
+type RemovedPartitionResponse struct {
+	Table      string    `json:"table"`
+	Partition  string    `json:"partition"`
+	DetectedAt time.Time `json:"detectedAt"`
 }
 
 // TableSnapshotProgress is one watched table's place in the initial snapshot.
@@ -246,6 +261,11 @@ func toIngestableStatusResponse(st cluster.IngestableStatus) IngestableStatusRes
 			Complete:    t.Complete,
 			ChunksTotal: t.ChunksTotal,
 			ChunksDone:  t.ChunksDone,
+		})
+	}
+	for _, p := range st.RemovedPartitions {
+		resp.RemovedPartitions = append(resp.RemovedPartitions, RemovedPartitionResponse{
+			Table: p.Table, Partition: p.Partition, DetectedAt: p.DetectedAt,
 		})
 	}
 	return resp

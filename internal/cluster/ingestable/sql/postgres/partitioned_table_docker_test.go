@@ -153,3 +153,55 @@ func TestPostgresPartitionedPreflight(t *testing.T) {
 	err = d.Preflight(partitionedConfig("pf", []string{"id"}, "part_pf_root", "part_pf_east"))
 	require.ErrorContains(t, err, `"part_pf_east" is a partition of "part_pf_root", which this ingestable also watches`)
 }
+
+// TestPostgresRemovedPartitionReported: logical replication carries no DDL, so
+// detaching or dropping a partition removes its rows with nothing in the
+// stream. The worker notices the partition leave and reports it in status.
+func TestPostgresRemovedPartitionReported(t *testing.T) {
+	restore := postgres.SetPartitionPollIntervalForTest(200 * time.Millisecond)
+	defer restore()
+	execAll(t,
+		`DROP TABLE IF EXISTS part_rm_root`,
+		`DROP TABLE IF EXISTS part_rm_east`,
+		`CREATE TABLE part_rm_root (id INT NOT NULL, region TEXT NOT NULL, val TEXT, PRIMARY KEY (id, region)) PARTITION BY LIST (region)`,
+		`CREATE TABLE part_rm_east PARTITION OF part_rm_root FOR VALUES IN ('east')`,
+		`CREATE TABLE part_rm_west PARTITION OF part_rm_root FOR VALUES IN ('west')`,
+		`CREATE TABLE part_rm_north PARTITION OF part_rm_root FOR VALUES IN ('north')`,
+		`INSERT INTO part_rm_root VALUES (1, 'east', 'snap'), (2, 'west', 'snap'), (3, 'north', 'snap')`,
+	)
+	t.Cleanup(func() { execAll(t, `DROP TABLE IF EXISTS part_rm_root`, `DROP TABLE IF EXISTS part_rm_east`) })
+	cleanReplication(t, "slot_part_rm", "slot_part_rm")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr := make(chan *cluster.Proposal, 100)
+	po := make(chan cluster.Position, 100)
+	d := &postgres.PostgreSQLDialect{}
+	cfg := partitionedConfig("slot_part_rm", []string{"id"}, "part_rm_root")
+	require.NoError(t, d.Preflight(cfg))
+	go func() { _ = d.Ingest(ctx, cfg, nil, 0, pr, po) }()
+	res := ingesttest.Await(t, pr, po, 20*time.Second, nil, "1", "2", "3")
+
+	st, err := d.Status(ctx, cfg, res.Position)
+	require.NoError(t, err)
+	require.Empty(t, st.RemovedPartitions, "nothing removed yet")
+
+	execAll(t, `ALTER TABLE part_rm_root DETACH PARTITION part_rm_east`, `DROP TABLE part_rm_west`)
+
+	var removed []cluster.RemovedPartition
+	require.Eventually(t, func() bool {
+		st, err := d.Status(ctx, cfg, res.Position)
+		if err != nil {
+			return false
+		}
+		removed = st.RemovedPartitions
+		return len(removed) == 2
+	}, 10*time.Second, 50*time.Millisecond)
+	names := make([]string, 0, len(removed))
+	for _, p := range removed {
+		require.Equal(t, "part_rm_root", p.Table)
+		require.False(t, p.DetectedAt.IsZero())
+		names = append(names, p.Partition)
+	}
+	require.ElementsMatch(t, []string{"part_rm_east", "part_rm_west"}, names)
+}

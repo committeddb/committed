@@ -561,6 +561,20 @@ covered with no config change. This needs PostgreSQL 13 or later.
 - **A single partition** can be watched on its own, by its own name. Watching
   a partition together with its root is refused, since the root already
   covers it.
+- **Detaching or dropping a partition** removes its rows from the source with
+  nothing in the change stream, since logical replication carries no DDL, so
+  no deletes reach committed. A running ingestable notices within about 10
+  seconds: it logs a warning and lists the partition under
+  `removedPartitions` in `GET /v1/ingestable/{id}/status` (a partition
+  removed while the ingestable isn't running goes unreported). The rows stay in the log and in every
+  destination; a [reconciling refresh](#reconciling-refresh-how-a-re-snapshot-removes-rows-deleted-at-the-source)
+  later removes them from keyed SQL syncables only, never from projections or
+  keyless syncables. To have the rows deleted everywhere (a retention job, or
+  removing one tenant's data), delete them before detaching or dropping the
+  partition.
+- **Attaching a table that already has rows** is silent the same way: its
+  rows reach committed only at the next full snapshot. Attach empty
+  partitions, or insert the rows through the root after attaching.
 
 ### Lag and the slot's disk cost
 

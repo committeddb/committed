@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -193,6 +194,23 @@ type IngestableStatus struct {
 	// rows deleted in the lost window off the downstream sink (reconciliation, not
 	// just re-load). So the gap is handled in-band rather than surfaced here.
 	ReSnapshotRequired bool
+	// RemovedPartitions lists partitions of a watched Postgres table that this
+	// worker saw detached or dropped, oldest first, at most the 20 most recent.
+	// Logical replication carries no DDL, so their rows left the source without
+	// deletes: they stay in the log and destinations (a reconciling refresh
+	// sweeps keyed SQL syncables only). A record of events since the worker
+	// started, not an error state.
+	RemovedPartitions []RemovedPartition
+}
+
+// RemovedPartition is one partition a worker saw leave a watched table.
+type RemovedPartition struct {
+	// Table is the watched table, as configured.
+	Table string
+	// Partition is the partition's name when it was last seen.
+	Partition string
+	// DetectedAt is when the worker noticed it was gone.
+	DetectedAt time.Time
 }
 
 // TableSnapshotStatus is one watched table's place in the initial snapshot.

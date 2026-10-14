@@ -3485,6 +3485,35 @@ components:
             loud state rather than a misleading lag number; recovery means
             re-running the initial snapshot. Always false for Postgres (the slot
             holds the WAL, so the source cannot purge unconsumed change data).
+        removedPartitions:
+          type: array
+          description: |
+            Postgres only: partitions of a watched table that this worker saw
+            detached or dropped, oldest first, at most the 20 most recent.
+            Logical replication carries no DDL, so their rows left the source
+            without deletes in the stream: they stay in the log and every
+            destination (a reconciling refresh later sweeps keyed SQL
+            syncables only, never projections or keyless syncables). A record
+            of events since the worker started, not an error state. Omitted
+            when there are none.
+          items:
+            $ref: '#/components/schemas/RemovedPartition'
+
+    RemovedPartition:
+      type: object
+      required: [table, partition, detectedAt]
+      description: One partition the worker saw leave a watched table.
+      properties:
+        table:
+          type: string
+          description: The watched table, as configured.
+        partition:
+          type: string
+          description: The partition's name when it was last seen.
+        detectedAt:
+          type: string
+          format: date-time
+          description: When the worker noticed it was gone.
 
     TableSnapshotProgress:
       type: object
