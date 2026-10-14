@@ -781,6 +781,8 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						if db.metrics != nil {
 							db.metrics.IngestDedupSkipped(id)
 						}
+						// The applied copy is durable, so this one is too.
+						proposal.Durable()
 						backoff = ingestBackoffMin
 						continue
 					case proposal.LineageRegressed && !lineageRideNoted:
@@ -834,6 +836,10 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 					err = drainPipeline()
 					if err == nil {
 						err = db.proposeIngestData(ctx, proposal)
+					}
+					if err == nil {
+						// Propose returns once the proposal is applied.
+						proposal.Durable()
 					}
 				}
 				if err != nil {

@@ -75,7 +75,8 @@ func TestPostgresStatusStreamingLag(t *testing.T) {
 			case <-ctx.Done():
 				return
 			case <-positionChan:
-			case <-proposalChan:
+			case p := <-proposalChan:
+				p.Durable() // as the worker would, once it commits it
 			}
 		}
 	}()

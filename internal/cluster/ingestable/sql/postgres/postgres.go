@@ -444,8 +444,12 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	// on the next attempt instead of silently skipping to streaming.
 	var intent *snapshotIntent
 
+	// What the source may be told is done: only what the worker has made
+	// durable. Kept across reconnects (see sourceAck).
+	ack := newSourceAck(startLSN)
+
 	for {
-		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, backoff, pr, po)
+		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, backoff, ack, pr, po)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -750,6 +754,7 @@ func (d *PostgreSQLDialect) stream(
 	epochFloor uint64,
 	intent **snapshotIntent,
 	backoff *sql.Backoff,
+	ack *sourceAck,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) (err error) {
@@ -964,6 +969,24 @@ func (d *PostgreSQLDialect) stream(
 	pendingBytes := 0
 	clientXLogPos := *lastLSN
 	nextStandby := time.Now().Add(standbyTimeout)
+	var lastSent pglogrepl.LSN
+
+	// sendStatus confirms what may be confirmed (see sourceAck): when it has
+	// moved, when the server asks, or at the standby interval.
+	sendStatus := func(force bool) error {
+		pos := ack.confirmable(clientXLogPos)
+		if !force && pos <= lastSent && time.Now().Before(nextStandby) {
+			return nil
+		}
+		if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
+			WALWritePosition: pos,
+		}); err != nil {
+			return err
+		}
+		lastSent = max(lastSent, pos)
+		nextStandby = time.Now().Add(standbyTimeout)
+		return nil
+	}
 
 	// resumeFloor is the LSN we asked StartReplication to resume from.
 	// pgoutput is allowed to re-stream messages from the slot's
@@ -990,10 +1013,26 @@ func (d *PostgreSQLDialect) stream(
 	var curTxnID string
 
 	for {
-		rawMsg, err := conn.ReceiveMessage(ctx)
+		// Wake for the standby interval, and promptly while a handed-off
+		// transaction waits to be confirmed. A deadline only sets the
+		// socket's read deadline (pgconn's default context handler sends no
+		// cancel request), so a timeout leaves the stream intact.
+		deadline := nextStandby
+		if soon := time.Now().Add(ackPoll); ack.outstanding(lastSent) && soon.Before(deadline) {
+			deadline = soon
+		}
+		recvCtx, cancelRecv := context.WithDeadline(ctx, deadline)
+		rawMsg, err := conn.ReceiveMessage(recvCtx)
+		cancelRecv()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if pgconn.Timeout(err) {
+				if err := sendStatus(false); err != nil {
+					return err
+				}
+				continue
 			}
 			return err
 		}
@@ -1017,23 +1056,17 @@ func (d *PostgreSQLDialect) stream(
 			// ServerWALEnd that this slot's publication would deliver has
 			// already arrived as XLogData (the stream is ordered), so the gap
 			// up to ServerWALEnd holds nothing for us — checkpoint records,
-			// other databases' traffic — and confirming it acks no data we
-			// haven't handled (no more than the existing per-commit ack
-			// does). Without this, a QUIET source pins confirmed_flush_lsn at
+			// other databases' traffic. sendStatus confirms it only once every
+			// handed-off transaction is durable. Without this, a QUIET source
+			// pins confirmed_flush_lsn at
 			// the last commit forever while the write head keeps moving on
 			// background WAL: the slot retains WAL indefinitely on idle
 			// databases, and /status lag never drains to CaughtUp.
 			if pkm.ServerWALEnd > clientXLogPos {
 				clientXLogPos = pkm.ServerWALEnd
 			}
-			if pkm.ReplyRequested || time.Now().After(nextStandby) {
-				err = pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
-					WALWritePosition: clientXLogPos,
-				})
-				if err != nil {
-					return err
-				}
-				nextStandby = time.Now().Add(standbyTimeout)
+			if err := sendStatus(pkm.ReplyRequested); err != nil {
+				return err
 			}
 
 		case pglogrepl.XLogDataByteID:
@@ -1112,7 +1145,7 @@ func (d *PostgreSQLDialect) stream(
 					pendingBytes += sql.EntityFlushBytes(e)
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil, nil); err != nil {
 						return err
 					}
 				}
@@ -1140,7 +1173,7 @@ func (d *PostgreSQLDialect) stream(
 					}
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil, nil); err != nil {
 						return err
 					}
 				}
@@ -1161,7 +1194,7 @@ func (d *PostgreSQLDialect) stream(
 					pendingBytes += sql.EntityFlushBytes(e)
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil, nil); err != nil {
 						return err
 					}
 				}
@@ -1190,9 +1223,12 @@ func (d *PostgreSQLDialect) stream(
 					return err
 				}
 
-				emitted, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, posBytes)
+				emitted, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, posBytes, ack.onDurable(endLSN))
 				if err != nil {
 					return err
+				}
+				if emitted {
+					ack.handOff(endLSN)
 				}
 				// The transaction is flushed; its provenance must not bleed
 				// into anything outside a Begin..Commit (the next Begin
@@ -1212,29 +1248,15 @@ func (d *PostgreSQLDialect) stream(
 				clientXLogPos = endLSN
 				*lastLSN = endLSN
 
-				// Acknowledge the commit position to Postgres on every
-				// commit (not just every standbyTimeout). The throttle
-				// here was the root cause of TestPostgresPositionResume:
-				// after one commit, the supervisor / test had a position
-				// checkpoint to resume from, but the server's
-				// confirmed_flush_lsn hadn't moved, so a resume from that
-				// checkpoint LSN re-streamed already-processed messages
-				// from the slot's older restart_lsn. Per-commit acking
-				// keeps the server's view of our progress in sync with
-				// the position we publish on the position channel.
-				//
-				// Cost is one TCP message per Postgres COMMIT, which is
-				// negligible — commits are inherently rate-limited by
-				// the upstream workload, not by us. The throttle still
-				// applies to keepalive-driven acks below where there
-				// is no new commit to report.
-				err = pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
-					WALWritePosition: clientXLogPos,
-				})
-				if err != nil {
+				// Confirm what is durable now (a transaction that emitted
+				// nothing, or earlier ones the worker has committed); this
+				// one is confirmed once the worker reports it durable (see
+				// sourceAck). A resume from a durable position above the
+				// confirmed one never re-delivers a processed transaction:
+				// resumeFloor drops it.
+				if err := sendStatus(false); err != nil {
 					return err
 				}
-				nextStandby = time.Now().Add(standbyTimeout)
 
 			case *pglogrepl.TruncateMessage:
 				// committed has no clear-all primitive yet, so a source TRUNCATE is
@@ -1875,7 +1897,7 @@ func quoteTable(table string) string {
 // the transaction's final part — only the commit flush passes it. Returns
 // whether any proposal was emitted, so the commit path can fall back to the
 // out-of-band position checkpoint for transactions that flushed nothing.
-func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64, commitTS int64, txnID string, bundlePos []byte) (bool, error) {
+func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64, commitTS int64, txnID string, bundlePos []byte, onDurable func()) (bool, error) {
 	buf := *pending
 	*pending = nil
 	*pendingBytes = 0
@@ -1898,7 +1920,7 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 	// dialect checkpoints per transaction (the Commit message's flush bundles
 	// the post-transaction position), so its resume re-emits at most the
 	// in-flight transaction — the contract that earns txn-scoped dedup.
-	prov := sql.Provenance{CommitUnixNano: commitTS, TxnID: txnID, TxnScopedDedup: txnID != ""}
+	prov := sql.Provenance{CommitUnixNano: commitTS, TxnID: txnID, TxnScopedDedup: txnID != "", OnDurable: onDurable}
 	emitted, err := sql.Flush(ctx, buf, epoch, prov, seq, bundlePos, pr)
 	return emitted > 0, err
 }

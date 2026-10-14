@@ -231,6 +231,22 @@ type Proposal struct {
 	// data, so the worker preserves the pre-upgrade FREEZE until the first
 	// transaction-stamped proposal applies and flips the regime.
 	LineageRegressed bool
+
+	// OnDurable is a TRANSIENT hook, never marshaled: the ingest worker calls
+	// it once this proposal is durably applied, or once it recognizes the
+	// proposal as a duplicate of one already applied. It is never called for a
+	// proposal that failed, was dropped on an ownership change, or is still in
+	// flight. A dialect whose source must be told what is done (Postgres
+	// confirms a slot position, and never streams below it again) confirms
+	// only what this hook has reported.
+	OnDurable func()
+}
+
+// Durable calls p.OnDurable, if set.
+func (p *Proposal) Durable() {
+	if p.OnDurable != nil {
+		p.OnDurable()
+	}
 }
 
 type Entity struct {

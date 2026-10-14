@@ -17,6 +17,9 @@ type Provenance struct {
 	// earns transaction-scoped dedup (Proposal.TxnScopedDedup). A dialect
 	// that checkpoints per polling window leaves it false.
 	TxnScopedDedup bool
+	// OnDurable rides the proposal carrying the bundled checkpoint (see
+	// cluster.Proposal.OnDurable): it reports the whole transaction durable.
+	OnDurable func()
 }
 
 // Flush proposes pending as one proposal per topic, in first-appearance
@@ -52,6 +55,7 @@ func Flush(ctx context.Context, pending []*cluster.Entity, epoch uint64, prov Pr
 		seq(p)
 		if bundlePos != nil && i == len(groups)-1 {
 			p.Position = bundlePos
+			p.OnDurable = prov.OnDurable
 		}
 		select {
 		case pr <- p:

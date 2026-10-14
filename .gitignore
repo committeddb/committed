@@ -23,3 +23,7 @@ wal.test
 # capture-fixture.sh from the pinned release tags and cached locally — real
 # old-binary bytes, but never committed.
 e2e/upgrade/testdata/*/datadir/
+
+# Bench bundles (bench/eventstore/bundle.sh)
+bench-bundle/
+.bench-src.*/
