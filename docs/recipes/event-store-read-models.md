@@ -68,6 +68,10 @@ The ingestable snapshots the existing events, then streams every new one as
 it commits. Each event becomes one entity in the `order-events` topic, keyed
 by `seq_id`, with `data` decoded as JSON.
 
+- **MySQL or SQL Server.** Set `dialect` to `"mysql"` or `"sqlserver"` and
+  `connectionString` to the source, and leave out `[sql.options]`: the slot
+  and publication are Postgres's. The rest of this recipe is unchanged,
+  including the Postgres read model.
 - **JSON in a text column.** On MySQL or SQL Server the payload column is
   often `TEXT` or `NVARCHAR`; list it under `jsonColumns` so projections can
   read into it. See [`jsonColumns`](../ingestables.md#configuration).
