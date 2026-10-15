@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -410,4 +411,55 @@ func TestCheckpointCadence_VetoedBoundaryDefersBump(t *testing.T) {
 		cp, err := s.GetSyncableIndex(id)
 		return err == nil && cp != 0
 	}, 10*time.Second, 10*time.Millisecond, "the first validated boundary after the stride must carry the bump")
+}
+
+// usersBatchSyncable counts the user entries its batches carry.
+type usersBatchSyncable struct{ users atomic.Int64 }
+
+func (c *usersBatchSyncable) Close() error { return nil }
+
+func (c *usersBatchSyncable) Sync(ctx context.Context, a *cluster.Actual) (cluster.ShouldSnapshot, error) {
+	panic("single-path Sync must not be called on a BatchSyncable")
+}
+
+func (c *usersBatchSyncable) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool, error) {
+	for _, a := range as {
+		if !allSystem(a) {
+			c.users.Add(1)
+		}
+	}
+	return true, nil
+}
+
+// TestCheckpointCadence_CaughtUpBumpDoesNotHoldTheWorker: a caught-up batch
+// worker's checkpoint is in flight while the worker goes back to reading, so
+// the next entry is not held for the checkpoint's raft round trip. With every
+// checkpoint held before raft, the second entry still reaches the syncable;
+// once released, the checkpoint converges to the head.
+func TestCheckpointCadence_CaughtUpBumpDoesNotHoldTheWorker(t *testing.T) {
+	d, s := newWalDB(t)
+	proposeTypeTOML(t, d, "evt", "evt", "", "")
+	const id = "caught-up-bump"
+	seedSyncableConfig(t, d, id)
+	release := d.HoldSyncableCheckpointsForTest()
+	defer release()
+	probe := &usersBatchSyncable{}
+	require.NoError(t, d.Sync(context.Background(), id, probe))
+
+	proposeUserUpsert(t, d, "evt", "a", `{}`)
+	require.Eventually(t, func() bool { return probe.users.Load() == 1 }, 5*time.Second, time.Millisecond)
+	// Caught up, with the checkpoint for "a" held before raft.
+	proposeUserUpsert(t, d, "evt", "b", `{}`)
+	require.Eventually(t, func() bool { return probe.users.Load() == 2 }, 2*time.Second, time.Millisecond,
+		"the next entry waited on the caught-up checkpoint")
+	cp, err := s.GetSyncableIndex(id)
+	require.NoError(t, err)
+	require.Zero(t, cp, "the held checkpoint applied")
+
+	release()
+	want := s.DataEventIndex()
+	require.Eventually(t, func() bool {
+		cp, err := s.GetSyncableIndex(id)
+		return err == nil && cp == want
+	}, 10*time.Second, 10*time.Millisecond, "the checkpoint never reached the head once released")
 }

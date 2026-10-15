@@ -106,6 +106,14 @@ func (db *DB) SetDeadLetterProposeHookForTest(h func(*cluster.SyncableDeadLetter
 	db.deadLetterProposeHookForTest = h
 }
 
+// HoldSyncableCheckpointsForTest holds every syncable checkpoint proposal
+// before it reaches raft until the returned release is called.
+func (db *DB) HoldSyncableCheckpointsForTest() (release func()) {
+	gate := make(chan struct{})
+	db.syncableIndexGateForTest.Store(&gate)
+	return sync.OnceFunc(func() { close(gate) })
+}
+
 // SetAfterRebuildCheckpointResetForTest installs the rebuild reset seam
 // directly, so a test can assert the checkpoint reset did (or did not) run.
 func (db *DB) SetAfterRebuildCheckpointResetForTest(f func()) { db.afterRebuildCheckpointReset = f }

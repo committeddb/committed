@@ -215,6 +215,12 @@ type DB struct {
 	// stands in for an orphaned propose (leader flap). nil in production.
 	deadLetterProposeHookForTest func(*cluster.SyncableDeadLetter) error
 
+	// syncableIndexGateForTest is a test-only seam: when set, a syncable
+	// checkpoint proposal is held (submitted, its waiter live) until the
+	// channel closes, standing in for a slow raft round trip. nil in
+	// production.
+	syncableIndexGateForTest atomic.Pointer[chan struct{}]
+
 	// afterRebuildCheckpointReset is a test-only seam invoked by RebuildSyncable
 	// immediately after the checkpoint-reset proposal applies (nil in
 	// production, so zero overhead). It lets a test deterministically inject the
@@ -695,12 +701,10 @@ func randomRequestIDBase() uint64 {
 // send completes, or Marshal fails), proposeAsync unregisters the
 // waiter itself and returns a zero RequestID + nil ack + error.
 //
-// proposeAsync is the shared primitive beneath db.Propose; every
-// caller (user/config proposals, sync's index bump, ingest's position
-// bump) goes through the blocking Propose wrapper, so none use the raw
-// ack form directly today. It stays factored out because Propose's
-// select-on-ack logic is cleaner expressed against it, and because a
-// future pipelined caller would build on it again.
+// proposeAsync is the shared primitive beneath db.Propose. Callers use
+// the raw ack form only to keep a proposal in flight while they work:
+// the pipelined ingest and a batch syncable's caught-up checkpoint
+// (caughtUpBump).
 func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-chan error, error) {
 	kind := proposalKind(p)
 
@@ -754,6 +758,21 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 	}
 
 	db.logger.Debug("proposing", zap.Uint64("requestID", p.RequestID), zap.Int("entities", len(p.Entities)))
+
+	if gate := db.syncableIndexGateForTest.Load(); gate != nil && len(p.Entities) > 0 && cluster.IsSyncableIndex(p.Entities[0].Type.ID) {
+		go func() {
+			select {
+			case <-*gate:
+			case <-db.ctx.Done():
+				return
+			}
+			select {
+			case db.proposeC <- bs:
+			case <-db.ctx.Done():
+			}
+		}()
+		return p.RequestID, w.ack, nil
+	}
 
 	// db.ctx in the select handles the "db is shutting down" case so a
 	// worker (e.g., the ingest goroutine) doesn't race against

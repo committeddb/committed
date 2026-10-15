@@ -1037,6 +1037,29 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// persisted", cluster.CheckpointPolicy).
 	syncedSinceBump := 0
 	var pendingBumpIndex uint64
+	// eofBump: the caught-up checkpoint, proposed without waiting (see
+	// caughtUpBump). settleBump folds its outcome into the accumulators.
+	eofBump := &caughtUpBump{db: db}
+	defer eofBump.release()
+	settleBump := func(block bool) bool {
+		index, count := eofBump.index, eofBump.count
+		ok, err := eofBump.settle(ctx, block)
+		if !ok {
+			return false
+		}
+		if err != nil {
+			// Not durably applied; pendingBumpIndex stays armed, and the next
+			// EOF or stride boundary proposes it again.
+			db.logger.Warn("caught-up checkpoint error, will retry",
+				zap.String("id", id), zap.Error(err))
+			return false
+		}
+		syncedSinceBump = max(syncedSinceBump-count, 0)
+		if pendingBumpIndex == index {
+			pendingBumpIndex = 0
+		}
+		return true
+	}
 	// fzPin: this worker's from-0 read pin — see the single-flush worker.
 	var fzPin fromZeroPin
 	defer fzPin.release()
@@ -1099,6 +1122,15 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		if shouldSnapshot {
 			prospectivePending = batch[len(batch)-1].Index
 		}
+		if prospectivePending != 0 && prospectiveCount >= every && eofBump.inFlight() {
+			// Checkpoints apply in the order proposed: settle the caught-up
+			// one first, then recount what this one covers.
+			settleBump(true)
+			prospectiveCount = syncedSinceBump + len(batch)
+			if !shouldSnapshot {
+				prospectivePending = pendingBumpIndex
+			}
+		}
 		if prospectivePending != 0 && prospectiveCount >= every {
 			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: prospectivePending, InterpretationIndex: interpPin}); err != nil {
 				// The bump did not durably apply (ctx canceled, or
@@ -1130,20 +1162,20 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// bumpPending persists the latest validated boundary regardless of the
 	// cadence stride — the reader-EOF flush ("persist whenever it catches
 	// up"), so a low-traffic syncable's checkpoint never lags behind its
-	// consumed head for long. A failure is retried at the next EOF or stride
-	// boundary; the pending index stays armed.
+	// consumed head for long. It proposes without waiting, one at a time: a
+	// newer boundary waits for the bump in flight to resolve. A failure is
+	// retried at the next EOF or stride boundary; the pending index stays
+	// armed.
 	bumpPending := func() bool {
-		if pendingBumpIndex == 0 {
-			return false
+		progressed := settleBump(false)
+		if pendingBumpIndex == 0 || eofBump.inFlight() {
+			return progressed
 		}
-		if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex, InterpretationIndex: interpPin}); err != nil {
+		if err := eofBump.propose(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex, InterpretationIndex: interpPin}, syncedSinceBump); err != nil {
 			db.logger.Warn("proposeSyncableIndex error at EOF, will retry",
 				zap.String("id", id), zap.Error(err))
-			return false
 		}
-		syncedSinceBump = 0
-		pendingBumpIndex = 0
-		return true
+		return progressed
 	}
 
 	for {
@@ -1177,7 +1209,10 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// propose while not the owner, and the new owner re-derives its
 			// position from the durable checkpoint — the un-persisted tail
 			// (< every) is simply re-delivered there, within the documented
-			// re-delivery window.
+			// re-delivery window. A caught-up bump already in flight is
+			// resolved first, as a synchronous one would have been.
+			settleBump(true)
+			eofBump.release()
 			syncedSinceBump = 0
 			pendingBumpIndex = 0
 			// Do NOT clear the stuck record on leadership loss — it is cluster-wide;
@@ -1294,7 +1329,9 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				if !retryBatch {
 					db.completeRematerializationIfDone(ctx, id, s, &remat, pendingBumpIndex)
 				}
-				caughtUp = !retryBatch && len(batch) == 0 && pendingBumpIndex == 0
+				// A bump in flight counts as caught up: its apply wakes the
+				// idle wait, and the next EOF settles it.
+				caughtUp = !retryBatch && len(batch) == 0 && (pendingBumpIndex == 0 || eofBump.inFlight())
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)
 			default:
@@ -1504,6 +1541,19 @@ func (db *DB) logSyncReadError(id string, readErr error) {
 const featureLevelInterpretationPin uint64 = 2
 
 func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex) error {
+	p, err := db.syncableIndexProposal(i)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	err = db.Propose(ctx, p)
+	if err == nil && db.metrics != nil {
+		db.metrics.SyncBumpCompleted(time.Since(start))
+	}
+	return err
+}
+
+func (db *DB) syncableIndexProposal(i *cluster.SyncableIndex) (*cluster.Proposal, error) {
 	if i.InterpretationIndex != 0 && !db.featureEnabled(featureLevelInterpretationPin) {
 		pinned := *i
 		pinned.InterpretationIndex = 0
@@ -1511,15 +1561,84 @@ func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex
 	}
 	entity, err := cluster.NewUpsertSyncableIndexEntity(i)
 	if err != nil {
+		return nil, err
+	}
+	return &cluster.Proposal{Entities: []*cluster.Entity{entity}}, nil
+}
+
+// caughtUpBump is a batch worker's caught-up checkpoint in flight: proposed
+// without waiting, so a worker that has synced everything goes straight back
+// to reading instead of holding the next entry for a raft round trip. At most
+// one is in flight, and every other checkpoint the worker proposes waits for
+// it first (settle with block), so the worker's checkpoints apply in the
+// order it proposed them and the stored checkpoint never moves backwards.
+type caughtUpBump struct {
+	db    *DB
+	rid   uint64
+	ack   <-chan error
+	index uint64
+	count int // the synced-since-checkpoint count the bump covers
+	start time.Time
+}
+
+func (b *caughtUpBump) inFlight() bool { return b.ack != nil }
+
+// propose submits the checkpoint at index. Only when none is in flight.
+func (b *caughtUpBump) propose(ctx context.Context, i *cluster.SyncableIndex, count int) error {
+	p, err := b.db.syncableIndexProposal(i)
+	if err != nil {
 		return err
 	}
-
-	start := time.Now()
-	err = db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
-	if err == nil && db.metrics != nil {
-		db.metrics.SyncBumpCompleted(time.Since(start))
+	rid, ack, err := b.db.proposeAsync(ctx, p)
+	if err != nil {
+		return err
 	}
-	return err
+	b.rid, b.ack, b.index, b.count, b.start = rid, ack, i.Index, count, time.Now()
+	return nil
+}
+
+// settle resolves the bump in flight: without block it only looks, with block
+// it waits (bounded by the propose timeout, like db.Propose). ok reports
+// whether it resolved; err is the bump's outcome. An unresolved bump past the
+// propose timeout resolves as ErrProposalUnknown, as db.Propose does.
+func (b *caughtUpBump) settle(ctx context.Context, block bool) (ok bool, err error) {
+	if b.ack == nil {
+		return false, nil
+	}
+	left := b.db.proposeTimeout - time.Since(b.start)
+	if !block {
+		select {
+		case err = <-b.ack:
+		default:
+			if left > 0 {
+				return false, nil
+			}
+			err = ErrProposalUnknown
+		}
+	} else {
+		t := time.NewTimer(max(left, 0))
+		defer t.Stop()
+		select {
+		case err = <-b.ack:
+		case <-t.C:
+			err = ErrProposalUnknown
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	if err == nil && b.db.metrics != nil {
+		b.db.metrics.SyncBumpCompleted(time.Since(b.start))
+	}
+	b.release()
+	return true, err
+}
+
+// release stops waiting for the bump in flight, if any.
+func (b *caughtUpBump) release() {
+	if b.ack != nil {
+		b.db.unregisterWaiter(b.rid)
+		b.ack = nil
+	}
 }
 
 // syncableProgressReporter is the optional Storage extension that exposes the

@@ -19,7 +19,8 @@ machines:
 | Apply rate (batched) | ≥ 1,000 entries/sec | How fast committed entries become readable/syncable |
 | Syncable catch-up read rate | ≥ 500,000 entries/sec | Rebuild, re-materialization, new consumer of an old topic |
 | Ingest snapshot rate | ≥ 5,000 rows/sec | Initial snapshot of a source table (pipelined) |
-| Ingest streaming rate | 10–20 source transactions/sec per ingestable | Change capture after the snapshot; one source transaction at a time |
+| Ingest streaming rate | ≥ 1,000 source transactions/sec per ingestable | Change capture after the snapshot, in source commit order |
+| Source commit to read-model row | ≤ 1.5 s at p99 | An event committed at the source until a projection's row shows it |
 
 Two shapes matter more than any single number:
 
@@ -30,14 +31,13 @@ Two shapes matter more than any single number:
   generator sees double-digit throughput, it is measuring its own serial
   round-trips, not the cluster's capacity — add concurrency or batch entities
   into fewer proposals.
-- **An ingestable streams one source transaction at a time.** It keeps the
-  source's commit order, so it waits for each transaction to be durable
-  before sending the next: its rate is one transaction per write round-trip
-  (~50 ms on the reference machine → ~20/sec). The limit is per transaction,
-  not per row: rows committed in one source transaction travel together. A
-  source that sustains more transactions per second than this falls behind
-  and stays behind; watch `lag` on `GET /v1/ingestable/{id}/status`.
-  Separate ingestables stream in parallel.
+- **An ingestable keeps many source transactions in flight.** Each source
+  transaction becomes one proposal, and the ingestable sends the next
+  without waiting for the last to be durable; the log still applies them in
+  source commit order. So its rate is set by raft's batched fsyncs, not by
+  one write round-trip per transaction. A source that sustains more
+  transactions per second than the envelope falls behind; watch `lag` on
+  `GET /v1/ingestable/{id}/status`. Separate ingestables stream in parallel.
 - **Reads are not the bottleneck.** Catch-up drains the log ~500× faster
   than the write path fills it, so a rebuilt destination converges quickly; sync
   throughput in practice is bounded by the destination database, not the
@@ -69,20 +69,45 @@ with default settings (2026-10-13):
 | Measurement | Result | Derived rate |
 |---|---|---|
 | Serial `POST /v1/proposal`, one entity each | median 30 ms | ~31 proposals/sec |
-| PostgreSQL ingestable streaming one-row transactions | ~50 ms per transaction | ~20 transactions/sec |
 | `BenchmarkAggregateLargeGroup`, five emits, append into a 1,000-input group | 0.13 ms per input | ~7,500 inputs/sec into that group |
 | `BenchmarkAggregateLargeGroup`, five emits, append into a 10,000-input group | 0.06 ms per input | ~16,500 inputs/sec into that group |
 | Source commit to read-model row, aggregate stage, 40-event group | median 69 ms | — |
 | Source commit to read-model row, aggregate stage, 10,000-event group | median 108 ms | — |
 
-The streaming figure commits one-row transactions to PostgreSQL 16 faster
-than the ingestable applies them and reads the rate from `appliedIndex` on
-`GET /v1/node/status`. The commit-to-row figures run the
+The commit-to-row figures run the
 [event-store recipe](../recipes/event-store-read-models.md) against
 PostgreSQL 16, appending one event at a time to one stream and timing
-until its row updates. A 10,000-event stream appended at ~80 events/sec
-caught up ~6.5 minutes after the last append, at the streaming rate: the
-refold was not the limit.
+until its row updates.
+
+The [event-store recipe](../recipes/event-store-read-models.md) with
+PostgreSQL 16 as source and destination, one event per source transaction,
+on the same laptop (2026-10-14). A backlog drain commits the events to
+PostgreSQL with every node stopped, then starts the nodes and times the
+ingestable to `lag` 0 and the read model to its last row:
+
+| Workload | Nodes | Ingest drained | Read model complete |
+|---|---|---|---|
+| 10,000 events, one per stream | 3 | 3.6 s (~2,800 transactions/sec) | 4.0 s |
+| 10,000 events into one stream | 3 | 3.2 s (~3,100 transactions/sec) | 3.9 s |
+| 50,000 events, one per stream | 3 | 10.5 s (~4,800 transactions/sec) | 15.2 s |
+| 10,000 events, one per stream | 1 | 1.6 s (~6,100 transactions/sec) | 2.7 s |
+| 10,000 events into one stream | 1 | 1.4 s (~6,900 transactions/sec) | 2.8 s |
+
+The live load runs `eventstore-load` (see [Re-measuring](#re-measuring))
+on three local nodes, with eight writers appending to PostgreSQL:
+
+| Offered load | Source commit to read-model row | Catch-up after the last append | Second read model from the log |
+|---|---|---|---|
+| 50 events/sec for 2 min | p50 355 ms, p99 1.03 s | 0.2 s | 2.1 s (~2,800 events/sec) |
+| 2,000 events/sec for 1 min (the writers reached 436/sec) | p50 378 ms, p99 1.05 s | 0.3 s | 5.2 s (~5,100 events/sec) |
+
+Latency holds as the rate rises, and the read model catches up within a
+second of the last append: the cluster keeps up, and the latency is the
+path's depth. A single append into a quiet cluster reaches its row in about
+70 ms. Under load each entry waits on fsyncs that queue behind the other two
+nodes' and PostgreSQL's on the one shared disk; on one node the same stretch,
+from proposal to the syncable reading the entry, takes a third as long.
+Separate disks per node shorten it.
 
 The 3-node HTTP number is the most conservative of all: real processes, real
 HTTP, follower→leader forwarding, quorum replication, and three nodes
@@ -101,6 +126,19 @@ make bench/workloads   # backup, concurrent streaming, and constrained caches
 make bench/multinode   # the 3-node throughput report (~15s), prints the
                        # THROUGHPUT REPORT line with proposals/sec + p50/p99
 ```
+
+The event-store workload needs Docker for its PostgreSQL databases. Build
+its bundle for this machine, then run it against three local nodes:
+
+```bash
+make bench/eventstore-bundle BUNDLE_ARGS="--local -o $PWD/bench-bundle"
+bench-bundle/run.sh -- -rate 50 -duration 2m -writers 8 -hot-streams 2 -hot-events 1500
+```
+
+It prints the commit-to-row percentiles, catch-up, and second-read-model
+rate, and writes the results to `bench-bundle/results`. `run.sh` without
+`BENCH_NODES` runs the nodes locally; set it to run them on other machines
+over SSH.
 
 (`make test/multinode` runs the full crash-recovery suite the report lives
 in; the dedicated target exists because `go test` hides the report line on a
