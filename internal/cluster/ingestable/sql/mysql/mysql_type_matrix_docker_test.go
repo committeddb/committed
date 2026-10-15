@@ -27,8 +27,8 @@ type typeMatrixRow struct {
 // CONTRACT: every MySQL type committed supports must appear as a row here. MySQL
 // scans typed values via go-sql-driver on the snapshot path and reconciles each
 // type against go-mysql's INDEPENDENT binlog decoder on the CDC path — unlike
-// Postgres, which casts every column ::text so both paths share one output
-// function. There is no shared decoder to make parity automatic, so this matrix
+// Postgres, which renders every column through its output function on both
+// paths. There is no shared decoder to make parity automatic, so this matrix
 // is the only thing forcing a new or refactored type to stay byte-identical
 // across the two paths. Adding a type without a row here is a silent gap: a
 // divergence (snapshot text ≠ CDC bytes) corrupts data downstream and breaks the

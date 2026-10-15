@@ -652,13 +652,14 @@ func dbParser() *syncsql.DBParser {
 	return p
 }
 
-func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader, features ingestablesqlserver.FeatureReader) *ingestablesql.IngestableParser {
+func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader, features ingestablesql.FeatureReader) *ingestablesql.IngestableParser {
 	p := ingestablesql.NewIngestableParser(t)
 	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
-	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{}
-	// The SQL Server dialect's uniqueidentifier rendering is gated on the
-	// cluster feature level (a mixed-version cluster must not spell one key
-	// two ways), so it reads the db's gate.
+	// The PostgreSQL snapshot text rendering and the SQL Server
+	// uniqueidentifier and date/time renderings are gated on the cluster
+	// feature level (a mixed-version cluster must not spell one key two ways),
+	// so both read the db's gate.
+	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{Features: features}
 	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{Features: features}
 	// Wire the delete-surviving per-topic refresh-epoch floor so a same-topic
 	// recreate resumes its generation above the rows still on the sink.

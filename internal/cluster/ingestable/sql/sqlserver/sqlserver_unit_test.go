@@ -103,7 +103,7 @@ func TestSessionRendering(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rendering, rerender := sessionRendering(c.checkpoint, c.hasCheckpoint, c.gateOpen)
+			rendering, rerender := sql.SessionRendering(c.checkpoint, c.hasCheckpoint, c.gateOpen)
 			require.Equal(t, c.rendering, rendering)
 			require.Equal(t, c.rerender, rerender)
 		})

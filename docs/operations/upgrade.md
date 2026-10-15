@@ -13,7 +13,22 @@ same, and its on-disk state is reused in place.
 ## Upgrading from 0.8.2 to 0.8.3
 
 Follow the rolling binary-upgrade procedure below; no configuration changes.
+0.8.3 raises the cluster feature level to 4 for one change, which activates
+once every node runs 0.8.3; the changes after it need no feature level and
+take effect on each node as it upgrades:
 
+- **PostgreSQL snapshot text:** the snapshot renders `boolean`, `char(n)`,
+  and `inet` values (and domains over them) as the change stream does: `t`
+  and `f`, `char(n)` with its padding, a host address without `/32`. Before,
+  a snapshotted row whose key had such a column was keyed differently from
+  its later updates and deletes, so the destination kept stale or duplicate
+  rows. A PostgreSQL ingestable with a `char(n)` or `inet` column, or a
+  `boolean` in `primaryKey`, re-snapshots once after the roll, which re-keys
+  keyed destinations and removes the stale rows; keyless destinations keep
+  both spellings until rebuilt. Other PostgreSQL ingestables, and MySQL and
+  SQL Server ones, are unaffected.
+- **Backups:** an archive taken on 0.8.3 records feature level 4, which a
+  0.8.2 binary refuses to restore.
 - **A destination with rows and no note stops.** 0.8.0 through 0.8.2 gave
   every SQL and Iceberg destination without a rendering note one on first
   contact (see
@@ -307,6 +322,9 @@ After the last node:
 > re-keyed to the typed date and time rendering (feature level 3, 0.8.2,
 > see [ingestables.md](../ingestables.md#date-and-time-rendering)): a 0.8.1 binary
 > would resume it rendering RFC 3339 instants again — treat it as one-way.
+> Likewise a PostgreSQL ingestable that has re-keyed to the stream's text
+> rendering (feature level 4, 0.8.3): a 0.8.2 binary would snapshot new
+> tables the old way again.
 > Once a type declares `onSupersede = "scrub"` (feature level 3, 0.8.2), do
 > not roll a node back to 0.8.1: the older binary drops the declaration and
 > keeps the superseded versions every 0.8.2 node scrubs, so that node's log

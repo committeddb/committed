@@ -32,6 +32,11 @@ import (
 // decodes INSERT/UPDATE/DELETE row events, groups them by transaction, and
 // emits one cluster.Proposal per committed transaction.
 type PostgreSQLDialect struct {
+	// Features is the cluster feature-level gate (db.FeatureEnabled), wired by
+	// the node. It decides each session's text rendering — see
+	// featureLevelOutputRendering. Nil (tests constructing the dialect
+	// directly) means the gate is open: the 0.8.3 rendering.
+	Features sql.FeatureReader
 	// snapshotBatchHook is a test-only failure-injection seam, called before
 	// each snapshot batch read with the table and 1-based batch number; a
 	// non-nil error aborts the snapshot as if the source connection failed.
@@ -65,6 +70,50 @@ type snapshotIntent struct {
 	// completes (full refreshes reconcile; a partial added-table backfill must
 	// NOT sweep, so it carries no marker).
 	marker bool
+}
+
+// featureLevelOutputRendering gates rendering snapshot column text through
+// each type's output function. The rendering reaches entity KEYS (a boolean
+// primary key), so a cluster where one owner snapshots one way and the next
+// the other would key the same row twice; every node keeps the `::text` cast
+// until every member announces level 4. See version.FeatureLevel and
+// sql.SessionRendering.
+const featureLevelOutputRendering uint64 = 4
+
+// The two text renderings a checkpoint can record
+// (PostgresPosition.text_rendering).
+const (
+	textRenderingCast   uint32 = 0 // `::text`: boolean true/false, char(n) unpadded, host inet with /32; every pre-field checkpoint
+	textRenderingOutput uint32 = 1 // the type's output function — the text pgoutput streams
+)
+
+// outputRenderingEnabled reports whether this node may render by output function.
+func (d *PostgreSQLDialect) outputRenderingEnabled() bool {
+	return d.Features == nil || d.Features.FeatureEnabled(featureLevelOutputRendering)
+}
+
+// textRender is one ingest session's text rendering (see sql.SessionRendering):
+// rerender says the checkpoint was written under the other rendering and the
+// session must re-snapshot before streaming — when a watched table has a
+// column the two renderings spell differently.
+type textRender struct {
+	rendering uint32
+	rerender  bool
+}
+
+// textColumn is the SELECT expression rendering column col as text under
+// rendering. The `::text` cast is the I/O conversion for most types, but
+// boolean, char(n) and inet (and domains over them) have function casts that
+// spell values differently from their output functions — which is what
+// pgoutput streams, so snapshot keys and payloads would differ from the CDC
+// ones. format('%s') always calls the output function; it renders NULL as an
+// empty string, so NULL is kept explicitly.
+func textColumn(col string, rendering uint32) string {
+	q := quoteIdent(col)
+	if rendering == textRenderingOutput {
+		return "CASE WHEN " + q + " IS NULL THEN NULL ELSE format('%s', " + q + ") END"
+	}
+	return q + "::text"
 }
 
 const (
@@ -431,10 +480,15 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	}
 	defer d.partitions.Delete(config)
 
-	startLSN, resumeProgress, epoch, err := decodePosition(pos)
+	startLSN, resumeProgress, epoch, checkpointRendering, err := decodePosition(pos)
 	if err != nil {
 		return err
 	}
+	// The session's text rendering, decided ONCE here so every row this
+	// session snapshots — across retries — spells a value the same way; a gate
+	// that opens mid-session is picked up by the next.
+	render := &textRender{}
+	render.rendering, render.rerender = sql.SessionRendering(checkpointRendering, len(pos) > 0, d.outputRenderingEnabled())
 
 	backoff := sql.NewReconnectBackoff()
 
@@ -449,7 +503,7 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	ack := newSourceAck(startLSN)
 
 	for {
-		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, backoff, ack, pr, po)
+		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, render, backoff, ack, pr, po)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -490,22 +544,23 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 // decodePosition parses a checkpoint position. The legacy format is a
 // raw 8-byte big-endian LSN; the new format is proto-encoded
 // PostgresPosition prefixed with pgPositionProtoMagic so a resume can
-// carry snapshot progress alongside the LSN.
-func decodePosition(pos cluster.Position) (pglogrepl.LSN, *dialectpb.SnapshotProgress, uint64, error) {
+// carry snapshot progress alongside the LSN. rendering is the checkpoint's
+// text rendering (PostgresPosition.text_rendering; the cast for a legacy one).
+func decodePosition(pos cluster.Position) (lsn pglogrepl.LSN, progress *dialectpb.SnapshotProgress, epoch uint64, rendering uint32, err error) {
 	if len(pos) == 0 {
-		return 0, nil, 0, nil
+		return 0, nil, 0, textRenderingCast, nil
 	}
 	if len(pos) > 0 && pos[0] == pgPositionProtoMagic {
 		pp := &dialectpb.PostgresPosition{}
 		if err := proto.Unmarshal(pos[1:], pp); err != nil {
-			return 0, nil, 0, fmt.Errorf("decode position: %w", err)
+			return 0, nil, 0, 0, fmt.Errorf("decode position: %w", err)
 		}
-		return pglogrepl.LSN(pp.Lsn), pp.SnapshotProgress, pp.RefreshEpoch, nil
+		return pglogrepl.LSN(pp.Lsn), pp.SnapshotProgress, pp.RefreshEpoch, pp.TextRendering, nil
 	}
 	if len(pos) == 8 {
-		return pglogrepl.LSN(binary.BigEndian.Uint64(pos)), nil, 0, nil
+		return pglogrepl.LSN(binary.BigEndian.Uint64(pos)), nil, 0, textRenderingCast, nil
 	}
-	return 0, nil, 0, fmt.Errorf("unrecognized position format (len=%d)", len(pos))
+	return 0, nil, 0, 0, fmt.Errorf("unrecognized position format (len=%d)", len(pos))
 }
 
 // needsColdSnapshot reports whether an ingestable has never durably run a
@@ -535,12 +590,14 @@ func needsColdSnapshot(slotIsNew bool, lastLSN pglogrepl.LSN, epoch uint64) bool
 // encodePosition writes a position using the new proto format with the
 // magic byte prefix. Passing progress=nil omits the snapshot section so
 // streaming-phase checkpoints stay compact. epoch is the reconciling-refresh
-// generation carried across checkpoints (see PostgresPosition.refresh_epoch).
-func encodePosition(lsn pglogrepl.LSN, progress *dialectpb.SnapshotProgress, epoch uint64) ([]byte, error) {
+// generation carried across checkpoints (see PostgresPosition.refresh_epoch);
+// rendering the session's text rendering (PostgresPosition.text_rendering).
+func encodePosition(lsn pglogrepl.LSN, progress *dialectpb.SnapshotProgress, epoch uint64, rendering uint32) ([]byte, error) {
 	pp := &dialectpb.PostgresPosition{
 		Lsn:              uint64(lsn),
 		SnapshotProgress: progress,
 		RefreshEpoch:     epoch,
+		TextRendering:    rendering,
 	}
 	raw, err := proto.Marshal(pp)
 	if err != nil {
@@ -565,7 +622,7 @@ const statusLagTimeout = 5 * time.Second
 // slot's distance behind the source write head.
 func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos cluster.Position) (cluster.IngestableStatus, error) {
 	decode := func(pos cluster.Position) (sql.StatusInputs, error) {
-		lsn, progress, _, err := decodePosition(pos)
+		lsn, progress, _, _, err := decodePosition(pos)
 		if err != nil {
 			return sql.StatusInputs{}, fmt.Errorf("[postgres.status] decode position: %w", err)
 		}
@@ -753,6 +810,7 @@ func (d *PostgreSQLDialect) stream(
 	epoch *uint64,
 	epochFloor uint64,
 	intent **snapshotIntent,
+	render *textRender,
 	backoff *sql.Backoff,
 	ack *sourceAck,
 	pr chan<- *cluster.Proposal,
@@ -809,7 +867,7 @@ func (d *PostgreSQLDialect) stream(
 	resolve := func(ctx context.Context, table string, pk map[string]string, cols []string) (map[string]string, error) {
 		sel := make([]string, len(cols))
 		for i, c := range cols {
-			sel[i] = quoteIdent(c) + "::text"
+			sel[i] = textColumn(c, render.rendering)
 		}
 		where := make([]string, 0, len(pk))
 		args := make([]any, 0, len(pk))
@@ -861,6 +919,18 @@ func (d *PostgreSQLDialect) stream(
 		return err
 	}
 
+	// A checkpoint written under the `::text` cast, resumed by a session that
+	// renders by output function, re-keys only when a watched table has a
+	// column the two renderings spell differently; with none, the promotion
+	// is simply recorded by the next checkpoint.
+	var differing []string
+	if render.rerender && *intent == nil {
+		if differing, err = textRenderingDiffers(ctx, sqlDB, config, pgCfg.tables); err != nil {
+			return err
+		}
+		render.rerender = len(differing) > 0
+	}
+
 	// Decide what (if anything) to snapshot, recording the decision as a
 	// snapshotIntent BEFORE running it — the signals below are one-shot, so the
 	// decision must outlive a failed attempt (see snapshotIntent). Order
@@ -901,9 +971,23 @@ func (d *PostgreSQLDialect) stream(
 		*lastLSN = cp
 		*resumeProgress = nil
 		*intent = &snapshotIntent{tables: pgCfg.tables, progress: gap.Progress, marker: gap.Marker}
+		render.rerender = false // the full re-snapshot renders every row the session's way
 	case *intent != nil:
 		// A prior attempt's snapshot is unfinished — resume it below. The epoch
 		// and LSN base were already set when the intent was formed.
+	case render.rerender:
+		// Re-emit every row at a bumped epoch — the gap contract applied to a
+		// rendering change: the closing refresh markers sweep the old
+		// spellings on keyed destinations (keyless and append destinations
+		// keep both until rebuilt). Streaming then resumes from the held LSN.
+		gap := sql.PlanSnapshot(sql.SnapshotGap, nil, *epoch, epochFloor, pgCfg.tables, nil)
+		*epoch = gap.Epoch
+		zap.L().Warn("snapshot text rendering changed (boolean, char(n) and inet now render as the replication stream does, at cluster feature level 4) — re-snapshotting so every key and payload re-keys; the closing refresh markers sweep the old renderings' rows on keyed destinations",
+			zap.Strings("columns", differing),
+			zap.Uint64("refreshEpoch", *epoch))
+		*resumeProgress = nil
+		*intent = &snapshotIntent{tables: pgCfg.tables, progress: gap.Progress, marker: gap.Marker}
+		render.rerender = false
 	case needsColdSnapshot(slotIsNew, *lastLSN, *epoch) || *resumeProgress != nil:
 		kind := sql.SnapshotCold
 		if *resumeProgress != nil {
@@ -930,10 +1014,10 @@ func (d *PostgreSQLDialect) stream(
 		// only after everything it promised has been handed to the channels —
 		// streaming (whose checkpoints erase the durable snapshot cursor)
 		// cannot start before that.
-		if err := d.snapshot(ctx, config, pgCfg, in.tables, in.progress, *lastLSN, *epoch, pr, po); err != nil {
+		if err := d.snapshot(ctx, config, pgCfg, in.tables, in.progress, *lastLSN, *epoch, render.rendering, pr, po); err != nil {
 			return err
 		}
-		checkpoint, err := encodePosition(*lastLSN, nil, *epoch)
+		checkpoint, err := encodePosition(*lastLSN, nil, *epoch, render.rendering)
 		if err != nil {
 			return err
 		}
@@ -1218,7 +1302,7 @@ func (d *PostgreSQLDialect) stream(
 				// shrinks the resume window to the in-flight transaction and
 				// earns the txn-scoped dedup the flush opts into).
 				endLSN := m.TransactionEndLSN
-				posBytes, err := encodePosition(endLSN, nil, *epoch)
+				posBytes, err := encodePosition(endLSN, nil, *epoch, render.rendering)
 				if err != nil {
 					return err
 				}
@@ -1625,6 +1709,7 @@ func (d *PostgreSQLDialect) snapshot(
 	progress *dialectpb.SnapshotProgress,
 	lsn pglogrepl.LSN,
 	epoch uint64,
+	rendering uint32,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) error {
@@ -1635,14 +1720,14 @@ func (d *PostgreSQLDialect) snapshot(
 	defer func() { _ = db.Close() }()
 	return sql.RunSnapshot(ctx, sql.SnapshotRun{
 		Config:    config,
-		Reader:    pgSnapshotReader{db: db},
+		Reader:    pgSnapshotReader{db: db, rendering: rendering},
 		Tables:    tables,
 		Progress:  progress,
 		Epoch:     epoch,
 		BatchSize: config.Options.BatchSizeOr(defaultSnapshotBatchSize),
 		Readers:   1,
 		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
-			return encodePosition(lsn, p, epoch)
+			return encodePosition(lsn, p, epoch, rendering)
 		},
 		BatchHook: d.snapshotBatchHook,
 		Proposals: pr,
@@ -1651,11 +1736,15 @@ func (d *PostgreSQLDialect) snapshot(
 }
 
 // pgSnapshotReader is the dialect's snapshot adapter: one keyset batch per
-// call over a short REPEATABLE READ transaction (readBatch).
-type pgSnapshotReader struct{ db *gosql.DB }
+// call over a short REPEATABLE READ transaction (readBatch), rendering
+// column text the session's way.
+type pgSnapshotReader struct {
+	db        *gosql.DB
+	rendering uint32
+}
 
 func (r pgSnapshotReader) ReadBatch(ctx context.Context, table string, spec *sql.TopicSpec, lastPK string, haveLastPK bool, batchSize int) ([]*cluster.Entity, string, int, error) {
-	return readBatch(ctx, r.db, table, spec, lastPK, haveLastPK, batchSize)
+	return readBatch(ctx, r.db, table, spec, lastPK, haveLastPK, batchSize, r.rendering)
 }
 
 // snapshotColumnMeta returns a table's column names (in order) and each column's
@@ -1685,6 +1774,62 @@ func snapshotColumnMeta(ctx context.Context, tx *gosql.Tx, quotedTable string) (
 	return columns, cats, nil
 }
 
+// textRenderingDiffers names the watched columns ("table.column") whose
+// snapshot text differs between the `::text` cast and the output function as
+// far as a destination can tell: every char(n) and inet column (key and
+// payload bytes), and boolean primary-key columns (a boolean payload decodes
+// to a JSON bool either way). A domain column reports its base type in the
+// row description, so a domain over one of these counts too.
+func textRenderingDiffers(ctx context.Context, db *gosql.DB, config *sql.Config, tables []string) ([]string, error) {
+	var out []string
+	for _, table := range tables {
+		spec := config.SpecForTable(table)
+		if spec == nil {
+			continue
+		}
+		key := make(map[string]bool, len(spec.PrimaryKey))
+		for _, c := range spec.PrimaryKey {
+			key[strings.ToLower(c)] = true
+		}
+		names, types, err := columnTypeNames(ctx, db, quoteTable(table))
+		if err != nil {
+			return nil, fmt.Errorf("read column types of %q: %w", table, err)
+		}
+		for i, name := range names {
+			switch strings.ToUpper(types[i]) {
+			case "BPCHAR", "INET":
+				out = append(out, table+"."+name)
+			case "BOOL":
+				if key[strings.ToLower(name)] {
+					out = append(out, table+"."+name)
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// columnTypeNames returns a table's column names and driver type names from
+// a zero-row probe.
+func columnTypeNames(ctx context.Context, db *gosql.DB, quotedTable string) ([]string, []string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT * FROM "+quotedTable+" LIMIT 0") //nolint:gosec // G202: quotedTable is quoteTable-escaped
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	cts, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, nil, err
+	}
+	names := make([]string, len(cts))
+	types := make([]string, len(cts))
+	for i, ct := range cts {
+		names[i] = ct.Name()
+		types[i] = ct.DatabaseTypeName()
+	}
+	return names, types, rows.Err()
+}
+
 // readBatch opens a short REPEATABLE READ transaction and reads up to
 // batchSize rows with pk > lastPK (or the first batchSize rows when
 // haveLastPK is false). Returns the entities, the last pk scanned, and
@@ -1697,6 +1842,7 @@ func readBatch(
 	lastPK string,
 	haveLastPK bool,
 	batchSize int,
+	rendering uint32,
 ) ([]*cluster.Entity, string, int, error) {
 	pkCols := spec.PrimaryKey
 	tx, err := db.BeginTx(ctx, &gosql.TxOptions{
@@ -1742,20 +1888,23 @@ func readBatch(
 	// Postgres text form, so a column's bytes would flip on its first CDC update
 	// after snapshot. Categories must come from the real types, not the text cast.
 	//
-	// The cast is total and the parity is by construction, not per type: the
-	// `::text` I/O-conversion cast exists for EVERY data type (it calls the
-	// type's output function), and pgoutput renders each column with that same
-	// output function — under the same session GUCs, which buildPgConfig pins on
-	// both connections. So a composite, an array, an extension type all spell
-	// identically here and on the stream, and no column can fail this cast
-	// (pinned by TestPostgresCompositeAndArrayColumnsRoundTrip).
+	// Under the output rendering the parity is by construction, not per type:
+	// format('%s') calls each type's output function (textColumn), and pgoutput
+	// renders each column with that same output function — under the same
+	// session GUCs, which buildPgConfig pins on both connections. So a
+	// composite, an array, an extension type all spell identically here and on
+	// the stream, and no column can fail the conversion (pinned by
+	// TestPostgresCompositeAndArrayColumnsRoundTrip and
+	// TestPostgresOutputRenderingMatchesCDC). The legacy `::text` cast is not:
+	// boolean, char(n) and inet have function casts that spell values their own
+	// way.
 	columns, cats, err := snapshotColumnMeta(ctx, tx, quotedTable)
 	if err != nil {
 		return nil, "", 0, err
 	}
 	selected := make([]string, len(columns))
 	for i, c := range columns {
-		selected[i] = quoteIdent(c) + "::text AS " + quoteIdent(c)
+		selected[i] = textColumn(c, rendering) + " AS " + quoteIdent(c)
 	}
 	selectList := strings.Join(selected, ", ")
 

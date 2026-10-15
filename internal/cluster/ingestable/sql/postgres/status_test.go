@@ -24,7 +24,7 @@ func TestPostgresStatusSnapshotPhase(t *testing.T) {
 		CompletedTables: []string{"region"},
 		LastPkByTable:   map[string]string{"nation": "7"},
 	}
-	pos, err := encodePosition(pglogrepl.LSN(0x1A2B3C8), progress, 1)
+	pos, err := encodePosition(pglogrepl.LSN(0x1A2B3C8), progress, 1, textRenderingOutput)
 	require.NoError(t, err)
 
 	st, err := d.Status(context.Background(), cfg, pos)

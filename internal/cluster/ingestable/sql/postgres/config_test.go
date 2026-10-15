@@ -178,27 +178,30 @@ func TestDecodePositionLegacyLSN(t *testing.T) {
 	legacy := make([]byte, 8)
 	binary.BigEndian.PutUint64(legacy, 0x0123456789ABCDEF)
 
-	lsn, progress, epoch, err := decodePosition(legacy)
+	lsn, progress, epoch, rendering, err := decodePosition(legacy)
 	require.NoError(t, err)
 	require.Equal(t, pglogrepl.LSN(0x0123456789ABCDEF), lsn)
 	require.Nil(t, progress)
 	require.Equal(t, uint64(0), epoch, "a legacy position predates the refresh epoch")
+	require.Equal(t, textRenderingCast, rendering, "a legacy position predates the output rendering")
 }
 
 func TestDecodePositionEmpty(t *testing.T) {
-	lsn, progress, epoch, err := decodePosition(nil)
+	lsn, progress, epoch, rendering, err := decodePosition(nil)
 	require.NoError(t, err)
 	require.Equal(t, pglogrepl.LSN(0), lsn)
 	require.Nil(t, progress)
 	require.Equal(t, uint64(0), epoch)
+	require.Equal(t, textRenderingCast, rendering)
 }
 
 func TestEncodeDecodePositionRoundtrip(t *testing.T) {
 	tests := []struct {
-		name     string
-		lsn      pglogrepl.LSN
-		progress *dialectpb.SnapshotProgress
-		epoch    uint64
+		name      string
+		lsn       pglogrepl.LSN
+		progress  *dialectpb.SnapshotProgress
+		epoch     uint64
+		rendering uint32
 	}{
 		{
 			name:     "lsn_only",
@@ -225,19 +228,26 @@ func TestEncodeDecodePositionRoundtrip(t *testing.T) {
 			lsn:   pglogrepl.LSN(0xABCD),
 			epoch: 3,
 		},
+		{
+			name:      "output_rendering",
+			lsn:       pglogrepl.LSN(0xABCD),
+			epoch:     2,
+			rendering: textRenderingOutput,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bs, err := encodePosition(tt.lsn, tt.progress, tt.epoch)
+			bs, err := encodePosition(tt.lsn, tt.progress, tt.epoch, tt.rendering)
 			require.NoError(t, err)
 			require.Equal(t, pgPositionProtoMagic, bs[0],
 				"encoded position must start with the magic byte")
 
-			gotLSN, gotProgress, gotEpoch, err := decodePosition(bs)
+			gotLSN, gotProgress, gotEpoch, gotRendering, err := decodePosition(bs)
 			require.NoError(t, err)
 			require.Equal(t, tt.lsn, gotLSN)
 			require.Equal(t, tt.epoch, gotEpoch)
+			require.Equal(t, tt.rendering, gotRendering)
 			if tt.progress == nil {
 				require.Nil(t, gotProgress)
 			} else {
