@@ -27,6 +27,10 @@ type columnInfo struct {
 	// transcoded eagerly into enumValues/setValues instead, so this stays nil for
 	// them.
 	transcode encoding.Encoding
+	// padTo is a BINARY(n) column's declared byte length n, 0 for every other
+	// column: the binlog strips a BINARY value's trailing 0x00 bytes, which a
+	// SELECT (and so the snapshot) keeps, so the stream pads them back.
+	padTo int
 }
 
 // tableSchema is a table's columns in ordinal (binlog row image) order.
@@ -100,6 +104,10 @@ func columnsFromTableMap(tm *replication.TableMapEvent, charsetPlans map[uint64]
 		// resolves the real type and matches mysqlCategoryForTypeName's numeric set
 		// exactly. BLOB/BINARY/VARBINARY are binary (base64, matching the snapshot's
 		// CatBinary); ENUM, SET, BIT, dates, text, geometry fall to text.
+		if plan.charset == binaryCharset {
+			ci.padTo = fixedBinaryLength(tm, i)
+		}
+
 		switch {
 		case tm.ColumnType[i] == mysql.MYSQL_TYPE_JSON:
 			ci.cat = sql.CatJSON
@@ -128,6 +136,46 @@ func columnsFromTableMap(tm *replication.TableMapEvent, charsetPlans map[uint64]
 		cols[i] = ci
 	}
 	return &tableSchema{cols: cols}, nil
+}
+
+// fixedBinaryLength is column i's declared byte length when it is a
+// fixed-width string column (CHAR(n) or, under the binary charset, BINARY(n)),
+// else 0. The table map packs the real type and the length into the column's
+// metadata, folding the length's high bits into the type byte (MySQL's
+// Field_string::save_field_metadata); go-mysql's string decoder reads it the
+// same way.
+func fixedBinaryLength(tm *replication.TableMapEvent, i int) int {
+	if tm.ColumnType[i] != mysql.MYSQL_TYPE_STRING {
+		return 0
+	}
+	meta := tm.ColumnMeta[i]
+	b0, b1 := byte(meta>>8), byte(meta) //nolint:gosec // G115: deliberate byte extraction
+	realType, length := b0, int(b1)
+	if b0&0x30 != 0x30 {
+		realType = b0 | 0x30
+		length = int(uint16(b1) | uint16((b0&0x30)^0x30)<<4)
+	}
+	if realType != mysql.MYSQL_TYPE_STRING {
+		return 0 // ENUM and SET travel as STRING with their own real type
+	}
+	return length
+}
+
+// padBinary right-pads a binlog BINARY value with 0x00 to n bytes, restoring
+// what the binlog stripped. go-mysql hands the value back as a string; a NULL
+// (nil) is left alone.
+func padBinary(cell any, n int) any {
+	switch v := cell.(type) {
+	case string:
+		if len(v) < n {
+			return v + strings.Repeat("\x00", n-len(v))
+		}
+	case []byte:
+		if len(v) < n {
+			return append(append(make([]byte, 0, n), v...), make([]byte, n-len(v))...)
+		}
+	}
+	return cell
 }
 
 // transcodeLabels converts an ENUM/SET column's member labels from its binlog

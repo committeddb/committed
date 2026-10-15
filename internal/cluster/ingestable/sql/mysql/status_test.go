@@ -42,7 +42,7 @@ func TestMysqlStatus(t *testing.T) {
 		Name: "binlog.000004", Pos: 1547,
 		SnapshotProgress: &dialectpb.SnapshotProgress{
 			CompletedTables: []string{"region"},
-			LastPkByTable:   map[string]string{"nation": "9"},
+			LastPkByTable:   map[string][]byte{"nation": []byte("9")},
 		},
 	})
 	require.NoError(t, err)

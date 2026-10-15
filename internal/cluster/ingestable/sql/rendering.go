@@ -9,7 +9,8 @@ type FeatureReader interface {
 }
 
 // SessionRendering decides one ingest session's rendering of a value family
-// (SQL Server uniqueidentifier and temporal types, PostgreSQL text) from the
+// (SQL Server uniqueidentifier and temporal types, PostgreSQL text, MySQL
+// BINARY(n) padding) from the
 // checkpoint it resumes and that rendering's cluster gate — 0 the legacy
 // rendering, 1 the new one — and whether the session must first re-snapshot
 // (rerender): the checkpoint was rendered the OTHER way, so every such key

@@ -2263,7 +2263,7 @@ waitProgress:
 		Name: origProto.Name,
 		Pos:  origProto.Pos,
 		SnapshotProgress: &dialectpb.SnapshotProgress{
-			LastPkByTable: map[string]string{table: "005"},
+			LastPkByTable: map[string][]byte{table: []byte("005")},
 		},
 	}
 	resumeBytes, err := proto.Marshal(resumeProto)

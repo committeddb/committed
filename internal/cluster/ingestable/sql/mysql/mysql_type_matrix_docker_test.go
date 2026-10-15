@@ -65,6 +65,10 @@ func TestMysqlSnapshotStreamTypeMatrix(t *testing.T) {
 		// (non-UTF-8) bytes round-trip faithfully and identically on both paths.
 		// 0xDEADBEEF → base64 "3q2+7w==". The sink base64-decodes back to bytes.
 		{"c_blob", "BLOB", "x'DEADBEEF'", `"3q2+7w=="`},
+		// BINARY(n) is fixed-width: a SELECT returns the value padded with 0x00
+		// to n bytes, but the binlog strips the trailing 0x00s, so the stream
+		// pads them back. 'AB' in BINARY(6) → 41 42 00 00 00 00 → "QUIAAAAA".
+		{"c_binary", "BINARY(6)", "x'4142'", `"QUIAAAAA"`},
 		{"c_enum", "ENUM('a','b','c')", "'b'", `"b"`},
 		{"c_set", "SET('x','y','z')", "'x,z'", `"x,z"`},
 		{"c_json", "JSON", `'{"z":1,"a":"x"}'`, `{"a":"x","z":1}`},

@@ -44,6 +44,14 @@ message MySQLBinLogPosition {
     // upgrade are not detected — matching the old behavior — adds made after
     // are). Stamped on snapshot-completion and every streaming checkpoint.
     repeated string snapshotted_tables = 7;
+    // binary_rendering is how the binlog path rendered a BINARY(n) value:
+    // 0 = as the binlog carries it, trailing 0x00 bytes stripped (also every
+    // checkpoint written before this field existed), 1 = padded back to n
+    // bytes, the value a SELECT returns and the snapshot emits (cluster
+    // feature level 4). A session that pads but resumes an unpadded
+    // checkpoint re-snapshots once at a bumped epoch when a watched table has
+    // a BINARY column, and the promotion is one-way.
+    uint32 binary_rendering = 8;
 }
 
 // PostgresPosition pairs the replication LSN with optional snapshot
@@ -112,8 +120,13 @@ message SQLServerPosition {
 //   - absent from both fields: not yet started
 //   - present in last_pk_by_table: partially complete (resume WHERE pk > last_pk)
 //   - present in completed_tables: done, skip entirely on resume
+//
+// A cursor is the last row's entity key, and a single-column binary key is
+// its raw bytes, so every cursor field is bytes, not string: proto3 refuses
+// to marshal a string that is not valid UTF-8. The two share a wire format,
+// so a checkpoint written before the change decodes unchanged.
 message SnapshotProgress {
-    map<string, string> last_pk_by_table = 1;
+    map<string, bytes> last_pk_by_table = 1;
     repeated string completed_tables = 2;
     // chunks_by_table is the chunked-parallel snapshot state (0.8.0): a table
     // being read by N parallel range readers appears here with its FROZEN
@@ -150,10 +163,10 @@ message TableChunkProgress {
 // pk > lower and pk <= upper. An empty lower means "from the table start"
 // (no lower predicate); an empty upper means "to the table end".
 message ChunkCursor {
-    string lower = 1;
-    string upper = 2;
+    bytes lower = 1;
+    bytes upper = 2;
     // last_pk is the highest pk this chunk has durably flushed (the resume
     // cursor within the range); empty until the chunk's first checkpoint.
-    string last_pk = 3;
+    bytes last_pk = 3;
     bool done = 4;
 }

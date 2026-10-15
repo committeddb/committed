@@ -175,7 +175,8 @@ func snapshotTable(ctx context.Context, run SnapshotRun, table string) error {
 	progress := run.Progress
 	// lastPK, haveLastPK distinguish "no rows yet flushed" from "last flushed
 	// pk was the empty string".
-	lastPK, haveLastPK := progress.LastPkByTable[table]
+	lastPKBytes, haveLastPK := progress.LastPkByTable[table]
+	lastPK := string(lastPKBytes)
 	batchNum := 0
 	totalRows := 0
 	for {
@@ -247,7 +248,7 @@ func handOffSnapshotWindow(
 	for ri, row := range entities {
 		p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
 		if ri == len(entities)-1 || (ri+1)%stride == 0 {
-			progress.LastPkByTable[table] = string(row.Key)
+			progress.LastPkByTable[table] = row.Key
 			posBytes, err := encode(progress)
 			if err != nil {
 				return err
@@ -410,7 +411,7 @@ func readChunk(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rows, lastKey, count, err := planner.ReadChunkBatch(ctx, table, spec, lastPK, haveLastPK, c.Upper, batchSize)
+		rows, lastKey, count, err := planner.ReadChunkBatch(ctx, table, spec, lastPK, haveLastPK, string(c.Upper), batchSize)
 		if err != nil {
 			return err
 		}
@@ -444,11 +445,11 @@ func readChunk(
 // chunkStartCursor is where a chunk's enumeration resumes: its own last
 // handed-off key if it has one, else its lower bound, else the table start.
 func chunkStartCursor(c *dialectpb.ChunkCursor) (lastPK string, have bool) {
-	if c.LastPk != "" {
-		return c.LastPk, true
+	if len(c.LastPk) > 0 {
+		return string(c.LastPk), true
 	}
-	if c.Lower != "" {
-		return c.Lower, true
+	if len(c.Lower) > 0 {
+		return string(c.Lower), true
 	}
 	return "", false
 }
@@ -468,7 +469,7 @@ func handOffChunkWindow(
 	for ri, row := range rows {
 		p := &cluster.Proposal{Entities: []*cluster.Entity{row}}
 		if ri == len(rows)-1 || (ri+1)%stride == 0 {
-			plan.Chunks[chunk].LastPk = string(row.Key)
+			plan.Chunks[chunk].LastPk = row.Key
 			posBytes, err := encode(progress)
 			if err != nil {
 				return err
@@ -503,7 +504,7 @@ func StampGeneration(entities []*cluster.Entity, epoch uint64) {
 // cursors) resumes verbatim — never re-planned.
 func NewSnapshotProgress(seed *dialectpb.SnapshotProgress) *dialectpb.SnapshotProgress {
 	p := &dialectpb.SnapshotProgress{
-		LastPkByTable: map[string]string{},
+		LastPkByTable: map[string][]byte{},
 		ChunksByTable: map[string]*dialectpb.TableChunkProgress{},
 	}
 	if seed != nil {

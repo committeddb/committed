@@ -55,7 +55,7 @@ func TestHandOffSnapshotWindow_CheckpointStride(t *testing.T) {
 
 	const n = 25
 	entities := stressRows(n)
-	progress := &dialectpb.SnapshotProgress{LastPkByTable: map[string]string{}}
+	progress := &dialectpb.SnapshotProgress{LastPkByTable: map[string][]byte{}}
 	pr := make(chan *cluster.Proposal, n)
 
 	require.NoError(t, handOffSnapshotWindow(context.Background(), entities, "orders", progress, encodeProgressForTest, pr))
@@ -80,12 +80,12 @@ func TestHandOffSnapshotWindow_CheckpointStride(t *testing.T) {
 		}
 		require.NotEmptyf(t, p.Position, "row %d must carry the inline checkpoint", i)
 		prog := decodeProgressForTest(t, p.Position)
-		require.Equal(t, string(entities[i].Key), prog.LastPkByTable["orders"],
+		require.Equal(t, string(entities[i].Key), string(prog.LastPkByTable["orders"]),
 			"row %d checkpoint cursor must be THAT row's key, not the window's last", i)
 	}
 
 	// The live cursor ends at the window's last key — the caller's read cursor.
-	require.Equal(t, "k24", progress.LastPkByTable["orders"])
+	require.Equal(t, "k24", string(progress.LastPkByTable["orders"]))
 }
 
 // TestHandOffSnapshotWindow_ShortWindow: a window at or below the stride
@@ -97,7 +97,7 @@ func TestHandOffSnapshotWindow_ShortWindow(t *testing.T) {
 	defer func() { SnapshotCheckpointStride = old }()
 
 	entities := stressRows(4)
-	progress := &dialectpb.SnapshotProgress{LastPkByTable: map[string]string{}}
+	progress := &dialectpb.SnapshotProgress{LastPkByTable: map[string][]byte{}}
 	pr := make(chan *cluster.Proposal, 4)
 	require.NoError(t, handOffSnapshotWindow(context.Background(), entities, "orders", progress, encodeProgressForTest, pr))
 	close(pr)
@@ -126,12 +126,12 @@ func TestHandOffChunkWindow_CursorSafety(t *testing.T) {
 	const n = 25
 	rows := stressRows(n)
 	plan := &dialectpb.TableChunkProgress{Chunks: []*dialectpb.ChunkCursor{
-		{Upper: "b0"},
-		{Lower: "b0", Upper: "b1", LastPk: "other-cursor"},
-		{Lower: "b1"},
+		{Upper: []byte("b0")},
+		{Lower: []byte("b0"), Upper: []byte("b1"), LastPk: []byte("other-cursor")},
+		{Lower: []byte("b1")},
 	}}
 	progress := &dialectpb.SnapshotProgress{
-		LastPkByTable: map[string]string{},
+		LastPkByTable: map[string][]byte{},
 		ChunksByTable: map[string]*dialectpb.TableChunkProgress{"photos": plan},
 	}
 	pr := make(chan *cluster.Proposal, n)
@@ -147,7 +147,7 @@ func TestHandOffChunkWindow_CursorSafety(t *testing.T) {
 			cp := decodeProgressForTest(t, p.Position).ChunksByTable["photos"]
 			require.NotNil(t, cp)
 			checkpoints = append(checkpoints, struct{ rowKey, cursor, other string }{
-				string(p.Entities[0].Key), cp.Chunks[2].LastPk, cp.Chunks[1].LastPk,
+				string(p.Entities[0].Key), string(cp.Chunks[2].LastPk), string(cp.Chunks[1].LastPk),
 			})
 		}
 		i++
@@ -165,15 +165,15 @@ func TestHandOffChunkWindow_CursorSafety(t *testing.T) {
 // resume: the durable cursor wins, else the exclusive lower bound, else
 // unbounded (the table-start chunk).
 func TestChunkStartCursor(t *testing.T) {
-	lastPK, have := chunkStartCursor(&dialectpb.ChunkCursor{Lower: "100", Upper: "200", LastPk: "150"})
+	lastPK, have := chunkStartCursor(&dialectpb.ChunkCursor{Lower: []byte("100"), Upper: []byte("200"), LastPk: []byte("150")})
 	require.True(t, have)
 	require.Equal(t, "150", lastPK, "a checkpointed chunk resumes from its cursor")
 
-	lastPK, have = chunkStartCursor(&dialectpb.ChunkCursor{Lower: "100", Upper: "200"})
+	lastPK, have = chunkStartCursor(&dialectpb.ChunkCursor{Lower: []byte("100"), Upper: []byte("200")})
 	require.True(t, have)
 	require.Equal(t, "100", lastPK, "a fresh chunk starts at its lower bound")
 
-	lastPK, have = chunkStartCursor(&dialectpb.ChunkCursor{Upper: "200"})
+	lastPK, have = chunkStartCursor(&dialectpb.ChunkCursor{Upper: []byte("200")})
 	require.False(t, have)
 	require.Empty(t, lastPK, "the first chunk starts unbounded below")
 }
@@ -185,15 +185,15 @@ func TestChunkStartCursor(t *testing.T) {
 // table's frozen plan clones too — it resumes verbatim, never re-planned.
 func TestNewSnapshotProgressPreservesPartialBackfillAndPlans(t *testing.T) {
 	seed := &dialectpb.SnapshotProgress{
-		LastPkByTable:   map[string]string{"b": "cursor"},
+		LastPkByTable:   map[string][]byte{"b": []byte("cursor")},
 		CompletedTables: []string{"a"},
 		PartialBackfill: true,
-		ChunksByTable:   map[string]*dialectpb.TableChunkProgress{"c": {Chunks: []*dialectpb.ChunkCursor{{Upper: "x"}}}},
+		ChunksByTable:   map[string]*dialectpb.TableChunkProgress{"c": {Chunks: []*dialectpb.ChunkCursor{{Upper: []byte("x")}}}},
 	}
 	got := NewSnapshotProgress(seed)
 	require.True(t, got.PartialBackfill, "cloning must carry the partial-backfill mark")
 	require.Equal(t, []string{"a"}, got.CompletedTables)
-	require.Equal(t, "cursor", got.LastPkByTable["b"])
+	require.Equal(t, "cursor", string(got.LastPkByTable["b"]))
 	require.Same(t, seed.ChunksByTable["c"], got.ChunksByTable["c"], "the frozen plan resumes verbatim")
 	fresh := NewSnapshotProgress(nil)
 	require.False(t, fresh.PartialBackfill)

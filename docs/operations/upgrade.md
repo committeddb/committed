@@ -13,8 +13,8 @@ same, and its on-disk state is reused in place.
 ## Upgrading from 0.8.2 to 0.8.3
 
 Follow the rolling binary-upgrade procedure below; no configuration changes.
-0.8.3 raises the cluster feature level to 4 for one change, which activates
-once every node runs 0.8.3; the changes after it need no feature level and
+0.8.3 raises the cluster feature level to 4 for two changes, which activate
+once every node runs 0.8.3; the changes after them need no feature level and
 take effect on each node as it upgrades:
 
 - **PostgreSQL snapshot text:** the snapshot renders `boolean`, `char(n)`,
@@ -25,10 +25,23 @@ take effect on each node as it upgrades:
   rows. A PostgreSQL ingestable with a `char(n)` or `inet` column, or a
   `boolean` in `primaryKey`, re-snapshots once after the roll, which re-keys
   keyed destinations and removes the stale rows; keyless destinations keep
-  both spellings until rebuilt. Other PostgreSQL ingestables, and MySQL and
-  SQL Server ones, are unaffected.
+  both spellings until rebuilt. Other PostgreSQL ingestables are unaffected.
+- **MySQL `BINARY(n)` values:** the change stream pads a `BINARY(n)` value
+  back to `n` bytes, as the snapshot reads it. MySQL's binary log drops the
+  trailing zero bytes, so a value ending in them was keyed and rendered
+  differently by the stream than by the snapshot, and the destination kept
+  stale or duplicate rows. A MySQL ingestable whose tables have a `BINARY`
+  column re-snapshots once after the roll, which re-keys keyed destinations
+  and removes the stale rows; keyless destinations keep both spellings until
+  rebuilt. Other MySQL ingestables are unaffected.
 - **Backups:** an archive taken on 0.8.3 records feature level 4, which a
   0.8.2 binary refuses to restore.
+- **Binary primary keys snapshot.** A MySQL or SQL Server table whose
+  primary key is a single binary column (`BINARY`, `VARBINARY`, a UUID
+  stored as `BINARY(16)`) holding bytes that are not valid UTF-8 failed its
+  snapshot and retried forever. It now snapshots, including through
+  parallel snapshot readers. A rolled-back node cannot read such a
+  table's mid-snapshot checkpoint and retries until it is upgraded again.
 - **A destination with rows and no note stops.** 0.8.0 through 0.8.2 gave
   every SQL and Iceberg destination without a rendering note one on first
   contact (see
@@ -324,7 +337,9 @@ After the last node:
 > would resume it rendering RFC 3339 instants again — treat it as one-way.
 > Likewise a PostgreSQL ingestable that has re-keyed to the stream's text
 > rendering (feature level 4, 0.8.3): a 0.8.2 binary would snapshot new
-> tables the old way again.
+> tables the old way again. And a MySQL ingestable that has re-keyed to
+> padded `BINARY(n)` values (feature level 4, 0.8.3): a 0.8.2 binary would
+> stream them stripped again.
 > Once a type declares `onSupersede = "scrub"` (feature level 3, 0.8.2), do
 > not roll a node back to 0.8.1: the older binary drops the declaration and
 > keeps the superseded versions every 0.8.2 node scrubs, so that node's log

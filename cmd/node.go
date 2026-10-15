@@ -654,11 +654,11 @@ func dbParser() *syncsql.DBParser {
 
 func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader, features ingestablesql.FeatureReader) *ingestablesql.IngestableParser {
 	p := ingestablesql.NewIngestableParser(t)
-	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
-	// The PostgreSQL snapshot text rendering and the SQL Server
-	// uniqueidentifier and date/time renderings are gated on the cluster
-	// feature level (a mixed-version cluster must not spell one key two ways),
-	// so both read the db's gate.
+	// The MySQL binlog BINARY(n) padding, the PostgreSQL snapshot text
+	// rendering and the SQL Server uniqueidentifier and date/time renderings
+	// are gated on the cluster feature level (a mixed-version cluster must not
+	// spell one key two ways), so all three read the db's gate.
+	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{Features: features}
 	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{Features: features}
 	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{Features: features}
 	// Wire the delete-surviving per-topic refresh-epoch floor so a same-topic

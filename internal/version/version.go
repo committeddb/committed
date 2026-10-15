@@ -104,6 +104,13 @@ var (
 //     keeps the `::text` cast until the minimum reaches 4; then a session
 //     resuming an old-style checkpoint whose tables have such a column
 //     re-snapshots once. Once by output function it stays so.
+//   - MySQL BINARY(n) padding on the binlog path
+//     (mysql.featureLevelBinaryPadding): a BINARY(n) value padded back to n
+//     bytes, as the snapshot reads it, where the binlog strips its trailing
+//     0x00 bytes. The value is in entity KEYS, so every node streams it
+//     stripped until the minimum reaches 4; then a session resuming a
+//     stripped checkpoint whose tables have a BINARY column re-snapshots
+//     once. Once padded it stays padded.
 const FeatureLevel uint64 = 4
 
 // Info is the JSON shape returned by /version and printed by the

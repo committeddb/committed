@@ -22,7 +22,7 @@ func TestPostgresStatusSnapshotPhase(t *testing.T) {
 
 	progress := &dialectpb.SnapshotProgress{
 		CompletedTables: []string{"region"},
-		LastPkByTable:   map[string]string{"nation": "7"},
+		LastPkByTable:   map[string][]byte{"nation": []byte("7")},
 	}
 	pos, err := encodePosition(pglogrepl.LSN(0x1A2B3C8), progress, 1, textRenderingOutput)
 	require.NoError(t, err)

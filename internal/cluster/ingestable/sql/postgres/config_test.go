@@ -212,7 +212,7 @@ func TestEncodeDecodePositionRoundtrip(t *testing.T) {
 			name: "lsn_with_progress",
 			lsn:  pglogrepl.LSN(0xDEADBEEF),
 			progress: &dialectpb.SnapshotProgress{
-				LastPkByTable:   map[string]string{"orders": "999", "items": "abc"},
+				LastPkByTable:   map[string][]byte{"orders": []byte("999"), "items": []byte("abc")},
 				CompletedTables: []string{"customers"},
 			},
 		},
@@ -220,7 +220,7 @@ func TestEncodeDecodePositionRoundtrip(t *testing.T) {
 			name: "zero_lsn_with_progress",
 			lsn:  0,
 			progress: &dialectpb.SnapshotProgress{
-				LastPkByTable: map[string]string{"t": "k"},
+				LastPkByTable: map[string][]byte{"t": []byte("k")},
 			},
 		},
 		{
