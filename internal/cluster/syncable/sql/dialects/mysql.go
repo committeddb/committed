@@ -411,6 +411,11 @@ func (d *MySQLDialect) DestinationDeleteSQL() string {
 	return fmt.Sprintf("DELETE FROM %s WHERE table_name = ?", mysqlIdent.Table(sql.DestinationsTable))
 }
 
+// HasRowsSQL implements Dialect.
+func (d *MySQLDialect) HasRowsSQL(table string) string {
+	return fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", mysqlIdent.Table(table))
+}
+
 // CreateRematerializationSweepSQL implements Dialect: delete rows this
 // replay never re-emitted (stamp below the epoch).
 func (d *MySQLDialect) CreateRematerializationSweepSQL(config *sql.Config) string {

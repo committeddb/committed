@@ -206,6 +206,10 @@ func (d *SQLMockDialect) DestinationDeleteSQL() string {
 	return (&dialects.MySQLDialect{}).DestinationDeleteSQL()
 }
 
+func (d *SQLMockDialect) HasRowsSQL(table string) string {
+	return (&dialects.MySQLDialect{}).HasRowsSQL(table)
+}
+
 func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {
 	return d.db, nil
 }

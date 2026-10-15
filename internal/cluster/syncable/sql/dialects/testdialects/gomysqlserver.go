@@ -79,6 +79,10 @@ func (d *GoMySQLServerDialect) DestinationDeleteSQL() string {
 	return (&dialects.MySQLDialect{}).DestinationDeleteSQL()
 }
 
+func (d *GoMySQLServerDialect) HasRowsSQL(table string) string {
+	return (&dialects.MySQLDialect{}).HasRowsSQL(table)
+}
+
 func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }

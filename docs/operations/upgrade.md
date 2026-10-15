@@ -10,6 +10,27 @@ moving on. A node only ever changes its **binary** — its
 `COMMITTED_*` environment (node id, peers, data directory) stays the
 same, and its on-disk state is reused in place.
 
+## Upgrading from 0.8.2 to 0.8.3
+
+Follow the rolling binary-upgrade procedure below; no configuration changes.
+
+- **A destination with rows and no note stops.** 0.8.0 through 0.8.2 gave
+  every SQL and Iceberg destination without a rendering note one on first
+  contact (see
+  [api-compatibility.md](../architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+  From 0.8.3, a syncable that has already written to its destination and
+  finds rows there but no note parks rather than guessing which version
+  wrote them. That happens when the destination database is restored from a
+  backup taken before 0.8.0, or the table is rebuilt by hand. The status
+  names the fix: `rematerialize` for a keyed mirror, or `DELETE`, drop the
+  table yourself, and re-POST. An empty table, or one a new syncable is
+  pointed at before it has written anything, still gets its note and is
+  served.
+- **Coming from before 0.8.0?** Upgrade to 0.8.2 first and let every
+  syncable run, so each destination gets its note, then upgrade to 0.8.3.
+  Going straight to 0.8.3 parks every syncable whose table already has rows,
+  and each then needs the fix above (a full replay from the log).
+
 ## Upgrading from 0.8.1 to 0.8.2
 
 Follow the rolling binary-upgrade procedure below; no configuration changes.
@@ -415,7 +436,9 @@ same quorum rule applies in reverse.
   `committed__destinations` table in the destination database (see
   [api-compatibility.md](../architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
   Nothing stops on this upgrade: existing tables get the note the first
-  time 0.8.0 touches them. The note also records whether committed created
+  time 0.8.0 touches them (0.8.3 stops a table with rows and no note
+  instead; see [Upgrading from 0.8.2 to 0.8.3](#upgrading-from-082-to-083)).
+  The note also records whether committed created
   the table, and a table that exists before the upgrade is recorded as one
   it did not: from then on `DELETE /v1/syncable/{id}` leaves that table in
   place (before 0.8.0 it dropped it) — drop it yourself when you mean to.

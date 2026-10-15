@@ -651,7 +651,10 @@ type StageStat struct {
 // rendering version it was last converged under, next to those rows (so it
 // moves, drops, and restores with them). The worker verifies the stamp before
 // it syncs and parks on a mismatch; a rematerialization re-stamps on
-// completion (db/rendering_stamp.go). Resolved through the Unwrap chain
+// completion (db/rendering_stamp.go). An unstamped destination is stamped
+// when committed has not written to it (checkpoint 0) or it holds no rows;
+// one holding rows committed wrote under no stamp (a restore from a
+// pre-stamp backup, a hand rebuild) parks. Resolved through the Unwrap chain
 // (SyncableAs), so mode wrappers forward it.
 type RenderingStamped interface {
 	// RenderingVersion is the version this binary renders.
@@ -661,6 +664,9 @@ type RenderingStamped interface {
 	RenderingStamp(ctx context.Context) (version uint64, present bool, err error)
 	// StampRendering records RenderingVersion as the destination's stamp.
 	StampRendering(ctx context.Context) error
+	// DestinationHasRows reports whether the destination, or any helper
+	// table committed keeps beside it, holds a row.
+	DestinationHasRows(ctx context.Context) (bool, error)
 }
 
 //counterfeiter:generate . SyncableParser

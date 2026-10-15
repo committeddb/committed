@@ -722,7 +722,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			// The destination's rendering stamp gates serving: rows rendered
 			// by another version must not be written into (rendering_stamp.go).
 			// A pending rematerialization is exempt — its replay converges them.
-			if v := db.verifyRenderingStamp(ctx, id, s); v == renderingPark {
+			if v := db.verifyRenderingStamp(ctx, id, s, cp); v == renderingPark {
 				return nil
 			} else if v == renderingRetry {
 				break // idle backoff, then retry — never a hot loop
@@ -1262,7 +1262,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// The destination's rendering stamp gates serving: rows rendered
 			// by another version must not be written into (rendering_stamp.go).
 			// A pending rematerialization is exempt — its replay converges them.
-			if v := db.verifyRenderingStamp(ctx, id, s); v == renderingPark {
+			if v := db.verifyRenderingStamp(ctx, id, s, cp); v == renderingPark {
 				return nil
 			} else if v == renderingRetry {
 				break // idle backoff, then retry — never a hot loop

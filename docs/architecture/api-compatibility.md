@@ -203,6 +203,14 @@ Every time a worker starts serving a syncable it reads the note first:
   updates the note), or `DELETE` and re-POST for a table that cannot be
   rewritten in place. This is deliberate rather than automatic because it
   touches a table your readers are using.
+- There is no note: if the syncable has not written yet, or the table is
+  empty, the worker writes the note and serves. If the syncable has
+  written and the table holds rows (a database restored from a backup
+  taken before 0.8.0, or a table rebuilt by hand), committed cannot tell
+  which version wrote them, so the syncable **stops** the same way. The
+  fix is `rematerialize` for a keyed table; otherwise `DELETE`, drop the
+  table yourself (with no note, committed cannot tell it created it), and
+  re-POST.
 
 **Iceberg tables** carry the same note as table properties
 (`committed.rendering-version`, and `committed.owned` on the tables and

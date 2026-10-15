@@ -74,6 +74,9 @@ type Dialect interface {
 	DestinationDisownSQL() string
 	// DestinationDeleteSQL deletes the row for table_name (one placeholder).
 	DestinationDeleteSQL() string
+	// HasRowsSQL selects at most one row from table (no placeholders): the
+	// probe an unstamped destination answers before it is stamped.
+	HasRowsSQL(table string) string
 	// CreateEnrichedUpsertSQL is CreateSQL for a projection rule with spine
 	// lookup enrichments: enriched columns' VALUES entries are scalar
 	// subqueries against the lookup dimension table — `(SELECT

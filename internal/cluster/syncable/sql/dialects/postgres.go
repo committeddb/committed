@@ -410,6 +410,11 @@ func (d *PostgreSQLDialect) DestinationDeleteSQL() string {
 	return fmt.Sprintf("DELETE FROM %s WHERE table_name = $1", pgIdent.Table(sql.DestinationsTable))
 }
 
+// HasRowsSQL implements Dialect.
+func (d *PostgreSQLDialect) HasRowsSQL(table string) string {
+	return fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", pgIdent.Table(table))
+}
+
 // CreateRematerializationSweepSQL implements Dialect: delete rows this
 // replay never re-emitted (stamp below the epoch).
 func (d *PostgreSQLDialect) CreateRematerializationSweepSQL(config *sql.Config) string {
