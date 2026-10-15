@@ -6,14 +6,13 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"os"
 	"strconv"
 
-	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/jsonpaths"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	"github.com/committeddb/committed/internal/cluster/syncable/stages"
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
@@ -825,6 +824,24 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	if p.stages != nil {
 		committed := false
 		berr := p.stageStore.Update(func(stx *stagestore.Tx) error {
+			if len(p.sources) == 0 {
+				// Every table source reads a stage: fold the batch and
+				// drain once, so a key the batch touches many times
+				// refolds once (see stages.Graph.FoldActuals). With
+				// topic-fed sources too, each Actual's stage deltas must
+				// land in step with its direct writes, so fold one at a
+				// time below.
+				p.syncIndex = as[len(as)-1].Index
+				if err := p.foldStagesBatchTx(ctx, tx, stx, as); err != nil {
+					return err
+				}
+				zap.L().Debug("sql projection batch committing", zap.Int("batch_size", len(as)))
+				if err := tx.Commit(); err != nil {
+					return execFailure("[projection.apply] commit", err, p.dialect.IsPermanent(err))
+				}
+				committed = true
+				return nil
+			}
 			for _, a := range as {
 				p.syncIndex = a.Index
 				if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
@@ -1125,12 +1142,7 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 			case s.Expr != "":
 				v, err := evalExpr(s.compiled, data, parent)
 				if err == nil {
-					if r, ok := v.(*big.Rat); ok {
-						var text string
-						if text, err = formatRat(r); err == nil {
-							v = json.Number(text)
-						}
-					}
+					v, err = materializeExprValue(v)
 				}
 				if err != nil {
 					return true, "", cluster.Permanent(fmt.Errorf("[projection.apply] expr for column %q: %w", s.Column, err))
@@ -1283,14 +1295,14 @@ func (p *Projection) applyAggregate(ctx context.Context, tx *gosql.Tx, src *proj
 		return err
 	}
 
-	elementKey, err := jsonpath.Get(ag.elementKey, jsonData)
+	elementKey, err := jsonpaths.Get(ag.elementKey, jsonData)
 	if err != nil {
 		return ag.elementKeyTracker.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] elementKey [%s]: %w", ag.elementKey, err))
 	}
 	ag.elementKeyTracker.Succeeded()
 	element := make(map[string]any, len(ag.fields))
 	for _, f := range ag.fields {
-		v, err := jsonpath.Get(f.From, jsonData)
+		v, err := jsonpaths.Get(f.From, jsonData)
 		if err != nil {
 			return f.tracker.Classify(p.syncIndex, fmt.Errorf("[projection.aggregate] element field %q from [%s]: %w", f.Field, f.From, err))
 		}
@@ -1552,6 +1564,24 @@ func (p *Projection) foldStagesTx(ctx context.Context, tx *gosql.Tx, stx *stages
 	return p.foldEntitiesTx(stx, a)
 }
 
+// foldStagesBatchTx is foldStagesTx for a run of Actuals drained once
+// (stages.Graph.FoldActuals); the frontier advances to the last.
+func (p *Projection) foldStagesBatchTx(ctx context.Context, tx *gosql.Tx, stx *stagestore.Tx, as []*cluster.Actual) error {
+	p.stages.OnDelta = func(stage string, outKey []byte, obj any, live bool) error {
+		for _, src := range p.stageSinks[stage] {
+			if err := p.applyStageDelta(ctx, tx, stx, src, outKey, obj, live); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	defer func() { p.stages.OnDelta = nil }()
+	if err := p.stages.FoldActuals(stx, as); err != nil {
+		return err
+	}
+	return stx.SetFrontier(as[len(as)-1].Index)
+}
+
 // StageStats implements cluster.StageIntrospector: each declared stage's
 // current out-key count (store truth) plus its in-memory flow counters.
 func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
@@ -1568,7 +1598,11 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 				return err
 			}
 			fc := flows[name]
-			out[name] = cluster.StageStat{Keys: n, Inputs: fc.Inputs, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, Joins: joinStats(fc.Joins)}
+			out[name] = cluster.StageStat{
+				Keys: n, Inputs: fc.Inputs, InputsBySource: fc.InputsBySource, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, HavingRejected: fc.HavingRejected,
+				WindowRowsRecomputed: fc.WindowRowsRecomputed, WindowLargestPartition: fc.WindowLargestPartition,
+				Joins: joinStats(fc.Joins),
+			}
 		}
 		return nil
 	})
@@ -1622,13 +1656,19 @@ func (p *Projection) StageFrontier() (uint64, bool, error) {
 	return f, true, err
 }
 
-// FoldStagesOnly implements cluster.StageRecoverer: fold one Actual into
-// stage state with sink emission suppressed (OnDelta stays nil) — the
-// recovery pass below the checkpoint, where every output is already
-// durably applied.
-func (p *Projection) FoldStagesOnly(a *cluster.Actual) error {
+// FoldStagesOnly implements cluster.StageRecoverer: fold a run of Actuals
+// into stage state, draining once, with sink emission suppressed (OnDelta
+// stays nil) — the recovery pass below the checkpoint, where every output
+// is already durably applied, so only the state the run ends at matters.
+func (p *Projection) FoldStagesOnly(as []*cluster.Actual) error {
+	if len(as) == 0 {
+		return nil
+	}
 	return p.stageStore.Update(func(stx *stagestore.Tx) error {
-		return p.foldEntitiesTx(stx, a)
+		if err := p.stages.FoldActuals(stx, as); err != nil {
+			return err
+		}
+		return stx.SetFrontier(as[len(as)-1].Index)
 	})
 }
 
@@ -1792,7 +1832,7 @@ func (p *Projection) applyLookup(ctx context.Context, tx *gosql.Tx, src *project
 
 	fields := make(map[string]any, len(lk.fields))
 	for _, f := range lk.fields {
-		v, err := jsonpath.Get(f.From, jsonData)
+		v, err := jsonpaths.Get(f.From, jsonData)
 		if err != nil {
 			return f.tracker.Classify(p.syncIndex, fmt.Errorf("[projection.lookup] field %q from [%s]: %w", f.Field, f.From, err))
 		}

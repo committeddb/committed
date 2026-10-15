@@ -60,6 +60,9 @@ func (r Result) Entity(key string) *cluster.Entity {
 // wait ends when the keys are seen, and Position best-effort carries the
 // last checkpoint observed after that point (possibly nil).
 //
+// Await reports every proposal it receives durable (cluster.Proposal
+// .OnDurable), as a worker that commits each one would.
+//
 // On timeout it fails the test naming exactly what is still missing.
 func Await(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position,
 	timeout time.Duration, wantPos func(cluster.Position) bool, wantKeys ...string,
@@ -94,6 +97,7 @@ func Await(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.Position
 	for !keysDone() || (wantPos != nil && !posDone) {
 		select {
 		case p := <-pr:
+			p.Durable() // the caller stands in for a worker that commits what it receives
 			res.Proposals = append(res.Proposals, p)
 			for _, e := range p.Entities {
 				res.Seen[string(e.Key)] = true
@@ -162,6 +166,7 @@ func AwaitRefresh(t *testing.T, pr <-chan *cluster.Proposal, po <-chan cluster.P
 	for !keysDone() || !markerDone || !posDone {
 		select {
 		case p := <-pr:
+			p.Durable() // the caller stands in for a worker that commits what it receives
 			res.Proposals = append(res.Proposals, p)
 			for _, e := range p.Entities {
 				if e.IsRefreshBoundary() {

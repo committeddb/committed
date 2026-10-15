@@ -10,8 +10,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/syncable/http"
 )
 
-// Pins decode tolerances deployed webhook configs may depend on (the
-// reference corpus from .claude-scratch/tickets/viper-containment.md):
+// Pins decode tolerances deployed webhook configs may depend on:
 // case-variant section/field names — including inside header entries —
 // keep decoding, while header values keep their case (they are user
 // data). Written against the current pipeline; must stay green across

@@ -55,9 +55,10 @@ const (
 	// endpoints must not hang on an unreachable source.
 	statusQueryTimeout = 5 * time.Second
 	// defaultPollInterval is the CT poll cadence when the config sets none.
-	// Seconds-scale, comparable to the sync workers' backoff ceiling: read
-	// models trail the source by roughly this much at rest.
-	defaultPollInterval = 3 * time.Second
+	// Read models trail the source by up to this much at rest, so it stays
+	// well inside the sub-second commit-to-row the other engines deliver; an
+	// idle poll costs 1 + len(tables) tiny catalog queries (readCTState).
+	defaultPollInterval = 250 * time.Millisecond
 	// ctOwnerProperty is the extended-property marker committed stamps on a
 	// table whose CT it enabled. Ownership must be REMEMBERED, not inferred —
 	// CT is a shared table property, not an owned named object like a PG
@@ -475,7 +476,7 @@ type FeatureReader interface {
 // uniqueidentifier rendering. The spelling is in entity KEYS: a cluster where
 // one owner renders uppercase and the next lowercase would key the same row
 // twice, so every node keeps the pre-0.8.0 uppercase rendering until every
-// member announces level 2. See version.FeatureLevel and sessionUUIDRendering.
+// member announces level 2. See version.FeatureLevel and sessionRendering.
 const featureLevelCanonicalUUID uint64 = 2
 
 // The two uniqueidentifier renderings a checkpoint can record
@@ -490,23 +491,43 @@ func (d *SQLServerDialect) canonicalUUIDEnabled() bool {
 	return d.Features == nil || d.Features.FeatureEnabled(featureLevelCanonicalUUID)
 }
 
-// sessionUUIDRendering decides one session's uniqueidentifier rendering from
-// the checkpoint it resumes and the cluster gate, and whether the session must
-// first re-snapshot (rerender): the checkpoint was spelled the OTHER way, so
-// every uniqueidentifier key and payload field on the sink is the old spelling
-// and only a full re-emission at a bumped epoch (whose closing markers sweep
-// the old rows on keyed sinks) re-keys it. The promotion is one-way: a
-// canonical checkpoint stays canonical even if the gate reads closed (a
-// member mid-join announces level 0 for a moment), so a membership change can
-// never flip a sink back to uppercase.
-func sessionUUIDRendering(checkpoint uint32, hasCheckpoint, gateOpen bool) (rendering uint32, rerender bool) {
-	if checkpoint == uuidRenderingCanonical {
-		return uuidRenderingCanonical, false
+// featureLevelTypedTemporal gates rendering the date/time types by declared
+// type (renderTemporal). Like the uniqueidentifier spelling it reaches entity
+// KEYS (a temporal primary key), so a mixed cluster must never produce both:
+// every node keeps the legacy rendering until every member announces level 3.
+const featureLevelTypedTemporal uint64 = 3
+
+// The two temporal renderings a checkpoint can record
+// (SQLServerPosition.temporal_rendering).
+const (
+	temporalRenderingLegacy uint32 = 0 // the driver's time.Time as an RFC 3339 instant; every pre-field checkpoint
+	temporalRenderingTyped  uint32 = 1 // by declared type: what PostgreSQL and MySQL ingest the same values as
+)
+
+// typedTemporalEnabled reports whether this node may render temporal types
+// by declared type.
+func (d *SQLServerDialect) typedTemporalEnabled() bool {
+	return d.Features == nil || d.Features.FeatureEnabled(featureLevelTypedTemporal)
+}
+
+// sessionRendering decides one session's rendering of a value family
+// (uniqueidentifier, temporal) from the checkpoint it resumes and that
+// rendering's cluster gate — 0 the legacy rendering, 1 the new one — and
+// whether the session must first re-snapshot (rerender): the checkpoint was
+// rendered the OTHER way, so every such key and payload field on the sink is
+// the old rendering and only a full re-emission at a bumped epoch (whose
+// closing markers sweep the old rows on keyed sinks) re-keys it. The
+// promotion is one-way: a promoted checkpoint stays promoted even if the gate
+// reads closed (a member mid-join announces level 0 for a moment), so a
+// membership change can never flip a sink back.
+func sessionRendering(checkpoint uint32, hasCheckpoint, gateOpen bool) (rendering uint32, rerender bool) {
+	if checkpoint == 1 {
+		return 1, false
 	}
 	if gateOpen {
-		return uuidRenderingCanonical, hasCheckpoint
+		return 1, hasCheckpoint
 	}
-	return uuidRenderingLegacy, false
+	return 0, false
 }
 
 // renderUniqueidentifier spells a GUID for this session: the driver's
@@ -518,16 +539,47 @@ func renderUniqueidentifier(u mssql.UniqueIdentifier, canonical bool) string {
 	return u.String()
 }
 
+// renderings is one session's choice per value family (see sessionRendering).
+type renderings struct {
+	canonicalUUID bool
+	typedTemporal bool
+}
+
+// colRendering is what scanRowValues needs to know per column beyond the
+// JSON category: which are uniqueidentifiers (the mixed-endian byte fix),
+// and which are date/time types, with their declared fractional scale.
+type colRendering struct {
+	uuid     map[string]bool
+	temporal map[string]temporalCol
+}
+
+type temporalCol struct {
+	typ   string // DATE, TIME, DATETIME, DATETIME2, SMALLDATETIME, DATETIMEOFFSET
+	scale int    // fractional-second digits
+}
+
 // columnCategories maps a result set's driver type metadata onto the shared
 // JSON categories, keyed by LOWERCASED column name (the shared decode
-// contract). uniqueidentifier is flagged for the mixed-endian byte fix (see
-// scanRowValues).
-func columnCategories(types []*gosql.ColumnType) (cats map[string]sql.JSONCategory, uuidCols map[string]bool) {
+// contract), and records the per-column rendering facts (see colRendering).
+func columnCategories(types []*gosql.ColumnType) (cats map[string]sql.JSONCategory, cr colRendering) {
 	cats = make(map[string]sql.JSONCategory, len(types))
-	uuidCols = make(map[string]bool)
+	cr = colRendering{uuid: map[string]bool{}, temporal: map[string]temporalCol{}}
 	for _, t := range types {
 		name := strings.ToLower(t.Name())
-		switch strings.ToUpper(t.DatabaseTypeName()) {
+		typ := strings.ToUpper(t.DatabaseTypeName())
+		switch typ {
+		case "DATE", "SMALLDATETIME":
+			cr.temporal[name] = temporalCol{typ: typ}
+		case "DATETIME":
+			cr.temporal[name] = temporalCol{typ: typ, scale: 3} // 1/300 s, shown to the millisecond
+		case "TIME", "DATETIME2", "DATETIMEOFFSET":
+			scale := 7 // the type's default
+			if _, s, ok := t.DecimalSize(); ok {
+				scale = int(s)
+			}
+			cr.temporal[name] = temporalCol{typ: typ, scale: scale}
+		}
+		switch typ {
 		case "BIT":
 			cats[name] = sql.CatBool
 		case "TINYINT", "SMALLINT", "INT", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "REAL", "MONEY", "SMALLMONEY":
@@ -536,7 +588,7 @@ func columnCategories(types []*gosql.ColumnType) (cats map[string]sql.JSONCatego
 			cats[name] = sql.CatBinary
 		case "UNIQUEIDENTIFIER":
 			cats[name] = sql.CatText
-			uuidCols[name] = true
+			cr.uuid[name] = true
 		default:
 			// char/varchar/nchar/nvarchar/text/ntext, date/time/datetime*,
 			// datetimeoffset, xml, sql_variant → text. JSON-in-nvarchar needs
@@ -544,15 +596,46 @@ func columnCategories(types []*gosql.ColumnType) (cats map[string]sql.JSONCatego
 			cats[name] = sql.CatText
 		}
 	}
-	return cats, uuidCols
+	return cats, cr
+}
+
+// renderTemporal spells a date/time value by its declared type, as the
+// source shows it and as PostgreSQL and MySQL ingest the same values: a date
+// as YYYY-MM-DD, a time of day as HH:MM:SS, the zone-less datetimes as
+// YYYY-MM-DD HH:MM:SS with no zone claim, and a datetimeoffset with its
+// offset (+05:30, +00:00). Fractions carry the declared scale, zero-padded
+// (datetime2(3) is .780) — SQL Server's own rendering; datetime's 1/300 s
+// ticks round to the millisecond it displays (.127, not .126).
+func renderTemporal(t time.Time, c temporalCol) string {
+	if c.typ == "DATETIME" {
+		t = t.Round(time.Millisecond)
+	}
+	frac := ""
+	if c.scale > 0 {
+		frac = "." + fmt.Sprintf("%09d", t.Nanosecond())[:min(c.scale, 9)]
+	}
+	switch c.typ {
+	case "DATE":
+		return t.Format("2006-01-02")
+	case "TIME":
+		return t.Format("15:04:05") + frac
+	case "SMALLDATETIME":
+		return t.Format("2006-01-02 15:04:05")
+	case "DATETIMEOFFSET":
+		return t.Format("2006-01-02 15:04:05") + frac + t.Format("-07:00")
+	default: // DATETIME, DATETIME2
+		return t.Format("2006-01-02 15:04:05") + frac
+	}
 }
 
 // scanRowValues scans the current row into a lowercased-column value map,
-// fixing the uniqueidentifier representation: the driver hands GUIDs back as
-// their 16 raw mixed-endian bytes, which would render as garbage text —
-// convert to the session's string form the same way on every read path so
-// snapshot and CT payloads agree byte-for-byte (see renderUniqueidentifier).
-func scanRowValues(rows *gosql.Rows, cols []string, uuidCols map[string]bool, canonicalUUID bool) (map[string]any, error) {
+// fixing the uniqueidentifier representation — the driver hands GUIDs back
+// as their 16 raw mixed-endian bytes, which would render as garbage text —
+// and, under the typed temporal rendering, spelling date/time values by
+// declared type (the driver hands every one back as a time.Time). Both
+// convert to the session's string form the same way on every read path, so
+// snapshot and CT payloads — and keys — agree byte-for-byte.
+func scanRowValues(rows *gosql.Rows, cols []string, cr colRendering, r renderings) (map[string]any, error) {
 	vals := make([]any, len(cols))
 	ptrs := make([]any, len(cols))
 	for i := range vals {
@@ -565,12 +648,17 @@ func scanRowValues(rows *gosql.Rows, cols []string, uuidCols map[string]bool, ca
 	for i, c := range cols {
 		name := strings.ToLower(c)
 		v := vals[i]
-		if uuidCols[name] {
+		if cr.uuid[name] {
 			if b, ok := v.([]byte); ok && len(b) == 16 {
 				var u mssql.UniqueIdentifier
 				if err := u.Scan(b); err == nil {
-					v = renderUniqueidentifier(u, canonicalUUID)
+					v = renderUniqueidentifier(u, r.canonicalUUID)
 				}
+			}
+		}
+		if tc, ok := cr.temporal[name]; ok && r.typedTemporal {
+			if t, ok := v.(time.Time); ok {
+				v = renderTemporal(t, tc)
 			}
 		}
 		m[name] = v

@@ -81,7 +81,7 @@ var ErrCompactionDeferred = errors.New("raft-log compaction deferred: a layout f
 // domain package so the sync worker can classify a corrupt read as fatal without
 // importing the wal package (which imports db — an import cycle). A torn tail is
 // repairable with `committed wal repair`; an in-record bitflip needs a rebuild
-// from a healthy replica. See docs/operations/rebuild.md.
+// from a healthy replica.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
 
 // ErrNotSyncableOwner is returned by RebuildSyncable / RematerializeSyncable
@@ -148,9 +148,7 @@ type ShouldSnapshot bool
 //     dedup key) emits DUPLICATE downstream events. The committed framework
 //     does not prevent that today — sinks that cannot be made idempotent are
 //     the operator's responsibility (wrap in an idempotency-key layer, a
-//     dedup table, or a HEAD-before-POST check). A future opt-in two-phase
-//     mechanism may bound the duplicate window; see
-//     .claude-scratch/tickets/sync-two-phase-syncable.md.
+//     dedup table, or a HEAD-before-POST check).
 //
 //   - An Actual is a TRANSACTION. Sync MUST apply its entities atomically —
 //     all or none, in one destination transaction (or one delivery) — and a
@@ -605,14 +603,28 @@ type StageIntrospector interface {
 type StageStat struct {
 	Keys   int   `json:"keys"`
 	Inputs int64 `json:"inputs"`
-	// Fanned counts elements produced by a forEach stage's fan (omitted
-	// for plain stages).
+	// InputsBySource splits inputs per listed source for a stage whose
+	// from is a list (UNION ALL); omitted for single-source stages.
+	InputsBySource map[string]int64 `json:"inputsBySource,omitempty"`
+	// Fanned counts elements produced by a forEach stage's fan, or the
+	// pairs a fan join folded (omitted for plain stages).
 	Fanned int64 `json:"fanned,omitempty"`
 	// UnkeyedDeletes counts delete-shaped inputs whose key could not
 	// resolve or render — LOST RETRACTIONS: the key each meant to kill
 	// stays live. Nonzero answers "the delete event arrived but the key
 	// is still live" in one read. Omitted while zero.
 	UnkeyedDeletes int64 `json:"unkeyedDeletes,omitempty"`
+	// HavingRejected counts refolds an aggregate stage's having held back
+	// since the worker started — "folded but filtered" told apart from "no
+	// inputs" (keys 0 with havingRejected > 0: the having rejects every
+	// key). Omitted while zero.
+	HavingRejected int64 `json:"havingRejected,omitempty"`
+	// WindowRowsRecomputed counts the rows a window stage recomputed since
+	// the worker started, and WindowLargestPartition is the largest
+	// partition (rows) a recompute walked to its end — a backfill's or a
+	// late event's cost, visible. Omitted for other stages.
+	WindowRowsRecomputed   int64 `json:"windowRowsRecomputed,omitempty"`
+	WindowLargestPartition int64 `json:"windowLargestPartition,omitempty"`
 	// Joins are per-join resolution counters (hits/misses since the
 	// worker started) — "the join never resolved" as a number instead
 	// of a replay-diff hunt. Omitted for stages without joins.
@@ -656,10 +668,11 @@ type StageRecoverer interface {
 	// StageFrontier reports the highest log index folded into the local
 	// stage state, and whether this syncable carries stage state at all.
 	StageFrontier() (uint64, bool, error)
-	// FoldStagesOnly folds one Actual into stage state with sink emission
-	// suppressed (everything at or below the checkpoint is already
-	// durably applied).
-	FoldStagesOnly(a *Actual) error
+	// FoldStagesOnly folds a run of Actuals, in order, into stage state
+	// with sink emission suppressed (everything at or below the checkpoint
+	// is already durably applied), refolding each touched key once for the
+	// run, and advances the frontier to the last.
+	FoldStagesOnly(as []*Actual) error
 }
 
 type SyncableParser interface {

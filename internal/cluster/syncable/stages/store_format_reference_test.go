@@ -173,6 +173,96 @@ func storeReferenceFixture() []Stage {
 			},
 			Emit: []Emit{{Field: "amount", From: "$.c.amount"}, {Field: "area", From: "$.wa.name"}},
 		},
+		// Aggregate expressions and having (SQL's select list and HAVING)
+		// over a computed key (GROUP BY <expression>): key rendering of a
+		// time value, avg's exact quotient under round, FILTER, a distinct
+		// count, a constant column, and a month the having holds back.
+		{
+			Name: "monthly", From: "payments", KeyPath: []string{"date_trunc('month', $.at::timestamptz)"},
+			Reduce: "aggregate",
+			Emit: []Emit{
+				{Field: "avg", Expr: "round(avg($.amount), 2)"},
+				{Field: "big", Expr: "count(*) filter (where $.amount > 5)"},
+				{Field: "payers", Expr: "count(distinct lower($.payer))"},
+				{Field: "source", Expr: "'ledger'"},
+			},
+			Having: "sum($.amount) > 0",
+		},
+		// Ordered aggregates: array_agg's order-by with a descending key and
+		// a null element, string_agg's distinct value order, and the
+		// value-order tiebreak — engine-chosen orders the store pins.
+		{
+			Name: "payer-list", From: "payments", KeyPath: []string{"'all'"},
+			Reduce: "aggregate",
+			Emit: []Emit{
+				{Field: "by_amount", Expr: "array_agg(lower($.payer) order by $.amount desc)"},
+				{Field: "names", Expr: "string_agg(distinct $.payer, ', ' order by $.payer)"},
+				{Field: "notes", Expr: "array_agg($.note)"},
+			},
+		},
+		// Window: one row per input in business order — the ord/pos/row
+		// buckets, the order-preserving sort key (a time value descending,
+		// a numeric tie), a computed partition, each row's running state,
+		// and peers (equal orderBy) sharing the running sum.
+		{
+			Name: "ledger-rows", From: "ledger", Reduce: "window",
+			PartitionBy: []string{"lower($.acct)"}, WindowOrderBy: []string{"$.at::timestamptz desc"}, WindowTieBy: []string{"$.seq"},
+			Emit: []Emit{
+				{Field: "n", Expr: "row_number()"},
+				{Field: "bal", Expr: "sum($.amount)"},
+				{Field: "prev", Expr: "lag($.amount, 1, 0)"},
+				{Field: "first", Expr: "first_value($.seq)"},
+				{Field: "seq", From: "$.seq"},
+			},
+		},
+		// Window frames: a ROWS moving sum and a RANGE (interval) count —
+		// framed calls keep no prefix accumulators in the row state.
+		{
+			Name: "ledger-frames", From: "ledger", Reduce: "window",
+			PartitionBy: []string{"lower($.acct)"}, WindowOrderBy: []string{"$.at::timestamptz"}, WindowTieBy: []string{"$.seq"},
+			Emit: []Emit{
+				{Field: "ma2", Expr: "sum($.amount) over (rows between 1 preceding and current row)"},
+				{Field: "day_n", Expr: "count(*) over (range between interval '1 day' preceding and current row)"},
+				{Field: "final", Expr: "last_value($.seq) over (rows between unbounded preceding and unbounded following)"},
+			},
+		},
+		// UNION ALL of a topic and a prior stage: the (source, key) input
+		// identity, source() in when and in aggregate arguments.
+		{
+			Name: "activity", FromList: []string{"refunds", "props"}, KeyPath: []string{"coalesce($.acct, $.pid)"},
+			When:   []WhenClause{{Expr: "source() = 'props' or $.amount > 0"}},
+			Reduce: "aggregate",
+			Emit: []Emit{
+				{Field: "n", Expr: "count(*)"},
+				{Field: "refunded", Expr: "sum($.amount) filter (where source() = 'refunds')"},
+				{Field: "srcs", Expr: "string_agg(distinct source(), ',' order by source())"},
+			},
+		},
+		// latest's list form over a union: a descending cast order key (the
+		// earliest wins) tied by source().
+		{
+			Name: "first-activity", FromList: []string{"refunds", "refund-notes"}, KeyPath: []string{"lower($.acct)"},
+			Reduce: "latest", WindowOrderBy: []string{"$.at::date desc"}, WindowTieBy: []string{"source()"},
+			Emit: []Emit{{Field: "kind", Expr: "source()"}, {Field: "at", From: "$.at"}},
+		},
+		// An optional fan join on a prior stage's field: the pairs' framed
+		// identities, the mdim/mpos/parent buckets, the null pair.
+		{
+			Name: "member-props", From: "proj-members", KeyPath: []string{"$.user", "coalesce($.pp.amount, 0)"},
+			Joins: []Join{{From: "props", Field: "$.pid", On: []string{"$.project"}, As: "pp", Optional: true, Fan: true}},
+			Emit:  []Emit{{Field: "amount", From: "$.pp.amount"}},
+		},
+		// An as-of join on a topic's field: the version index (a date
+		// order key, a tie, the producer key), each version's position, and
+		// the dependents indexed by their bound.
+		{
+			Name: "fx-usd", From: "fx-payments", KeyPath: []string{"$.id"},
+			Joins: []Join{{
+				Topic: "fx-rates", Field: "$.ccy", On: []string{"$.ccy"}, Normalize: NormalizeLower,
+				OrderBy: []string{"$.day::date"}, TieBy: []string{"$.seq"}, AsOf: "$.paid::date", As: "fx", Optional: true,
+			}},
+			Emit: []Emit{{Field: "usd", Expr: "round($.amount * $.fx.rate, 2)"}},
+		},
 	}
 }
 
@@ -207,6 +297,31 @@ func storeReferenceFeed(fold func(topic, key, payload string, gen uint64), sweep
 	// refold; o3 (epoch 2) survives.
 	sweep("owners", 2)
 	del("proposals", "p3")
+	fold("payments", "q1", `{"at":"2026-01-05T10:00:00Z","amount":10,"payer":"Ada"}`, 0)
+	fold("payments", "q2", `{"at":"2026-01-20","amount":3,"payer":"ada"}`, 0)
+	fold("payments", "q3", `{"at":"2026-01-31 20:00:00-05:00","amount":-4,"payer":"Bea"}`, 0) // Feb 1 UTC: Feb's sum is -4, held back
+	fold("ledger", "l1", `{"acct":"A","at":"2026-01-02","seq":1,"amount":5}`, 0)
+	fold("ledger", "l2", `{"acct":"a","at":"2026-01-01","seq":2,"amount":-2.5}`, 0)
+	fold("ledger", "l3", `{"acct":"B","at":"2026-01-03","seq":3,"amount":1}`, 0)
+	fold("ledger", "l4", `{"acct":"a","at":"2026-01-02","seq":4,"amount":2}`, 0) // a peer of l1
+	fold("ledger", "l3", `{"acct":"a","at":"2026-01-03","seq":3,"amount":1}`, 0) // moves partitions
+	del("ledger", "l2")
+	fold("refunds", "r1", `{"acct":"J1","amount":2,"at":"2026-01-03"}`, 1)
+	fold("refunds", "r2", `{"acct":"J9","amount":0,"at":"2026-01-01"}`, 1) // filtered out of activity by its when
+	fold("refund-notes", "r1", `{"acct":"j1","at":"2026-01-02"}`, 1)       // refunds' key r1 too: a separate row
+	fold("refunds", "r3", `{"acct":"j1","amount":1,"at":"2026-01-02"}`, 2) // ties refund-notes r1; source() breaks it
+	fold("refunds", "r4", `{"acct":"J1","amount":5,"at":"2026-01-04"}`, 2) // joins props' J1 row in activity
+	sweep("refunds", 2)                                                    // r1, r2 retract; refund-notes r1 is another source's
+	fold("refund-notes", "n2", `{"acct":"j1","at":"2026-01-01"}`, 0)
+	del("refund-notes", "n2")                                      // a tombstone retracts its own source's row only
+	fold("proj-members", "pm1", `{"user":"u1","project":"J1"}`, 1) // pairs with props' J1 row
+	fold("proj-members", "pm2", `{"user":"u2","project":"J7"}`, 1) // no match: the null pair
+	fold("fx-rates", "r1", `{"ccy":"EUR","day":"2026-01-01","seq":1,"rate":1.1}`, 1)
+	fold("fx-rates", "r2", `{"ccy":"eur","day":"2026-01-10","seq":2,"rate":1.2}`, 2)
+	fold("fx-payments", "x1", `{"id":"x1","ccy":"EUR","amount":100,"paid":"2026-01-05"}`, 0)
+	fold("fx-payments", "x2", `{"id":"x2","ccy":"EUR","amount":100,"paid":"2025-12-31"}`, 0) // before any version
+	sweep("fx-rates", 2)                                                                     // r1 retracts: x1 falls to nothing
+	fold("fx-rates", "r0", `{"ccy":"EUR","day":"2025-12-01","seq":0,"rate":1.05}`, 2)        // backfill: x1 and x2 resolve to it
 }
 
 // TestStoreReferenceFixtureCoversTheVocabulary makes the reference's coverage
@@ -219,7 +334,7 @@ func TestStoreReferenceFixtureCoversTheVocabulary(t *testing.T) {
 	var walk func(v reflect.Value)
 	walk = func(v reflect.Value) {
 		switch v.Kind() {
-		case reflect.Ptr, reflect.Interface:
+		case reflect.Pointer, reflect.Interface:
 			if !v.IsNil() {
 				walk(v.Elem())
 			}

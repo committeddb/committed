@@ -65,14 +65,13 @@ func (v logEntityWireView) isDelete() bool {
 // defense-in-depth behind that gate), and bytes from a data dir OLDER than the
 // supported floor of 0.7.3-beta — the pre-envelope FLAT fields (<= 0.7.2-beta,
 // tags 2/3/5/6, an era no deployment ever ran) and the long-removed Timestamp
-// (pre-v0.5, tag 4) are reserved, so their bytes land here as unknowns — see
-// docs/api-compatibility.md. Unknown tags INSIDE a known variant's message are
-// still fine (adding a field to LogRow stays add-only); only LogEntity-level
+// (pre-v0.5, tag 4) are reserved, so their bytes land here as unknowns.
+// Unknown tags INSIDE a known variant's message are still fine (adding a field to LogRow stays add-only); only LogEntity-level
 // unknowns trip this.
 func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 	if u := le.ProtoReflect().GetUnknown(); len(u) > 0 {
 		return logEntityWireView{}, fmt.Errorf(
-			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.3-beta (recreate it; see docs/api-compatibility.md)",
+			"log entity of type %s carries wire fields this binary does not recognize: either a newer release wrote it (upgrade this node) or the data dir predates the supported floor of 0.7.3-beta (recreate it; see docs/architecture/api-compatibility.md)",
 			le.Type.GetID())
 	}
 	switch b := le.GetBody().(type) {
@@ -95,7 +94,7 @@ func logEntityView(le *clusterpb.LogEntity) (logEntityWireView, error) {
 		// field tags were removed from the schema when the floor rose to
 		// 0.7.3-beta, so their bytes trip the unknown-wire-fields guard above.)
 		return logEntityWireView{}, fmt.Errorf(
-			"log entity of type %s carries no body variant: not a legal encoding for any supported era (floor 0.7.3-beta; see docs/api-compatibility.md)",
+			"log entity of type %s carries no body variant: not a legal encoding for any supported era (floor 0.7.3-beta; see docs/architecture/api-compatibility.md)",
 			le.Type.GetID())
 	}
 }
@@ -198,6 +197,24 @@ type Proposal struct {
 	// before proposing, and the record stays in the legacy shape.
 	TxnScopedDedup bool
 
+	// IngestSeq, IngestSession and IngestSessionStart order an ingest
+	// worker's pipelined proposals (marshaled; the apply path checks them).
+	// IngestSeq is dense per ingestable, IngestSession identifies one run of
+	// the worker's inner Ingest, and IngestSessionStart marks that session's
+	// first sequenced proposal. Apply accepts a sequenced proposal only if
+	// IngestSeq is one past the last accepted one AND it continues the last
+	// accepted session or starts a new one; anything else (a gap left by a
+	// dropped proposal, a stale session's straggler) is rejected identically
+	// on every node: stored in the event log as an empty entry, its entities
+	// and positions unapplied, and its waiter told ErrIngestOutOfOrder. So the
+	// worker may keep many proposals in flight and the log still holds them
+	// in source order with none skipped. Zero IngestSeq means "not
+	// sequenced". Stamped by the ingest worker, never by a dialect, and only
+	// at cluster feature level 3.
+	IngestSeq          uint64
+	IngestSession      uint64
+	IngestSessionStart bool
+
 	// DedupUnsafe is a TRANSIENT pre-raft hint, set by an ingest dialect and
 	// consumed only by the leader's ingest-worker dedup — it is deliberately NOT
 	// marshaled into the log (see Marshal), so it never reaches raft, replay, or a
@@ -232,6 +249,22 @@ type Proposal struct {
 	// data, so the worker preserves the pre-upgrade FREEZE until the first
 	// transaction-stamped proposal applies and flips the regime.
 	LineageRegressed bool
+
+	// OnDurable is a TRANSIENT hook, never marshaled: the ingest worker calls
+	// it once this proposal is durably applied, or once it recognizes the
+	// proposal as a duplicate of one already applied. It is never called for a
+	// proposal that failed, was dropped on an ownership change, or is still in
+	// flight. A dialect whose source must be told what is done (Postgres
+	// confirms a slot position, and never streams below it again) confirms
+	// only what this hook has reported.
+	OnDurable func()
+}
+
+// Durable calls p.OnDurable, if set.
+func (p *Proposal) Durable() {
+	if p.OnDurable != nil {
+		p.OnDurable()
+	}
 }
 
 type Entity struct {
@@ -396,6 +429,9 @@ func (p *Proposal) Marshal() ([]byte, error) {
 		SourceCommitUnixNano: p.SourceCommitUnixNano,
 		SourceTxnID:          p.SourceTxnID,
 		TxnScopedDedup:       p.TxnScopedDedup,
+		IngestSeq:            p.IngestSeq,
+		IngestSession:        p.IngestSession,
+		IngestSessionStart:   p.IngestSessionStart,
 	}
 
 	return proto.Marshal(lp)
@@ -460,6 +496,9 @@ func (p *Proposal) Unmarshal(bs []byte, r TypeResolver) error {
 	p.SourceCommitUnixNano = lp.SourceCommitUnixNano
 	p.SourceTxnID = lp.SourceTxnID
 	p.TxnScopedDedup = lp.TxnScopedDedup
+	p.IngestSeq = lp.IngestSeq
+	p.IngestSession = lp.IngestSession
+	p.IngestSessionStart = lp.IngestSessionStart
 	for _, e := range lp.LogEntities {
 		ref := TypeRef{ID: e.Type.GetID(), Version: int(e.Type.GetVersion())}
 		t, err := resolveType(ref, r)
@@ -545,7 +584,7 @@ const (
 	AdmissionConfig AdmissionClass = "config"
 	// AdmissionPosition / AdmissionIndex: the ingest / sync resume
 	// checkpoints. Always admitted — tiny, and blocking them turns
-	// at-most-one-duplicate into a duplicate storm (see disk-limits.md).
+	// at-most-one-duplicate into a duplicate storm.
 	AdmissionPosition AdmissionClass = "position"
 	AdmissionIndex    AdmissionClass = "index"
 	// AdmissionCoordination: the failure-plane records — dead-letters,
@@ -618,4 +657,43 @@ func IsInternal(id string) bool {
 func IsSystemTombstonable(id string) bool {
 	t := systemType(id)
 	return t != nil && t.EntityKind == EntityKindSnapshot
+}
+
+// IngestOrder is a marshaled proposal's ingest ordering stamp (see
+// Proposal.IngestSeq), decoded without resolving entity types.
+type IngestOrder struct {
+	IngestableID string
+	Seq          uint64
+	Session      uint64
+	SessionStart bool
+}
+
+// IngestOrderFromProposal decodes only the ingest ordering fields of a
+// marshaled Proposal. The apply path decides a sequenced proposal's fate from
+// these alone, before the entry reaches the event log, so it must not depend
+// on the entities' types resolving. Seq 0 means the proposal is not sequenced.
+func IngestOrderFromProposal(bs []byte) (IngestOrder, error) {
+	lp := &clusterpb.LogProposal{}
+	if err := proto.Unmarshal(bs, lp); err != nil {
+		return IngestOrder{}, err
+	}
+	return IngestOrder{
+		IngestableID: lp.IngestableID,
+		Seq:          lp.IngestSeq,
+		Session:      lp.IngestSession,
+		SessionStart: lp.IngestSessionStart,
+	}, nil
+}
+
+// FoldSourceDedup folds one ingest proposal's (seq, txnID) into a dedup
+// record (curTxn, curSeq) — the apply path's rule, shared with the ingest
+// worker, which folds what it has submitted but not yet seen applied. The
+// same transaction keeps the higher seq; a different transaction replaces
+// the record. txnID "" is the legacy scalar regime, where every proposal is
+// "the same transaction" and the record is a global highwater.
+func FoldSourceDedup(curTxn string, curSeq uint64, txnID string, seq uint64) (string, uint64) {
+	if txnID == curTxn && seq <= curSeq {
+		return curTxn, curSeq
+	}
+	return txnID, seq
 }

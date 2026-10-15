@@ -41,8 +41,8 @@ func newTestWatcher(states *[]diskState) (*diskWatcher, func(free, total uint64)
 // guard: the bands must be warn > critical > full (or a band is unreachable —
 // classify() reaches the lower band first). A non-descending set — each value
 // individually valid, so per-value validation misses it — warns and falls back to
-// the defaults, matching the per-value fallback policy documented in
-// disk-limits.md; a valid descending set is preserved as-is.
+// the defaults, matching the documented per-value fallback policy; a valid
+// descending set is preserved as-is.
 func TestNewDiskWatcher_RejectsNonDescendingThresholds(t *testing.T) {
 	tests := map[string]struct {
 		warn, critical, full float64

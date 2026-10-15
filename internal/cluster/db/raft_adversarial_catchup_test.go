@@ -17,8 +17,7 @@ import (
 // The catch-up scenarios beyond scenario (e) (raft_adversarial_test.go): a
 // brand-new node joining an established cluster from an empty data
 // directory, and a member that missed a right-to-be-forgotten scrub while
-// it was away. Both are the operator flows docs/operations/membership.md
-// and rebuild.md now promise happen by themselves.
+// it was away. Both are operator flows documented to happen by themselves.
 
 // catchUpNodeOpts: compaction aggressive enough that the raft log is past
 // index 1 after a short burst, so a joining node can only be served a

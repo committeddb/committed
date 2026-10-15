@@ -27,7 +27,7 @@ var (
 // Bump this — and add a `featureLevel*` requirement constant at the emitting
 // site — whenever you introduce state an older peer cannot correctly apply (a
 // new built-in system type, a new semantic marker). NEVER renumber or reuse a
-// level; it only ever increases. See docs/api-compatibility.md.
+// level; it only ever increases.
 //
 // Level 1: the baseline for the first binary carrying this mechanism —
 // includes the refresh-boundary marker (featureLevelRefreshBoundary). A binary
@@ -73,7 +73,28 @@ var (
 //     nonConvertible bump; the checkpoint's interpretation coordinate
 //     (db.featureLevelInterpretationPin) is cleared, since a checkpoint cannot
 //     be refused, and the first bump after the roll records the real one.
-const FeatureLevel uint64 = 2
+//
+// Level 3: 0.8.2.
+//
+//   - Typed date/time rendering on SQL Server ingest
+//     (sqlserver.featureLevelTypedTemporal): a date as YYYY-MM-DD, a time of
+//     day as HH:MM:SS, zone-less datetimes without a zone, datetimeoffset
+//     with its offset. The rendering is in entity KEYS (a temporal primary
+//     key), so, as with the uniqueidentifier spelling, every node keeps the
+//     old RFC 3339 rendering until the minimum reaches 3; then a session
+//     resuming an old-style checkpoint re-snapshots once. Once typed it
+//     stays typed.
+//   - The type record's onSupersede field (db.featureLevelOnSupersede): it
+//     changes which entities the scrub's rewrite removes, and an older binary
+//     re-marshals the type without it, so a declaration that changes the
+//     kind's default is refused until every member is at level 3.
+//   - Ordered, pipelined ingest (db.featureLevelIngestOrder): an ingest
+//     worker numbers its ordered proposals (cluster.Proposal.IngestSeq) and
+//     keeps many in flight, and apply rejects one that is out of order,
+//     storing it in the event log as an empty entry. An older binary would
+//     apply it, so a worker numbers nothing until every member is at level
+//     3, and its ordered proposals stay one at a time meanwhile.
+const FeatureLevel uint64 = 3
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

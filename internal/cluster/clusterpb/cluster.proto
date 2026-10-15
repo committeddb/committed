@@ -36,7 +36,7 @@ message LogEntity {
 	// body variant. Do not add flat fields — add a new body variant instead:
 	// wire-level add-only (an old reader sees body unset), with its EMISSION
 	// feature-gated (db.featureEnabled) so the variant is only committed once
-	// every member can apply it. See docs/api-compatibility.md.
+	// every member can apply it.
 	//
 	// generation semantics (LogRow.generation / LogRefresh.generation): the
 	// ingest reconciling-refresh epoch — a per-ingestable monotonic counter
@@ -124,8 +124,8 @@ message LogProposal {
     // transaction produced it. Stamped by the dialect from the change stream
     // (MySQL binlog event-header timestamp + GTID, Postgres pgoutput
     // Begin commit-time + xid, SQL Server change-tracking version +
-    // sys.dm_tran_commit_table — fidelity varies by dialect, see
-    // docs/operations/cdc-setup.md "How ingest works"). Proposal-level because all
+    // sys.dm_tran_commit_table — fidelity varies by dialect). Proposal-level
+    // because all
     // rows in one emitted proposal come from one source transaction context.
     // Provenance only — nothing in apply or sync reads them; they preserve
     // what becomes unrecoverable once the source's binlog/WAL retention
@@ -146,6 +146,16 @@ message LogProposal {
     // Provenance (sourceTxnID) is thus decoupled from dedup scope: stamping
     // an identity never changes dedup behavior without this flag.
     bool txnScopedDedup = 8;
+    // ingestSeq, ingestSession and ingestSessionStart order an ingest
+    // worker's pipelined proposals. ingestSeq is dense per ingestable; the
+    // apply path accepts a sequenced proposal only if it is the next number
+    // and continues the last accepted session (or starts a new one), and
+    // stores a rejected one in the event log as an empty entry. Zero means
+    // "not sequenced" (snapshot rows, every pre-feature entry, non-ingest
+    // proposals). Emitted only at cluster feature level 3.
+    uint64 ingestSeq = 9;
+    uint64 ingestSession = 10;
+    bool ingestSessionStart = 11;
 }
 
 enum LogValidationStrategy {
@@ -189,6 +199,18 @@ enum LogEntityKind {
     // "as of"). The latest is current; the history is part of the data, so
     // it is never compacted away.
     EntityKindRevision = 6;
+}
+
+// LogOnSupersede is what the scrub does with an entity that a later entity
+// for the same (type, key) supersedes. Unspecified resolves per entity kind
+// (cluster.Type.ScrubsSuperseded): scrub for snapshot, keep for every other
+// kind.
+enum LogOnSupersede {
+    OnSupersedeUnspecified = 0;
+    // Keep every version of every key.
+    OnSupersedeKeep = 1;
+    // Keep only each key's latest version: the scrub removes the rest.
+    OnSupersedeScrub = 2;
 }
 
 message LogType {
@@ -248,6 +270,13 @@ message LogType {
     // above until a document is re-submitted for it.
     bytes Document = 12;
     string DocumentMimeType = 13;
+    // OnSupersede declares whether the scrub removes a key's superseded
+    // versions (see LogOnSupersede). Mutable in place, in both directions.
+    // Add-only, and gated on cluster feature level 3 at the proposer, for the
+    // same reason as Document: a pre-level-3 binary re-marshals the type from
+    // its own struct on apply and would drop the field, and the scrub's
+    // rewrite must be identical on every replica.
+    LogOnSupersede OnSupersede = 14;
 }
 
 message LogConfiguration {
@@ -491,8 +520,7 @@ message LogTypeMigrationDeadLetter {
 // delete-proposed at a raft index <= B. Pinning B inside the committed
 // command makes every replica remove the identical set, so the rewritten
 // event logs stay byte-identical across nodes (the rsync-rebuild and
-// determinism-test contract). See docs/event-log-architecture.md
-// § "Right-to-be-forgotten / deletes".
+// determinism-test contract).
 message LogScrub {
     uint64 upperBound = 1;
     // hashDeleteKeys authorizes the delete-key erasure pass for this rewrite:
@@ -503,6 +531,11 @@ message LogScrub {
     // rewrite. Old binaries ignore the field and never see it set to true (the
     // feature gate holds it until they are gone).
     bool hashDeleteKeys = 2;
+    // timestampUnixNano is the wall-clock time the proposer issued the
+    // command. Stamped once at propose time so apply is content-deterministic
+    // on every replica; it starts the onSupersede scrub ceiling. Zero from a
+    // binary that predates it, which leaves the recorded time unchanged.
+    int64 timestampUnixNano = 3;
 }
 
 // LogNodeAPIURL is a node's self-announcement of its advertised HTTP API
@@ -511,7 +544,7 @@ message LogScrub {
 // leader-only reads (GET /v1/membership) from a follower. Raft replicates
 // only node ids and raft peer URLs, never API addresses, so each node
 // announces its own once it joins. Upsert keyed by node id; the apply path
-// stores it in the memberAPIURLs bucket. See raft-leader-read-proxy.md.
+// stores it in the memberAPIURLs bucket.
 message LogNodeAPIURL {
     uint64 nodeID = 1;
     string apiURL = 2;
@@ -523,8 +556,7 @@ message LogNodeAPIURL {
 // until every member can apply them — the fix for semantic version skew (a new
 // system type must not reach an old node, a refresh-boundary marker must not
 // reach a node that can't interpret it). Upsert keyed by node id; the apply
-// path stores it in the memberVersions bucket. See node_version.go and
-// docs/api-compatibility.md.
+// path stores it in the memberVersions bucket. See node_version.go.
 message LogNodeVersion {
     uint64 nodeID = 1;
     uint64 featureLevel = 2;

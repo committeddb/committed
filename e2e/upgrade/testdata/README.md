@@ -23,7 +23,7 @@ Why captured, not synthesized: bytes generated with the current `clusterpb`
 package can never reproduce a removed field or a superseded encoding, so a
 guard against genuinely-old bytes would pass every synthetic test while
 failing in the field. Only a dir the old binary actually wrote proves the
-contract (docs/api-compatibility.md § on-disk compatibility).
+contract (docs/architecture/api-compatibility.md § on-disk compatibility).
 
 ## Fixtures
 

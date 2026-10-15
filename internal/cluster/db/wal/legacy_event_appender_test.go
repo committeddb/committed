@@ -34,6 +34,7 @@ type observedEntryStore struct {
 func (s *observedEntryStore) Append(records []eventlog.Record) error {
 	return s.appender.Append(records)
 }
+
 func (s *observedEntryStore) LastAppended() (uint64, bool, error) { return s.appender.LastAppended() }
 
 func TestProductionEventAppendUsesLogicalBackend(t *testing.T) {

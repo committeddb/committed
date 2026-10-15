@@ -60,6 +60,14 @@ var ErrProposalUnknown = fmt.Errorf("db: proposal status unknown after leader ch
 // arrives.
 var ErrProposalLost = fmt.Errorf("db: proposal truncated before commit: %w", cluster.ErrProposalUnconfirmed)
 
+// ErrIngestOutOfOrder is returned to an ingest worker whose sequenced
+// proposal committed but was rejected at apply: an earlier proposal of its
+// session never committed (a gap), or it belongs to a session another one
+// has superseded. Nothing of it applied, so it is safe to retry, which the
+// worker does by restarting from its durable position. See
+// cluster.Proposal.IngestSeq.
+var ErrIngestOutOfOrder = errors.New("db: ingest proposal rejected at apply: out of order")
+
 // defaultProposeTimeout is the backstop db.Propose applies when a waiter is
 // never signaled — the state a raft-dropped proposal reaches when no leader
 // change follows (forwardProposeErr absorbs ErrProposalDropped). Set well beyond
@@ -173,7 +181,7 @@ type DB struct {
 	// into the replicated memberAPIURLs map by announceAPIURL. Empty disables
 	// the announce. announceInterval is the poll cadence that goroutine uses
 	// while waiting for this node to become a member with a reachable leader
-	// (derived from tickInterval at New time). See raft-leader-read-proxy.md.
+	// (derived from tickInterval at New time).
 	advertisedAPIURL string
 	announceInterval time.Duration
 	// zone is this node's configured placement identity (COMMITTED_ZONE; ""
@@ -206,6 +214,12 @@ type DB struct {
 	// set, proposeSyncableDeadLetter consults it first and a non-nil error
 	// stands in for an orphaned propose (leader flap). nil in production.
 	deadLetterProposeHookForTest func(*cluster.SyncableDeadLetter) error
+
+	// syncableIndexGateForTest is a test-only seam: when set, a syncable
+	// checkpoint proposal is held (submitted, its waiter live) until the
+	// channel closes, standing in for a slow raft round trip. nil in
+	// production.
+	syncableIndexGateForTest atomic.Pointer[chan struct{}]
 
 	// afterRebuildCheckpointReset is a test-only seam invoked by RebuildSyncable
 	// immediately after the checkpoint-reset proposal applies (nil in
@@ -687,12 +701,10 @@ func randomRequestIDBase() uint64 {
 // send completes, or Marshal fails), proposeAsync unregisters the
 // waiter itself and returns a zero RequestID + nil ack + error.
 //
-// proposeAsync is the shared primitive beneath db.Propose; every
-// caller (user/config proposals, sync's index bump, ingest's position
-// bump) goes through the blocking Propose wrapper, so none use the raw
-// ack form directly today. It stays factored out because Propose's
-// select-on-ack logic is cleaner expressed against it, and because a
-// future pipelined caller would build on it again.
+// proposeAsync is the shared primitive beneath db.Propose. Callers use
+// the raw ack form only to keep a proposal in flight while they work:
+// the pipelined ingest and a batch syncable's caught-up checkpoint
+// (caughtUpBump).
 func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-chan error, error) {
 	kind := proposalKind(p)
 
@@ -701,6 +713,10 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 	// user-data proposals are rejected; at full everything is. Returns the
 	// typed cluster.ErrInsufficientStorage the HTTP layer maps to 507.
 	if err := db.disk.checkWritable(kind); err != nil {
+		return 0, nil, err
+	}
+	// Backpressure: wait while this node's apply is far behind its commit.
+	if err := db.waitApplyBacklog(ctx); err != nil {
 		return 0, nil, err
 	}
 
@@ -742,6 +758,21 @@ func (db *DB) proposeAsync(ctx context.Context, p *cluster.Proposal) (uint64, <-
 	}
 
 	db.logger.Debug("proposing", zap.Uint64("requestID", p.RequestID), zap.Int("entities", len(p.Entities)))
+
+	if gate := db.syncableIndexGateForTest.Load(); gate != nil && len(p.Entities) > 0 && cluster.IsSyncableIndex(p.Entities[0].Type.ID) {
+		go func() {
+			select {
+			case <-*gate:
+			case <-db.ctx.Done():
+				return
+			}
+			select {
+			case db.proposeC <- bs:
+			case <-db.ctx.Done():
+			}
+		}()
+		return p.RequestID, w.ack, nil
+	}
 
 	// db.ctx in the select handles the "db is shutting down" case so a
 	// worker (e.g., the ingest goroutine) doesn't race against
@@ -1273,7 +1304,7 @@ func (db *DB) IsLeader() bool {
 // conf change Context so every existing node learns the address to dial it
 // (raft replicates only node ids, not addresses). The new node itself must
 // be started in join mode (WithJoin / COMMITTED_JOIN) with a peer set that
-// lets it reach the existing members. See docs/operations/membership.md.
+// lets it reach the existing members.
 //
 // The change is safe under partition: joint consensus requires a majority of
 // both the old and new configurations to agree throughout the transition, so
@@ -1307,7 +1338,7 @@ func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
 // rawURL is the new node's advertised raft peer URL, carried in the conf
 // change Context exactly like AddMember; the new node must be started in join
 // mode and should set COMMITTED_API_URL so it self-announces its API address.
-// Partition-safe and callable on any node. See docs/operations/membership.md.
+// Partition-safe and callable on any node.
 func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
@@ -1336,7 +1367,6 @@ func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 // via GET /v1/membership and decides), the check would be racy regardless (the
 // matched index is a snapshot), and the server has no principled threshold to
 // pick. The caller minimizes the at-quorum window by polling before promoting.
-// See docs/operations/membership.md and the ticket's "Decisions".
 //
 // Promoting a non-learner is rejected with cluster.ErrNotLearner rather than
 // submitted: a ConfChangeAddNode for an unknown id would add a brand-new voter

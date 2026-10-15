@@ -18,14 +18,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       # Pin golangci-lint to match the version used locally during the
       # ci-golangci-lint ticket triage. Bump deliberately so dev and CI
       # flag the same things.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.4
+          version: v2.14.0
 
   test:
     name: test (race)
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       - run: make test/ci
 
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       - run: make test/integration
 
@@ -64,7 +64,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       - run: make test/cdc
 
@@ -87,7 +87,7 @@ jobs:
           fetch-depth: 0 # the fixture capture builds released tags in git worktrees
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       - run: make test/upgrade
 
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       - run: make test/backup
 
@@ -126,7 +126,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       - name: Record benchmark environment
         shell: bash
@@ -169,7 +169,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       - run: make test/multinode
       # Re-run just the throughput report with its log line surfaced, so
@@ -196,7 +196,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       - run: make test/adversarial ADVERSARIAL_COUNT=${{ github.event_name == 'pull_request' && '1' || '5' }}
 
@@ -235,7 +235,7 @@ jobs:
           # The action release pins an older Trivy; pin the scanner itself
           # so the CVE feeds and severity mappings stay current. Bump this
           # alongside the action tag when a new release appears.
-          version: v0.74.0
+          version: v0.75.0
           image-ref: committed:scan
           scanners: vuln
           vuln-type: os,library
@@ -259,13 +259,13 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           check-latest: true
       # Install the golangci-lint binary (pinned to match the lint job and local
       # dev) so the batched script can invoke it per package.
       - name: Install golangci-lint
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v2.11.4
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.14.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: make lint/gosec

@@ -700,7 +700,7 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			if fi < 0 {
 				return fmt.Errorf("%s: from %q names no declared stage", where, src.FromStage)
 			}
-			if arity, _, _ := stages.ResolvedKeySpace(c.Stages, fi); len(c.PrimaryKey) != arity {
+			if arity, _, _ := stages.ResolvedKeySpace(c.Stages, fi); arity != stages.KeyArityProducer && len(c.PrimaryKey) != arity {
 				return fmt.Errorf("%s: this table's primaryKey has %d column(s) but stage %q keys by %d path(s) — a stage-fed source's rows are keyed BY the stage's key, so the arities must match", where, len(c.PrimaryKey), src.FromStage, arity)
 			}
 			if src.Aggregate != nil || src.Lookup != nil || src.ForEach != "" {
@@ -899,9 +899,9 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 // is rejected at ParseSyncable (a clean 400) instead of failing per-row at
 // runtime — where an extraction path dead-letters every row (config-shaped, but
 // classified permanent) and a when-clause path silently never matches (the rule
-// never fires → wrong/empty output, no error anywhere). jsonpath.Get compiles the
-// path internally on every call; jsonpath.New is the same compile without the
-// evaluation. The path is config, not secret, so it may appear in the error.
+// never fires → wrong/empty output, no error anywhere). jsonpaths.Get compiles
+// with the same jsonpath.New at first use. The path is config, not secret, so
+// it may appear in the error.
 func validateJSONPath(path, where string) error {
 	// A `$parent.` prefix is the forEach element scope's way of reaching the
 	// enclosing event payload; validate the remainder as a rooted path (the
@@ -926,8 +926,18 @@ func validateProjectionJSONPaths(c *ProjectionConfig) error {
 	for si, src := range c.Sources {
 		where := fmt.Sprintf("source %d (topic %q)", si+1, src.Topic)
 		for _, kp := range src.KeyPath {
-			if err := validateJSONPath(kp, where+" keyPath"); err != nil {
-				return err
+			// The jsonpath library parses a function call (lower($.x)), so a
+			// computed key would pass validateJSONPath and then silently
+			// resolve nothing. Table sources key by path; computed keys are
+			// a stage's.
+			_, isExpr, cerr := stages.ClassifyKeyPath(kp)
+			if !isExpr {
+				if err := validateJSONPath(kp, where+" keyPath"); err != nil {
+					return err
+				}
+			}
+			if isExpr || cerr != nil {
+				return fmt.Errorf("%s keyPath: %q is not a path — a table source keys rows by a path; to key by a computed value, compute it in a stage's keyPath and read that stage (from = \"<stage>\")", where, kp)
 			}
 		}
 		for _, cl := range src.When {

@@ -52,8 +52,8 @@ func (db *DB) LinearizableRead(ctx context.Context) error {
 
 // waitForApplied blocks until db.storage.AppliedIndex() >= target, ctx is
 // canceled, or the DB is shutting down. It waits on the applied-index
-// broadcast (appliedNotifyCh) that the raft Ready loop fires after each
-// apply, re-checking the index on every wake rather than polling.
+// broadcast (appliedNotifyCh) fired after each applied batch, re-checking the
+// index on every wake rather than polling.
 //
 // The fast path is common: on the leader serving a read, AppliedIndex is
 // usually already at or past the confirmed ReadIndex, so the loop returns on
@@ -84,6 +84,35 @@ func (db *DB) waitForApplied(ctx context.Context, target uint64) error {
 	}
 }
 
+// maxApplyBacklog bounds how far apply may trail commit on this node before
+// new proposals wait (waitApplyBacklog). Apply runs off the raft goroutine so
+// it can never stall elections; this keeps the committed-but-unapplied queue,
+// and so memory and read staleness, bounded instead. etcd bounds the same gap
+// at 5,000 entries.
+const maxApplyBacklog = 5000
+
+// waitApplyBacklog blocks while this node's apply trails its commit by more
+// than maxApplyBacklog entries.
+func (db *DB) waitApplyBacklog(ctx context.Context) error {
+	if db.raft == nil {
+		return nil
+	}
+	for db.raft.ApplyBacklog() > maxApplyBacklog {
+		ch := db.appliedNotify()
+		if db.raft.ApplyBacklog() <= maxApplyBacklog {
+			return nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-db.ctx.Done():
+			return db.ctx.Err()
+		}
+	}
+	return nil
+}
+
 // appliedNotify returns the current-generation broadcast channel. A waiter
 // reads it, re-checks its condition, then selects on it; notifyAppliedIndexAdvanced
 // closes it to wake every current waiter and installs a fresh one.
@@ -93,10 +122,11 @@ func (db *DB) appliedNotify() <-chan struct{} {
 	return db.appliedNotifyCh
 }
 
-// notifyAppliedIndexAdvanced is invoked from the raft Ready loop once per
-// iteration in which AppliedIndex advanced. It closes the current broadcast
-// channel (waking every waitForApplied caller) and installs a fresh one for
-// the next generation. Cheap and lock-bounded; fired at most once per Ready.
+// notifyAppliedIndexAdvanced is invoked once per applied batch (on the apply
+// goroutine, or in step on the Ready loop) in which AppliedIndex advanced. It
+// closes the current broadcast channel (waking every waitForApplied caller)
+// and installs a fresh one for the next generation. Cheap and lock-bounded;
+// fired at most once per batch.
 func (db *DB) notifyAppliedIndexAdvanced() {
 	db.appliedMu.Lock()
 	close(db.appliedNotifyCh)

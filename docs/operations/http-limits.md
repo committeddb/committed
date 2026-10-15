@@ -88,7 +88,7 @@ want the node to give up first.
 
 Default `GET` reads run a raft ReadIndex round-trip to confirm the
 serving node still holds quorum before answering (see
-[consistency.md](../consistency.md)). This knob bounds how long that
+[consistency.md](../architecture/consistency.md)). This knob bounds how long that
 confirmation waits before the handler returns `503 not_linearizable` —
 so a partitioned node fails fast instead of holding the connection until
 `WRITE_TIMEOUT`.

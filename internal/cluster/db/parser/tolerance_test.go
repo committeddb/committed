@@ -9,8 +9,7 @@ import (
 	parser "github.com/committeddb/committed/internal/cluster/db/parser"
 )
 
-// Pins envelope-level decode tolerances (the reference corpus from
-// .claude-scratch/tickets/viper-containment.md): the [syncable] /
+// Pins envelope-level decode tolerances: the [syncable] /
 // [ingestable] / [database] envelopes keep accepting case-variant
 // section and field names, JSON-mimetype payloads keep working, and
 // ${VAR} secret interpolation keeps expanding values. Written against

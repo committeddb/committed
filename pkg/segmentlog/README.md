@@ -268,7 +268,7 @@ now measures completed-file churn and checks scrub equivalence against tidwall.
 It separates local file replacement from new content hashes and compares plain
 and zstd workloads. The synthetic results do not establish production backup costs.
 
-The [storage overview](../../docs/event-segment-design.md) describes the current
+The [storage overview](../../docs/architecture/event-segment-design.md) describes the current
 engine, application boundary, and experimental limitations.
 
 ## Validation

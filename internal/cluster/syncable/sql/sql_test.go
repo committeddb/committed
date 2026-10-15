@@ -467,7 +467,7 @@ func TestSyncDeleteWithoutKeyColumnIsPermanent(t *testing.T) {
 // translate a delete, so a right-to-be-forgotten erasure reaches it —
 // DELETE FROM <table> WHERE <keyColumn> = <entity key>, removing the subject's
 // whole history from the table. Without this, the only keyless shape that
-// honors erasure would be undocumented and untested (see read-models.md).
+// honors erasure would be undocumented and untested.
 func TestSyncKeylessWithKeyColumnHonorsDelete(t *testing.T) {
 	dialect, mock, err := testdialects.NewSQLMockDialect()
 	require.Nil(t, err)

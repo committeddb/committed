@@ -208,8 +208,7 @@ func New(d *db.DB, opts ...Option) *HTTP {
 		}
 
 		// Every API endpoint lives under /v1 so a future breaking change
-		// can bump the prefix instead of breaking existing clients. See
-		// docs/api-compatibility.md for the versioning contract.
+		// can bump the prefix instead of breaking existing clients.
 		//
 		// The four config resources share a generic handler set (see
 		// config_handlers.go); the route table stays explicit so
@@ -339,7 +338,7 @@ func New(d *db.DB, opts ...Option) *HTTP {
 			// so a follower proxies to the leader, giving a load-balanced
 			// caller a leader-truthful answer (per-member match index is
 			// leader-only state). The node added via POST must first be
-			// started in join mode. See docs/operations/membership.md.
+			// started in join mode.
 			if !split {
 				r.Get("/membership", h.leaderRead(h.GetMembership))
 				r.Post("/membership", h.AddMember)

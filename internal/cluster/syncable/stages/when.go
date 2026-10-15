@@ -14,13 +14,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/PaesslerAG/jsonpath"
+	"github.com/committeddb/committed/internal/cluster/jsonpaths"
 )
 
 // WhenClause is one match condition: exactly one of Equals (the value
 // at Path must equal it), Null (the value must be JSON null), NotEquals
 // (present, same scalar family, and different), or GreaterThan/LessThan
-// (numeric, strictly ordered against a numeric literal) must be set. A
+// (strictly ordered against a number or text literal) must be set. A
 // rule matches when every one of its clauses holds (AND); a missing
 // Path is "no match", never an error — and that invariant is why a Null
 // clause matches only a PRESENT null.
@@ -44,8 +44,10 @@ type WhenClause struct {
 	// for the key.
 	NotNull   bool `mapstructure:"notNull"`
 	NotEquals any  `mapstructure:"notEquals"`
-	// GreaterThan/LessThan take numeric literals only (validated at
-	// admission); values compare numerically, non-numbers never match.
+	// GreaterThan/LessThan take a number or a text literal (validated at
+	// admission; a quoted NUMBER is rejected — as text "10" sorts before
+	// "9"). A number literal orders numbers numerically, a text literal
+	// orders strings byte-wise; a value of the other family never matches.
 	GreaterThan any `mapstructure:"greaterThan"`
 	LessThan    any `mapstructure:"lessThan"`
 	// Expr is the expression arm: the closed expression language as a
@@ -180,11 +182,11 @@ func ClauseEval(c WhenClause, jsonData, parent any) (bool, any) {
 			return false, v
 		}
 	case c.GreaterThan != nil:
-		if !numericallyOrdered(v, c.GreaterThan, false) {
+		if !scalarOrdered(v, c.GreaterThan, false) {
 			return false, v
 		}
 	case c.LessThan != nil:
-		if !numericallyOrdered(v, c.LessThan, true) {
+		if !scalarOrdered(v, c.LessThan, true) {
 			return false, v
 		}
 	default:
@@ -213,10 +215,21 @@ func sameScalarFamily(lit, v any) bool {
 	return false
 }
 
-// numericallyOrdered reports v < lit (less=true) or v > lit (less=false),
-// SQL-style: a null, missing, or non-numeric value matches neither.
-// Exact comparison, like every other comparison in the system.
-func numericallyOrdered(v, lit any, less bool) bool {
+// scalarOrdered reports v < lit (less=true) or v > lit (less=false),
+// SQL-style: a null, missing, or other-family value matches neither.
+// Numbers compare exactly, text byte-wise — the expression language's
+// and min/max's order.
+func scalarOrdered(v, lit any, less bool) bool {
+	if ls, ok := lit.(string); ok {
+		vs, ok := v.(string)
+		if !ok {
+			return false
+		}
+		if less {
+			return vs < ls
+		}
+		return vs > ls
+	}
 	lr, ok := ratFromScalar(lit)
 	if !ok {
 		return false // rejected at admission; unreachable via a validated config
@@ -486,6 +499,40 @@ func walkExprPaths(n Node, visit func(string)) {
 		for _, a := range x.args {
 			walkExprPaths(a, visit)
 		}
+	case exprCast:
+		walkExprPaths(x.operand, visit)
+	case exprAgg:
+		if x.arg != nil {
+			walkExprPaths(x.arg, visit)
+		}
+		if x.filter != nil {
+			walkExprPaths(x.filter, visit)
+		}
+		for _, o := range x.order {
+			walkExprPaths(o.expr, visit)
+		}
+	case exprWin:
+		for _, c := range x.children() {
+			walkExprPaths(c, visit)
+		}
+	case exprSubscript:
+		for _, c := range x.children() {
+			walkExprPaths(c, visit)
+		}
+	case exprLike:
+		walkExprPaths(x.operand, visit)
+		walkExprPaths(x.pattern, visit)
+	case exprCase:
+		if x.operand != nil {
+			walkExprPaths(x.operand, visit)
+		}
+		for i := range x.whens {
+			walkExprPaths(x.whens[i], visit)
+			walkExprPaths(x.thens[i], visit)
+		}
+		if x.els != nil {
+			walkExprPaths(x.els, visit)
+		}
 	}
 }
 
@@ -522,11 +569,12 @@ func RejectMultiValued(p, where string) error {
 // event); everything else resolves against data. Outside forEach, parent
 // is nil and a $parent path is a loud misconfiguration.
 func ResolvePath(path string, data, parent any) (any, error) {
+	data = unwrapSource(data)
 	if rest, ok := strings.CutPrefix(path, "$parent"); ok {
 		if parent == nil {
 			return nil, fmt.Errorf("path [%s]: $parent is only meaningful inside a forEach source", path)
 		}
-		return jsonpath.Get("$"+rest, parent)
+		return jsonpaths.Get("$"+rest, parent)
 	}
-	return jsonpath.Get(path, data)
+	return jsonpaths.Get(path, data)
 }

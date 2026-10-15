@@ -65,7 +65,7 @@ is not retrying, it has stopped.
   clear this one; the message names the verb that does — `rematerialize`
   for a keyed syncable, or `DELETE` and re-POST for one that cannot
   converge in place. See
-  [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings).
+  [api-compatibility.md](../architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings).
 
 A new config version clears the parked record and starts a fresh worker;
 deleting the syncable also clears it. A bare restart or leadership change

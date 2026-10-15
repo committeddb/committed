@@ -16,7 +16,7 @@
 // can neither be running when the backup starts nor start (and write) part-way
 // through it. To back up a live cluster, stop one follower (quorum holds on the
 // rest), archive it, and start it again — the same rolling discipline as a
-// rolling upgrade. See docs/operations/backup.md.
+// rolling upgrade.
 package backup
 
 import (
@@ -90,7 +90,7 @@ type Manifest struct {
 	// would invite an older build to restore a directory it cannot read
 	// correctly. Moving 0.8.0 data onto an older binary goes through the
 	// documented downgrade door instead — restore on 0.8.0, `committed wal
-	// decompress`, then start the older build (docs/operations/backup.md).
+	// decompress`, then start the older build.
 	//
 	// All three are omitempty so a future read of an archive that predates
 	// them treats them as zero (no gate) rather than needing a format bump.

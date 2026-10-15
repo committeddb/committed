@@ -20,7 +20,7 @@ import (
 // path, one decode path — the property the CT design leans on). It also pins
 // the category mapping: bit → JSON bool, the numeric family → exact unquoted
 // numbers (decimal/money keeping source precision), binary → base64, and the
-// temporal family → strings.
+// temporal family → strings by declared type.
 func TestSQLServerTypeMatrixParity(t *testing.T) {
 	db := createDB(t)
 	defer db.Close()
@@ -32,20 +32,21 @@ func TestSQLServerTypeMatrixParity(t *testing.T) {
 		c_dec DECIMAL(12,4), c_float FLOAT, c_real REAL, c_money MONEY,
 		c_char NCHAR(4), c_var NVARCHAR(50), c_date DATE, c_dt2 DATETIME2(3),
 		c_dto DATETIMEOFFSET(2), c_time TIME(1), c_bin VARBINARY(16),
-		c_guid UNIQUEIDENTIFIER)`)
+		c_guid UNIQUEIDENTIFIER, c_dtm DATETIME, c_sdt SMALLDATETIME)`)
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO dbo.ct_types VALUES (
 		1, 1, 255, -32768, 9223372036854775807,
 		12345678.9900, 1.5, 2.5, 922337.1234,
 		N'abcd', N'text with ''quote''', '2026-08-06', '2026-08-06 12:34:56.789',
 		'2026-08-06 12:34:56.78 +02:00', '23:59:59.9', 0xDEADBEEF,
-		'3E11FA47-71CA-11E1-9E33-C80AA9429562')`)
+		'3E11FA47-71CA-11E1-9E33-C80AA9429562', '2026-08-06 12:34:56.127', '2026-08-06 12:34:00')`)
 	require.NoError(t, err)
 
 	typ := &cluster.Type{ID: "ct-types", Name: "ct-types"}
 	cols := []string{
 		"pk", "c_bit", "c_tiny", "c_small", "c_big", "c_dec", "c_float", "c_real",
 		"c_money", "c_char", "c_var", "c_date", "c_dt2", "c_dto", "c_time", "c_bin", "c_guid",
+		"c_dtm", "c_sdt",
 	}
 	mappings := make([]sql.Mapping, len(cols))
 	for i, c := range cols {
@@ -78,6 +79,13 @@ func TestSQLServerTypeMatrixParity(t *testing.T) {
 	require.Contains(t, snapData, `"c_bin":"3q2+7w=="`, "varbinary renders base64 (0xDEADBEEF)")
 	require.Contains(t, snapData, `"c_guid":"3e11fa47-71ca-11e1-9e33-c80aa9429562"`, "guid canonical RFC 4122 lowercase (the PostgreSQL uuid spelling)")
 	require.Contains(t, snapData, `"c_var":"text with 'quote'"`, "text with embedded quote survives")
+	// The temporal family renders by declared type (feature level 3).
+	require.Contains(t, snapData, `"c_date":"2026-08-06"`, "date is a date, not a midnight instant")
+	require.Contains(t, snapData, `"c_dt2":"2026-08-06 12:34:56.789"`, "datetime2 is zone-less, at its declared scale")
+	require.Contains(t, snapData, `"c_dto":"2026-08-06 12:34:56.78+02:00"`, "datetimeoffset keeps its offset")
+	require.Contains(t, snapData, `"c_time":"23:59:59.9"`, "time is a time of day, not a year-1 instant")
+	require.Contains(t, snapData, `"c_dtm":"2026-08-06 12:34:56.127"`, "datetime shows its millisecond as the source does")
+	require.Contains(t, snapData, `"c_sdt":"2026-08-06 12:34:00"`, "smalldatetime has no fraction")
 
 	// The parity rewrite: update the row to its exact same values (touch one
 	// column to itself — CT records the row changed; the join re-reads all).

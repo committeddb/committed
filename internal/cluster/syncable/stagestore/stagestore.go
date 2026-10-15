@@ -20,6 +20,40 @@
 //	stage:<name>:out         output key -> the stage's current output bytes
 //	stage:<name>:in          retained input set: frame(outKey)+inKey -> input
 //	stage:<name>:rev:<join>  reverse index: frame(dimKey)+outKey -> nil
+//	stage:<name>:ord         window stages: frame(partition)+sortKey+inKey -> order length
+//	stage:<name>:pos         window stages: inKey -> its current ord key
+//	stage:<name>:row         window stages: inKey -> the row's running state
+//	stage:<name>:mdim:<join> fan joins: frame(onKey)+producerKey -> the matched row
+//	stage:<name>:mpos:<join> fan joins: producerKey -> its current onKey
+//	stage:<name>:parent      fan joins: inKey -> the input, for re-fanning
+//	stage:<name>:odim:<join> ordered joins: frame(onKey)+sortKey+producerKey -> order end + row
+//	stage:<name>:opos:<join> ordered joins: producerKey -> its current odim key
+//	stage:<name>:arev:<join> as-of joins: frame(onKey)+asOf sort key+outKey -> asOf end
+//	stage:<name>:acc         aggregate stages without joins: output key -> its fold state
+//
+// The odim/opos buckets exist only for joins declaring orderBy: every
+// matching row (version) of a reference, in business order, so the join
+// resolves by one seek — the greatest version, or for asOf the greatest at
+// or below the input's bound. arev indexes an as-of join's dependents by
+// their bound, so a version at T re-resolves only the inputs in [T, next
+// version).
+//
+// The mdim/mpos/parent buckets exist only for stages with a fan join: a
+// fan join resolves EVERY row matching a reference (mdim, scanned by the
+// onKey prefix; mpos finds a producer row's entry when it moves or
+// leaves), and a dimension change re-fans the inputs referencing it from
+// their retained copies (parent).
+//
+// The acc bucket holds an aggregate key's fold state (counts, exact sums,
+// extremes, ordered item lists), kept in step with its retained inputs so a
+// changed input updates the state instead of refolding every input. It is
+// derived state: a key without one refolds from its inputs and writes it.
+//
+// The ord/pos/row buckets exist only for window stages (reduce =
+// "window"): ord walks a partition in business order (the sort key is an
+// order-preserving encoding, so bytes compare as values do), pos finds an
+// input's entry when it moves or leaves, and row holds the running state
+// a recompute continues from instead of re-reading the prefix.
 //
 // The in/rev keys are length-framed (varint prefix) rather than
 // separator-joined so an output key containing any byte — including a
@@ -40,7 +74,7 @@ import (
 
 // formatVersion is bumped when the layout changes incompatibly; an old
 // store is then reset and rebuilt from the log rather than migrated.
-const formatVersion uint64 = 2 // 2: numeric key parts render canonically (5.0000 ≡ 5)
+const formatVersion uint64 = 3 // 2: numeric key parts render canonically (5.0000 ≡ 5); 3: aggregate fold state (acc)
 
 var (
 	metaBucket      = []byte("meta")
@@ -372,6 +406,234 @@ func (tx *Tx) InputsFor(stage string, outKey []byte, fn func(inKey, val []byte) 
 	return nil
 }
 
+// GetIn reads one retained input (nil if absent). The returned bytes are
+// only valid within the transaction.
+func (tx *Tx) GetIn(stage string, outKey, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(inBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(frameKey(outKey, inKey)), nil
+}
+
+func accBucket(stage string) []byte { return []byte("stage:" + stage + ":acc") }
+
+// PutAcc records an aggregate key's fold state.
+func (tx *Tx) PutAcc(stage string, outKey, val []byte) error {
+	b, err := tx.bucket(accBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(outKey, val)
+}
+
+// GetAcc reads an aggregate key's fold state (nil if absent). The returned
+// bytes are only valid within the transaction.
+func (tx *Tx) GetAcc(stage string, outKey []byte) ([]byte, error) {
+	b, err := tx.bucket(accBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(outKey), nil
+}
+
+// DeleteAcc removes an aggregate key's fold state.
+func (tx *Tx) DeleteAcc(stage string, outKey []byte) error {
+	b, err := tx.bucket(accBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(outKey)
+}
+
+func ordBucket(stage string) []byte { return []byte("stage:" + stage + ":ord") }
+func posBucket(stage string) []byte { return []byte("stage:" + stage + ":pos") }
+func rowBucket(stage string) []byte { return []byte("stage:" + stage + ":row") }
+
+// OrdPrefix is the ord-key prefix of one window partition: every entry of
+// the partition, and nothing else, starts with it.
+func OrdPrefix(partition []byte) []byte { return framePrefix(partition) }
+
+// OrdKey composes a window row's ord key: the partition prefix, the sort
+// key (order values, then tie values — order-preserving encodings), and
+// the input key as the final tiebreak.
+func OrdKey(partition, sortKey, inKey []byte) []byte {
+	out := framePrefix(partition)
+	out = append(out, sortKey...)
+	return append(out, inKey...)
+}
+
+// OrdEntry is one decoded ord entry. OrderEnd and SortEnd are absolute
+// offsets into Key: Key[:OrderEnd] is the shared prefix of the row's peer
+// group (partition + order values), Key[SortEnd:] is the input key.
+type OrdEntry struct {
+	Key       []byte
+	Partition []byte
+	OrderEnd  int
+	SortEnd   int
+}
+
+// InKey is the entry's input key.
+func (e OrdEntry) InKey() []byte { return e.Key[e.SortEnd:] }
+
+// PeerPrefix is the prefix every peer of this row (equal order values in
+// the same partition) shares, and that no other row has.
+func (e OrdEntry) PeerPrefix() []byte { return e.Key[:e.OrderEnd] }
+
+// decodeOrdEntry resolves an ord key and its value (the order and sort
+// lengths) into an entry; ok=false at a cursor's end or on a malformed
+// entry.
+func decodeOrdEntry(k, v []byte) (OrdEntry, bool) {
+	if k == nil {
+		return OrdEntry{}, false
+	}
+	part, rest, ok := splitFrame(k)
+	if !ok {
+		return OrdEntry{}, false
+	}
+	orderLen, n1 := binary.Uvarint(v)
+	if n1 <= 0 {
+		return OrdEntry{}, false
+	}
+	sortLen, n2 := binary.Uvarint(v[n1:])
+	if n2 <= 0 || sortLen > uint64(len(rest)) || orderLen > sortLen {
+		return OrdEntry{}, false
+	}
+	base := len(k) - len(rest)
+	return OrdEntry{Key: k, Partition: part, OrderEnd: base + int(orderLen), SortEnd: base + int(sortLen)}, true //nolint:gosec // G115: bounded by len(rest) above
+}
+
+// PutOrd records a window row's position: its ord key with the byte
+// lengths of the order part and the whole sort key (order + tie values).
+func (tx *Tx) PutOrd(stage string, ordKey []byte, orderLen, sortLen int) error {
+	b, err := tx.bucket(ordBucket(stage))
+	if err != nil {
+		return err
+	}
+	v := binary.AppendUvarint(nil, uint64(orderLen)) //nolint:gosec // G115: a length, never negative
+	v = binary.AppendUvarint(v, uint64(sortLen))     //nolint:gosec // G115: as above
+	return b.Put(ordKey, v)
+}
+
+// DeleteOrd removes a window row's position.
+func (tx *Tx) DeleteOrd(stage string, ordKey []byte) error {
+	b, err := tx.bucket(ordBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(ordKey)
+}
+
+// GetOrd reads one ord entry (ok=false when absent).
+func (tx *Tx) GetOrd(stage string, ordKey []byte) (OrdEntry, bool, error) {
+	b, err := tx.bucket(ordBucket(stage))
+	if err != nil || b == nil {
+		return OrdEntry{}, false, err
+	}
+	v := b.Get(ordKey)
+	if v == nil {
+		return OrdEntry{}, false, nil
+	}
+	e, ok := decodeOrdEntry(ordKey, v)
+	return e, ok, nil
+}
+
+// OrdCursor walks one window stage's ord bucket in key (business) order.
+// Writes to the ord bucket invalidate it; writes to other buckets do not.
+// Returned entries' bytes are only valid within the transaction.
+type OrdCursor struct{ c *bolt.Cursor }
+
+// OrdCursor opens a cursor over a window stage's ord bucket; on a stage
+// that has never folded it yields nothing.
+func (tx *Tx) OrdCursor(stage string) (*OrdCursor, error) {
+	b, err := tx.bucket(ordBucket(stage))
+	if err != nil || b == nil {
+		return &OrdCursor{}, err
+	}
+	return &OrdCursor{c: b.Cursor()}, nil
+}
+
+// Seek positions at the first entry >= k; Next and Prev step. ok=false at
+// either end.
+func (c *OrdCursor) Seek(k []byte) (OrdEntry, bool) {
+	if c.c == nil {
+		return OrdEntry{}, false
+	}
+	return decodeOrdEntry(c.c.Seek(k))
+}
+
+func (c *OrdCursor) Next() (OrdEntry, bool) {
+	if c.c == nil {
+		return OrdEntry{}, false
+	}
+	return decodeOrdEntry(c.c.Next())
+}
+
+func (c *OrdCursor) Prev() (OrdEntry, bool) {
+	if c.c == nil {
+		return OrdEntry{}, false
+	}
+	return decodeOrdEntry(c.c.Prev())
+}
+
+// Last positions at the bucket's last entry.
+func (c *OrdCursor) Last() (OrdEntry, bool) {
+	if c.c == nil {
+		return OrdEntry{}, false
+	}
+	return decodeOrdEntry(c.c.Last())
+}
+
+// PutPos / GetPos / DeletePos map a window input to its current ord key.
+func (tx *Tx) PutPos(stage string, inKey, ordKey []byte) error {
+	b, err := tx.bucket(posBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(inKey, ordKey)
+}
+
+func (tx *Tx) GetPos(stage string, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(posBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(inKey), nil
+}
+
+func (tx *Tx) DeletePos(stage string, inKey []byte) error {
+	b, err := tx.bucket(posBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(inKey)
+}
+
+// PutRow / GetRow / DeleteRow hold a window row's running state.
+func (tx *Tx) PutRow(stage string, inKey, state []byte) error {
+	b, err := tx.bucket(rowBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(inKey, state)
+}
+
+func (tx *Tx) GetRow(stage string, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(rowBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(inKey), nil
+}
+
+func (tx *Tx) DeleteRow(stage string, inKey []byte) error {
+	b, err := tx.bucket(rowBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(inKey)
+}
+
 // PutRev records that dimKey (in one of the stage's joins) is referenced
 // by outKey — the fan-out address for dimension changes.
 func (tx *Tx) PutRev(stage, join string, dimKey, outKey []byte) error {
@@ -485,3 +747,255 @@ func hasPrefix(k, prefix []byte) bool {
 	}
 	return true
 }
+
+func mdimBucket(stage, join string) []byte { return []byte("stage:" + stage + ":mdim:" + join) }
+func mposBucket(stage, join string) []byte { return []byte("stage:" + stage + ":mpos:" + join) }
+func parentBucket(stage string) []byte     { return []byte("stage:" + stage + ":parent") }
+
+// PutMDim stores one matched row of a fan join under the reference value
+// it answers (onKey) and its producer key.
+func (tx *Tx) PutMDim(stage, join string, onKey, producerKey, val []byte) error {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil {
+		return err
+	}
+	return b.Put(frameKey(onKey, producerKey), val)
+}
+
+// GetMDim reads one filed row of a fan join (nil if absent).
+func (tx *Tx) GetMDim(stage, join string, onKey, producerKey []byte) ([]byte, error) {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(frameKey(onKey, producerKey)), nil
+}
+
+// DeleteMDim removes one matched row of a fan join.
+func (tx *Tx) DeleteMDim(stage, join string, onKey, producerKey []byte) error {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(frameKey(onKey, producerKey))
+}
+
+// MDimsFor iterates every row a fan join matches for one reference value,
+// in producer-key order.
+func (tx *Tx) MDimsFor(stage, join string, onKey []byte, fn func(producerKey, val []byte) error) error {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	prefix := framePrefix(onKey)
+	c := b.Cursor()
+	for k, v := c.Seek(prefix); k != nil && hasPrefix(k, prefix); k, v = c.Next() {
+		if err := fn(k[len(prefix):], v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MDimsAll iterates every matched row of a fan join — the epoch sweep's
+// scan.
+func (tx *Tx) MDimsAll(stage, join string, fn func(onKey, producerKey, val []byte) error) error {
+	b, err := tx.bucket(mdimBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		onKey, producerKey, ok := splitFrame(k)
+		if !ok {
+			continue
+		}
+		if err := fn(onKey, producerKey, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PutMPos / GetMPos / DeleteMPos map a fan join's producer row to the
+// reference value it is filed under.
+func (tx *Tx) PutMPos(stage, join string, producerKey, onKey []byte) error {
+	b, err := tx.bucket(mposBucket(stage, join))
+	if err != nil {
+		return err
+	}
+	return b.Put(producerKey, onKey)
+}
+
+func (tx *Tx) GetMPos(stage, join string, producerKey []byte) ([]byte, error) {
+	b, err := tx.bucket(mposBucket(stage, join))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(producerKey), nil
+}
+
+func (tx *Tx) DeleteMPos(stage, join string, producerKey []byte) error {
+	b, err := tx.bucket(mposBucket(stage, join))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(producerKey)
+}
+
+// PutParent / GetParent / DeleteParent retain a fan-join stage's inputs,
+// which a dimension change re-fans.
+func (tx *Tx) PutParent(stage string, inKey, val []byte) error {
+	b, err := tx.bucket(parentBucket(stage))
+	if err != nil {
+		return err
+	}
+	return b.Put(inKey, val)
+}
+
+func (tx *Tx) GetParent(stage string, inKey []byte) ([]byte, error) {
+	b, err := tx.bucket(parentBucket(stage))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(inKey), nil
+}
+
+func (tx *Tx) DeleteParent(stage string, inKey []byte) error {
+	b, err := tx.bucket(parentBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(inKey)
+}
+
+// ParentsAll iterates a fan-join stage's retained inputs — the epoch
+// sweep's scan.
+func (tx *Tx) ParentsAll(stage string, fn func(inKey, val []byte) error) error {
+	b, err := tx.bucket(parentBucket(stage))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		if err := fn(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Join index kinds: an ordered join's versions (odim), each producer row's
+// current version key (opos), and an as-of join's dependents (arev).
+const (
+	JoinIndexVersions   = "odim"
+	JoinIndexPositions  = "opos"
+	JoinIndexDependents = "arev"
+)
+
+func joinIndexBucket(stage, kind, join string) []byte {
+	return []byte("stage:" + stage + ":" + kind + ":" + join)
+}
+
+// PutJoinIndex / GetJoinIndex / DeleteJoinIndex address one entry of an
+// ordered join's index of the given kind.
+func (tx *Tx) PutJoinIndex(stage, kind, join string, key, val []byte) error {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil {
+		return err
+	}
+	return b.Put(key, val)
+}
+
+func (tx *Tx) GetJoinIndex(stage, kind, join string, key []byte) ([]byte, error) {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil || b == nil {
+		return nil, err
+	}
+	return b.Get(key), nil
+}
+
+func (tx *Tx) DeleteJoinIndex(stage, kind, join string, key []byte) error {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil || b == nil {
+		return err
+	}
+	return b.Delete(key)
+}
+
+// ScanJoinIndex walks the entries starting with prefix: forward from the
+// first key >= from, or backward from the last key < from (from nil = the
+// prefix's last entry). fn returns false to stop.
+func (tx *Tx) ScanJoinIndex(stage, kind, join string, prefix, from []byte, backward bool, fn func(key, val []byte) (bool, error)) error {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	var k, v []byte
+	switch {
+	case !backward:
+		start := prefix
+		if from != nil && string(from) > string(prefix) {
+			start = from
+		}
+		k, v = c.Seek(start)
+	default:
+		upper := from
+		if upper == nil {
+			upper = PrefixEnd(prefix)
+		}
+		if upper == nil {
+			k, v = c.Last()
+		} else if k, _ = c.Seek(upper); k == nil {
+			k, v = c.Last()
+		} else {
+			k, v = c.Prev()
+		}
+	}
+	for k != nil && hasPrefix(k, prefix) {
+		more, err := fn(k, v)
+		if err != nil || !more {
+			return err
+		}
+		if backward {
+			k, v = c.Prev()
+		} else {
+			k, v = c.Next()
+		}
+	}
+	return nil
+}
+
+// AllJoinIndex iterates every entry of one join index — the epoch sweep.
+func (tx *Tx) AllJoinIndex(stage, kind, join string, fn func(key, val []byte) error) error {
+	b, err := tx.bucket(joinIndexBucket(stage, kind, join))
+	if err != nil || b == nil {
+		return err
+	}
+	c := b.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		if err := fn(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PrefixEnd is the least key greater than every key starting with prefix
+// (nil: no such key — the prefix is all 0xFF, so its range runs to the
+// end).
+func PrefixEnd(prefix []byte) []byte {
+	end := append([]byte(nil), prefix...)
+	for i := len(end) - 1; i >= 0; i-- {
+		if end[i] < 0xFF {
+			end[i]++
+			return end[:i+1]
+		}
+	}
+	return nil
+}
+
+// SplitFrame undoes a framed key: the first (length-prefixed) key and the
+// rest.
+func SplitFrame(k []byte) (first, rest []byte, ok bool) { return splitFrame(k) }

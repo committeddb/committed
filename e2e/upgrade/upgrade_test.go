@@ -1,7 +1,7 @@
 //go:build upgrade
 
-// Package upgrade_test exercises the per-node half of the rolling-upgrade
-// procedure documented in docs/operations/upgrade.md against the REAL binary:
+// Package upgrade_test exercises the per-node half of the documented
+// rolling-upgrade procedure against the REAL binary:
 // graceful SIGTERM shutdown, restart over the same data directory, /ready
 // gating, /version, and that persisted state survives the restart.
 //
@@ -57,8 +57,8 @@ func TestRollingUpgrade_NodeRestartPreservesState(t *testing.T) {
 	postType(t, base, "upgrade-canary")
 	requireTypeListed(t, base, "upgrade-canary")
 
-	// Graceful stop: SIGTERM drains HTTP, stops raft, closes the WAL cleanly
-	// (see docs/operations/shutdown.md). Waits for the process to fully exit
+	// Graceful stop: SIGTERM drains HTTP, stops raft, closes the WAL cleanly.
+	// Waits for the process to fully exit
 	// and the port to free.
 	first.stopGraceful(t, base)
 

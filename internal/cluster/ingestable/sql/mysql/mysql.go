@@ -1807,7 +1807,7 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 // replication TruncateMessage: committed has no clear-all primitive, so the
 // truncate is NOT propagated and the destination now diverges from the source until a
 // re-snapshot. It gets the same specific divergence Warn Postgres emits (see
-// postgres.go and the TRUNCATE caveat in docs/operations/cdc-setup.md) instead of
+// postgres.go) instead of
 // being buried in the generic DDL warn. Filtered through watches() because MySQL's
 // binlog is server-wide: a TRUNCATE on an unwatched table diverges no sink of
 // this ingest, and warning on it would cry wolf.

@@ -94,7 +94,7 @@ func TestEventLogSelectionsMatchLegacyPrefix(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		old, err := storage.metadataSupersessions(tt.bound)
+		old, err := storage.selectSupersessions(tt.bound, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

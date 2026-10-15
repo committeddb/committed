@@ -82,7 +82,7 @@ func (s *Storage) saveIngestablePosition(e *cluster.Entity, _ uint64) error {
 // since dropped (error) or a silent data gap. Deterministic: config existence
 // is replicated state applied in identical log order on every node. Shared by
 // the entity-apply path (saveIngestablePosition) and the atomic bundled-position
-// path (applyBundledIngestablePosition).
+// path (applyBundledIngestablePositionTx).
 func putIngestablePositionGuarded(tx *bolt.Tx, key, data []byte) error {
 	b := tx.Bucket(ingestablePositionBucket)
 	if b == nil {
@@ -100,21 +100,20 @@ func putIngestablePositionGuarded(tx *bolt.Tx, key, data []byte) error {
 	return nil
 }
 
-// applyBundledIngestablePosition persists the resume checkpoint a proposal
+// applyBundledIngestablePositionTx persists the resume checkpoint a proposal
 // carried inline (Proposal.Position), keyed by its IngestableID, through the
-// SAME guarded put a standalone position entity uses. Called from ApplyCommitted
+// SAME guarded put a standalone position entity uses, within the caller's
+// transaction. Called from apply (applyDataTx)
 // so the checkpoint advances in the same raft entry as the proposal's rows —
 // closing the crash window between a committed snapshot batch and a separate
 // position proposal (the window SourceSeq dedup can't cover, since snapshot rows
 // carry SourceSeq 0). pos is the raw dialect position bytes; we wrap it in a
 // LogIngestablePosition exactly as proposeIngestablePosition would, so Position()
 // unwraps it identically.
-func (s *Storage) applyBundledIngestablePosition(id string, pos cluster.Position) error {
+func applyBundledIngestablePositionTx(tx *bolt.Tx, id string, pos cluster.Position) error {
 	data, err := (&cluster.IngestablePosition{ID: id, Position: pos}).Marshal()
 	if err != nil {
 		return fmt.Errorf("[wal.ingestable_position] marshal bundled: %w", err)
 	}
-	return s.update(func(tx *bolt.Tx) error {
-		return putIngestablePositionGuarded(tx, []byte(id), data)
-	})
+	return putIngestablePositionGuarded(tx, []byte(id), data)
 }

@@ -180,6 +180,47 @@ func (k EntityKind) String() string {
 	}
 }
 
+// OnSupersede declares what the scrub does with an entity that a later entity
+// for the same (type, key) supersedes. OnSupersedeUnspecified resolves per
+// entity kind (see Type.ScrubsSuperseded).
+type OnSupersede int
+
+const (
+	// OnSupersedeUnspecified takes the entity kind's default: scrub for
+	// snapshot, keep for every other kind.
+	OnSupersedeUnspecified OnSupersede = 0
+	// OnSupersedeKeep keeps every version of every key.
+	OnSupersedeKeep OnSupersede = 1
+	// OnSupersedeScrub keeps only each key's latest version; the scrub
+	// removes the superseded ones from the permanent log.
+	OnSupersedeScrub OnSupersede = 2
+)
+
+// ParseOnSupersede maps the TOML string form to an OnSupersede. The empty
+// string is OnSupersedeUnspecified (the field is optional).
+func ParseOnSupersede(s string) (OnSupersede, error) {
+	switch s {
+	case "":
+		return OnSupersedeUnspecified, nil
+	case "keep":
+		return OnSupersedeKeep, nil
+	case "scrub":
+		return OnSupersedeScrub, nil
+	}
+	return 0, fmt.Errorf("unknown onSupersede %q (expected \"keep\" or \"scrub\")", s)
+}
+
+func (o OnSupersede) String() string {
+	switch o {
+	case OnSupersedeKeep:
+		return "keep"
+	case OnSupersedeScrub:
+		return "scrub"
+	default:
+		return "unspecified"
+	}
+}
+
 type Type struct {
 	ID         string
 	Name       string
@@ -205,6 +246,11 @@ type Type struct {
 	// EntityKindEvent; projection-style syncables can default their
 	// match rules to it.
 	Discriminator string
+	// OnSupersede is the declared scrub behavior for superseded versions of
+	// a key; OnSupersedeUnspecified takes the entity kind's default. Mutable
+	// in place in both directions. Read the effective value through
+	// ScrubsSuperseded.
+	OnSupersede OnSupersede
 	// SchemaChangeTopic is the Type ID of the topic that receives
 	// ContractExtension events when data claiming this type diverges from
 	// its schema under ValidateAnnounce. Type-level so both arrival paths
@@ -230,6 +276,21 @@ type Type struct {
 	// requirement that every version after v1 declares its migration
 	// intent explicitly.
 	MigrationExplicit bool
+}
+
+// ScrubsSuperseded reports whether the scrub removes this type's superseded
+// entities, keeping only each key's latest. An undeclared OnSupersede takes
+// the entity kind's default: snapshot entities are last-writer-wins, so their
+// superseded copies are disposable; every other kind keeps them.
+func (t *Type) ScrubsSuperseded() bool {
+	switch t.OnSupersede {
+	case OnSupersedeScrub:
+		return true
+	case OnSupersedeKeep:
+		return false
+	default:
+		return t.EntityKind == EntityKindSnapshot
+	}
 }
 
 // Configuration is the type's read-back: the document the operator
@@ -271,6 +332,7 @@ type typeTable struct {
 	SchemaChangeTopic string `toml:"schemaChangeTopic,omitempty"`
 	EntityKind        string `toml:"entityKind,omitempty"`
 	Discriminator     string `toml:"discriminator,omitempty"`
+	OnSupersede       string `toml:"onSupersede,omitempty"`
 }
 
 type typeMigrationTable struct {
@@ -296,6 +358,9 @@ func (t *Type) synthesizeDocument() ([]byte, error) {
 	}
 	if t.EntityKind != EntityKindUnspecified {
 		doc.Type.EntityKind = t.EntityKind.String()
+	}
+	if t.OnSupersede != OnSupersedeUnspecified {
+		doc.Type.OnSupersede = t.OnSupersede.String()
 	}
 	if len(t.Migration) > 0 || t.NonConvertible || t.Version > 1 {
 		doc.Migration = &typeMigrationTable{}
@@ -386,7 +451,7 @@ type TypeSchemaValidator interface {
 // changes how FUTURE Actuals of the type are read, but does NOT re-materialize
 // rows already synced through the previous migration on the type's dependent
 // projections; rebuilding those projections to reach already-synced history is
-// the operator's responsibility (see docs/read-models.md). before is the type as
+// the operator's responsibility. before is the type as
 // it stood before the update (nil for a brand-new type); after is the current
 // type. Returns "" when no advisory is warranted — a new type, a schema/version
 // bump (which forces a new version and its own migration), or a byte-identical
@@ -456,12 +521,12 @@ func (t *Type) Marshal() ([]byte, error) {
 	lt := &clusterpb.LogType{
 		ID:   t.ID,
 		Name: t.Name,
-		// Version, Validate, and EntityKind are bounded by the domain:
-		// Version is monotonically assigned starting at 1 (will never
-		// exceed int32), Validate has only the defined ValidationStrategy
-		// constants (ParseType rejects anything else), and EntityKind only
-		// the defined EntityKind constants (ParseEntityKind rejects
-		// anything else).
+		// Version, Validate, EntityKind, and OnSupersede are bounded by
+		// the domain: Version is monotonically assigned starting at 1
+		// (will never exceed int32), Validate has only the defined
+		// ValidationStrategy constants (ParseType rejects anything else),
+		// and EntityKind and OnSupersede only their defined constants
+		// (ParseEntityKind and ParseOnSupersede reject anything else).
 		Version:           int32(t.Version), //nolint:gosec // G115: bounded by domain
 		SchemaType:        t.SchemaType,
 		Schema:            t.Schema,
@@ -473,6 +538,7 @@ func (t *Type) Marshal() ([]byte, error) {
 		NonConvertible:    t.NonConvertible,
 		Document:          t.Document,
 		DocumentMimeType:  t.DocumentMimeType,
+		OnSupersede:       clusterpb.LogOnSupersede(t.OnSupersede), //nolint:gosec // G115: bounded by domain
 	}
 
 	return proto.Marshal(lt)
@@ -498,6 +564,7 @@ func (t *Type) Unmarshal(bs []byte) error {
 	t.NonConvertible = lt.NonConvertible
 	t.Document = lt.Document
 	t.DocumentMimeType = lt.DocumentMimeType
+	t.OnSupersede = OnSupersede(lt.OnSupersede)
 
 	return nil
 }

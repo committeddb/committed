@@ -14,25 +14,6 @@ enrichment, delete lifecycles, and dimension fan-out.
 > read model in one `docker compose up`. This guide explains the mechanics
 > behind it.
 
-## Choosing your read-model shape (read this first)
-
-committed gives you three ways to serve queries, and **the projection is the
-primary pattern** — reach for the others when their specific reason applies,
-not by default:
-
-| You want | Use | Why |
-|---|---|---|
-| A derived/denormalized table you query directly — a BFF row, a flat table replacing a complex join, current state per entity | **`projection`** | It maintains the table *incrementally, per event*: continuously current (no refresh step), folds **multiple topics into one row**, aggregates children into array columns, enriches from other topics. This is committed's centerpiece use case. |
-| Raw per-table replicas — ad-hoc SQL, joins you own, feeding views/BI on your terms | plain **`sql`** syncable with a `primaryKey` (a mirror) | Faithful keyed copies of source tables. If you build a materialized view over mirrors, *you* own its refresh cost and staleness — committed keeps only the mirrors current. |
-| One row per **event** — an audit/history log | plain **`sql`** syncable with no `primaryKey` | Append-only, replay-safe history. Add `keyColumn` if the topic can carry deletes — without it they dead-letter (below). |
-
-The trade to understand: a materialized view over mirrors is stale from the
-moment its (often expensive) refresh completes; a projection is current
-within seconds of the source commit, forever, with no refresh to schedule.
-If the table you're building is *the thing the application reads*, start
-from `projection` and use mirrors only for the parts a projection
-cannot yet express.
-
 One projection scope line to know before you design: a projection's
 `primaryKey` takes one column or a list (`primaryKey = ["visit_id",
 "workarea_id"]` — a latest-event-wins fold on a composite identity). A
@@ -49,115 +30,12 @@ data").
 
 ## History tables vs. read models
 
-The plain `sql` syncable lands a *history* table: one row per event.
-Applications usually query *current state*: one row per entity, which
-requires folding each entity's events in log order. A
-`type = "projection"` syncable expresses that fold declaratively —
-in the one place that sees every event exactly in order — so the log
-stays the source of truth, the rules live in version-controlled TOML,
-reads are O(1), and the table is disposable: rebuild it by replaying
-from index 0. Use `sql` for event-log/history tables (and for
-`snapshot`-kind topics, which are total updates with nothing to fold);
-use `projection` to maintain current-state tables from an
-`event`-kind topic. One topic typically feeds both.
-
-> **The former `sql-projection` spelling was removed in 0.8.0.** The type
-> is `projection` with a `[projection]` section, and the array tables are
-> plural (`[[projection.sources]]`, `[[projection.stages]]`,
-> `[[…aggregate.fields]]`, `[[…aggregate.scalars]]`, `[[…lookup.fields]]`,
-> `[[…stages.joins]]`). Posting the old spelling is
-> refused with a message naming the rename, and a config stored under it
-> parks on an upgraded node until re-POSTed renamed — its declared content is
-> unchanged, so it resumes with its stores and checkpoint (see
-> [upgrade.md](operations/upgrade.md#before-you-upgrade)).
-
-A keyless history table (no `primaryKey`) is **replay-safe**: committed dedups
-each appended row on a hidden sidecar (`<table>__committed_applied`, keyed by the
-event's raft index and its ordinal within the proposal), so a crash mid-batch, a
-leader-change re-sync, or a corrupt-checkpoint restart re-applies as a no-op
-rather than duplicating rows. The sidecar is committed-managed and never queried
-by the application — your history table keeps exactly the columns you mapped. (A
-`snapshot`-kind or otherwise keyed `sql` syncable needs none of this: its upsert
-is already idempotent on the key.) Because the sidecar name is derived from the
-table name, a keyless syncable's table must be short enough that
-`<table>__committed_applied` fits the database's 63-char identifier limit;
-committed rejects a longer one at config time.
-
-**A keyless table cannot honor a delete unless you tell it where the key is.**
-A keyed syncable deletes by its `primaryKey`; a keyless one has no key to bind,
-so a delete tombstone — including a
-[right-to-be-forgotten erasure](operations/rtbf.md) — **dead-letters** rather
-than being silently dropped, and the syncable keeps running. Set `keyColumn` to
-the column whose value equals the entity's key and deletes translate to
-`DELETE FROM <table> WHERE <keyColumn> = ?`, removing the subject's whole
-history from the table:
-
-```toml
-[sql]
-db = "bff"; table = "order_events"      # no primaryKey: append-only history
-keyColumn = "order_id"                  # ...but deletes still erase by this column
-[[sql.mappings]]
-jsonPath = "$.order_id"; column = "order_id"; type = "TEXT"
-```
-
-`keyColumn` is single-column and cannot be combined with a composite
-`primaryKey`. Leaving it unset is a legitimate choice for a topic that never
-receives deletes — committed logs a warning at config time naming the
-consequence, so the decision is yours and visible. If you leave it unset on a
-topic that may carry erasures, erasing that table is your responsibility.
-
-You will also find a small table called `committed__destinations` in the
-destination database: one row per projected table, a note saying which
-rendering version of committed wrote its rows and whether committed
-created the table. A worker reads the version before serving, and if a
-newer committed writes rows differently than the note says, the syncable
-stops and tells you how to bring the table forward instead of mixing two
-renderings in one table (see
-[api-compatibility.md](api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
-
-Whether committed created the table decides what a `DELETE` does. The
-rule is the one committed applies everywhere it touches your systems: it
-removes what it created and leaves what it did not. A table committed
-created (there was none when the syncable was first POSTed) is dropped
-with the syncable. A table you created first and pointed a syncable at
-stays, rows and all. The helper tables are always committed's and always
-go. `?keepData=true` on the DELETE hands a table committed created over
-to you: nothing is removed, and committed stops counting the table as
-its own, so a later DELETE leaves it too.
-
-The sidecar keys on the event's *raft index*, so it makes re-applying the **same
-committed event** a no-op — but each *distinct* event is still its own row. A
-history table records one row per event by design, so the same logical data
-committed as two separate events lands as two rows. That happens two ways:
-
-- **You propose the same unkeyed data more than once.** Direct proposals are
-  yours to control, and committed faithfully appends each.
-- **An ingestable re-emits a row.** A snapshot is at-least-once at the source-row
-  level: a crash mid-snapshot re-reads the current window, and a *full
-  re-snapshot* — a Postgres replication-slot recreate, deleting and recreating
-  the ingestable, or a node rebuild — re-reads the whole source table, so one
-  source row can arrive as several events. (CDC *stream* changes are deduplicated
-  by source sequence and do not duplicate this way; only the snapshot phase
-  does.)
-
-Either way the history table faithfully records each event — that is what an
-append log is. If you want one row per logical entity instead, give the `sql`
-syncable a `primaryKey` (its upsert then converges on the key) or maintain a
-current-state table with `projection`.
-
-`primaryKey` takes one column or a list: `primaryKey = ["tenant_id",
-"project_id"]` declares a real composite `PRIMARY KEY (tenant_id,
-project_id)` — upserts converge on the combination and a source delete
-removes the row matching every key column. **The columns and their order
-must match the producing ingestable's `primaryKey`**: a delete tombstone
-carries only the encoded key, and its values decode positionally in the
-producer's column order — a mismatched order mis-addresses rows, and nothing
-can detect it mechanically (topics decouple the two configs on purpose).
-A mismatched column COUNT, by contrast, is caught at delete-apply time and
-dead-letters loudly — a composite tombstone hitting a single-key destination (or
-the reverse) would otherwise execute a WHERE that matches nothing and
-silently strand the deleted row. Every key column must also appear in the
-mappings; the parser rejects a config where it doesn't.
+The plain `sql` syncable lands a *history* table: one row per event, or a
+keyed mirror of a source table; see
+[syncables.md](syncables.md#sql-mirrors-and-history-tables-sql), which also
+covers [choosing between them and a projection](syncables.md#choosing-a-shape).
+A projection maintains a *current-state* table: one row per entity, folding
+each entity's events in log order.
 
 ## A single-source projection
 
@@ -227,10 +105,13 @@ error handling, deletes, and schema evolution:
   *present* JSON null — the flag form, since TOML cannot write
   `equals = null`), `notEquals`, `notNull` (present and
   non-null — SQL's IS NOT NULL, the merge's left/inner gate), or
-  `greaterThan`/`lessThan` (numeric literals, strict). Comparisons follow SQL: a missing or null value
+  `greaterThan`/`lessThan` (strict; a number literal compares numbers,
+  a text literal compares strings in byte order — `greaterThan =
+  "2026-01-01"` is an ISO-date window — and a quoted number like `"5"` is
+  rejected, since as text `"10"` sorts before `"9"`). Comparisons follow SQL: a missing or null value
   matches NO comparison — including `notEquals` — and a value of a
   different scalar family (a string where the literal is a number)
-  matches neither `equals` nor `notEquals`. That is the whole language —
+  matches no comparison either. That is the whole language —
   single field, compare-to-literal; boolean expressions stay out.
   A missing path is "no match", never an error — including for `null`
   clauses, so an absent field never matches. Inside a fan (a forEach
@@ -304,11 +185,13 @@ set = [
 ]
 ```
 
-The language: `+ - * /`, comparisons (`= <> < <= > >=`), the boolean
+The language: `+ - * /`, comparisons (`= <> < <= > >=` — numbers
+numerically, strings in byte order, `false < true`; ordering a string
+against a number is an error), the boolean
 predicates — `or`/`and`/`not` (SQL keywords, case-insensitive),
-`x in (…)`, `x is [not] null`, `true`/`false` literals — plus `coalesce`, `nullif`,
+`x [not] in (…)`, `x [not] like pattern`, `x is [not] null`, `x is [not] distinct from y` (null-safe comparison: two nulls are not distinct, never null), `true`/`false`/`null` literals — plus `coalesce`, `nullif`,
 `round(x, scale)` (half away from zero), `trunc(x[, scale])` (toward
-zero), decimal and `'string'` literals, and `$.…` paths into the
+zero), SQL's `case` conditional, `x [not] between a and b`, the string functions, casts, math, and date/time functions below, decimal and `'string'` literals, and `$.…` paths into the
 payload. Connectives follow SQL's three-valued logic — `null or true`
 is TRUE, `null and false` is FALSE — the one deliberate exception to
 blanket null propagation; `is [not] null` never returns null, and it
@@ -321,6 +204,177 @@ non-terminating value, **every `/` must sit under a `round` or `trunc`**
 rejected at POST, not at apply. A missing field is null; null propagates
 through arithmetic and comparison; `coalesce`/`nullif` are the null-aware
 escape hatches (`nullif(x, 0)` is the division-by-zero guard).
+
+`case` takes both SQL forms — searched (`case when … then … else … end`)
+and simple (`case $.status when 1 then 'open' when 2 then 'closed' end`):
+
+```toml
+set = [
+  { column = "size_band", expr = "case when $.hours < 8 then 'small' when $.hours < 40 then 'medium' else 'large' end" },
+  { column = "rate",      expr = "case when $.hours = 0 then null else round($.amount / $.hours, 2) end" },
+]
+```
+
+The first `when` that is TRUE selects its result; a null or false `when`
+falls through (in the simple form a null operand matches nothing), and no
+match without an `else` is null. Only the selected branch is evaluated, so
+a guarded branch never fails the event — `rate` above never divides by
+zero. A `/` inside a result still needs a `round`/`trunc` (one around the
+whole `case` covers every branch), and literal results of different kinds
+(`then 1 else 'x'`) are rejected at POST. `case` works everywhere `expr`
+does, including fold arms — SQL's conditional sum is
+`{ field = "done_hours", sum = "case when $.status = 'done' then $.hours else 0 end" }`.
+
+The string functions follow PostgreSQL, counting in characters (code
+points), never bytes:
+
+| Function | Result |
+|---|---|
+| `a \|\| b` | concatenation; null if either side is null |
+| `concat(a, …)` | concatenation that skips nulls (`concat(null)` is `''`) |
+| `lower(s)`, `upper(s)` | case mapping |
+| `trim(s[, chars])`, `ltrim`, `rtrim` | strip spaces — or the characters in `chars` — from both ends, the start, or the end |
+| `substring(s, start[, count])` | characters from 1-based `start`; a `start` below 1 eats into `count` |
+| `length(s)`, `char_length(s)` | character count |
+| `replace(s, from, to)` | every literal occurrence of `from` replaced (no regex) |
+| `starts_with(s, prefix)` | boolean |
+| `s [not] like pattern` | case-sensitive whole-string match: `%` any run, `_` one character, `\` escapes the next |
+
+```toml
+set = [
+  { column = "display_name", expr = "trim(coalesce($.first, '') || ' ' || coalesce($.last, ''))" },
+  { column = "code",         expr = "upper(trim($.code))" },
+]
+when = [ { expr = "$.sku like 'SVC-%'" } ]
+```
+
+A null argument makes any of them null except `concat`. `||` binds looser
+than `+`/`-` and tighter than comparisons, as in PostgreSQL (`'#' || $.n + 1`
+concatenates the sum). `||` and `concat` render a number in canonical digits
+and a boolean as `true`/`false`; every other string function, and `like`,
+needs a string (`lower` of a number fails the event — there is no implicit
+conversion). `trim` strips spaces only, not tabs or newlines, matching
+PostgreSQL. Four deliberate differences from PostgreSQL keep the results
+identical on every replay:
+
+- **Case mapping is locale-free** — Unicode's simple one-to-one mappings,
+  so `upper('ß')` stays `ß` (PostgreSQL can give `ẞ`, depending on its locale). The Unicode tables
+  ship with committed's binary, and Unicode very rarely changes an existing
+  mapping (it gave Georgian new capitals in 2018); should an upgrade carry
+  such a change, rows written before it keep the old result until you
+  rebuild.
+- **Numbers render in canonical digits** — `'n=' || $.n` over a payload
+  `1.50` is `n=1.5` (PostgreSQL keeps the source scale, `n=1.50`).
+- **Booleans render as `true`/`false` in `concat`** too (PostgreSQL's
+  `concat` writes `t`/`f`, its `||` writes `true`/`false`).
+- **Strings order by byte (code point)** — PostgreSQL's `COLLATE "C"`,
+  not a locale collation, which a library upgrade can reorder: `'B' < 'a'`
+  is true (a locale puts `a` first). ISO dates and same-case codes order
+  identically either way, and the `min`/`max` folds use the same order.
+
+Casts convert between numbers, text, and booleans with PostgreSQL's rules —
+`cast(x as t)` or the shorthand `x::t`, for `numeric` (`decimal`), `integer`
+(`int`), `bigint`, `text` (`varchar`), and `boolean` (`bool`):
+
+```toml
+set = [
+  { column = "qty",         expr = "greatest(cast($.qty as numeric), 0)" },
+  { column = "status_code", expr = "$.Status::integer" },
+  { column = "discount",    expr = "coalesce(try_cast($.discount as numeric), 0)" },
+]
+```
+
+- **`numeric`** reads a string in PostgreSQL's numeric syntax, exactly:
+  surrounding spaces, a sign, a fraction, an exponent (`1e3`), `0x`/`0o`/`0b`
+  prefixes, and `_` between digits (`1_000`).
+- **`integer`/`bigint`** round a number half away from zero (`2.5` → `3`)
+  but read a string only in integer syntax (`'2.5'::integer` fails — go
+  through `::numeric` first), map a boolean to `1`/`0`, and fail outside
+  their range.
+- **`boolean`** reads PostgreSQL's spellings — `true`/`false`, `yes`/`no`,
+  `on`/`off`, `1`/`0`, or any unambiguous prefix (`t`, `n`), in any case —
+  and casts an integer as nonzero-is-true.
+- **`text`** renders a number in canonical digits and a boolean as
+  `true`/`false`.
+
+A cast that cannot convert its value fails the event, as in PostgreSQL.
+**`try_cast(x as t)`** — committed's one addition — is the same conversion,
+yielding null instead, for a producer whose strings are sometimes junk;
+pair it with `coalesce` for a default. `NaN` and `Infinity`, which
+PostgreSQL's numeric accepts, have no exact value here and are a failed
+conversion.
+
+The math functions: `abs`, `ceil` (`ceiling`), `floor`, `mod(a, b)` (the
+remainder takes the dividend's sign; `mod(x, 0)` fails), and
+`greatest(…)`/`least(…)`, which ignore nulls (null only when every argument
+is) and order values like the comparisons do. `ceil`, `floor`, and an
+`integer` cast settle a division the way `round` does, so
+`ceil($.minutes / 60)` needs no `round`.
+
+#### Dates and times
+
+Four PostgreSQL types compute over time: `timestamptz`, `timestamp`,
+`date`, and `interval`. A payload carries times as strings, so you reach
+them with a cast or a typed literal:
+
+```toml
+set = [
+  { column = "due",       expr = "cast($.created as timestamptz) + interval '30 days'" },
+  { column = "days_open", expr = "trunc(extract(epoch from ($.closed::timestamptz - $.created::timestamptz)) / 86400)" },
+  { column = "month",     expr = "date_trunc('month', $.paid_at::timestamptz)" },
+]
+when = [ { expr = "$.paid_at::date >= '2026-01-01'" } ]
+```
+
+- **Input** is the ISO 8601 family every source writes: `2024-01-15`,
+  then a `T` or a space and `HH:MM[:SS[.fraction]]`, then an optional
+  offset `Z`, `+05:30`, `+0530`, or `+05`. That covers Postgres, MySQL,
+  and SQL Server ingest renderings and RFC 3339 producer timestamps alike.
+  **A time without an offset is UTC.**
+- **Output** is canonical text: a `timestamptz` as
+  `2024-01-15 07:00:45.123456+00:00`, a `timestamp` without the offset, a
+  `date` as `2024-01-15`, and an `interval` in PostgreSQL's form
+  (`1 year 2 mons 3 days 04:05:06.5`). Every SQL destination column
+  accepts these (MySQL rejects PostgreSQL's own `+00` and a trailing `Z`,
+  which is why the offset is written `+00:00`).
+- **Typed literals**: `date '2024-01-15'`, `timestamptz '…'`,
+  `interval '30 days'` — intervals also read `'1 day 02:00'`,
+  `'2 hours 30 mins'`, `'1.5 months'`, `'2 weeks ago'`, and ISO 8601
+  `'P1DT2H'`.
+- **Arithmetic** follows PostgreSQL: `timestamp ± interval`;
+  `timestamp - timestamp` is an interval; `date ± n` moves whole days;
+  `date - date` is a day count; `date ± interval` is a `timestamp`;
+  intervals add, subtract, negate, and multiply by a number. Months are
+  calendar months — `date '2024-01-31' + interval '1 month'` is Feb 29.
+- **Functions**: `date_trunc('unit', t)` (`microseconds` through
+  `millennium`, `week` starting Monday), `extract(field from t)` /
+  `date_part('field', t)` (`year`, `quarter`, `month`, `week`, `day`,
+  `dow`, `isodow`, `doy`, `hour`, `minute`, `second`, `epoch`, …),
+  `to_timestamp(epoch_seconds)`, and `make_date(y, m, d)`. The unit is a
+  literal, checked when the config is posted.
+- **Comparisons** between times — including against a string, which is
+  read as the other side's type (`$.paid_at::date >= '2026-01-01'`) —
+  compare instants; a date is its midnight. Two plain strings still
+  compare as text, which orders ISO strings correctly only when they share
+  one rendering: `'2024-01-15T10:00Z'` and `'2024-01-15 09:00+00'` do NOT
+  compare as times until you cast them. `min`/`max`/`collect` order time
+  values chronologically.
+
+**Time zones: UTC only.** There are no named zones and no `AT TIME ZONE`:
+a zone's rules change between releases of the time-zone database, and a
+replay must compute what the first pass computed. So
+`date_trunc('day', …)` starts days at UTC midnight — a daily rollup for a
+non-UTC business shifts its boundaries by the offset; shift the timestamp
+first (`$.at::timestamptz - interval '7 hours'`) if a fixed offset fits.
+There is no `now()` either: a read model computed from "now" would change
+on every replay.
+
+The other differences from PostgreSQL: years run 0001–9999 (no BC, no
+`infinity`), and PostgreSQL's free-form inputs (`January 8, 2024`,
+`epoch`, `today`) are failed conversions — `try_cast` turns them into
+null. Precision is PostgreSQL's microseconds, rounded the way it rounds,
+so a SQL Server `datetime2(7)` value loses its seventh digit exactly as
+PostgreSQL would drop it.
 
 ## Folding several topics into one row (multi-source)
 
@@ -498,8 +552,12 @@ set = [ { column = "total", from = "$.total" },
 ```
 
 - **Every stage is a keyed refold**: an input lands in its key's retained
-  set and the key recomputes from that set — never delta arithmetic — so
-  redelivery, rekeying, and replay converge to identical bytes. Key
+  set and the key's output is what recomputing from that set gives, so
+  redelivery, rekeying, and replay converge to identical bytes. An
+  aggregate stage without joins also keeps each key's fold state (exact
+  counts and sums, the current extremes, ordered value lists) and updates
+  it from the inputs that changed rather than re-reading the set; wherever
+  that state cannot show the same result, the key recomputes from its set. Key
   comparisons are byte-exact; when two producers render the same logical
   key differently (SQL Server CDC writes GUIDs UPPERCASE, most JSON
   serializers lowercase), declare `normalize = "lower"` on the
@@ -523,6 +581,73 @@ set = [ { column = "total", from = "$.total" },
   count = true, where = [ { path = "$.billed", equals = "true" } ] }`
   folds only matching inputs for THAT field, while row membership stays
   the key's.
+- **An aggregate emit can be an expression over aggregate calls** —
+  SQL's select list over a GROUP BY, so a ratio, an average, or a
+  conditional count is one emit instead of a fold stage plus a reshape:
+
+  ```toml
+  emit   = [ { field = "margin",   expr = "round((sum($.rev) - sum($.cost)) / nullif(sum($.rev), 0), 4)" },
+             { field = "avg_rate", expr = "round(avg($.rate), 2)" },
+             { field = "techs",    expr = "count(distinct $.tech_id)" },
+             { field = "done",     expr = "count(*) filter (where $.status = 'done')" },
+             { field = "source",   expr = "'teamup'" } ]
+  having = "sum($.hours) > 0"
+  ```
+
+  The calls are `sum`, `min`, `max`, `avg`, `count(*)`, `count(x)`
+  (non-null values), `array_agg(x [order by …])`, and
+  `string_agg(x, 'sep' [order by …])`, with `distinct` on all but
+  `min`/`max` and `filter (where …)` on any of them. Each is folded over the key's inputs
+  with the same refold-from-scratch rules as the arms, and SQL's
+  empty-set results (`count` 0, the others null). `avg` is an exact
+  quotient, so like `/` it sits under `round`/`trunc`; `sum` also adds
+  intervals. Outside an aggregate call an expression reads no input path
+  — which input would it come from? — so a constant is fine and the key
+  reaches the table through the stage key. The arm forms (`sum = "$.x"`)
+  remain as shorthand for one call. Aggregate calls belong to aggregate
+  stages' emits and `having` only.
+- **`array_agg` and `string_agg` order by a business field**:
+  `array_agg($.person_id order by $.billing)`,
+  `string_agg($.name, ', ' order by $.billing desc)`. Each `order by` key
+  takes `asc`/`desc` and `nulls first`/`last` (default: nulls last
+  ascending, first descending). They follow PostgreSQL: `array_agg` keeps
+  null elements, `string_agg` skips nulls and takes text only (cast a
+  number: `$.n::text`), the delimiter is a string literal, both are null
+  — not empty — when no input qualifies, and with `distinct` the `order
+  by` must be the argument itself. Where PostgreSQL leaves the order
+  unspecified — no `order by`, or a tie — committed sorts by the value
+  (nulls last), so a refold is byte-identical. The `collect` arm is the
+  older, unordered form: it skips nulls and yields `[]` for an empty
+  set.
+- **Subscripts and slices take the top N as one column** —
+  PostgreSQL's array subscripts on an aggregate's array:
+  `(array_agg($.person_id order by $.billing))[1:5]` is the top five
+  cast, `[1]` the lead, `[2:]` everyone after, and `cardinality(…)` the
+  element count. Positions are 1-based (PostgreSQL's arrays): a subscript
+  outside the array is null, a slice clips to the array and is `[]` when
+  nothing remains, a null array or bound gives null, and a non-integer
+  position rounds. The parentheses are required, as in PostgreSQL. Payload
+  arrays are different: they're addressed by jsonpath, 0-based
+  (`$.items[0]`).
+- **`having` filters the folded keys** — SQL's HAVING: an expression over
+  aggregate calls, evaluated after the fold. A key whose `having` is not
+  TRUE has no output, so it retracts downstream like an emptied key and
+  re-enters when the predicate flips back; the stage's `havingRejected`
+  counter (below) tells "folded but filtered" apart from "no inputs".
+- **Keys can be computed** — SQL's `GROUP BY <expression>`: a `keyPath`
+  entry may be an expression instead of a path, so a rollup by month, a
+  normalized email, or a `case` bucket is one stage:
+  `keyPath = [ "$.customer", "date_trunc('month', $.paid_at::timestamptz)" ]`.
+  The value keys exactly as a stored value renders (a month is
+  `2024-03-01 00:00:00+00:00`, which lands in a `TIMESTAMPTZ` key column
+  as is), `keyType`/`normalize` apply after it, an input whose expression
+  is null or fails is not a member (the first failure is logged), and an
+  input whose value changes moves to its new key like any rekey. Probe it
+  with the computed value (`probeKey=2024-03-01 00:00:00+00:00`). An
+  entry is a path whenever it is one — `$.id`, and also the bare
+  `tenant_id` form — so existing keys never change meaning. Computed keys
+  belong to stages and topic merge sides; a table source keys rows by a
+  path (feed it from the stage instead).
 - **Filtering is refold**: an input that stops matching a stage's `when`
   retracts from its key — predicate rows leave the read model when the
   predicate flips off, and re-enter when it flips back.
@@ -613,6 +738,42 @@ set = [ { column = "total", from = "$.total" },
   needed) — the lift stage, synthesized: the engine folds the topic
   through a hidden identity reshape (`<topic>[<keyPath>]` in stats)
   feeding the merge as a normal side.
+- **A list `from` is UNION ALL**: `from = [ "order-placed",
+  "order-shipped", "order-cancelled" ]` folds the rows of every listed
+  topic or prior stage as ONE input stream — for a history split across
+  topics (one topic per event type), or one entity fed by two systems.
+  Every stage kind takes a list, so `avg`, `count(distinct …)`, ordered
+  `array_agg`, `latest` ("last activity of any kind"), a window over a
+  cross-topic timeline, and a `liveSet` whose create and delete events
+  live in different topics all work across the sources. Each input's
+  identity is (source, key), so equal keys from different sources stay
+  separate rows, and each source's tombstones retract its own rows only.
+  `source()` returns the input's source name — SQL's per-branch literal
+  (`SELECT 'placed' AS kind … UNION ALL …`); it has no PostgreSQL
+  counterpart. It reads the input, so it works in `when`, `deleteWhen`,
+  `keyPath`, a window's or latest's order keys, emits, and inside
+  aggregate calls (`count(*) filter (where source() = 'returns')`), but
+  not in a join's `where`, a merge, or a table rule. In a single-source
+  stage it returns that source's name. Inputs keep their own shapes: align
+  them with expressions (`coalesce($.job_id, $.jobId)`), or reshape each
+  source in its own stage and list those. A window over a list keys its
+  rows by (source, input key); a table fed by it decodes that as a
+  two-column `primaryKey`. Stats and the dry-run split inputs per source
+  (`inputsBySource`). Decision rule: SAME-KEY correlation → `merge`
+  (it pairs sides into one tuple); ROWS from several sources → a list
+  `from` (it keeps every row).
+
+  ```toml
+  [[projection.stages]]
+  name        = "order-timeline"
+  from        = [ "order-placed", "order-shipped", "order-cancelled" ]
+  reduce      = "window"
+  partitionBy = "$.order_id"
+  orderBy     = [ "$.at::timestamptz" ]
+  tieBy       = [ "source()" ]
+  emit = [ { field = "kind",            expr = "source()" },
+           { field = "secs_since_prev", expr = "extract(epoch from ($.at::timestamptz - lag($.at::timestamptz)))" } ]
+  ```
 - **Joins can address a PRIOR stage** (`from = "<stage>"` on a join):
   its outputs are the dimension rows, maintained live by the drain — so
   cross-stage correlation is a join, not a second input; heal, flip,
@@ -624,11 +785,194 @@ set = [ { column = "total", from = "$.total" },
   bytewise-largest producer key's row, deterministically; with `field`,
   `normalize`/`onType` are declarable (a non-key field is not governed
   by the producer's key space).
+- **`fan = true` makes a named join multiply rows**, as SQL's join does
+  over a non-unique column — for many-to-many, where neither side can key
+  the result: memberships × group permissions = a user-permissions table.
+
+  ```toml
+  [[projection.stages]]
+  name    = "user-perms"
+  from    = "memberships"                     # { user_id, group_id }
+  joins   = [ { from = "group-perms", field = "$.group_id", on = "$.group_id", as = "perm", fan = true } ]
+  keyPath = [ "$.user_id", "$.perm.permission" ]
+  reduce  = "aggregate"                       # two groups granting one permission fold into one row
+  emit    = [ { field = "groups", expr = "string_agg($.group_id, ',' order by $.group_id)" } ]
+  ```
+
+  The stage's fold unit becomes the PAIR (input, matched row): one per
+  row whose `field` matches the input's `on` and passes the join's
+  `where`, so `keyPath`, `when`, and emits read the matched row as
+  `$.<as>.` (at fold time too: the row is part of the pair). An aggregate
+  folds over pairs, double counting included, as SQL's GROUP BY after a
+  join does. With `optional = true`, an input with no match keeps one pair
+  with a null alias (LEFT JOIN; key it with `coalesce`). A fan join needs
+  `as` and `field` (a join by key matches at most one row); `field` works
+  on a topic join when it fans (every entity carrying the value matches).
+  One fan join per stage, none beside `forEach`, and none on window or
+  liveSet stages — fan in a prior stage instead. A matched row arriving,
+  changing, or leaving updates one pair in every input referencing it,
+  and an input's change re-fans its own pairs; stats count pairs as
+  `fanned`. The output is the product of the sides, as in SQL: a value
+  shared by many rows on both sides (one group with thousands of members
+  and permissions) makes that many pairs.
+- **`orderBy`/`tieBy` choose which matching row a join resolves to, and
+  `asOf` bounds it in business time** — SQL's ASOF JOIN (PostgreSQL's
+  `LEFT JOIN LATERAL (… WHERE p.product_id = o.product_id AND
+  p.effective_from <= o.ordered_at ORDER BY p.effective_from DESC,
+  p.change_id DESC LIMIT 1)`). An order prices at the rate in effect at
+  its own time, not today's:
+
+  ```toml
+  joins = [ { topic = "price-changes", field = "$.product_id", on = "$.product_id",
+              orderBy = [ "$.effective_from::timestamptz" ], tieBy = [ "$.change_id" ],
+              asOf = "$.ordered_at::timestamptz", as = "price", optional = true } ]
+  ```
+
+  Among the rows whose `field` matches the input's `on` (and that pass the
+  join's `where`), the join resolves to the greatest by `orderBy`, then
+  `tieBy` (required), then the producer key. Both take the window's
+  order-key form and read the JOINED row. With `asOf` (an expression over
+  the input; no aliases), only rows whose single, ascending `orderBy`
+  value is at or before the input's bound are eligible: inclusive and
+  backward only. A null bound or a null version time is never eligible,
+  and comparing different kinds (a time against a number) is a data error,
+  so cast both sides alike. A version is valid until the next version for
+  the same reference (there is no `validTo`). All join modes compose:
+  - inner drops an input before any version;
+  - `optional` scopes it null;
+  - `absent` keeps exactly the inputs with no version in effect.
+
+  Without `asOf`, an ordered join is "the latest by business order" (a
+  ticket's current assignee by assignment time, not by key bytes); without
+  `orderBy`, a `field` join keeps its original rule (the bytewise-largest
+  producer key's row). `field` is declarable on a topic join when the join
+  orders. Corrections propagate exactly: a version inserted, corrected,
+  moved, or deleted at time T re-resolves only the inputs bounded in
+  [T, the next version), and an input whose own time changes re-resolves
+  just itself. Stats and the dry-run count them per join (`reresolved`).
+  Transaction-time as-of ("what the log believed then") is deliberately
+  not offered: it is arrival order, which a backfill or an ingest snapshot
+  makes meaningless.
+
+  As-of versus copying the value into the event: copying a price or rate
+  into the event at command time works only for data the command side
+  had, and it freezes mistakes. An as-of join resolves at fold time from
+  the versions themselves, so a backfilled or corrected version reaches
+  every event in its range.
 - **`reduce = "latest"` is argmax by a business field** (`orderBy` — never
   arrival order, so backfills converge with steady state), with `tieBy`
   a MANDATORY deterministic tiebreak (`orderByType`/`tieByType` choose
   numeric vs lexical; text default). `when` filters before the argmax,
   and a retracted winner promotes the runner-up from the retained set.
+  `orderBy`/`tieBy` also take the window's order-key form — a list, an
+  expression, a direction: `orderBy = [ "$.at::timestamptz", "$.priority
+  desc" ]`, `tieBy = [ "$.id" ]`. The winner is then the LAST row in that
+  order, compared in the expression language's value order (timestamps as
+  instants, numbers numerically): `orderBy = [ "$.at::timestamptz desc"
+  ]` keeps the earliest. It is PostgreSQL's `DISTINCT ON (key) … ORDER BY
+  key, <each key reversed>`, nulls included: `$.at` (nulls last) is `at
+  DESC` (nulls first), so a null time wins unless written `$.at nulls
+  first`. In this form, cast instead of `orderByType`. A single bare path
+  keeps the original comparison.
+- **`reduce = "window"` keeps one row per input** — SQL's window
+  functions, `f(…) OVER (PARTITION BY … ORDER BY …)`, for the
+  computations over an entity's ordered history that keep a row per
+  event: time in each status, a running balance after each transaction,
+  "changed from X to Y" audit rows, the top N per group. The window is
+  declared once on the stage (SQL's named `WINDOW`), and the emit
+  `expr`s call window functions:
+
+  ```toml
+  [[projection.stages]]
+  name        = "spans"
+  from        = "job-status"
+  reduce      = "window"
+  partitionBy = "$.job"                       # path or expression, like keyPath; omit = one partition
+  orderBy     = [ "$.at::timestamptz" ]       # each: expr [asc|desc] [nulls first|last]
+  tieBy       = [ "$.seq" ]
+  emit = [ { field = "job",    from = "$.job" },
+           { field = "status", from = "$.status" },
+           { field = "secs",   expr = "extract(epoch from (lead($.at::timestamptz) - $.at::timestamptz))" },
+           { field = "prev",   expr = "lag($.status)" } ]
+
+  [[projection.stages]]
+  name    = "time-in-status"                  # then fold the spans
+  from    = "spans"
+  keyPath = [ "$.job", "$.status" ]
+  reduce  = "aggregate"
+  emit    = [ { field = "secs", expr = "sum($.secs)" } ]
+  ```
+
+  The functions are `row_number()`, `rank()`, `dense_rank()`,
+  `lag(x [, n [, default]])`, `lead(…)`, `first_value(x)`,
+  `last_value(x)`, and the running aggregates `sum`, `count(*)`,
+  `count(x)`, `min`, `max`, and `avg` (under `round`, like `/`), each
+  with `filter (where …)`. They follow PostgreSQL's default frame — from
+  the partition's first row through the current row's last PEER (rows
+  with equal `orderBy` values) — so peers share `rank`, `dense_rank`,
+  running aggregates, and `last_value`, as in PostgreSQL. Each output is
+  keyed by its input's own key (a topic entity key, or the upstream
+  stage's key, whose key space it inherits); paths outside the calls read
+  the row's own fields, and a named join's row is readable as in any
+  stage. The stage's `when` filters inputs before windowing (SQL's WHERE),
+  and required joins decide membership. Deleting an input retracts its
+  row and its neighbors recompute; an input whose partition or order
+  changes moves. A stage holds one window — for a second, chain another
+  window stage.
+
+  **Ties are deterministic.** Where PostgreSQL (like every other SQL
+  engine) leaves the order within a tie unspecified, committed decides
+  it: `tieBy` orders rows that are equal on `orderBy`, and the input key
+  breaks any tie left after that. `tieBy` is required when a stage uses a
+  function whose result depends on that order (`row_number`, `lag`,
+  `lead`, `first_value`, `last_value`); `rank`, `dense_rank`, and the
+  running aggregates treat ties as peers and need none. Other deliberate
+  differences from PostgreSQL: `lag`/`lead`'s offset is an integer
+  literal from 0 to 1000 (not a per-row expression); running aggregates
+  take no `distinct` or `order by` (PostgreSQL implements neither for
+  window aggregates) and no `array_agg`/`string_agg` — collapse with an
+  aggregate stage; and a window stage does not fan (fan in a prior stage
+  keyed by the element, and window its outputs).
+
+  **Frames.** A call can narrow or widen its frame with `over (…)` —
+  SQL's `OVER (w frame)`, refining the stage's window (partition and
+  order stay the stage's):
+
+  ```toml
+  emit = [ { field = "balance", expr = "sum($.amount)" },                                   # default frame
+           { field = "ma7",     expr = "round(avg($.reading) over (rows between 6 preceding and current row), 2)" },
+           { field = "hour_n",  expr = "count(*) over (range between interval '1 hour' preceding and current row)" },
+           { field = "final",   expr = "last_value($.status) over (rows between unbounded preceding and unbounded following)" } ]
+  ```
+
+  `rows` counts rows (peers are separate rows, in `tieBy` order);
+  `range` measures by the single `orderBy` value — a number with a number
+  offset, a date/time with an interval offset (calendar months included)
+  — so peers are always in or out together, and a null value's frame is
+  its peers. Bounds are `unbounded preceding|following`, `current row`,
+  or a constant `n preceding|following` (`rows 3 preceding` is short for
+  `between 3 preceding and current row`), with PostgreSQL's rules (a frame
+  cannot start after it ends). Frames apply to the aggregates and
+  `first_value`/`last_value`; an empty frame gives null (`count` 0). A
+  rolling window is anchored to each row's own timestamp, never the
+  clock: "the hour before this login", not "the last hour". Not
+  supported: `groups` frames and `exclude`.
+
+  **Partition by entity.** Rows are kept in business order, and each row
+  stores its running state, so an event appended in order recomputes
+  only the rows whose frames (or `lag`/`lead`) reach it — usually one or
+  two. A late or backfilled event recomputes the rows after it that
+  really change: under a bounded frame, just the rows whose frames hold
+  it; under a running total, the rest of the partition. A frame ending
+  `unbounded following` makes every row depend on every later one, so
+  each change recomputes its whole partition; and a join dimension
+  change recomputes the dependent partitions whole. Partition
+  by the entity whose history you're computing over (an account, a job),
+  not a tenant or the whole stream: the stage warns once when a partition
+  passes 50,000 rows, and `windowRowsRecomputed`/`windowLargestPartition`
+  (below) show the cost. Top N per group is a window plus a filter — emit
+  `row_number()` and keep `$.n <= 3` in a downstream stage's `when`; a row
+  that slides out of the top N retracts.
 - **Stage-fed sources key rows by the stage's key** (no keyPath
   resolution — an aggregate's emit carries folds, never its key). A
   retraction — the stage's key going away, or a live output that stops
@@ -639,7 +983,9 @@ set = [ { column = "total", from = "$.total" },
   each stage's row — `keys` (the store's current output count) plus
   `inputs`/`fanned` flow counters since the worker started, and
   `unkeyedDeletes` (delete-shaped inputs whose key would not resolve or
-  render), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
+  render), `havingRejected` (refolds an aggregate's `having` held back),
+  `windowRowsRecomputed`/`windowLargestPartition` (a window stage's
+  recompute cost and its largest partition), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
   arrived but the key is still live" in one read; each also warns once
   in the log). The three
   numbers split every silent-empty state: `inputs` 0 = that topic's log
@@ -673,11 +1019,35 @@ set = [ { column = "total", from = "$.total" },
   says so: `workerState: "re-deriving"` with `stageRecovery {folded,
   target}` progress on the default call — lag climbs by design until
   the fold-only pass reaches the checkpoint.
+- **An aggregate's cost per input does not depend on its group's size,
+  for most arms.** In an aggregate stage without joins, an input updates
+  its key's fold state: `count`, `sum` and `avg` adjust a running total,
+  `min` and `max` move the extreme, and `array_agg`, `string_agg`,
+  `collect` and any `distinct` insert into an ordered list (so they cost
+  in proportion to that list, which a `filter` keeps short). On the
+  reference machine
+  ([performance.md](operations/performance.md#reference-measurements)) the
+  event-store recipe's five-emit aggregate takes about 0.06 ms per
+  appended event at both 1,000 and 10,000 events per key. A key recomputes
+  from every input it holds — a cost proportional to its group's size —
+  when: the input that held a `min` or `max` leaves or moves the wrong way;
+  two values tie for an extreme but print differently (a date and its
+  midnight timestamp); an `interval` sum changes; or the stage has joins
+  (every change refolds the key). Inputs apply in log order, so a large
+  recompute holds up the inputs behind it. Group by the entity whose
+  history you are aggregating (an order, an account, a device), not a
+  tenant or a whole topic, and give the stage a `when` that drops inputs
+  no emit reads: a rejected input is not retained, so it costs neither
+  refold time nor disk.
 - Stage state lives in one bbolt file per syncable under
   `<dataDir>/projections/` — derived, node-local, rebuildable from the
-  log. **Editing stage definitions requires a rebuild** (the
-  config-change guard enforces it): changed stages must re-derive from
-  index 0, exactly like a changed table schema.
+  log. It retains every input of every key, so it grows with the topics
+  it reads, in proportion to the number and size of inputs and the
+  number of stages that keep them: one aggregate stage over 1,000,000
+  events of about 260 bytes held 841 MB. **Editing stage definitions
+  requires a rebuild** (the config-change guard enforces it): changed
+  stages must re-derive from index 0, exactly like a changed table
+  schema.
 
 ### Row ownership (`rowOwner`)
 
@@ -869,116 +1239,17 @@ stays consistent at every checkpoint. One syncable fills one table — a
 dimension is its own internal housekeeping, so two syncables that need the same
 data each keep their own copy.
 
-## Derived topics: transform once, N dumb consumers (loopback)
+## Derived topics (loopback)
 
-When several syncables need the same cleanup — a jsonPath projection to a
-canonical shape, version normalization via `mode = "always-current"` — the
-transform logic is repeated N times and drifts. A `loopback` syncable applies
-it ONCE, inside the cluster: it consumes a source topic, transforms each
-entity, and proposes the result to a **derived topic** under that topic's own
-type. Downstream syncables then consume the derived topic with dumb mappings.
+A `loopback` syncable applies one transform inside the cluster and proposes
+the result to a derived topic that downstream syncables consume; see
+[loopback.md](loopback.md).
 
-```toml
-[syncable]
-name = "canonical-photos"
-type = "loopback"
-mode = "always-current"        # normalize versions before deriving (optional)
+## Consumer stances
 
-[loopback]
-topic  = "photos-raw"          # source topic
-target = "photos"              # derived topic (its type must exist)
-
-[[loopback.mappings]]
-jsonPath = "$.id"
-jsonName    = "photo_id"
-
-[[loopback.mappings]]
-jsonPath = "$.meta.title"
-jsonName    = "title"
-```
-
-No mappings means whole-payload passthrough — with `always-current`, that is
-the version-normalization shape: the derived topic carries every entity
-re-written at the current type version. Because the loopback sits behind the
-same interpretation machinery as every syncable, restatements are folded in too —
-**the derived topic is the cache of the source's current interpretation**,
-and its status (`GET /v1/syncable/{id}/status`) shows `derivedFrom` /
-`derivesInto` plus `interpretationStale` when a later restatement supersedes the
-reading it was materialized under. Re-derivation is operator-triggered, never
-automatic: `POST /v1/syncable/{id}/rematerialize` replays the source from
-index 0 (a snapshot-kind derived topic converges by key).
-
-The rules that keep the chain safe:
-
-- **The derived topic is a materialization, never a source of truth.** The raw
-  topic stays sacred; the derived one is rebuildable from it forever.
-- **Keys are preserved** (re-keying is refused at POST): a delete proposed to
-  the source — including an RTBF delete — forwards as a tombstone with the
-  same key, so erasure chases the derivation chain. Generations and
-  refresh-boundary markers forward verbatim too, so an ingest full-refresh of
-  the source reconciles all the way through to the derived topic's destinations.
-- **The derivation graph is a DAG with one producer per derived topic** —
-  checked at POST and re-checked deterministically at apply (a config that
-  races past admission is persisted but loudly degraded, never run). A cycle
-  would re-derive its own output forever; a second producer would interleave
-  two refresh-epoch spaces on one topic.
-- **Producer handover must not regress the epoch space.** A loopback targeting
-  a topic whose committed refresh epochs exceed its source's is refused at
-  POST: forwarded sweeps could never reconcile the previous producer's
-  higher-stamped rows, which would linger stale on downstream keyed syncables.
-  Derive into a fresh topic instead — the old topic's log carries its history
-  permanently. A source at or *above* the target's highwater is fine (its
-  first refresh reconciles the handover), and replacing any producer with an
-  **ingestable** is always safe: the ingest epoch floor is topic-keyed and
-  sees every committed generation, forwarded ones included.
-- **Declare the derived topic's type `entityKind = "snapshot"`** (recommended):
-  replays then converge by key. Any other kind appends on replay and requires
-  an explicit `acknowledgeAppendSemantics = true`.
-- **Transforms are stateless per-entity** — no cross-entity aggregation,
-  no filtering. Sequence-context analysis belongs offline; its output lands
-  as restatements or as proposals to a topic of its own.
-
-Chains (`raw → canonical → per-team`) are fine — each hop is its own loopback.
-
-## Consumer stances: how a syncable meets a versioned topic
-
-The log is permanently heterogeneous: entities carry the type version that was
-current when they were written, and there is no ALTER TABLE — only new writes
-under new versions. Every syncable takes one of three stances toward that:
-
-- **Version-pinned** (`mode = "as-stored"`, handling one version): the syncable
-  sees the exact bytes written, and its mappings target one version's shape.
-  Nothing pins it, though: there is no version selector in the vocabulary, so
-  entities written under a later version still arrive, as written, and the
-  mappings meet a shape they were not written for. Take this stance for a
-  topic whose version is frozen; a topic that will move needs one of the two
-  below.
-- **Version-aware** (`mode = "as-stored"`, dispatching on version): the
-  syncable sees raw bytes plus each entity's stamped version and handles the
-  differences itself — the stance for consumers that genuinely want each era's
-  shape.
-- **Always-current** (`mode = "always-current"`): committed runs each entity
-  through the type's migration chain (older-version data upgraded step by step)
-  before the syncable sees it, so mappings only ever target the current shape.
-
-Always-current is a **promise, and it is checked at admission**: it is only
-admissible when the migration chain can actually carry every version's data to
-the current shape. A version declared `nonConvertible = true` in its
-`[migration]` section — meaning that version requires information older data
-never contained — breaks the chain: `POST /v1/syncable/{id}` refuses an
-always-current syncable over such a topic, naming the gap, and
-`POST /v1/type/{id}` refuses a nonConvertible bump that would strand *existing*
-always-current syncables, naming them (re-POST with `?force=true` to
-acknowledge the stranding deliberately). A force-stranded syncable does not
-silently receive unconverted data, and it does not shunt the whole topic to
-dead letters either. The first entities below the break dead-letter at the
-migration chain (replayable); once ten consecutive distinct rows have failed
-there, the failure is established as config-shaped and the worker **wedges**
-on the next one, visibly, rather than dead-lettering everything older than
-the break (see [stuck-syncables.md](operations/stuck-syncables.md)). The
-repair is the reading, not the syncable: a restatement rebinding the
-below-break range lets the wedged worker resume on its own, after which the
-dead letters replay.
+How a syncable meets a versioned topic — version-pinned, version-aware, or
+always-current — is common to every kind; see
+[syncables.md](syncables.md#consumer-stances-how-a-syncable-meets-a-versioned-topic).
 ## Rehearsing a config before it exists (dry-run)
 
 `POST /v1/syncable/dryrun` takes the same document a syncable POST
@@ -1018,64 +1289,11 @@ Authoring loop: dry-run until the findings list is empty, then POST
 for real — "valid config, wrong result, no error" costs minutes
 instead of a full replay against an oracle.
 
-## Restatements: changing how history is read — rehearse first
+## Restatements
 
-A **restatement** is an append-only, consensus-ordered statement that rebinds
-how already-committed entities are *read* — never their bytes: entities of a
-type committed in an index range (optionally narrowed to one stamped version
-and a deterministic jq predicate) read as a different declared version from
-the moment the restatement commits. The facts never change; the reading does
-— same facts, stated a different way. That covers repairs (an unannounced
-writer that produced v2-shaped data under v1 stamps, a nonConvertible break
-whose below-range data turns out readable after all) and equally
-understanding that simply evolved — no error anywhere, just a better reading
-of the same range. Either way it feeds the same interpretation fold every
-syncable reads through.
-
-```toml
-[restatement]
-topic = "photos"           # the type (topic) whose readings rebind
-fromIndex = 100           # inclusive raft-index range of EXISTING actuals
-toIndex = 250
-readAsVersion = 2       # the version matching entities read as
-# fromVersion = 1         # optional: only entities STAMPED v1
-# predicate = '.license == "cc"'   # optional deterministic jq narrowing
-```
-
-Restatements are the highest-blast-radius config in committed: they are
-**append-only** (a wrong one cannot be edited, only corrected by another —
-later in the log wins), and admitting one instantly marks every consumer of
-the topic `interpretationStale` — rows materialized before it keep the
-superseded reading until you re-materialize each syncable. So the workflow is
-**rehearse, then author**:
-
-1. `POST /v1/restatement/dryrun` with the exact body you intend to admit. Nothing
-   is admitted or stored; the rehearsal runs the restatement's own index range
-   through the *real* interpretation fold and reports what the selectors
-   actually catch (`stampEligible`, `matched`, broken down `byStampedVersion`),
-   what the restatement really *changes* (`rebound`, with before/after reading
-   `samples`), rows its predicate cannot evaluate (`predicateErrors` — each of
-   these would dead-letter or wedge a live consumer), already-applied restatements it
-   composes with (`overlaps`), and the re-materialization bill
-   (`affectedSyncables`, with each consumer's current interpretation pin).
-   Auto-generated `findings` name the authoring signatures: a restatement that
-   matches nothing, one that changes no readings, a predicate that filtered
-   nothing. Admission-level validation runs in full, with the same words the
-   real POST would refuse with — and a rehearsal works even mid-rolling-upgrade,
-   when the real POST would still be refused by the feature gate (the report
-   says so).
-2. Iterate until the findings list is empty and `matched`/`rebound` are the
-   numbers you expected.
-3. `POST /v1/restatement/{id}` with the same body — then re-materialize the
-   affected syncables (`POST /v1/syncable/{id}/rematerialize`) when you want
-   the corrected reading to reach their already-synced rows.
-
-Like the syncable dry-run, the scan is budgeted (`?maxEntries`, default 100k)
-and time-bounded (`?timeoutSeconds`); an exhausted budget yields a **partial**
-report that says so (`coverage`, `truncated`) — never a silently-complete-
-looking one. Sample rows quote entity keys verbatim (that precision is the
-diagnostic point; the trusted-appliance caveat from the syncable dry-run
-applies).
+A restatement rebinds how already-committed entities are read, and marks
+every consumer of the topic `interpretationStale`; see
+[types.md](types.md#restatements-changing-how-history-is-read).
 
 ## Changing the rules after a projection is live
 
@@ -1086,18 +1304,9 @@ that point on*; it does **not** retroactively re-render rows already written to
 the destination. Correcting history is a deliberate rebuild, and running it is your
 responsibility.
 
-**Re-materializing a plain keyed `sql` mirror — in place.** For a plain
-keyed `sql` syncable, `POST /v1/syncable/{id}/rematerialize` converges the
-live table without dropping it: the worker replays from index 0 through the
-current mappings + type migrations + restatements, keyed upserts overwrite rows in
-place while the table keeps serving reads, and a completion sweep removes
-rows the replay never re-emitted. Restart-resumable, and it refreshes the
-syncable's `interpretationPin` (clearing `interpretationStale`). Projections
-and keyless syncables refuse the verb — for those, use the patterns below. The
-verb also needs every member of the cluster on 0.8.0 or later: on a
-mixed-version cluster it answers 503 `cluster_below_feature_level` until the
-rolling upgrade completes, because an older node taking ownership
-mid-replay would write rows the completion sweep then deletes.
+A plain keyed `sql` mirror can instead be re-materialized in place; see
+[syncables.md](syncables.md#re-materializing-a-keyed-mirror-in-place).
+Projections refuse that verb.
 
 **Changing one projection's own rules — blue-green.** Because a projection
 replays from index 0 and the log stays the source of truth, the clean way to fix
@@ -1116,38 +1325,13 @@ This is the recommended pattern precisely because the view is disposable: you
 never mutate a live table in place, and you get to *verify* the fix before
 trusting it.
 
-**Fixing a type's migration — the fan-out case.** A type's `[migration]` jq (the
-transform that brings older-version Actuals up to the current schema) is read by
-**every** projection on that topic. Committed lets you correct a buggy migration
-in place, at the same version — but that edit, too, changes only how *future*
-reads transform the data. Every row already synced through the old migration
-stays as it was, on **all** dependent projections, and committed does not
-currently tell you which projections are now stale or rebuild them for you.
-
-**After an in-place migration fix, rebuilding the dependent projections is your
-responsibility** — blue-green each one as above — for the correction to reach
-already-synced history. Treat a migration edit as "applies going forward;
-rebuild the dependents to fix the past." If you only need the correction for new
-data and accept the historical rows as-is, that is a valid choice — just make it
-knowingly, because nothing rebuilds them on your behalf.
+**Fixing a type's migration** changes only future reads on every projection of
+the topic; rebuilding the dependents is yours. See
+[types.md](types.md#versions-and-migrations).
 
 ## Checkpoint cadence and replay throughput
 
-A syncable's `checkpointEvery` (TOML, `[syncable]` section) is its **checkpoint
-cadence**: how many synced records may accumulate before the resume checkpoint
-is durably persisted. It is also the crash re-delivery bound — a restart
-re-delivers at most that many already-synced records, rounded up to the
-internal batch cap, which keyed syncables absorb idempotently. It does **not**
-control destination transaction size: the sink transaction is sized separately
-and capped internally (a few hundred rows) regardless of cadence.
-
-The cadence matters most during **replays** (initial destination builds, rebuilds):
-every checkpoint persist is a consensus round trip, and many syncables replaying
-with a tight cadence can bottleneck on checkpoint traffic rather than data.
-The default (2500) keeps replays fast out of the box; raising it further
-(e.g. 5000) buys a little more replay throughput at a proportionally larger
-re-delivery window. Caught-up syncables persist on catch-up regardless of
-cadence, so steady-state checkpoint freshness does not depend on this value.
+See [syncables.md](syncables.md#checkpoint-cadence).
 
 ## Destination limits: when a row cannot fit the destination
 
@@ -1204,7 +1388,7 @@ accepts the row.
 
 - [Quickstart](quickstart.md) — a working four-topic `movie_card` read model
   (spine + contributor + aggregate + lookup) end to end.
-- [docs/event-log-architecture.md](event-log-architecture.md) — why the log is
+- [docs/architecture/event-log-architecture.md](architecture/event-log-architecture.md) — why the log is
   the source of truth and the read model is disposable.
 - [docs/operations/rebuild.md](operations/rebuild.md) and
   [docs/operations/stuck-syncables.md](operations/stuck-syncables.md) —

@@ -23,7 +23,7 @@ info:
     old prefix is supported for at least one further release. Operational
     endpoints (`/health`, `/ready`, `/version`, `/openapi.yaml`, `/docs`)
     are infrastructure, not API surface, and stay unprefixed. See
-    `docs/api-compatibility.md` for the full contract.
+    `docs/architecture/api-compatibility.md` for the full contract.
 
     ## Authentication
 
@@ -60,7 +60,7 @@ info:
     from the leader returns `503` rather than stale data. Pass
     `?consistency=stale` on any GET to skip that confirmation and serve
     local state immediately, accepting that a lagging node may answer with
-    out-of-date data. See `docs/consistency.md` for the full model.
+    out-of-date data. See `docs/architecture/consistency.md` for the full model.
 servers:
   - url: /
     description: Served from the same origin as this spec
@@ -667,9 +667,15 @@ paths:
                       type: object
                       properties:
                         inputs: { type: integer, format: int64 }
+                        inputsBySource:
+                          type: object
+                          additionalProperties: { type: integer, format: int64 }
                         fanned: { type: integer, format: int64 }
                         keys: { type: integer }
                         unkeyedDeletes: { type: integer, format: int64 }
+                        havingRejected: { type: integer, format: int64 }
+                        windowRowsRecomputed: { type: integer, format: int64 }
+                        windowLargestPartition: { type: integer, format: int64 }
                         liveDeltas: { type: integer, format: int64 }
                         retractions: { type: integer, format: int64 }
                         joins:
@@ -683,6 +689,7 @@ paths:
                               optional: { type: boolean }
                               hits: { type: integer, format: int64 }
                               misses: { type: integer, format: int64 }
+                              reresolved: { type: integer, format: int64 }
                         samples:
                           type: array
                           items: { type: object }
@@ -785,7 +792,7 @@ paths:
         from the node's AWS credential chain / catalog token),
         `iceberg.namespace`, `iceberg.table`, optional `iceberg.warehouse`
         and `[iceberg.props]` FileIO properties (s3.endpoint …). See
-        docs/operations/iceberg-syncable.md.
+        docs/iceberg-syncable.md.
 
         `loopback` derives a topic INSIDE the cluster: it consumes
         `loopback.topic`, applies `[[loopback.mappings]]` (`jsonPath` →
@@ -1602,6 +1609,17 @@ paths:
         version in place — no version bump, no `[migration]` section
         needed.
 
+        `onSupersede = "keep" | "scrub"` declares whether the scrub removes
+        a key's superseded versions, keeping only its latest (see
+        docs/types.md § Superseded versions). The default is `"scrub"` for
+        `snapshot` and `"keep"` for every other kind; `"keep"` on a
+        `snapshot` and `"scrub"` on a `revision` fail with 400. Changing it
+        updates the current version in place, like the discriminator.
+        Switching to `"scrub"` is one-way in effect: the next scrub removes
+        every superseded version already in the log. A non-default value
+        fails with 503 (`cluster_below_feature_level`) until every member
+        runs a binary at feature level 3.
+
         `validate` selects the validation strategy: `"none"` (the
         default), `"schema"` (the gate — a proposal whose payload violates
         the schema is rejected with 400), or `"announce"` (the tripwire:
@@ -1877,7 +1895,7 @@ paths:
         every other write, and idempotent. Returns 202 once the scrub is
         submitted and confirmed by consensus.
 
-        See docs/event-log-architecture.md for what the scrub removes (and the
+        See docs/architecture/event-log-architecture.md for what the scrub removes (and the
         delete tombstone it deliberately retains).
       operationId: scrub
       responses:
@@ -2492,7 +2510,7 @@ components:
         reflects every write that completed before it — at the cost of one
         heartbeat round-trip. `stale` skips that confirmation and serves
         local state immediately; a node partitioned from the leader may
-        then return out-of-date data. See docs/consistency.md.
+        then return out-of-date data. See docs/architecture/consistency.md.
       schema:
         type: string
         enum: [linearizable, stale]
@@ -3302,16 +3320,47 @@ components:
                 type: integer
                 format: int64
                 description: Inputs folded since the worker started.
+              inputsBySource:
+                type: object
+                additionalProperties:
+                  type: integer
+                  format: int64
+                description: |
+                  Inputs per listed source for a stage whose from is a list
+                  (UNION ALL) — a source that never delivered shows as 0.
+                  Omitted for single-source stages.
               fanned:
                 type: integer
                 format: int64
-                description: Elements a forEach stage's fan produced (omitted for plain stages).
+                description: |
+                  Elements a forEach stage's fan produced, or the (input, matched row)
+                  pairs a fan join folded (omitted for plain stages).
               unkeyedDeletes:
                 type: integer
                 format: int64
                 description: |
                   Delete-shaped inputs whose key could not resolve — lost
                   retractions, the key each meant to kill stays live. Omitted while zero.
+              havingRejected:
+                type: integer
+                format: int64
+                description: |
+                  Refolds an aggregate stage's having held back since the worker
+                  started — keys 0 with havingRejected above 0 means the having
+                  rejects every key. Omitted while zero.
+              windowRowsRecomputed:
+                type: integer
+                format: int64
+                description: |
+                  Rows a window stage recomputed since the worker started — an
+                  in-order append recomputes one or two, a late event the rows
+                  after it in its partition. Omitted for other stages.
+              windowLargestPartition:
+                type: integer
+                format: int64
+                description: |
+                  The largest partition (rows) a window stage's recompute walked
+                  to its end since the worker started. Omitted for other stages.
               joins:
                 type: array
                 description: Per-join hit/miss counters (omitted for stages without joins).
@@ -3436,6 +3485,35 @@ components:
             loud state rather than a misleading lag number; recovery means
             re-running the initial snapshot. Always false for Postgres (the slot
             holds the WAL, so the source cannot purge unconsumed change data).
+        removedPartitions:
+          type: array
+          description: |
+            Postgres only: partitions of a watched table that this worker saw
+            detached or dropped, oldest first, at most the 20 most recent.
+            Logical replication carries no DDL, so their rows left the source
+            without deletes in the stream: they stay in the log and every
+            destination (a reconciling refresh later sweeps keyed SQL
+            syncables only, never projections or keyless syncables). A record
+            of events since the worker started, not an error state. Omitted
+            when there are none.
+          items:
+            $ref: '#/components/schemas/RemovedPartition'
+
+    RemovedPartition:
+      type: object
+      required: [table, partition, detectedAt]
+      description: One partition the worker saw leave a watched table.
+      properties:
+        table:
+          type: string
+          description: The watched table, as configured.
+        partition:
+          type: string
+          description: The partition's name when it was last seen.
+        detectedAt:
+          type: string
+          format: date-time
+          description: When the worker noticed it was gone.
 
     TableSnapshotProgress:
       type: object

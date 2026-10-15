@@ -41,6 +41,12 @@ func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
 		if err := setVersionedLastIndex(b, []byte(t.ID), raftIndex); err != nil {
 			return err
 		}
+		// Every registration records its onSupersede declaration at its index,
+		// in this same tx, so the scrub can resolve the setting as of its
+		// bound (see typeOnSupersedeBucket).
+		if err := recordTypeOnSupersedeTx(tx, t, raftIndex); err != nil {
+			return err
+		}
 
 		existing, err := getVersioned(b, []byte(t.ID))
 		if err == nil {
@@ -49,8 +55,8 @@ func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
 				// Same (typeID, version). Schema is immutable but the
 				// migration, entity-kind (unspecified→declared adoption
 				// only; ProposeType rejects every other change),
-				// discriminator, and schema-change-topic fields are mutable
-				// in place — operators may need to retroactively fix a
+				// discriminator, onSupersede, and schema-change-topic fields
+				// are mutable in place — operators may need to retroactively fix a
 				// forgotten or buggy migration, declare an entity kind on a
 				// grandfathered type, or re-point where divergences
 				// announce — and a type stored without its document adopts
@@ -66,6 +72,7 @@ func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
 					changed := migrationEdited ||
 						prev.EntityKind != t.EntityKind ||
 						prev.Discriminator != t.Discriminator ||
+						prev.OnSupersede != t.OnSupersede ||
 						prev.SchemaChangeTopic != t.SchemaChangeTopic ||
 						(len(prev.Document) == 0 && len(t.Document) > 0)
 					if changed {
@@ -104,6 +111,11 @@ func (s *Storage) saveType(t *cluster.Type, raftIndex uint64) error {
 	})
 	if err != nil {
 		return err
+	}
+	// A switch to scrub leaves the superseded versions already in the log to
+	// remove: start the ceiling as if a correction had just been written.
+	if tracksCorrections(t) {
+		s.noteCorrectionWrite(raftIndex)
 	}
 	// A save can overwrite the CURRENT version in place (the mutable-fields
 	// path above — e.g. an operator fixing a buggy migration), so versioned

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -35,8 +36,21 @@ import (
 // Errors here are treated as fatal by raft.go; see the apply error policy
 // comment in raft.go's Ready loop.
 func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
-	advanced, err := s.applyCommitted(entry)
-	if err != nil || !advanced {
+	rejected, err := s.orderVerdicts([]*pb.Entry{entry})
+	if err != nil {
+		return fmt.Errorf("[wal.storage] %w", err)
+	}
+	if entry.GetIndex() > s.appliedIndex.Load() && entry.GetIndex() > s.eventIndex.Load() {
+		stored := entry
+		if rejected[entry.GetIndex()] {
+			stored = withoutData(entry)
+		}
+		if err := s.appendEvent(stored); err != nil {
+			return fmt.Errorf("[wal.storage] %w", err)
+		}
+	}
+	before := s.appliedIndex.Load()
+	if _, err := s.applyEntries([]*pb.Entry{entry}, rejected, 0); err != nil || s.appliedIndex.Load() == before {
 		return err
 	}
 	return s.saveAppliedIndex(entry.GetIndex())
@@ -62,6 +76,9 @@ func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 // the recovery today's per-entry window uses, now proven whole-batch by
 // wal/apply_conformance_test.go.
 func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
+	if d := s.applyDelayForTest.Load(); d > 0 {
+		time.Sleep(time.Duration(d))
+	}
 	fresh := entries[:0:0]
 	for _, e := range entries {
 		if e.GetIndex() > s.appliedIndex.Load() {
@@ -78,21 +95,292 @@ func (s *Storage) ApplyCommittedBatch(entries []*pb.Entry) error {
 		s.snapMu.Unlock()
 		return nil
 	}
-	if err := s.appendEvents(fresh); err != nil {
+	// Sequenced ingest proposals are decided before the append: a rejected
+	// one is stored without its data (see ingest_order.go).
+	rejected, err := s.orderVerdicts(fresh)
+	if err != nil {
 		return fmt.Errorf("[wal.storage] %w", err)
 	}
-	for _, e := range fresh {
-		if _, err := s.applyCommitted(e); err != nil {
-			return err
+	stored := fresh
+	if len(rejected) > 0 {
+		stored = make([]*pb.Entry, len(fresh))
+		for i, e := range fresh {
+			stored[i] = e
+			if rejected[e.GetIndex()] {
+				stored[i] = withoutData(e)
+			}
 		}
+	}
+	if err := s.appendEvents(stored); err != nil {
+		return fmt.Errorf("[wal.storage] %w", err)
+	}
+	last := fresh[len(fresh)-1].GetIndex()
+	merged, err := s.applyEntries(fresh, rejected, last)
+	if err != nil {
+		return err
+	}
+	if merged {
+		return nil // the final run saved the applied index with its writes
 	}
 	return s.saveAppliedIndex(fresh[len(fresh)-1].GetIndex())
 }
 
+// applyEntries applies entries in order after the caller has mirrored them
+// into the event log, WITHOUT persisting appliedIndex (the caller owns that).
+//
+// A run of consecutive DATA entries (proposals of user-topic entities only:
+// ingested rows and CDC transactions, user writes) applies in ONE bbolt
+// transaction. Their writes are few and self-contained (applyDataTx), so a
+// Ready of N data entries costs one commit instead of up to three per entry
+// (the dedup/order record, the bundled position, a refresh-epoch raise). Any
+// other entry — a config, a coordination record, a rejected or undecodable
+// one — first commits the run, then applies on its own exactly as before, so
+// it sees every write the entries before it made, and a run never spans a
+// config change it would have to observe.
+//
+// Each run is decoded before its transaction opens (type resolution reads
+// bbolt, and a read on the apply goroutine while its write transaction is
+// open can deadlock bbolt's remap), and the in-memory marks (appliedIndex, the
+// data head, the scrub triggers) advance only after the commit, so a reader
+// that sees appliedIndex move sees the state behind it.
+//
+// Crash semantics are unchanged: the run's writes commit atomically, before
+// saveAppliedIndex, and every one is replay-idempotent (monotonic folds,
+// config-guarded last-writer-wins positions, the tombstone's index scan).
+//
+// With finalIdx set (the batch path), a run that ends the batch commits in
+// the SAME transaction as the applied index (saveAppliedIndexTx), one bbolt
+// commit for both; the result reports whether that happened, so the caller
+// does not save the applied index again.
+func (s *Storage) applyEntries(entries []*pb.Entry, rejected map[uint64]bool, finalIdx uint64) (bool, error) {
+	type decoded struct {
+		index uint64
+		p     *cluster.Proposal
+	}
+	var run []decoded
+	write := false
+	flush := func(withApplied bool) error {
+		if len(run) == 0 {
+			return nil
+		}
+		var pending *pb.ConfState
+		var pendingData []byte
+		if withApplied {
+			var err error
+			if pending, pendingData, err = s.pendingConfStateBytes(); err != nil {
+				return err
+			}
+			s.appliedIndexPersists.Add(1)
+		}
+		if write || withApplied {
+			// Every run entry carries user-topic data, so the data head after
+			// the run is its last index.
+			dataHead := max(s.dataEventIndex.Load(), run[len(run)-1].index)
+			if err := s.update(func(tx *bolt.Tx) error {
+				if write {
+					for _, d := range run {
+						if err := s.applyDataTx(tx, d.index, d.p); err != nil {
+							return err
+						}
+					}
+				}
+				if withApplied {
+					return saveAppliedIndexTx(tx, finalIdx, dataHead, pendingData)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		for _, d := range run {
+			s.noteDataApplied(d.index, d.p)
+		}
+		if withApplied {
+			s.clearPendingConfState(pending)
+		}
+		run, write = run[:0], false
+		return nil
+	}
+	for _, e := range entries {
+		idx := e.GetIndex()
+		if idx <= s.appliedIndex.Load() {
+			continue
+		}
+		if !rejected[idx] && e.GetType() == pb.EntryNormal && e.Data != nil {
+			p := &cluster.Proposal{}
+			if err := p.Unmarshal(e.Data, s); err == nil && isDataProposal(p) {
+				for _, entity := range p.Entities {
+					s.logger.Debug("applying entity", zap.String("typeID", entity.Type.ID), zap.Uint64("index", idx))
+				}
+				run = append(run, decoded{index: idx, p: p})
+				write = write || s.needsDataWrites(p)
+				continue
+			}
+			// Undecodable here: applyCommitted decodes again and owns the
+			// skip-or-fatal decision.
+		}
+		if err := flush(false); err != nil {
+			return false, err
+		}
+		if _, err := s.applyCommitted(e, rejected[idx]); err != nil {
+			return false, err
+		}
+	}
+	merged := finalIdx > 0 && len(run) > 0 && run[len(run)-1].index == finalIdx
+	return merged, flush(merged)
+}
+
+// isDataProposal reports whether every entity is user-topic data, so the
+// proposal's apply is applyDataTx alone (a user type has no entity handler).
+func isDataProposal(p *cluster.Proposal) bool {
+	if len(p.Entities) == 0 {
+		return false
+	}
+	for _, e := range p.Entities {
+		if cluster.IsInternal(e.Type.ID) {
+			return false
+		}
+	}
+	return true
+}
+
+// needsDataWrites reports whether applyDataTx would write anything for p, so
+// a proposal (or a run) with nothing to write opens no transaction: a bbolt
+// commit costs two fsyncs even when empty. A refresh-epoch raise is checked
+// against the stored floor, which is a no-op for all but the first row of an
+// epoch.
+func (s *Storage) needsDataWrites(p *cluster.Proposal) bool {
+	if len(p.Position) > 0 || (p.IngestableID != "" && (p.SourceSeq > 0 || p.IngestSeq > 0)) {
+		return true
+	}
+	for _, e := range p.Entities {
+		if isUserDefinedType(e.Type.ID) && e.IsDelete() {
+			return true
+		}
+		if e.Generation > 0 && e.Generation > s.TopicRefreshEpoch(e.Type.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// applyDataTx makes a committed proposal's data writes within tx: delete
+// tombstones, refresh-epoch raises, the ingest dedup and order records, and a
+// bundled resume position. Deterministic: derived only from the committed
+// proposal and replicated state.
+func (s *Storage) applyDataTx(tx *bolt.Tx, index uint64, p *cluster.Proposal) error {
+	for _, entity := range p.Entities {
+		// Record an event-log tombstone for a user-defined delete so a
+		// future Scrub can physically remove this subject's PII from the
+		// permanent event log. Built-in config/coordination deletes are not
+		// PII and are never scrubbed. Deterministic: keyed on the committed
+		// entity and stamped with this entry's raft index, so every replica
+		// stores identical bytes.
+		if isUserDefinedType(entity.Type.ID) && entity.IsDelete() {
+			if err := recordEventTombstoneTx(tx, entity.Type.ID, entity.Key, index); err != nil {
+				return fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
+			}
+			// Track the retained delete's index (no subject data) for the
+			// delete-key erasure cadence — reconciled at scrub completion.
+			if !cluster.IsErasedKey(entity.Key) {
+				if err := recordUnhashedDeleteTx(tx, index); err != nil {
+					return fmt.Errorf("[wal.storage] recordUnhashedDelete: %w", err)
+				}
+			}
+		}
+
+		// Raise the per-topic refresh-epoch floor to the highest generation
+		// ever stamped on this topic (data rows and refresh-boundary markers
+		// alike carry Generation). Survives DeleteIngestable, so a same-topic
+		// recreate — whose cleared position resets the epoch to 0 — resumes
+		// ABOVE the generations still on the sink instead of re-emitting at
+		// epoch 1 and leaving a vacuous "gen < 1" sweep. See
+		// topic_refresh_epoch.go.
+		if entity.Generation > 0 {
+			if err := bumpTopicRefreshEpochTx(tx, entity.Type.ID, entity.Generation); err != nil {
+				return fmt.Errorf("[wal.storage] bumpTopicRefreshEpoch: %w", err)
+			}
+		}
+	}
+
+	// Advance the per-ingestable source-seq highwater for ingest
+	// proposals. Deterministic across replicas (derived only from the
+	// committed proposal) and done before saveAppliedIndex so a
+	// replayed entry re-applies the idempotent max. Non-ingest
+	// proposals carry "" / 0 and no-op here.
+	// The dedup record scopes by transaction ONLY for dialects that
+	// opted in (their resume granularity is per-transaction — see
+	// cluster.Proposal.TxnScopedDedup); everything else folds under the
+	// legacy scalar semantics, SourceTxnID notwithstanding.
+	dedupTxn := ""
+	if p.TxnScopedDedup {
+		dedupTxn = p.SourceTxnID
+	}
+	if err := advanceIngestSourceSeqTx(tx, p.IngestableID, p.SourceSeq, dedupTxn, p.IngestSeq, p.IngestSession); err != nil {
+		return fmt.Errorf("[wal.storage] advanceIngestSourceSeq: %w", err)
+	}
+
+	// Persist a bundled resume checkpoint ATOMICALLY with the proposal's
+	// data: a snapshot batch carries its own position (Proposal.Position) so
+	// the checkpoint advances in the SAME raft entry as the rows. This closes
+	// the crash window between a committed batch and a separate position
+	// proposal — the gap SourceSeq dedup can't cover, because snapshot rows
+	// carry SourceSeq 0. Before saveAppliedIndex so a replayed
+	// entry re-applies the idempotent (last-writer-wins) put; guarded on the
+	// config existing, exactly like a standalone position entity.
+	if len(p.Position) > 0 {
+		if err := applyBundledIngestablePositionTx(tx, p.IngestableID, p.Position); err != nil {
+			return fmt.Errorf("[wal.storage] apply bundled position: %w", err)
+		}
+	}
+	return nil
+}
+
+// noteDataApplied advances the in-memory marks for an applied proposal, after
+// its writes committed.
+func (s *Storage) noteDataApplied(index uint64, p *cluster.Proposal) {
+	// Advance the data-entry head iff this proposal carries user topic data —
+	// exactly the filter the per-syncable reader applies in reader.go (same
+	// userTopicEntities helper, per-entity), so dataEventIndex tracks the
+	// index the reader converges to at EOF. Internal entries (committed's
+	// config + coordination) are skipped here just as the reader skips them,
+	// so an idle syncable's lag reads 0 rather than a phantom backlog of
+	// trailing internal entries. Monotonic: entries apply in index order.
+	if len(userTopicEntities(p.Entities)) > 0 {
+		s.dataEventIndex.Store(index)
+	}
+	for _, entity := range p.Entities {
+		// Count an applied EntityKindSnapshot entity as metadata-GC backlog so
+		// the automatic scrubber fires on a Snapshot-heavy cluster even with no
+		// RTBF deletes — covering both internal bookkeeping and user Snapshot
+		// streams. (Revision configs and Standalone dead-letters are retained,
+		// not counted.) This is a leader-local trigger heuristic, so the live
+		// resolved kind is fine here; it over-counts distinct-key writes
+		// slightly, which is harmless (see metadataBacklog).
+		if entity.Type.EntityKind == cluster.EntityKindSnapshot {
+			s.metadataBacklog.Add(1)
+			// Approximate the reclaimable bytes: the superseded prior entry
+			// is ~the size of this, its same-key successor (+ framing).
+			s.metadataBacklogBytes.Add(int64(len(entity.Key)+len(entity.Data)) + metadataEntryOverhead)
+		} else if tracksCorrections(entity.Type) {
+			// A write to a scrub-declared type of another kind is usually an
+			// append, not a supersession, so it does not count toward the
+			// volume gate; it starts the supersede ceiling instead
+			// (hasSupersedeBacklog), which bounds how long a correction's
+			// superseded version stays in the log.
+			s.noteCorrectionWrite(index)
+		}
+	}
+	s.appliedIndex.Store(index)
+}
+
 // applyCommitted applies one committed entry WITHOUT persisting appliedIndex
 // (the caller owns that — per entry via ApplyCommitted, per batch via
-// ApplyCommittedBatch). Reports whether the entry advanced appliedIndex.
-func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
+// ApplyCommittedBatch) and after the caller has mirrored it into the event
+// log. Reports whether the entry advanced appliedIndex. A rejected entry (a
+// sequenced ingest proposal out of order, see ingest_order.go) advances
+// appliedIndex and applies nothing.
+func (s *Storage) applyCommitted(entry *pb.Entry, rejected bool) (bool, error) {
 	// Skip already-applied entries (replay-on-restart safety). A bare
 	// EntryNormal with nil data (e.g. the leader's post-election no-op
 	// entry from raft) still counts as applied — we bump appliedIndex so
@@ -101,15 +389,10 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 		return false, nil
 	}
 
-	// Mirror the raw raft entry into the permanent event log. The guard
-	// against entry.GetIndex() <= eventIndex covers the crash window where
-	// appendEvent succeeded but saveAppliedIndex didn't persist:
-	// without it, replay would try to append the same entry again and
-	// diverge seq vs. raft index on disk.
-	if entry.GetIndex() > s.eventIndex.Load() {
-		if err := s.appendEvent(entry); err != nil {
-			return false, fmt.Errorf("[wal.storage] %w", err)
-		}
+	if rejected {
+		s.noteIngestRejected(entry)
+		s.appliedIndex.Store(entry.GetIndex())
+		return true, nil
 	}
 
 	// For EntryNormal with data, apply entities to bucket state and the
@@ -149,17 +432,6 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 			return false, fmt.Errorf("[wal.storage] unmarshal proposal at index %d: %w", entry.GetIndex(), err)
 		}
 
-		// Advance the data-entry head iff this proposal carries user topic data —
-		// exactly the filter the per-syncable reader applies in reader.go (same
-		// userTopicEntities helper, per-entity), so dataEventIndex tracks the
-		// index the reader converges to at EOF. Internal entries (committed's
-		// config + coordination) are skipped here just as the reader skips them,
-		// so an idle syncable's lag reads 0 rather than a phantom backlog of
-		// trailing internal entries. Monotonic: entries apply in index order.
-		if len(userTopicEntities(p.Entities)) > 0 {
-			s.dataEventIndex.Store(entry.GetIndex())
-		}
-
 		for _, entity := range p.Entities {
 			// Never log the raw entity Key: for a user topic entity (and especially
 			// an RTBF delete) it is the erasure subject's PII. The typeID + raft
@@ -168,85 +440,14 @@ func (s *Storage) applyCommitted(entry *pb.Entry) (bool, error) {
 			if err := s.applyEntity(entity, entry.GetIndex()); err != nil {
 				return false, err
 			}
-
-			// Record an event-log tombstone for a user-defined delete so a
-			// future Scrub can physically remove this subject's PII from the
-			// permanent event log. Built-in config/coordination deletes are not
-			// PII and are never scrubbed. Deterministic: keyed on the committed
-			// entity and stamped with this entry's raft index, so every replica
-			// stores identical bytes.
-			if isUserDefinedType(entity.Type.ID) && entity.IsDelete() {
-				if err := s.recordEventTombstone(entity.Type.ID, entity.Key, entry.GetIndex()); err != nil {
-					return false, fmt.Errorf("[wal.storage] recordEventTombstone: %w", err)
-				}
-				// Track the retained delete's index (no subject data) for the
-				// delete-key erasure cadence — reconciled at scrub completion.
-				if !cluster.IsErasedKey(entity.Key) {
-					if err := s.recordUnhashedDelete(entry.GetIndex()); err != nil {
-						return false, fmt.Errorf("[wal.storage] recordUnhashedDelete: %w", err)
-					}
-				}
-			}
-
-			// Count an applied EntityKindSnapshot entity as metadata-GC backlog so
-			// the automatic scrubber fires on a Snapshot-heavy cluster even with no
-			// RTBF deletes — covering both internal bookkeeping and user Snapshot
-			// streams. (Revision configs and Standalone dead-letters are retained,
-			// not counted.) This is a leader-local trigger heuristic, so the live
-			// resolved kind is fine here; it over-counts distinct-key writes
-			// slightly, which is harmless (see metadataBacklog).
-			if entity.Type.EntityKind == cluster.EntityKindSnapshot {
-				s.metadataBacklog.Add(1)
-				// Approximate the reclaimable bytes: the superseded prior entry
-				// is ~the size of this, its same-key successor (+ framing).
-				s.metadataBacklogBytes.Add(int64(len(entity.Key)+len(entity.Data)) + metadataEntryOverhead)
-			}
-
-			// Raise the per-topic refresh-epoch floor to the highest generation
-			// ever stamped on this topic (data rows and refresh-boundary markers
-			// alike carry Generation). Survives DeleteIngestable, so a same-topic
-			// recreate — whose cleared position resets the epoch to 0 — resumes
-			// ABOVE the generations still on the sink instead of re-emitting at
-			// epoch 1 and leaving a vacuous "gen < 1" sweep. See
-			// topic_refresh_epoch.go.
-			if entity.Generation > 0 {
-				if err := s.bumpTopicRefreshEpoch(entity.Type.ID, entity.Generation); err != nil {
-					return false, fmt.Errorf("[wal.storage] bumpTopicRefreshEpoch: %w", err)
-				}
+		}
+		if s.needsDataWrites(p) {
+			if err := s.update(func(tx *bolt.Tx) error { return s.applyDataTx(tx, entry.GetIndex(), p) }); err != nil {
+				return false, err
 			}
 		}
-
-		// Advance the per-ingestable source-seq highwater for ingest
-		// proposals. Deterministic across replicas (derived only from the
-		// committed proposal) and done before saveAppliedIndex so a
-		// replayed entry re-applies the idempotent max. Non-ingest
-		// proposals carry "" / 0 and no-op here.
-		// The dedup record scopes by transaction ONLY for dialects that
-		// opted in (their resume granularity is per-transaction — see
-		// cluster.Proposal.TxnScopedDedup); everything else folds under the
-		// legacy scalar semantics, SourceTxnID notwithstanding.
-		dedupTxn := ""
-		if p.TxnScopedDedup {
-			dedupTxn = p.SourceTxnID
-		}
-		if err := s.advanceIngestSourceSeq(p.IngestableID, p.SourceSeq, dedupTxn); err != nil {
-			return false, fmt.Errorf("[wal.storage] advanceIngestSourceSeq: %w", err)
-		}
-
-		// Persist a bundled resume checkpoint ATOMICALLY with the proposal's
-		// data: a snapshot batch carries its own position (Proposal.Position) so
-		// the checkpoint advances in the SAME raft entry as the rows. This closes
-		// the crash window between a committed batch and a separate position
-		// proposal — the gap SourceSeq dedup can't cover, because snapshot rows
-		// carry SourceSeq 0 (see the effectively-once guarantee in
-		// docs/operations/cdc-setup.md). Before saveAppliedIndex so a replayed
-		// entry re-applies the idempotent (last-writer-wins) put; guarded on the
-		// config existing, exactly like a standalone position entity.
-		if len(p.Position) > 0 {
-			if err := s.applyBundledIngestablePosition(p.IngestableID, p.Position); err != nil {
-				return false, fmt.Errorf("[wal.storage] apply bundled position: %w", err)
-			}
-		}
+		s.noteDataApplied(entry.GetIndex(), p)
+		return true, nil
 	}
 
 	s.appliedIndex.Store(entry.GetIndex())
@@ -299,55 +500,79 @@ func (s *Storage) saveAppliedIndex(idx uint64) error {
 	// past the conf) or neither (membership stale/missing, applied index
 	// behind the conf → raft re-delivers and applies it fresh). There is no
 	// window where the applied index leads a stale ConfState.
+	pending, pendingData, err := s.pendingConfStateBytes()
+	if err != nil {
+		return err
+	}
+	err = s.update(func(tx *bolt.Tx) error {
+		return saveAppliedIndexTx(tx, idx, s.dataEventIndex.Load(), pendingData)
+	})
+	if err == nil {
+		s.clearPendingConfState(pending)
+	}
+	return err
+}
+
+// pendingConfStateBytes snapshots the ConfState staged this Ready and
+// marshals it BEFORE the bbolt write lock is taken, so snapMu is never
+// nested inside kvMu.
+func (s *Storage) pendingConfStateBytes() (*pb.ConfState, []byte, error) {
 	s.snapMu.Lock()
 	pending := s.pendingConfState
 	s.snapMu.Unlock()
-	var pendingData []byte
-	if pending != nil {
-		d, err := proto.Marshal(pending)
-		if err != nil {
-			return fmt.Errorf("marshal conf state: %w", err)
-		}
-		pendingData = d
+	if pending == nil {
+		return nil, nil, nil
 	}
+	d, err := proto.Marshal(pending)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal conf state: %w", err)
+	}
+	return pending, d, nil
+}
 
-	err := s.update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(appliedIndexBucket)
-		if b == nil {
+// clearPendingConfState drops the staged ConfState once it is durable,
+// unless a newer one was staged meanwhile.
+func (s *Storage) clearPendingConfState(pending *pb.ConfState) {
+	if pending == nil {
+		return
+	}
+	s.snapMu.Lock()
+	if s.pendingConfState == pending {
+		s.pendingConfState = nil
+	}
+	s.snapMu.Unlock()
+}
+
+// saveAppliedIndexTx writes the applied index, the data head, and a staged
+// ConfState in the caller's transaction.
+func saveAppliedIndexTx(tx *bolt.Tx, idx, dataHead uint64, pendingData []byte) error {
+	b := tx.Bucket(appliedIndexBucket)
+	if b == nil {
+		return ErrBucketMissing
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], idx)
+	if err := b.Put(appliedIndexKey, buf[:]); err != nil {
+		return err
+	}
+	// The data head rides the same transaction: it is applied state, and
+	// restart must restore it exactly (the Open-time backscan is a capped
+	// fallback the field defeated — see dataEventIndexKey).
+	var dbuf [8]byte
+	binary.BigEndian.PutUint64(dbuf[:], dataHead)
+	if err := b.Put(dataEventIndexKey, dbuf[:]); err != nil {
+		return err
+	}
+	if pendingData != nil {
+		cb := tx.Bucket(confStateBucket)
+		if cb == nil {
 			return ErrBucketMissing
 		}
-		var buf [8]byte
-		binary.BigEndian.PutUint64(buf[:], idx)
-		if err := b.Put(appliedIndexKey, buf[:]); err != nil {
+		if err := cb.Put(confStateKey, pendingData); err != nil {
 			return err
 		}
-		// The data head rides the same transaction: it is applied state, and
-		// restart must restore it exactly (the Open-time backscan is a capped
-		// fallback the field defeated — see dataEventIndexKey).
-		var dbuf [8]byte
-		binary.BigEndian.PutUint64(dbuf[:], s.dataEventIndex.Load())
-		if err := b.Put(dataEventIndexKey, dbuf[:]); err != nil {
-			return err
-		}
-		if pendingData != nil {
-			cb := tx.Bucket(confStateBucket)
-			if cb == nil {
-				return ErrBucketMissing
-			}
-			if err := cb.Put(confStateKey, pendingData); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err == nil && pending != nil {
-		s.snapMu.Lock()
-		if s.pendingConfState == pending {
-			s.pendingConfState = nil
-		}
-		s.snapMu.Unlock()
 	}
-	return err
+	return nil
 }
 
 // durableConfState reads the ConfState written atomically with appliedIndex,
@@ -371,6 +596,12 @@ func (s *Storage) durableConfState() *pb.ConfState {
 		return nil
 	})
 	return out
+}
+
+// SetApplyDelayForTest makes every ApplyCommittedBatch take at least d (zero
+// restores normal apply), so a test can hold a node in apply.
+func (s *Storage) SetApplyDelayForTest(d time.Duration) {
+	s.applyDelayForTest.Store(int64(d))
 }
 
 // SetAppliedIndexForTest rewinds the applied index (in memory and in bbolt) to

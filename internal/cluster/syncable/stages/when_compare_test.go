@@ -50,6 +50,13 @@ func TestMatchComparisons(t *testing.T) {
 		{"greaterThan: a string value never compares", WhenClause{Path: "$.v", GreaterThan: 0}, `{"v":"12"}`, false},
 		{"notEquals numeric across representations", WhenClause{Path: "$.v", NotEquals: 5}, `{"v":5.0}`, false},
 		{"notEquals numeric different", WhenClause{Path: "$.v", NotEquals: 5}, `{"v":6}`, true},
+
+		// Text literals order strings byte-wise; other families never match.
+		{"greaterThan text admits later", WhenClause{Path: "$.d", GreaterThan: "2026-01-01"}, `{"d":"2026-02-01"}`, true},
+		{"greaterThan text excludes equal", WhenClause{Path: "$.d", GreaterThan: "2026-01-01"}, `{"d":"2026-01-01"}`, false},
+		{"lessThan text is byte order (B < a)", WhenClause{Path: "$.s", LessThan: "a"}, `{"s":"B"}`, true},
+		{"lessThan text: a number value never compares", WhenClause{Path: "$.s", LessThan: "a"}, `{"s":5}`, false},
+		{"lessThan text: null never compares", WhenClause{Path: "$.s", LessThan: "a"}, `{"s":null}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,12 +65,15 @@ func TestMatchComparisons(t *testing.T) {
 	}
 }
 
-// Admission: exactly one arm, scalar literals, numeric-only ordering.
+// Admission: exactly one arm, scalar literals, ordering against a number
+// or a text literal — never a quoted number, which would order as text.
 func TestValidateWhenComparisons(t *testing.T) {
 	ok := []WhenClause{
 		{Path: "$.a", NotEquals: "delete"},
 		{Path: "$.b", GreaterThan: 0},
 		{Path: "$.c", LessThan: 10.5},
+		{Path: "$.d", GreaterThan: "high"},
+		{Path: "$.e", LessThan: "2026-04-01"},
 	}
 	require.NoError(t, ValidateWhen(ok, "w"))
 
@@ -71,9 +81,12 @@ func TestValidateWhenComparisons(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "exactly one of equals, null, notNull, notEquals, greaterThan, lessThan, or expr")
 
-	err = ValidateWhen([]WhenClause{{Path: "$.a", GreaterThan: "high"}}, "w")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "greaterThan takes a numeric literal")
+	err = ValidateWhen([]WhenClause{{Path: "$.a", GreaterThan: "5"}}, "w")
+	require.ErrorContains(t, err, `greaterThan = "5" is a quoted number`)
+	err = ValidateWhen([]WhenClause{{Path: "$.a", LessThan: "-1.5e3"}}, "w")
+	require.ErrorContains(t, err, "is a quoted number")
+	err = ValidateWhen([]WhenClause{{Path: "$.a", GreaterThan: true}}, "w")
+	require.ErrorContains(t, err, "greaterThan takes a number or text literal")
 
 	err = ValidateWhen([]WhenClause{{Path: "$.a", NotEquals: map[string]any{}}}, "w")
 	require.Error(t, err)

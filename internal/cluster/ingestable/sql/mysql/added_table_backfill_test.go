@@ -12,7 +12,7 @@ import (
 // is the benign self-healing case (Info — a freshly-enabled/brand-new server
 // with no post-enable transactions, found in the field as "lag: null with no
 // GTID lines despite gtid_mode=ON"); anything else is the documented degraded
-// mode and must WARN, per the cdc-setup promise that file:pos positioning is
+// mode and must WARN, per the documented promise that file:pos positioning is
 // visible rather than silent.
 func TestGtidFallbackLog(t *testing.T) {
 	msg, level := gtidFallbackLog("ON")

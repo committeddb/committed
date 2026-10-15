@@ -150,7 +150,7 @@ target directory untouched and a retry is never blocked by a half-restored
 directory. Before the publish it `fsync`s every staged file's content and every
 staged directory, and after the rename it `fsync`s the target's parent — so a
 crash can never surface a torn or zero-length restored file. The publish itself is
-a single rename, which the [crash-consistent filesystem](../storage-architecture.md)
+a single rename, which the [crash-consistent filesystem](../architecture/storage-architecture.md)
 requirement makes atomic: after any crash the target is either absent (retry it)
 or fully populated and durable, never partial. Restore is fully re-runnable.
 
@@ -209,7 +209,7 @@ binary does not fail on them — it silently opens a **partial log**.
 > **Moving 0.8.0 data onto a pre-0.8.0 binary.** Restore the archive with a
 > 0.8.0 build, stop it, run `committed wal decompress --data <datadir>`, then
 > start the older binary on that directory. Check the rest of the one-way
-> transitions in [api-compatibility.md](../api-compatibility.md#one-way-transitions-no-rollback-past-these)
+> transitions in [api-compatibility.md](../architecture/api-compatibility.md#one-way-transitions-no-rollback-past-these)
 > first — a log carrying a committed restatement, for example, cannot go back
 > at all.
 

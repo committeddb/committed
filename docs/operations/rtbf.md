@@ -4,7 +4,7 @@ How to erase a data subject from committed and everything it feeds: issue the
 deletes, let the machinery propagate and physically scrub, verify completion
 with an end condition you can poll, and know what can delay it. This is the
 operator how-to; the design (why the log can be both permanent and erasable)
-is in [event-log-architecture.md](../event-log-architecture.md#right-to-be-forgotten--deletes).
+is in [event-log-architecture.md](../architecture/event-log-architecture.md#right-to-be-forgotten--deletes).
 
 Erasure is three stages, the first yours and the rest committed's:
 
@@ -42,7 +42,7 @@ for the verification loop below.
 
 > **One shape cannot.** A keyless (append/history) `sql` syncable has no key to
 > bind a delete against. Unless it declares
-> [`keyColumn`](../read-models.md#history-tables-vs-read-models), the delete
+> [`keyColumn`](../syncables.md#history-tables), the delete
 > **dead-letters** instead of being silently dropped: the erasure does not
 > reach that table, and clearing it is yours. committed warns about this at
 > config time, and the dead-letter is visible on
@@ -90,6 +90,29 @@ downstream row, and not a scrub longer. A nonzero count shortly after an
 erasure is normal — watch it shrink across scrub passes; a count that stops
 shrinking means a consumer is holding the gate (next section).
 
+## Masking or correcting at the source
+
+Some sources erase personal data by rewriting a record in place instead of
+deleting it: an event store that masks a field in an event, or a correction
+that replaces a row. The update reaches committed as a new version of the
+same key, and by default the log keeps the original too.
+
+To have the scrub remove the originals, declare
+[`onSupersede = "scrub"`](../types.md#superseded-versions-onsupersede) on
+the type. Every scrub then keeps only the latest version of each key, so
+the masked version replaces the original in the log as it already does in
+your read models.
+
+- **Timing.** Every scrub removes superseded versions, whatever triggered
+  it. The automatic scheduler also runs one at least once every 7 days
+  while a type declared `"scrub"` has been written since the last scrub.
+  When an obligation clock is running, trigger one with `POST /v1/scrub`.
+- **Verify** as for deletes: note `appliedIndex` from `GET
+  /v1/node/status` after the masking update committed, and the original
+  is gone from a node's log once that node's `completedBound` reaches it.
+- **Backups** taken before the scrub still hold the originals, as they hold
+  deleted data.
+
 ## What can delay erasure — and what to do
 
 - **A lagging syncable** holds the delete-key erasure gate until its
@@ -125,7 +148,7 @@ Erasure in committed does not reach copies it doesn't manage:
   ([logging.md](logging.md)).
 - **Databases you point syncables at** got real `DELETE`s, but their own
   backups/replicas/logs are your domain.
-- **The [shape census](../schema-contracts.md#the-shape-census) with value
+- **The [shape census](../types.md#the-shape-census) with value
   tracking on.** `censusValues = true` keeps up to `censusValueLimit`
   distinct source values per string field in the replicated census record,
   and erasure does not scrub it. Do not turn value tracking on for a topic

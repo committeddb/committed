@@ -940,7 +940,8 @@ func createTestIngestableConfig(id string) *cluster.Configuration {
 // and grace overrides the leader-change fail-fast grace period —
 // truncation-detection tests set it large so the conservative
 // ErrProposalUnknown can't preempt the definitive ErrProposalLost they assert.
-func newFaultyMultiDBHarness(t *testing.T, replicas int, tick, grace time.Duration) (*multiDBHarness, *FaultyCluster) {
+// extra options apply to every node.
+func newFaultyMultiDBHarness(t *testing.T, replicas int, tick, grace time.Duration, extra ...db.Option) (*multiDBHarness, *FaultyCluster) {
 	t.Helper()
 
 	ports := pickFreePorts(replicas)
@@ -968,11 +969,12 @@ func newFaultyMultiDBHarness(t *testing.T, replicas int, tick, grace time.Durati
 			t.Fatalf("wal.Open for node %d: %v", id, err)
 		}
 
-		d := db.New(id, peers, storage, p, syncCh, ingestCh,
+		opts := append([]db.Option{
 			db.WithTickInterval(tick),
 			db.WithTransportWrapperForTest(fc.Wrap(id)),
 			db.WithLeaderChangeGracePeriod(grace),
-		)
+		}, extra...)
+		d := db.New(id, peers, storage, p, syncCh, ingestCh, opts...)
 
 		h.nodes = append(h.nodes, &multiDBNode{
 			id:      id,
@@ -1033,7 +1035,7 @@ func (h *multiDBHarness) agreedLeaderAmong(ids []uint64) uint64 {
 }
 
 // -----------------------------------------------------------------------------
-// Scenario: truncation-detection ErrProposalLost (propose-truncation-detection.md)
+// Scenario: truncation-detection ErrProposalLost
 //
 // Invariant protected: a proposer that was leader when its entry was appended,
 // and that physically observes the entry's truncation by a higher-term leader,
@@ -1591,15 +1593,13 @@ func TestAdversarial_DiskFull(t *testing.T) {
 // Invariants protected:
 //
 //   - Storage invariant (P_local == R_local) holds on every node after
-//     the follower rejoins, per docs/event-log-architecture.md
-//     § "The central invariant" (Face 1 — the storage highwatermark). If
+//     the follower rejoins. If
 //     the invariant breaks on any node, checkStorageInvariant fatal-exits
 //     the Ready loop — every node's logger routes Fatal through a test hook
 //     that records it, so a fatal is a test failure, not a lost process.
 //
 //   - Determinism invariant — every node's permanent event log is byte-
-//     identical for the full applied prefix after convergence, per
-//     docs/event-log-architecture.md § "Determinism requirement". The
+//     identical for the full applied prefix after convergence. The
 //     caught-up follower's events/ must hash to the same value as the
 //     two peers that stayed online.
 //
@@ -1677,8 +1677,7 @@ func testSevereLagFollowerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 	// the Ready loop on a decode failure (commit 8af21d9). Raw
 	// []byte("base-0") payloads — what the test used to send — are not
 	// valid protobuf and therefore trip that fatal on the first user
-	// entry. See .claude-scratch/tickets/adversarial-severe-lag-phase1-
-	// flake.md for the full diagnosis.
+	// entry.
 	var seq uint64
 
 	// Phase 1: baseline. Propose baselineEntries entries and wait for

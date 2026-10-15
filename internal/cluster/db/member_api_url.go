@@ -19,7 +19,7 @@ import (
 // replicates node ids and raft peer URLs but never API addresses, and the
 // leader — whose API address a follower needs to proxy to — is usually an
 // original bootstrap node that never went through `member add`. Self-announce
-// covers bootstrap and added nodes uniformly. See raft-leader-read-proxy.md.
+// covers bootstrap and added nodes uniformly.
 //
 // A node with no advertised URL (WithAdvertisedAPIURL unset) announces
 // nothing. A restart re-announces only if the durably-stored value differs

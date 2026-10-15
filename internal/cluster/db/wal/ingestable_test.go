@@ -86,7 +86,7 @@ func TestEmptyIngestables(t *testing.T) {
 // This is the load-bearing assertion behind PR1's idempotency story:
 // without persisted appliedIndex, restart would replay every committed
 // entry through ApplyCommitted, which would re-parse every ingestable and
-// re-spawn its worker — exactly the worker-registry-by-id.md bug.
+// re-spawn its worker, leaving duplicate workers for one ingestable.
 //
 // We verify by installing a parser on reopen whose Parse panics. If the
 // re-apply fails to short-circuit on the index check, the panic surfaces.

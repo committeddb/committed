@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -36,6 +37,9 @@ type PostgreSQLDialect struct {
 	// non-nil error aborts the snapshot as if the source connection failed.
 	// Always nil in production (set via SetSnapshotBatchHookForTest).
 	snapshotBatchHook func(table string, batch int) error
+	// partitions holds each running ingestable's partitionWatch, keyed by its
+	// *sql.Config (see partitionWatch).
+	partitions sync.Map
 }
 
 // snapshotIntent records a snapshot stream() has decided to run but not yet
@@ -208,6 +212,50 @@ func (d *PostgreSQLDialect) Preflight(config *sql.Config) error {
 			return err
 		}
 	}
+	return checkPartitionOverlap(ctx, db, pgCfg.tables)
+}
+
+// checkPartitionOverlap rejects watching a partition together with one of its
+// ancestors. The publication reports the partition's changes under the
+// topmost published ancestor, so the partition's own topic would receive
+// nothing from the stream while its snapshot duplicated rows the ancestor's
+// snapshot already read.
+func checkPartitionOverlap(ctx context.Context, db *gosql.DB, tables []string) error {
+	watched := make(map[uint32]string, len(tables))
+	for _, t := range tables {
+		var oid uint32
+		if err := db.QueryRowContext(ctx, `SELECT $1::regclass::oid`, t).Scan(&oid); err != nil {
+			return fmt.Errorf("resolve table %q: %w", t, err)
+		}
+		watched[oid] = t
+	}
+	for _, t := range tables {
+		rows, err := db.QueryContext(ctx, `SELECT relid::oid FROM pg_partition_ancestors($1::regclass) WHERE relid <> $1::regclass`, t)
+		if err != nil {
+			return fmt.Errorf("read partition ancestors of %q: %w", t, err)
+		}
+		var ancestor string
+		for rows.Next() {
+			var oid uint32
+			if err := rows.Scan(&oid); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if a, ok := watched[oid]; ok && ancestor == "" {
+				ancestor = a
+			}
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return err
+		}
+		if ancestor != "" {
+			return fmt.Errorf("ingest source table %q is a partition of %q, which this ingestable also watches: "+
+				"its changes arrive as %q's, so watching both duplicates its rows; remove %q from tables",
+				t, ancestor, ancestor, t)
+		}
+	}
 	return nil
 }
 
@@ -217,10 +265,10 @@ func (d *PostgreSQLDialect) OptionKeys() []string {
 	return []string{sql.OptionSlotName, sql.OptionPublication, sql.OptionBatchSize}
 }
 
-// TeardownSource drops the replication slot and publication this ingestable
-// created on the source. The slot is what pins the source's WAL (its restart_lsn
-// holds WAL back), so an orphaned slot from a deleted ingestable grows the
-// source's disk without bound — this releases it. Called by the ingest delete
+// TeardownSource drops the replication slot this ingestable created on the
+// source, and its publication when committed owns it. The slot is what pins
+// the source's WAL (its restart_lsn holds WAL back), so an orphaned slot from
+// a deleted ingestable grows the source's disk without bound — this releases it. Called by the ingest delete
 // path on the owner node only, AFTER the worker has stopped, so the slot is
 // inactive and droppable. Idempotent: the slot drop is guarded on existence
 // (pg_drop_replication_slot errors on a missing name) and the publication uses IF
@@ -265,6 +313,17 @@ func (d *PostgreSQLDialect) TeardownSource(config *sql.Config) error {
 		return fmt.Errorf("drop replication slot %q: %w", pgCfg.slotName, err)
 	}
 	// Then the publication — it pins no WAL, but leaving it clutters the source.
+	// Only a publication committed owns is dropped; one the user had is left as
+	// it was found (see publication.go).
+	owned, err := ownsPublication(ctx, db, pgCfg)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		zap.L().Info("leaving the source publication in place: committed did not create it",
+			zap.String("publication", pgCfg.publication))
+		return nil
+	}
 	if _, err := db.ExecContext(ctx,
 		fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", quoteIdent(pgCfg.publication))); err != nil {
 		return fmt.Errorf("drop publication %q: %w", pgCfg.publication, err)
@@ -304,11 +363,25 @@ func checkReplicaIdentity(ctx context.Context, db *gosql.DB, table string, prima
 	fix := fmt.Sprintf("set the table's REPLICA IDENTITY to carry the key "+
 		"(e.g. `ALTER TABLE %s REPLICA IDENTITY FULL`) or add a PRIMARY KEY on the configured column(s)", table)
 
-	var ident string
+	var ident, kind string
 	if err := db.QueryRowContext(ctx,
-		`SELECT relreplident FROM pg_class WHERE oid = $1::regclass`, table,
-	).Scan(&ident); err != nil {
+		`SELECT relreplident, relkind FROM pg_class WHERE oid = $1::regclass`, table,
+	).Scan(&ident, &kind); err != nil {
 		return fmt.Errorf("read replica identity of %q: %w", table, err)
+	}
+
+	// A partitioned table logs nothing itself: each partition logs a DELETE's
+	// old row under its OWN replica identity, and the root's never reaches the
+	// partitions (existing or created later). A DEFAULT partition published via
+	// a FULL root even arrives flagged as a full old row with every non-key
+	// column NULL, so a key relying on FULL would bind the tombstone to NULL
+	// silently. The PRIMARY KEY is the one key every partition carries, present
+	// and future, so it alone counts.
+	if kind == "p" {
+		ident = "d"
+		fix = fmt.Sprintf("%s is partitioned, so its REPLICA IDENTITY does not reach its partitions "+
+			"(each partition, including ones created later, logs its own); "+
+			"include the configured column(s) in its PRIMARY KEY, or set primaryKey to the PRIMARY KEY columns", table)
 	}
 
 	switch ident {
@@ -356,6 +429,7 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	if err != nil {
 		return err
 	}
+	defer d.partitions.Delete(config)
 
 	startLSN, resumeProgress, epoch, err := decodePosition(pos)
 	if err != nil {
@@ -370,8 +444,12 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 	// on the next attempt instead of silently skipping to streaming.
 	var intent *snapshotIntent
 
+	// What the source may be told is done: only what the worker has made
+	// durable. Kept across reconnects (see sourceAck).
+	ack := newSourceAck(startLSN)
+
 	for {
-		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, backoff, pr, po)
+		err := d.stream(ctx, config, pgCfg, &startLSN, &resumeProgress, &epoch, epochFloor, &intent, backoff, ack, pr, po)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -385,6 +463,15 @@ func (d *PostgreSQLDialect) Ingest(ctx context.Context, config *sql.Config, pos 
 			// so it is the authoritative detail — no separate primary_key field,
 			// which would show only the first topic's key on a multi-topic ingestable.
 			zap.L().Error("ingest stopping: a primaryKey column is missing from the source schema (renamed or dropped) — worker will park until the ingestable is re-POSTed or the column restored",
+				zap.Error(err),
+			)
+			return err
+		}
+		if errors.Is(err, errSourceMisconfigured) {
+			// The publication itself is wrong for this ingestable (another
+			// ingestable's, or carrying a table no watched table routes);
+			// reconnecting meets the same publication. Park, loud, until a re-POST.
+			zap.L().Error("ingest stopping: the source publication does not match this ingestable — worker will park until the ingestable is re-POSTed",
 				zap.Error(err),
 			)
 			return err
@@ -498,7 +585,14 @@ func (d *PostgreSQLDialect) Status(ctx context.Context, config *sql.Config, pos 
 			status.CaughtUp = lag == 0
 		}
 	}
-	return sql.RenderStatus(ctx, config, pos, decode, probe)
+	status, err := sql.RenderStatus(ctx, config, pos, decode, probe)
+	if err != nil {
+		return status, err
+	}
+	if w, ok := d.partitions.Load(config); ok {
+		status.RemovedPartitions = w.(*partitionWatch).removedPartitions()
+	}
+	return status, nil
 }
 
 // replicationLag returns how many bytes the source's write head is ahead of the
@@ -660,6 +754,7 @@ func (d *PostgreSQLDialect) stream(
 	epochFloor uint64,
 	intent **snapshotIntent,
 	backoff *sql.Backoff,
+	ack *sourceAck,
 	pr chan<- *cluster.Proposal,
 	po chan<- cluster.Position,
 ) (err error) {
@@ -692,6 +787,19 @@ func (d *PostgreSQLDialect) stream(
 		return err
 	}
 	defer func() { _ = sqlDB.Close() }()
+
+	// Watch the watched tables' partitions on the same conn; stopped before the
+	// conn closes.
+	pollCtx, stopPoll := context.WithCancel(ctx)
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		d.partitionWatch(config).run(pollCtx, sqlDB, config.Tables)
+	}()
+	defer func() {
+		stopPoll()
+		<-pollDone
+	}()
 
 	// Resolves relation-message type OIDs to JSON categories, following user
 	// DOMAIN types to their base type so a domain column classifies the same as
@@ -734,10 +842,14 @@ func (d *PostgreSQLDialect) stream(
 		return out, nil
 	}
 
-	addedTables, err := ensurePublication(ctx, conn, pgCfg)
+	// A held position means this ingestable has streamed before, so an
+	// uncommented publication is the one an earlier version created for it.
+	resumed := *lastLSN != 0 || *resumeProgress != nil || *intent != nil
+	pub, err := ensurePublication(ctx, sqlDB, pgCfg, resumed)
 	if err != nil {
 		return err
 	}
+	addedTables := pub.added
 
 	// Create the replication slot if it doesn't already exist. The result's
 	// ConsistentPoint is the new slot's starting LSN — the earliest point from
@@ -857,6 +969,24 @@ func (d *PostgreSQLDialect) stream(
 	pendingBytes := 0
 	clientXLogPos := *lastLSN
 	nextStandby := time.Now().Add(standbyTimeout)
+	var lastSent pglogrepl.LSN
+
+	// sendStatus confirms what may be confirmed (see sourceAck): when it has
+	// moved, when the server asks, or at the standby interval.
+	sendStatus := func(force bool) error {
+		pos := ack.confirmable(clientXLogPos)
+		if !force && pos <= lastSent && time.Now().Before(nextStandby) {
+			return nil
+		}
+		if err := pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
+			WALWritePosition: pos,
+		}); err != nil {
+			return err
+		}
+		lastSent = max(lastSent, pos)
+		nextStandby = time.Now().Add(standbyTimeout)
+		return nil
+	}
 
 	// resumeFloor is the LSN we asked StartReplication to resume from.
 	// pgoutput is allowed to re-stream messages from the slot's
@@ -883,10 +1013,26 @@ func (d *PostgreSQLDialect) stream(
 	var curTxnID string
 
 	for {
-		rawMsg, err := conn.ReceiveMessage(ctx)
+		// Wake for the standby interval, and promptly while a handed-off
+		// transaction waits to be confirmed. A deadline only sets the
+		// socket's read deadline (pgconn's default context handler sends no
+		// cancel request), so a timeout leaves the stream intact.
+		deadline := nextStandby
+		if soon := time.Now().Add(ackPoll); ack.outstanding(lastSent) && soon.Before(deadline) {
+			deadline = soon
+		}
+		recvCtx, cancelRecv := context.WithDeadline(ctx, deadline)
+		rawMsg, err := conn.ReceiveMessage(recvCtx)
+		cancelRecv()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if pgconn.Timeout(err) {
+				if err := sendStatus(false); err != nil {
+					return err
+				}
+				continue
 			}
 			return err
 		}
@@ -910,23 +1056,17 @@ func (d *PostgreSQLDialect) stream(
 			// ServerWALEnd that this slot's publication would deliver has
 			// already arrived as XLogData (the stream is ordered), so the gap
 			// up to ServerWALEnd holds nothing for us — checkpoint records,
-			// other databases' traffic — and confirming it acks no data we
-			// haven't handled (no more than the existing per-commit ack
-			// does). Without this, a QUIET source pins confirmed_flush_lsn at
+			// other databases' traffic. sendStatus confirms it only once every
+			// handed-off transaction is durable. Without this, a QUIET source
+			// pins confirmed_flush_lsn at
 			// the last commit forever while the write head keeps moving on
 			// background WAL: the slot retains WAL indefinitely on idle
 			// databases, and /status lag never drains to CaughtUp.
 			if pkm.ServerWALEnd > clientXLogPos {
 				clientXLogPos = pkm.ServerWALEnd
 			}
-			if pkm.ReplyRequested || time.Now().After(nextStandby) {
-				err = pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
-					WALWritePosition: clientXLogPos,
-				})
-				if err != nil {
-					return err
-				}
-				nextStandby = time.Now().Add(standbyTimeout)
+			if err := sendStatus(pkm.ReplyRequested); err != nil {
+				return err
 			}
 
 		case pglogrepl.XLogDataByteID:
@@ -956,10 +1096,15 @@ func (d *PostgreSQLDialect) stream(
 				// but tuples stay correctly keyed — so warn and continue. A
 				// RelationMessage is pgoutput's schema-change boundary (one per relation
 				// per schema version), so the warn needs no dedup. Reconcile against the
-				// spec that routes this relation (one for the flat config); a relation
-				// the config does not watch has no spec — none should reach here, as the
-				// publication is scoped to watched tables — so skip it.
-				if spec := specForRelation(config, m); spec != nil {
+				// spec that routes this relation (one for the flat config). A relation
+				// no spec routes is either a fault — the stream stops here, before any
+				// of its changes could be acknowledged — or knowingly skipped; see
+				// unroutableRelation.
+				if spec := specForRelation(config, m); spec == nil {
+					if err := unroutableRelation(ctx, sqlDB, pgCfg, pub.owned, m.Namespace, m.RelationName); err != nil {
+						return err
+					}
+				} else {
 					observed := make(map[string]bool, len(m.Columns))
 					for _, c := range m.Columns {
 						observed[strings.ToLower(c.Name)] = true
@@ -1000,7 +1145,7 @@ func (d *PostgreSQLDialect) stream(
 					pendingBytes += sql.EntityFlushBytes(e)
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil, nil); err != nil {
 						return err
 					}
 				}
@@ -1028,7 +1173,7 @@ func (d *PostgreSQLDialect) stream(
 					}
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil, nil); err != nil {
 						return err
 					}
 				}
@@ -1049,7 +1194,7 @@ func (d *PostgreSQLDialect) stream(
 					pendingBytes += sql.EntityFlushBytes(e)
 				}
 				if pendingBytes >= sql.TxnSoftFlushBytes {
-					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil); err != nil {
+					if _, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, nil, nil); err != nil {
 						return err
 					}
 				}
@@ -1078,9 +1223,12 @@ func (d *PostgreSQLDialect) stream(
 					return err
 				}
 
-				emitted, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, posBytes)
+				emitted, err := flushPending(ctx, &pending, &pendingBytes, pr, curLSN, *epoch, curTxnCommitTS, curTxnID, posBytes, ack.onDurable(endLSN))
 				if err != nil {
 					return err
+				}
+				if emitted {
+					ack.handOff(endLSN)
 				}
 				// The transaction is flushed; its provenance must not bleed
 				// into anything outside a Begin..Commit (the next Begin
@@ -1100,37 +1248,21 @@ func (d *PostgreSQLDialect) stream(
 				clientXLogPos = endLSN
 				*lastLSN = endLSN
 
-				// Acknowledge the commit position to Postgres on every
-				// commit (not just every standbyTimeout). The throttle
-				// here was the root cause of TestPostgresPositionResume:
-				// after one commit, the supervisor / test had a position
-				// checkpoint to resume from, but the server's
-				// confirmed_flush_lsn hadn't moved, so a resume from that
-				// checkpoint LSN re-streamed already-processed messages
-				// from the slot's older restart_lsn. Per-commit acking
-				// keeps the server's view of our progress in sync with
-				// the position we publish on the position channel.
-				//
-				// Cost is one TCP message per Postgres COMMIT, which is
-				// negligible — commits are inherently rate-limited by
-				// the upstream workload, not by us. The throttle still
-				// applies to keepalive-driven acks below where there
-				// is no new commit to report.
-				err = pglogrepl.SendStandbyStatusUpdate(ctx, conn, pglogrepl.StandbyStatusUpdate{
-					WALWritePosition: clientXLogPos,
-				})
-				if err != nil {
+				// Confirm what is durable now (a transaction that emitted
+				// nothing, or earlier ones the worker has committed); this
+				// one is confirmed once the worker reports it durable (see
+				// sourceAck). A resume from a durable position above the
+				// confirmed one never re-delivers a processed transaction:
+				// resumeFloor drops it.
+				if err := sendStatus(false); err != nil {
 					return err
 				}
-				nextStandby = time.Now().Add(standbyTimeout)
 
 			case *pglogrepl.TruncateMessage:
 				// committed has no clear-all primitive yet, so a source TRUNCATE is
 				// not propagated: the sink keeps the truncated rows until a
 				// re-snapshot. Do NOT swallow it silently (the old behavior) — name
-				// the affected tables at Warn so an operator can reconcile. Full
-				// propagation is tracked separately; see the TRUNCATE caveat in
-				// docs/operations/cdc-setup.md.
+				// the affected tables at Warn so an operator can reconcile.
 				names := make([]string, 0, len(m.RelationIDs))
 				for _, relID := range m.RelationIDs {
 					if rel, ok := relations[relID]; ok {
@@ -1170,56 +1302,6 @@ func quoteIdent(s string) string {
 // surrounding quotes.
 func publicationNamesArg(publication string) string {
 	return fmt.Sprintf("publication_names '%s'", sqlident.EscapeStringLiteral(publication))
-}
-
-// ensurePublication creates the publication if it does not exist, or — if it
-// already exists — reconciles its table set so every configured table is
-// published. It returns the tables that were (re-)added, so the caller can
-// backfill just those on a resumed slot. The connection must be in
-// replication=database mode which allows SQL.
-//
-// Without reconciliation, pgoutput only streams the tables the publication had
-// when first created, so two silent-row-loss cases slip through: (a) a re-POST
-// adds a table to sql.tables — the publication is untouched, and because the
-// slot already exists no snapshot runs either, so the table is never streamed;
-// (b) a watched table is DROPped + reCREATEd on the source — Postgres auto-drops
-// it from the publication and the recreated table (new OID) is never re-added.
-// ADD-ing each configured table (skipping "already member") covers both.
-//
-// Table names are quoted via quoteTable (not quoteIdent) so schema-qualified
-// entries like "public.orders" become "public"."orders" — a schema-qualified
-// reference — instead of one literal identifier with a dot in it.
-func ensurePublication(ctx context.Context, conn *pgconn.PgConn, pgCfg *pgConfig) ([]string, error) {
-	quoted := make([]string, len(pgCfg.tables))
-	for i, t := range pgCfg.tables {
-		quoted[i] = quoteTable(t)
-	}
-	tableList := strings.Join(quoted, ", ")
-	create := fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quoteIdent(pgCfg.publication), tableList)
-	if _, err := conn.Exec(ctx, create).ReadAll(); err != nil {
-		if !strings.Contains(err.Error(), "already exists") {
-			return nil, err
-		}
-		// Publication exists — reconcile. ADD each configured table; Postgres
-		// reports the ones already present ("already member"), which we skip. The
-		// ones that ADD accepts are new to the publication and need a backfill.
-		var added []string
-		for _, t := range pgCfg.tables {
-			alter := fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s", quoteIdent(pgCfg.publication), quoteTable(t))
-			if _, err := conn.Exec(ctx, alter).ReadAll(); err != nil {
-				if strings.Contains(err.Error(), "already member") {
-					continue
-				}
-				return nil, fmt.Errorf("reconcile publication: add table %s: %w", t, err)
-			}
-			added = append(added, t)
-		}
-		return added, nil
-	}
-	// Freshly created with every configured table. The caller's slot-is-new
-	// branch does the full snapshot; if the slot somehow already exists, these
-	// are treated as newly-added and backfilled.
-	return pgCfg.tables, nil
 }
 
 // tupleToEntity converts a pgoutput tuple into a cluster.Entity using the
@@ -1815,7 +1897,7 @@ func quoteTable(table string) string {
 // the transaction's final part — only the commit flush passes it. Returns
 // whether any proposal was emitted, so the commit path can fall back to the
 // out-of-band position checkpoint for transactions that flushed nothing.
-func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64, commitTS int64, txnID string, bundlePos []byte) (bool, error) {
+func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes *int, pr chan<- *cluster.Proposal, lsn pglogrepl.LSN, epoch uint64, commitTS int64, txnID string, bundlePos []byte, onDurable func()) (bool, error) {
 	buf := *pending
 	*pending = nil
 	*pendingBytes = 0
@@ -1838,7 +1920,7 @@ func flushPending(ctx context.Context, pending *[]*cluster.Entity, pendingBytes 
 	// dialect checkpoints per transaction (the Commit message's flush bundles
 	// the post-transaction position), so its resume re-emits at most the
 	// in-flight transaction — the contract that earns txn-scoped dedup.
-	prov := sql.Provenance{CommitUnixNano: commitTS, TxnID: txnID, TxnScopedDedup: txnID != ""}
+	prov := sql.Provenance{CommitUnixNano: commitTS, TxnID: txnID, TxnScopedDedup: txnID != "", OnDurable: onDurable}
 	emitted, err := sql.Flush(ctx, buf, epoch, prov, seq, bundlePos, pr)
 	return emitted > 0, err
 }

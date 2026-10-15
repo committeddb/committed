@@ -2,7 +2,7 @@
 # Web and Express included). committed enables Change Tracking where it is
 # off (database level with 2-day auto-cleanup retention, and per table) and
 # on ingestable deletion disables only what it enabled; pre-existing Change
-# Tracking is never touched. See docs/operations/cdc-setup.md § SQL Server.
+# Tracking is never touched. See docs/ingestables.md § SQL Server.
 
 [ingestable]
 name = "orders-ingest"

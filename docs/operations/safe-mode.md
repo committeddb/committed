@@ -57,7 +57,7 @@ default owner is the raft leader. That means:
    syncable's destination table remains, and a deleted ingestable's
    replication slot/publication remains at the source — an orphaned slot
    pins the source's WAL, so drop it manually (see
-   [CDC setup](cdc-setup.md)). The node logs a warning naming exactly this
+   [Ingestables](../ingestables.md)). The node logs a warning naming exactly this
    on each safe-mode delete.
 4. Restart without `COMMITTED_SAFE_MODE`. Workers spawn from the stored
    configs as on any normal boot.

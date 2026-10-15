@@ -170,12 +170,21 @@ BENCH_WORKLOAD_COUNT ?= 1
 
 .PHONY: bench bench/workloads
 bench:
-	go test -bench=. -skip='$(WORKLOAD_BENCHMARKS)' -benchtime=1s -run='^$$' ./internal/cluster/db/wal/ ./internal/cluster/db/ ./internal/cluster/ ./internal/cluster/interpretation/
+	go test -bench=. -skip='$(WORKLOAD_BENCHMARKS)' -benchtime=1s -run='^$$' ./internal/cluster/db/wal/ ./internal/cluster/db/ ./internal/cluster/ ./internal/cluster/interpretation/ ./internal/cluster/syncable/stages/
 	$(MAKE) bench/workloads
 
 # Each iteration creates and validates a complete durable workload.
 bench/workloads:
 	go test -bench='$(WORKLOAD_BENCHMARKS)' -benchtime=1x -count=$(BENCH_WORKLOAD_COUNT) -run='^$$' ./internal/cluster/db/wal/
+
+# The event-store workload's bundle (bench/eventstore): committed builds for
+# the cluster machines, the load generator, the recipe, and run.sh, which runs
+# on a load machine with Docker and SSH to the cluster. BUNDLE_ARGS takes
+# bundle.sh's arguments, e.g. `BUNDLE_ARGS="base=main fix=HEAD"` or
+# `BUNDLE_ARGS=--local` to run on this machine with BENCH_NODES=local.
+.PHONY: bench/eventstore-bundle
+bench/eventstore-bundle:
+	bench/eventstore/bundle.sh $(BUNDLE_ARGS)
 
 test/multinode:
 	go test -tags multinode -p=1 -timeout 600s ./e2e/multinode/...

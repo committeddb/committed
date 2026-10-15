@@ -78,7 +78,7 @@ func TestSyncableIndexZeroInterpretationWireBackCompatible(t *testing.T) {
 // its snapshots. Proto3's "old binaries ignore unknown fields" does not save
 // these records. Every field added to one of them must therefore be gated on
 // the cluster feature level at its emitting site (db.featureLevelTypeRecord,
-// db.featureLevelInterpretationPin).
+// db.featureLevelOnSupersede, db.featureLevelInterpretationPin).
 //
 // Adding a field here fails this test. That is the point: bump the count in
 // the same commit that adds the gate, and say which gate in the message.
@@ -89,7 +89,7 @@ func TestRemarshaledRecordFieldCounts(t *testing.T) {
 		want  int
 		gated string
 	}{
-		{"LogType", &clusterpb.LogType{}, 13, "db.featureLevelTypeRecord"},
+		{"LogType", &clusterpb.LogType{}, 14, "db.featureLevelTypeRecord; OnSupersede: db.featureLevelOnSupersede"},
 		{"LogSyncableIndex", &clusterpb.LogSyncableIndex{}, 3, "db.featureLevelInterpretationPin"},
 		{"LogConfiguration", &clusterpb.LogConfiguration{}, 4, "no 0.8.0 additions yet — gate the first one"},
 	} {

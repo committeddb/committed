@@ -138,13 +138,18 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 			}
 			rep.Stages[name] = cluster.DryRunStage{
 				Inputs:         fc.Inputs,
+				InputsBySource: fc.InputsBySource,
 				Fanned:         fc.Fanned,
 				Keys:           keys,
 				UnkeyedDeletes: fc.UnkeyedDeletes,
+				HavingRejected: fc.HavingRejected,
 				LiveDeltas:     liveDeltas[name],
 				Retractions:    retractions[name],
 				Joins:          joinStats(fc.Joins),
 				Samples:        samples[name],
+
+				WindowRowsRecomputed:   fc.WindowRowsRecomputed,
+				WindowLargestPartition: fc.WindowLargestPartition,
 			}
 		}
 		return nil
@@ -168,7 +173,7 @@ func joinStats(flows []stages.JoinFlow) []cluster.JoinStat {
 	}
 	out := make([]cluster.JoinStat, len(flows))
 	for i, f := range flows {
-		out[i] = cluster.JoinStat{Target: f.Target, Alias: f.Alias, Absent: f.Absent, Optional: f.Optional, Hits: f.Hits, Misses: f.Misses}
+		out[i] = cluster.JoinStat{Target: f.Target, Alias: f.Alias, Absent: f.Absent, Optional: f.Optional, Hits: f.Hits, Misses: f.Misses, Reresolved: f.Reresolved}
 	}
 	return out
 }
@@ -321,8 +326,10 @@ func newDryRunObserver(cfg *ProjectionConfig) *dryRunObserver {
 	}
 	for i := range cfg.Stages {
 		st := &cfg.Stages[i]
-		if st.From != "" && !names[st.From] {
-			o.topicsSeen[st.From] = 0
+		for _, src := range st.Sources() {
+			if !names[src] {
+				o.topicsSeen[src] = 0
+			}
 		}
 		for j := range st.Joins {
 			if st.Joins[j].Topic != "" {
@@ -342,12 +349,20 @@ func newDryRunObserver(cfg *ProjectionConfig) *dryRunObserver {
 	}
 	for i := range cfg.Stages {
 		st := &cfg.Stages[i]
-		if st.From == "" || names[st.From] || len(st.When) == 0 {
-			continue // merge stages, stage-fed stages, or nothing to observe
+		if len(st.When) == 0 {
+			continue // nothing to observe
 		}
-		w := newWhenObs(fmt.Sprintf("stage %q when", st.Name), st.When)
-		o.stageWhens = append(o.stageWhens, w)
-		o.byTopic[st.From] = append(o.byTopic[st.From], func(data any) { w.observe(data) })
+		var w *whenObs
+		for _, src := range st.Sources() {
+			if names[src] {
+				continue // stage-fed: the observers watch topic inputs only
+			}
+			if w == nil {
+				w = newWhenObs(fmt.Sprintf("stage %q when", st.Name), st.When)
+				o.stageWhens = append(o.stageWhens, w)
+			}
+			o.byTopic[src] = append(o.byTopic[src], func(data any) { w.observe(stages.WithSource(data, src)) })
+		}
 	}
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]
@@ -459,6 +474,12 @@ func (o *dryRunObserver) report(cfg *ProjectionConfig, rep *cluster.DryRunReport
 			if !j.Absent && j.Hits == 0 && j.Misses >= dryRunFindingFloor {
 				findings = append(findings, fmt.Sprintf("stage %q join on %q never resolved a dimension row (0 hits / %d attempts) — check the on path, the key space (normalize/keyType), and whether the dimension's region was sampled", name, j.Target, j.Misses))
 			}
+		}
+		if st.Keys == 0 && st.HavingRejected > 0 {
+			findings = append(findings, fmt.Sprintf("stage %q folded inputs but its having held back every key (%d refold(s) rejected) — check the having predicate against the sample's values", name, st.HavingRejected))
+		}
+		if st.WindowLargestPartition >= stages.WindowLargePartitionRows {
+			findings = append(findings, fmt.Sprintf("window stage %q has a partition of %d rows — every out-of-order change recomputes the rows after it in its partition; partition by entity (an account, a job) rather than a tenant or the whole stream", name, st.WindowLargestPartition))
 		}
 		if st.UnkeyedDeletes > 0 {
 			findings = append(findings, fmt.Sprintf("stage %q dropped %d delete-shaped input(s) that could not key — LOST retractions; the delete events' payloads lack the keyPath field or fail its keyType", name, st.UnkeyedDeletes))

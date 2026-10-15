@@ -10,6 +10,50 @@ moving on. A node only ever changes its **binary** — its
 `COMMITTED_*` environment (node id, peers, data directory) stays the
 same, and its on-disk state is reused in place.
 
+## Upgrading from 0.8.1 to 0.8.2
+
+Follow the rolling binary-upgrade procedure below; no configuration changes.
+0.8.2 raises the cluster feature level to 3 for three changes, which activate
+once every node runs 0.8.2; the changes after them need no feature level and
+take effect on each node as it upgrades:
+
+- **Pipelined ingest:** an ingestable keeps many source transactions in
+  flight instead of one (see
+  [performance.md](performance.md#the-envelope)). Until every node runs
+  0.8.2, ingest stays one transaction at a time.
+
+- **SQL Server date and time rendering:** `date`, `time`, and the zone-less
+  datetime types render by declared type instead of as RFC 3339 instants
+  (see [ingestables.md](../ingestables.md#date-and-time-rendering)). Each SQL
+  Server ingestable re-snapshots once after the roll, which re-keys keyed
+  destinations; entries already in the log keep the old renderings, so
+  budget for one re-snapshot per SQL Server ingestable and make consumers
+  accept both shapes. MySQL and PostgreSQL ingestables are unaffected.
+- **`onSupersede` on types** (see
+  [types.md](../types.md#superseded-versions-onsupersede)): a type that
+  declares `onSupersede = "scrub"` on a kind other than `snapshot` is refused
+  until every node runs 0.8.2.
+- **Projection stage state is re-derived:** the node-local stage store's
+  format changed, so a projection with stages discards its store and
+  re-derives it from the log the first time a 0.8.2 node runs it. The
+  destination is not rewritten and stays readable, but new entries reach it
+  only after the re-derivation completes; status shows `re-deriving` with
+  progress meanwhile. A large log takes a while, so roll during a quiet
+  period.
+- **SQL Server poll cadence:** a SQL Server ingestable polls Change Tracking
+  every 250 ms by default instead of every 3 s, so read models trail the
+  source by up to 250 ms. An idle poll runs one small catalog query plus one
+  per watched table; set `pollInterval = "3s"` to keep the old cadence (see
+  [ingestables.md](../ingestables.md#lag-retention-and-the-poll-cadence)).
+- **PostgreSQL publications:** committed now records ownership of the publication it creates
+  (see [ingestables.md](../ingestables.md#what-committed-creates-for-you)). An
+  existing ingestable adopts its publication on its first connection after the
+  upgrade, and from then on removes tables no longer in `tables` from it. A
+  change that arrives for a table in the publication that no watched table
+  matches now stops the ingestable instead of being skipped.
+- **Backups:** an archive taken on 0.8.2 records feature level 3, which a
+  0.8.1 binary refuses to restore.
+
 ## Upgrading from 0.8.0 to 0.8.1
 
 Keep the existing tidwall event-log backend and legacy authentication settings
@@ -47,8 +91,8 @@ Two properties make a rolling upgrade safe:
   reads everything its predecessor wrote, for data dirs created on
   **0.7.3-beta or later** (the supported floor as of 0.8.0; an older dir must
   be recreated, not upgraded — see
-  [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)). This is a contract, documented
-  in [api-compatibility.md → On-disk and wire compatibility](../api-compatibility.md#on-disk-and-wire-compatibility);
+  [api-compatibility.md](../architecture/api-compatibility.md#log-entities-protobuf)). This is a contract, documented
+  in [api-compatibility.md → On-disk and wire compatibility](../architecture/api-compatibility.md#on-disk-and-wire-compatibility);
   read it before upgrading, especially the **one-way transitions** list.
 
 If a node ever *can't* read its on-disk state it fails to start with a
@@ -66,7 +110,7 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 
 1. **Read the release notes** for every version between your current one
    and the target, and the [on-disk compatibility
-   contract](../api-compatibility.md#on-disk-and-wire-compatibility).
+   contract](../architecture/api-compatibility.md#on-disk-and-wire-compatibility).
    Confirm the upgrade does not cross a major version (`/v1` → `/v2`) or
    trigger a one-way transition you can't roll back from.
 2. **Confirm the cluster is healthy first.** `GET /v1/membership` on any
@@ -115,7 +159,7 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 >
 > **It also applies to any 0.7.2 → 0.7.3+ multi-node upgrade**, with a sharper
 > failure mode: 0.7.3 encodes every committed entity in a typed envelope
-> (see [api-compatibility.md → Log entities](../api-compatibility.md#log-entities-protobuf)),
+> (see [api-compatibility.md → Log entities](../architecture/api-compatibility.md#log-entities-protobuf)),
 > which a 0.7.2 node decodes **without error as an empty entity** and silently
 > misapplies — no crash-loop warns you. Never run a mixed 0.7.2/0.7.3 cluster:
 > stop all nodes, replace every binary, restart. Single-node deployments and
@@ -126,7 +170,7 @@ rolling would crash the nodes you haven't upgraded yet. See the warning under
 > type (the ingest terminal-park record) a 0.7.3 node can't resolve, so it is a
 > full-stop for the same reason. 0.7.4 also lands the **system-type compat
 > namespace** (see
-> [api-compatibility.md](../api-compatibility.md#log-entities-protobuf)): from
+> [api-compatibility.md](../architecture/api-compatibility.md#log-entities-protobuf)): from
 > 0.7.4 forward a new *ungated* internal type — skippable coordination /
 > observability — no longer forces a full-stop, because a node that doesn't know
 > it skips it rather than crashing; only a *gated* (must-understand) type does.
@@ -197,7 +241,7 @@ After the last node:
 > **Feature activation is automatic.** A release may carry features that
 > stay dormant until *every* node is upgraded — anything an older peer
 > would mishandle is held back by the [cluster feature
-> level](../api-compatibility.md#cluster-feature-level-semantic-compatibility-gate)
+> level](../architecture/api-compatibility.md#cluster-feature-level-semantic-compatibility-gate)
 > until the whole cluster advertises support, then activates on its own.
 > You don't enable anything; just finish the roll. The corollary: don't
 > run half-upgraded indefinitely (a stalled roll leaves those features
@@ -234,14 +278,22 @@ After the last node:
 > already-erased tombstones stay erased, but new erasures resume only when
 > you upgrade again. And a SQL Server ingestable that has already re-keyed
 > to the canonical lowercase `uniqueidentifier` spelling (feature level 2,
-> see [cdc-setup.md](cdc-setup.md#uniqueidentifier-rendering)) keeps that
+> see [ingestables.md](../ingestables.md#uniqueidentifier-rendering)) keeps that
 > spelling in its checkpoint; an older binary would resume it rendering
 > uppercase again and spell new rows differently from the rows on the destination —
 > treat the re-key as a one-way transition and rebuild the destination if you must
-> roll back past it. Finally, do not roll a node back while a
+> roll back past it. The same holds for a SQL Server ingestable that has
+> re-keyed to the typed date and time rendering (feature level 3, 0.8.2,
+> see [ingestables.md](../ingestables.md#date-and-time-rendering)): a 0.8.1 binary
+> would resume it rendering RFC 3339 instants again — treat it as one-way.
+> Once a type declares `onSupersede = "scrub"` (feature level 3, 0.8.2), do
+> not roll a node back to 0.8.1: the older binary drops the declaration and
+> keeps the superseded versions every 0.8.2 node scrubs, so that node's log
+> stops matching the others'. Roll back by rebuilding the node from a peer.
+> Finally, do not roll a node back while a
 > re-materialization is in progress (`rematerializing` on the syncable's
 > status): the verb only starts once every member is 0.8.0 (feature level
-> 6), and an older owner resuming the replay would write rows the completion
+> 2), and an older owner resuming the replay would write rows the completion
 > sweep then deletes — let it finish, or run the verb again after upgrading.
 > And a MySQL or PostgreSQL ingestable dedups per source transaction from
 > 0.8.0 on (feature level 2): once every member is 0.8.0, its dedup record
@@ -268,7 +320,7 @@ or shows a regression — roll that node back the same way you upgraded it:
 directory, wait for `/ready`. The previous binary can read the state the
 new one wrote, **except across a one-way transition** — those are listed
 in the [on-disk compatibility
-contract](../api-compatibility.md#on-disk-and-wire-compatibility) and are
+contract](../architecture/api-compatibility.md#on-disk-and-wire-compatibility) and are
 the reason you check it before upgrading. If you've crossed one, rollback
 of that node is a [rebuild from a healthy peer](rebuild.md) still running
 the old binary, not an in-place binary swap.
@@ -280,7 +332,7 @@ same quorum rule applies in reverse.
 
 - **0.8.0 closes the config vocabulary.** A config key the parser does not
   read — a typo, a misplaced field — is now rejected at POST instead of
-  being silently ignored (see [api-compatibility.md](../api-compatibility.md#config-vocabulary-is-closed)).
+  being silently ignored (see [api-compatibility.md](../architecture/api-compatibility.md#config-vocabulary-is-closed)).
   A *stored* config that carries such a key parks on the upgraded binary
   when its worker is rebuilt (the status and the log name the key: "not
   admissible under this binary"); re-POST it without the key. The setting
@@ -361,7 +413,7 @@ same quorum rule applies in reverse.
 - **0.8.0 leaves a note in each SQL destination** saying which version of
   committed wrote its rows: one row per projected table in a small
   `committed__destinations` table in the destination database (see
-  [api-compatibility.md](../api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+  [api-compatibility.md](../architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
   Nothing stops on this upgrade: existing tables get the note the first
   time 0.8.0 touches them. The note also records whether committed created
   the table, and a table that exists before the upgrade is recorded as one
@@ -382,7 +434,7 @@ same quorum rule applies in reverse.
   — finish the roll rather than parking the cluster mid-upgrade.
 - **Feature coordination is automatic, not manual.** Committed *does* gate a
   semantically-incompatible feature on the [cluster feature
-  level](../api-compatibility.md#cluster-feature-level-semantic-compatibility-gate):
+  level](../architecture/api-compatibility.md#cluster-feature-level-semantic-compatibility-gate):
   it stays dormant until every node advertises support, then activates on its
   own (see the callout under *Verifying the upgrade*). You never run a manual
   version-bump barrier — just finish the roll. (Introducing the mechanism itself

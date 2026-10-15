@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage ----
-# golang:1.26-alpine tracks the latest 1.26.x, satisfying the go.mod
+# golang:1.27-alpine tracks the latest 1.27.x, satisfying the go.mod
 # toolchain floor. The builder is throwaway, so its size doesn't matter;
 # only the static binary it produces is copied into the runtime image.
 #
@@ -10,7 +10,7 @@
 # with GOOS/GOARCH at native speed instead of running an emulated
 # (QEMU) builder per target arch. Safe here because the binary is pure
 # Go with CGO disabled.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 WORKDIR /src
 

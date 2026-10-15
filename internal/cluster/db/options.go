@@ -72,8 +72,7 @@ type options struct {
 	// compactMaxSize is the on-disk raft log size in bytes that, once
 	// exceeded, triggers a CreateSnapshot + Compact at the end of the
 	// current Ready iteration. 0 disables the size limb of the
-	// compaction policy. See docs/event-log-architecture.md §
-	// "Compaction policy".
+	// compaction policy.
 	compactMaxSize uint64
 	// compactMaxAge is the wall-clock time-since-last-compaction that,
 	// once exceeded, triggers compaction regardless of raft log size.
@@ -120,7 +119,7 @@ type options struct {
 	// members and bind its own listener), but it does NOT become a
 	// bootstrap configuration — bootstrapping from it would form a
 	// competing single-node cluster. Set via WithJoin from cmd/node.go when
-	// COMMITTED_JOIN is truthy. See docs/operations/membership.md.
+	// COMMITTED_JOIN is truthy.
 	join bool
 
 	// ingestSupervisor{InitialBackoff,MaxBackoff,MaxAttempts} govern the
@@ -150,8 +149,7 @@ type options struct {
 	// PII originals are still in the permanent event log). The interval
 	// amortizes the O(N) rewrite over batches of deletes and bounds the
 	// erasure SLA. 0 disables the automatic scheduler entirely (the manual
-	// POST /v1/scrub lever still works). See docs/event-log-architecture.md
-	// § "Right-to-be-forgotten / deletes". Tests shorten it via
+	// POST /v1/scrub lever still works). Tests shorten it via
 	// WithScrubInterval; production leaves the default.
 	scrubInterval time.Duration
 
@@ -160,8 +158,7 @@ type options struct {
 	// on startup so other nodes can resolve this node's API address to proxy
 	// leader-only reads. Empty (the default) means "don't announce" — the
 	// node's address stays unknown to the proxy, the documented degraded
-	// path. cmd/node.go wires COMMITTED_API_URL to this. See
-	// raft-leader-read-proxy.md.
+	// path. cmd/node.go wires COMMITTED_API_URL to this.
 	advertisedAPIURL string
 
 	// diskWatcher configures the background disk-usage watcher (free-space
@@ -201,8 +198,7 @@ type options struct {
 const defaultSyncStuckThreshold = 30 * time.Second
 
 // DefaultCompactMaxSize is the production default: compact the raft
-// log when it grows past 10 GiB. See docs/event-log-architecture.md §
-// "Compaction policy".
+// log when it grows past 10 GiB.
 const DefaultCompactMaxSize uint64 = 10 * 1024 * 1024 * 1024
 
 // DefaultCompactMaxAge is the production default: compact the raft
@@ -384,8 +380,7 @@ func WithScrubInterval(d time.Duration) Option {
 // leader-only read (GET /v1/membership) — can resolve this node's API
 // address. Empty (the default) disables the announce: the node's address
 // stays unknown to the proxy and a leader-only read on a follower degrades to
-// 503 + leaderId. cmd/node.go wires COMMITTED_API_URL to this. See
-// raft-leader-read-proxy.md.
+// 503 + leaderId. cmd/node.go wires COMMITTED_API_URL to this.
 func WithAdvertisedAPIURL(url string) Option {
 	return func(o *options) { o.advertisedAPIURL = url }
 }

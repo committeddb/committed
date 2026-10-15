@@ -10,10 +10,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/PaesslerAG/jsonpath"
 	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/jsonpaths"
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
@@ -53,6 +53,10 @@ type graphNode struct {
 	// reads from an HTTP goroutine.
 	inputs atomic.Int64
 	fanned atomic.Int64
+	// bySource splits inputs per source for a union stage (nil
+	// otherwise); built with the graph, so the map is read-only and only
+	// its counters move.
+	bySource map[string]*atomic.Int64
 	// unkeyedDeletes counts delete-shaped inputs (matched deleteWhen)
 	// whose key could not resolve or render — LOST RETRACTIONS: the key
 	// each meant to kill stays live, silently, with zero dead letters.
@@ -62,6 +66,22 @@ type graphNode struct {
 	unkeyedDeletes atomic.Int64
 	// unkeyedDeleteWarned one-shots the warn log (worker goroutine only).
 	unkeyedDeleteWarned bool
+	// havingRejected counts refolds whose having held the key's output
+	// back (since the worker started) — "folded but filtered" told apart
+	// from "no inputs". Same atomicity contract as inputs/fanned.
+	havingRejected atomic.Int64
+	// aggIncremental and aggFull count an aggregate stage's refolds from
+	// its fold state and in full (agg_incremental.go).
+	aggIncremental atomic.Int64
+	aggFull        atomic.Int64
+	// keyExprs are the compiled keyPath expressions, parallel to
+	// def.KeyPath (nil for a plain path); keyExprWarned one-shots the
+	// warning for a key expression's data error (worker goroutine only).
+	keyExprs      []Node
+	keyExprWarned bool
+	// latestOrderWarned one-shots the warning for a latest stage's
+	// list-form order key failing on an input (worker goroutine only).
+	latestOrderWarned bool
 	// joinFlows counts each join's dimension-resolution outcomes since
 	// this worker started — hit = a row matched (passing the join's
 	// where) — indexed parallel to def.Joins. With inputs/fanned these
@@ -76,6 +96,20 @@ type graphNode struct {
 	// mergeConsumers are the merge stages combining THIS stage's outputs
 	// as one aliased side of their tuples.
 	mergeConsumers []mergeRef
+	// mdimConsumers are the fan joins (of LATER stages) matching THIS
+	// stage's outputs by a field: every output is filed in their
+	// multi-match index.
+	mdimConsumers []dimRef
+	// fanJoin is the index of the stage's fan join in def.Joins (-1: none).
+	fanJoin int
+	// odimConsumers are the ordered joins (of LATER stages) whose versions
+	// are THIS stage's outputs.
+	odimConsumers []dimRef
+	// orderWarned one-shots the warning for a version whose orderBy/tieBy
+	// cannot evaluate (worker goroutine only).
+	orderWarned bool
+	// win is a window stage's runtime (nil for every other stage).
+	win *windowRuntime
 }
 
 // Graph is the compiled stage topology of one projection: manifest
@@ -89,11 +123,16 @@ type mergeRef struct {
 	alias string
 }
 
-type joinFlowCount struct{ hits, misses atomic.Int64 }
+// joinFlowCount is one join's resolution counters; reresolved counts the
+// dependent keys an ordered join's version changes re-resolved.
+type joinFlowCount struct{ hits, misses, reresolved atomic.Int64 }
 
 type dimRef struct {
 	node *graphNode
 	join *Join
+	// index is the join's position in the stage (an ordered join's index
+	// is per join: two may share a target with different fields).
+	index int
 }
 
 type Graph struct {
@@ -105,6 +144,12 @@ type Graph struct {
 	// dims routes topics consumed as JOIN DIMENSIONS: rows stored by
 	// entity key, dependents refolded on change (reverse-index fan-out).
 	dims map[string][]dimRef
+	// mdims routes topics consumed as FAN-join dimensions: rows filed by
+	// the join's field in its multi-match index, referencing inputs
+	// re-fanned on change.
+	mdims map[string][]dimRef
+	// odims routes topics consumed as ORDERED-join versions.
+	odims map[string][]dimRef
 	// OnDelta, when set, observes every stage's post-refold delta — the
 	// chaining terminal's feed (table sources consuming a stage). live=false
 	// is a retraction. Set per Sync call by the single worker goroutine.
@@ -115,7 +160,7 @@ type Graph struct {
 // topology.
 func BuildGraph(stages []Stage) *Graph {
 	stages = expandSynthetic(stages)
-	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}}
+	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}, mdims: map[string][]dimRef{}, odims: map[string][]dimRef{}}
 	nodes := make([]*graphNode, len(stages))
 	// The graph owns a copy of the stage definitions (joins deep-copied):
 	// stage-join normalize is RESOLVED below by inheritance, and that
@@ -125,7 +170,22 @@ func BuildGraph(stages []Stage) *Graph {
 	copy(owned, stages)
 	for i := range owned {
 		owned[i].Joins = append([]Join(nil), owned[i].Joins...)
-		nodes[i] = &graphNode{def: &owned[i], joinFlows: make([]joinFlowCount, len(owned[i].Joins))}
+		if owned[i].Reduce == "window" {
+			// A window stage retains its inputs by PARTITION — the
+			// retention key's role — so the graph-owned copy keys by
+			// partitionBy and the shared fold path places each input.
+			owned[i].KeyPath = append([]string(nil), owned[i].PartitionBy...)
+		}
+		nodes[i] = &graphNode{def: &owned[i], joinFlows: make([]joinFlowCount, len(owned[i].Joins)), keyExprs: compileKeyParts(owned[i].KeyPath), fanJoin: owned[i].fanJoin()}
+		if owned[i].isUnion() {
+			nodes[i].bySource = make(map[string]*atomic.Int64, len(owned[i].FromList))
+			for _, src := range owned[i].FromList {
+				nodes[i].bySource[src] = new(atomic.Int64)
+			}
+		}
+		if owned[i].Reduce == "window" {
+			nodes[i].win = newWindowRuntime(&owned[i])
+		}
 		g.byName[owned[i].Name] = nodes[i]
 	}
 	g.order = nodes
@@ -145,13 +205,37 @@ func BuildGraph(stages []Stage) *Graph {
 			}
 			continue
 		}
-		if up, ok := g.byName[st.From]; ok {
-			up.consumers = append(up.consumers, nodes[i])
-		} else {
-			g.byTopic[st.From] = append(g.byTopic[st.From], nodes[i])
+		for _, src := range st.Sources() {
+			if up, ok := g.byName[src]; ok {
+				up.consumers = append(up.consumers, nodes[i])
+			} else {
+				g.byTopic[src] = append(g.byTopic[src], nodes[i])
+			}
 		}
 		for j := range st.Joins {
 			jn := &st.Joins[j]
+			if jn.ordered() {
+				// An ordered join keeps every version of a reference in its
+				// own index, in its declared key space (never inherited).
+				ref := dimRef{node: nodes[i], join: jn, index: j}
+				if producer, ok := g.byName[jn.From]; ok && jn.From != "" {
+					producer.odimConsumers = append(producer.odimConsumers, ref)
+				} else if jn.Topic != "" {
+					g.odims[jn.Topic] = append(g.odims[jn.Topic], ref)
+				}
+				continue
+			}
+			if jn.Fan {
+				// A fan join matches by its declared field, in its own
+				// key space (normalize/onType as declared, never inherited).
+				ref := dimRef{node: nodes[i], join: jn}
+				if producer, ok := g.byName[jn.From]; ok && jn.From != "" {
+					producer.mdimConsumers = append(producer.mdimConsumers, ref)
+				} else if jn.Topic != "" {
+					g.mdims[jn.Topic] = append(g.mdims[jn.Topic], ref)
+				}
+				continue
+			}
 			if jn.From != "" {
 				if producer, ok := g.byName[jn.From]; ok {
 					// A stage join INHERITS the joined stage's key space:
@@ -200,8 +284,8 @@ func expandSynthetic(sts []Stage) []Stage {
 			st.Joins = append([]Join(nil), st.Joins...)
 			for j := range st.Joins {
 				jn := &st.Joins[j]
-				if jn.Field == "" {
-					continue
+				if jn.Field == "" || jn.Fan || jn.ordered() {
+					continue // fan and ordered joins keep every match: no collapsing re-key stage
 				}
 				name := jn.From + "[" + jn.Field + "]"
 				if !seen[name] {
@@ -267,7 +351,7 @@ func SyntheticLiftName(topic string, keyPath []string) string {
 // ConsumesTopic reports whether any stage reads this topic — as its
 // input or as a join dimension.
 func (g *Graph) ConsumesTopic(topic string) bool {
-	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0
+	return len(g.byTopic[topic]) > 0 || len(g.dims[topic]) > 0 || len(g.mdims[topic]) > 0 || len(g.odims[topic]) > 0
 }
 
 // SweepEpochs applies a refresh-boundary marker for one topic: retained
@@ -280,9 +364,20 @@ func (g *Graph) ConsumesTopic(topic string) bool {
 func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirty Dirty) error {
 	for _, n := range g.byTopic[topic] {
 		st := n.def
+		if n.fanJoin >= 0 {
+			// A fan join's pairs carry their input's epoch; the retained
+			// inputs are swept, and each takes its pairs with it.
+			if err := g.sweepFanJoinInputs(tx, n, topic, marker, dirty); err != nil {
+				return err
+			}
+			continue
+		}
 		type stale struct{ outKey, inKey []byte }
 		var stales []stale
 		if err := tx.InputsAll(st.Name, func(outKey, inKey, val []byte) error {
+			if st.isUnion() && st.inputSource(inKey) != topic {
+				return nil // another source's epochs: this marker says nothing about them
+			}
 			if gen, _ := decodeRetained(val); gen >= 1 && gen < marker {
 				stales = append(stales, stale{append([]byte(nil), outKey...), append([]byte(nil), inKey...)})
 			}
@@ -291,6 +386,15 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 			return err
 		}
 		for _, sl := range stales {
+			if n.win != nil {
+				if err := g.foldDeleteInput(tx, n, sl.inKey, dirty); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := g.noteIn(tx, n, sl.outKey, sl.inKey, nil, dirty); err != nil {
+				return err
+			}
 			if err := tx.DeleteIn(st.Name, sl.outKey, sl.inKey); err != nil {
 				return err
 			}
@@ -319,6 +423,16 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 			}
 		}
 	}
+	for _, d := range g.mdims[topic] {
+		if err := g.sweepMultiDims(tx, d, marker, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range g.odims[topic] {
+		if err := g.sweepVersions(tx, d, marker, dirty); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -327,15 +441,66 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 // and Drain refolds each dirty key ONCE per batch (the 87-minutes-vs-
 // 5-seconds field lesson), suppressing cascades whose output bytes did
 // not change (sound because folds are deterministic).
-type Dirty map[*graphNode]map[string]bool
+//
+// For an aggregate stage keeping a fold state (agg_incremental.go), it also
+// carries each key's input changes within the batch, so the drain can update
+// the state rather than refold every input. A key marked without them
+// refolds in full.
+type Dirty map[*graphNode]*dirtyNode
+
+type dirtyNode struct {
+	keys   map[string]bool
+	deltas map[string]*aggDelta
+}
+
+func (d Dirty) node(n *graphNode) *dirtyNode {
+	dn, ok := d[n]
+	if !ok {
+		dn = &dirtyNode{keys: map[string]bool{}}
+		d[n] = dn
+	}
+	return dn
+}
 
 func (d Dirty) Mark(n *graphNode, outKey []byte) {
-	m, ok := d[n]
-	if !ok {
-		m = map[string]bool{}
-		d[n] = m
+	d.node(n).keys[string(outKey)] = true
+}
+
+// delta is a key's recorded input changes (nil: none recorded).
+func (d Dirty) delta(n *graphNode, outKey []byte) *aggDelta {
+	if dn := d[n]; dn != nil {
+		return dn.deltas[string(outKey)]
 	}
-	m[string(outKey)] = true
+	return nil
+}
+
+// noteIn records, for a stage keeping a fold state, that one retained input
+// of outKey changes to cur (nil: removed). Called BEFORE the store write, so
+// the first call for an input in the batch captures its bytes before it.
+func (g *Graph) noteIn(tx *stagestore.Tx, n *graphNode, outKey, inKey, cur []byte, dirty Dirty) error {
+	if !n.def.incrementalAggregate() {
+		return nil
+	}
+	dn := dirty.node(n)
+	if dn.deltas == nil {
+		dn.deltas = map[string]*aggDelta{}
+	}
+	d := dn.deltas[string(outKey)]
+	if d == nil {
+		d = &aggDelta{inputs: map[string]*inputChange{}}
+		dn.deltas[string(outKey)] = d
+	}
+	ch := d.inputs[string(inKey)]
+	if ch == nil {
+		old, err := tx.GetIn(n.def.Name, outKey, inKey)
+		if err != nil {
+			return err
+		}
+		ch = &inputChange{old: bytes.Clone(old)}
+		d.inputs[string(inKey)] = ch
+	}
+	ch.cur = bytes.Clone(cur)
+	return nil
 }
 
 // FoldTopicUpsertNow folds one entity and drains immediately — the
@@ -361,7 +526,7 @@ func (g *Graph) FoldTopicDeleteNow(tx *stagestore.Tx, topic string, inKey []byte
 // consuming that topic (and their downstream chains).
 func (g *Graph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, payload any, gen uint64, dirty Dirty) error {
 	for _, n := range g.byTopic[topic] {
-		if err := g.foldUpsert(tx, n, inKey, payload, gen, dirty); err != nil {
+		if err := g.foldUpsert(tx, n, topic, inKey, payload, gen, dirty); err != nil {
 			return err
 		}
 	}
@@ -381,13 +546,23 @@ func (g *Graph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, p
 			return err
 		}
 	}
+	for _, d := range g.mdims[topic] {
+		if err := g.putMultiDim(tx, d, inKey, payload, gen, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range g.odims[topic] {
+		if err := g.putVersion(tx, d, inKey, payload, gen, dirty); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // FoldTopicDelete routes one topic tombstone (key only, no payload).
 func (g *Graph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte, dirty Dirty) error {
 	for _, n := range g.byTopic[topic] {
-		if err := g.foldDelete(tx, n, inKey, dirty); err != nil {
+		if err := g.foldDelete(tx, n, topic, inKey, dirty); err != nil {
 			return err
 		}
 	}
@@ -397,6 +572,16 @@ func (g *Graph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte, d
 			return err
 		}
 		if err := g.markDimDependents(tx, d, dimKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range g.mdims[topic] {
+		if err := g.deleteMultiDim(tx, d, inKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range g.odims[topic] {
+		if err := g.putVersion(tx, d, inKey, nil, 0, dirty); err != nil {
 			return err
 		}
 	}
@@ -411,19 +596,31 @@ func (g *Graph) FoldTopicDelete(tx *stagestore.Tx, topic string, inKey []byte, d
 func (g *Graph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte, dirty Dirty) error {
 	return tx.DependentsOf(d.node.def.Name, d.join.target(), dimKey, func(outKey []byte) error {
 		dirty.Mark(d.node, outKey)
+		if d.node.win != nil {
+			// Membership may move every position in the partition.
+			d.node.win.markFull(outKey)
+		}
 		return nil
 	})
 }
 
-// foldUpsert lands one input in a stage: filter, key, retain, refold the
+// foldUpsert lands one input from source src (a topic id, or the
+// producing stage's name) in a stage: filter, key, retain, refold the
 // affected key(s), cascade the delta. An input that stops matching the
 // stage's when RETRACTS (filtering is refold, not skip).
-func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, inKey []byte, payload any, gen uint64, dirty Dirty) error {
+func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, src string, inKey []byte, payload any, gen uint64, dirty Dirty) error {
 	n.inputs.Add(1)
-	if n.def.hasFan() {
-		return g.foldFan(tx, n, inKey, payload, gen, dirty)
+	if c := n.bySource[src]; c != nil {
+		c.Add(1)
 	}
-	return g.foldOneInput(tx, n, inKey, payload, nil, gen, dirty)
+	inKey = n.def.inputKey(src, inKey)
+	if n.def.hasFan() {
+		return g.foldFan(tx, n, src, inKey, payload, gen, dirty)
+	}
+	if n.fanJoin >= 0 {
+		return g.foldJoinFan(tx, n, src, inKey, payload, gen, dirty)
+	}
+	return g.foldOneInput(tx, n, src, inKey, payload, nil, gen, dirty)
 }
 
 // FoldActual folds one committed Actual's entities into the graph —
@@ -434,6 +631,33 @@ func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, inKey []byte, payloa
 // bookkeeping.
 func (g *Graph) FoldActual(tx *stagestore.Tx, a *cluster.Actual) error {
 	dirty := Dirty{}
+	if err := g.foldEntities(tx, a, dirty); err != nil {
+		return err
+	}
+	return g.Drain(tx, dirty)
+}
+
+// FoldActuals folds a run of committed Actuals, in order, and drains ONCE:
+// a key touched by several of them refolds once, over the retained set
+// they leave, instead of once per Actual. The result is the full keyed
+// refold over the same final retained state, so the outputs are the ones
+// per-Actual draining ends at; only the intermediate outputs between the
+// Actuals are never computed or emitted. A caller whose sink must see each
+// Actual's deltas in step with other writes (a projection with
+// topic-fed table sources) folds one Actual at a time instead.
+func (g *Graph) FoldActuals(tx *stagestore.Tx, as []*cluster.Actual) error {
+	dirty := Dirty{}
+	for _, a := range as {
+		if err := g.foldEntities(tx, a, dirty); err != nil {
+			return err
+		}
+	}
+	return g.Drain(tx, dirty)
+}
+
+// foldEntities updates retention for one Actual's entities, marking the
+// keys it dirties.
+func (g *Graph) foldEntities(tx *stagestore.Tx, a *cluster.Actual, dirty Dirty) error {
 	for _, e := range a.Entities {
 		if !g.ConsumesTopic(e.Type.ID) {
 			continue
@@ -464,7 +688,7 @@ func (g *Graph) FoldActual(tx *stagestore.Tx, a *cluster.Actual) error {
 			// dead-letters them loudly.
 		}
 	}
-	return g.Drain(tx, dirty)
+	return nil
 }
 
 // fanPathDesc names the fan declaration for logs: the single forEach
@@ -493,7 +717,7 @@ func fanPathDesc(st *Stage) string {
 // shape).
 func FanMiss(path string, payload any, elems *[]any) string {
 	miss := "unresolved"
-	if v, err := jsonpath.Get(path, payload); err == nil {
+	if v, err := jsonpaths.Get(path, payload); err == nil {
 		if list, ok := v.([]any); ok {
 			*elems = list
 			miss = ""
@@ -503,7 +727,7 @@ func FanMiss(path string, payload any, elems *[]any) string {
 	}
 	if miss == "" && len(*elems) == 0 {
 		if container, ok := strings.CutSuffix(path, "[*]"); ok {
-			if cv, err := jsonpath.Get(container, payload); err != nil {
+			if cv, err := jsonpaths.Get(container, payload); err != nil {
 				miss = "unresolved"
 			} else if _, isList := cv.([]any); !isList {
 				miss = fmt.Sprintf("%T", cv)
@@ -520,14 +744,24 @@ func FanMiss(path string, payload any, elems *[]any) string {
 func (g *Graph) FlowCounts() map[string]FlowCount {
 	out := make(map[string]FlowCount, len(g.order))
 	for _, n := range g.order {
-		fc := FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load()}
+		fc := FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load(), HavingRejected: n.havingRejected.Load()}
+		if n.bySource != nil {
+			fc.InputsBySource = make(map[string]int64, len(n.bySource))
+			for src, c := range n.bySource {
+				fc.InputsBySource[src] = c.Load()
+			}
+		}
+		if n.win != nil {
+			fc.WindowRowsRecomputed = n.win.recomputed.Load()
+			fc.WindowLargestPartition = n.win.largest.Load()
+		}
 		for ji := range n.def.Joins {
 			j := &n.def.Joins[ji]
 			target := j.Topic
 			if target == "" {
 				target = j.From
 			}
-			fc.Joins = append(fc.Joins, JoinFlow{Target: target, Alias: j.As, Absent: j.Absent, Optional: j.Optional, Hits: n.joinFlows[ji].hits.Load(), Misses: n.joinFlows[ji].misses.Load()})
+			fc.Joins = append(fc.Joins, JoinFlow{Target: target, Alias: j.As, Absent: j.Absent, Optional: j.Optional, Hits: n.joinFlows[ji].hits.Load(), Misses: n.joinFlows[ji].misses.Load(), Reresolved: n.joinFlows[ji].reresolved.Load()})
 		}
 		out[n.def.Name] = fc
 	}
@@ -537,9 +771,20 @@ func (g *Graph) FlowCounts() map[string]FlowCount {
 // FlowCount is one stage's flow counters (see Graph.FlowCounts).
 type FlowCount struct {
 	Inputs int64
-	Fanned int64
+	// InputsBySource splits Inputs per listed source for a union stage
+	// (nil otherwise) — a starved source shows as its own zero.
+	InputsBySource map[string]int64
+	Fanned         int64
 	// UnkeyedDeletes counts lost retractions — see graphNode.
 	UnkeyedDeletes int64
+	// HavingRejected counts refolds a having held back — see graphNode.
+	HavingRejected int64
+	// WindowRowsRecomputed counts a window stage's row recomputes, and
+	// WindowLargestPartition is the largest partition (rows) a recompute
+	// walked to its end — both since the worker started; a backfill's or
+	// a late event's cost shows here.
+	WindowRowsRecomputed   int64
+	WindowLargestPartition int64
 	// Joins are the per-join resolution counters — see graphNode.
 	Joins []JoinFlow
 }
@@ -554,6 +799,9 @@ type JoinFlow struct {
 	Optional bool
 	Hits     int64
 	Misses   int64
+	// Reresolved: dependent keys an ordered join's version changes
+	// re-resolved.
+	Reresolved int64
 }
 
 // stageForEachNonArrayWarnRun is how many CONSECUTIVE non-array forEach
@@ -565,7 +813,7 @@ const stageForEachNonArrayWarnRun = 1000
 // its own input — identity (parent key, element key) — and the fan
 // reverse-index reconciles: elements the re-emitted input no longer
 // carries retract, and the input's tombstone retracts them all.
-func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, payload any, gen uint64, dirty Dirty) error {
+func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, src string, parentKey []byte, payload any, gen uint64, dirty Dirty) error {
 	st := n.def
 	type armFan struct {
 		ordinal int // -1 = single-path forEach (legacy identity bytes)
@@ -582,7 +830,7 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 		lastMiss := ""
 		for ai := range st.Fan {
 			arm := &st.Fan[ai]
-			if !MatchScoped(arm.When, payload, nil) {
+			if !MatchScoped(arm.When, withSource(payload, src), nil) {
 				continue
 			}
 			anyMatched = true
@@ -635,15 +883,17 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 		return err
 	}
 
-	identityPath := st.ElementKey
-	if identityPath == "" {
-		identityPath = st.KeyPath[0]
-	}
 	current := map[string]bool{}
 	for _, f := range fans {
 		for _, el := range f.elems {
 			n.fanned.Add(1)
-			kv, err := ResolvePath(identityPath, el, payload)
+			var kv any
+			var err error
+			if st.ElementKey != "" {
+				kv, err = ResolvePath(st.ElementKey, el, payload)
+			} else {
+				kv, err = n.resolveKeyValue(0, withSource(el, src), payload)
+			}
 			if err != nil || kv == nil {
 				continue // an unidentifiable element fans nothing (and reconciles away)
 			}
@@ -656,7 +906,7 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 				continue
 			}
 			current[string(elemIn)] = true
-			if err := g.foldOneInput(tx, n, elemIn, el, payload, gen, dirty); err != nil {
+			if err := g.foldOneInput(tx, n, src, elemIn, el, payload, gen, dirty); err != nil {
 				return err
 			}
 			if err := tx.PutRev(st.Name, fanJoinName, parentKey, elemIn); err != nil {
@@ -680,16 +930,19 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, parentKey []byte, paylo
 
 // foldOneInput lands one input (an entity, an upstream delta, or a
 // fanned element with its parent in scope) in a stage's retained set.
-func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data, parent any, gen uint64, dirty Dirty) error {
+func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey []byte, data, parent any, gen uint64, dirty Dirty) error {
 	st := n.def
-	deleteShaped := st.Reduce == "liveSet" && MatchScoped(st.DeleteWhen, data, parent)
-	if !deleteShaped && !MatchScoped(st.When, data, parent) {
+	// Fold-time expressions see the input with its source (source());
+	// retention keeps the bare input — the source is in its identity.
+	scoped := withSource(data, src)
+	deleteShaped := st.Reduce == "liveSet" && MatchScoped(st.DeleteWhen, scoped, parent)
+	if !deleteShaped && !MatchScoped(st.When, scoped, parent) {
 		return g.foldDeleteInput(tx, n, inKey, dirty)
 	}
 
 	parts := make([]string, len(st.KeyPath))
 	for i, kp := range st.KeyPath {
-		kv, err := ResolvePath(kp, data, parent)
+		kv, err := n.resolveKeyValue(i, scoped, parent)
 		if err != nil || kv == nil {
 			// A matched input without a (complete) key cannot fold; treat as
 			// non-membership (and retract any prior membership) rather than
@@ -715,6 +968,17 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 		parts[i] = NormalizeKeyPart(st.Normalize, part)
 	}
 	outKey := []byte(OutKey(parts))
+	if n.win != nil {
+		// A window stage's outKey is the input's PARTITION; the row's
+		// position in it comes from its order values.
+		placed, err := g.windowPlace(tx, n, outKey, inKey, scoped)
+		if err != nil {
+			return err
+		}
+		if !placed {
+			return g.foldDeleteInput(tx, n, inKey, dirty)
+		}
+	}
 
 	// Rekey: if this input previously fed a DIFFERENT key, retract it
 	// there first — its old key refolds without it.
@@ -723,6 +987,9 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 		return err
 	}
 	if prior != nil && !bytes.Equal(prior, outKey) {
+		if err := g.noteIn(tx, n, prior, inKey, nil, dirty); err != nil {
+			return err
+		}
 		if err := tx.DeleteIn(st.Name, prior, inKey); err != nil {
 			return err
 		}
@@ -736,7 +1003,11 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 	if err != nil {
 		return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
 	}
-	if err := tx.PutIn(st.Name, outKey, inKey, encodeRetained(gen, inputBytes)); err != nil {
+	retained := encodeRetained(gen, inputBytes)
+	if err := g.noteIn(tx, n, outKey, inKey, retained, dirty); err != nil {
+		return err
+	}
+	if err := tx.PutIn(st.Name, outKey, inKey, retained); err != nil {
 		return err
 	}
 	if err := tx.PutSrc(st.Name, inKey, outKey); err != nil {
@@ -744,6 +1015,17 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, inKey []byte, data
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
+		if j.Fan {
+			continue // the pair carries its matched row; the fan's own index re-fans the input
+		}
+		if j.asOfExpr != nil {
+			// An as-of dependent is indexed by its bound, so a version
+			// re-resolves only the inputs in its range.
+			if err := g.putAsOfDependent(tx, st, i, j, scoped, parent, outKey); err != nil {
+				return err
+			}
+			continue
+		}
 		if onKey := joinOnKey(j, data, parent); onKey != nil {
 			if err := tx.PutRev(st.Name, j.target(), onKey, outKey); err != nil {
 				return err
@@ -772,30 +1054,39 @@ func (g *Graph) noteUnkeyedDelete(n *graphNode, keyPath string) {
 		zap.String("key_path", keyPath))
 }
 
-// foldDelete retracts one input from a stage: the key it fed refolds
-// without it (possibly to deletion), and the delta cascades.
-func (g *Graph) foldDelete(tx *stagestore.Tx, n *graphNode, inKey []byte, dirty Dirty) error {
+// foldDelete retracts one input of source src from a stage: the key it
+// fed refolds without it (possibly to deletion), and the delta cascades.
+func (g *Graph) foldDelete(tx *stagestore.Tx, n *graphNode, src string, inKey []byte, dirty Dirty) error {
+	inKey = n.def.inputKey(src, inKey)
+	if n.fanJoin >= 0 {
+		return g.unfanJoin(tx, n, inKey, dirty)
+	}
 	if n.def.hasFan() {
-		// The input's tombstone retracts every element it fanned.
-		st := n.def
-		var elems [][]byte
-		if err := tx.DependentsOf(st.Name, fanJoinName, inKey, func(elemIn []byte) error {
-			elems = append(elems, append([]byte(nil), elemIn...))
-			return nil
-		}); err != nil {
-			return err
-		}
-		for _, elemIn := range elems {
-			if err := g.foldDeleteInput(tx, n, elemIn, dirty); err != nil {
-				return err
-			}
-			if err := tx.DeleteRev(st.Name, fanJoinName, inKey, elemIn); err != nil {
-				return err
-			}
-		}
-		return nil
+		return g.retractElements(tx, n, inKey, dirty)
 	}
 	return g.foldDeleteInput(tx, n, inKey, dirty)
+}
+
+// retractElements retracts every element an input fanned (forEach, fan
+// arms, or a fan join's pairs) — the input's tombstone.
+func (g *Graph) retractElements(tx *stagestore.Tx, n *graphNode, inKey []byte, dirty Dirty) error {
+	st := n.def
+	var elems [][]byte
+	if err := tx.DependentsOf(st.Name, fanJoinName, inKey, func(elemIn []byte) error {
+		elems = append(elems, append([]byte(nil), elemIn...))
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, elemIn := range elems {
+		if err := g.foldDeleteInput(tx, n, elemIn, dirty); err != nil {
+			return err
+		}
+		if err := tx.DeleteRev(st.Name, fanJoinName, inKey, elemIn); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // foldDeleteInput retracts one retained input from a stage.
@@ -804,6 +1095,14 @@ func (g *Graph) foldDeleteInput(tx *stagestore.Tx, n *graphNode, inKey []byte, d
 	outKey, err := tx.GetSrc(st.Name, inKey)
 	if err != nil || outKey == nil {
 		return err // never fed this stage — a no-op, not an error
+	}
+	if n.win != nil {
+		if err := g.windowRemove(tx, n, inKey); err != nil {
+			return err
+		}
+	}
+	if err := g.noteIn(tx, n, outKey, inKey, nil, dirty); err != nil {
+		return err
 	}
 	if err := tx.DeleteIn(st.Name, outKey, inKey); err != nil {
 		return err
@@ -823,9 +1122,26 @@ func (g *Graph) foldDeleteInput(tx *stagestore.Tx, n *graphNode, inKey []byte, d
 // sound and which turns a batch touching one key N times into one
 // refold and at most one downstream write.
 func (g *Graph) Drain(tx *stagestore.Tx, dirty Dirty) error {
+	// Window stages' pending positions belong to this batch: cleared on
+	// the way out, success or not (a failed batch rolls back and refolds
+	// from scratch).
+	defer func() {
+		for _, n := range g.order {
+			if n.win != nil {
+				n.win.reset()
+			}
+		}
+	}()
 	for _, n := range g.order {
-		keys := dirty[n]
-		if len(keys) == 0 {
+		dn := dirty[n]
+		if dn == nil || len(dn.keys) == 0 {
+			continue
+		}
+		keys := dn.keys
+		if n.win != nil {
+			if err := g.drainWindow(tx, n, keys, dirty); err != nil {
+				return err
+			}
 			continue
 		}
 		sorted := make([]string, 0, len(keys))
@@ -851,7 +1167,7 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 	if err != nil {
 		return err
 	}
-	out, live, err := g.refoldOutput(tx, st, outKey)
+	out, live, err := g.refoldOutput(tx, st, outKey, dirty.delta(n, outKey))
 	if err != nil {
 		return err
 	}
@@ -859,37 +1175,62 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 		if prior == nil {
 			return nil // was absent, still absent — nothing to say
 		}
-		if err := tx.DeleteOut(st.Name, outKey); err != nil {
-			return err
-		}
-		if g.OnDelta != nil {
-			if err := g.OnDelta(st.Name, outKey, nil, false); err != nil {
-				return err
-			}
-		}
-		for _, d := range n.dimConsumers {
-			if err := tx.DeleteDim(d.node.def.Name, d.join.target(), outKey); err != nil {
-				return err
-			}
-			if err := g.markDimDependents(tx, d, outKey, dirty); err != nil {
-				return err
-			}
-		}
-		for _, c := range n.consumers {
-			if err := g.foldDelete(tx, c, outKey, dirty); err != nil {
-				return err
-			}
-		}
-		for _, m := range n.mergeConsumers {
-			if err := g.foldMergeSide(tx, m.node, m.alias, outKey, nil, dirty); err != nil {
-				return err
-			}
-		}
-		return nil
+		return g.retractOutput(tx, n, outKey, dirty)
 	}
 	if prior != nil && bytes.Equal(prior, out) {
 		return nil // unchanged — suppressed (deterministic bytes make this sound)
 	}
+	return g.publishOutput(tx, n, outKey, out, dirty)
+}
+
+// retractOutput deletes a stage's output for one key and cascades the
+// retraction: the chaining terminal, the joins using this stage as their
+// dimension, consumer retention, and merge sides.
+func (g *Graph) retractOutput(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty Dirty) error {
+	st := n.def
+	if err := tx.DeleteOut(st.Name, outKey); err != nil {
+		return err
+	}
+	if g.OnDelta != nil {
+		if err := g.OnDelta(st.Name, outKey, nil, false); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.dimConsumers {
+		if err := tx.DeleteDim(d.node.def.Name, d.join.target(), outKey); err != nil {
+			return err
+		}
+		if err := g.markDimDependents(tx, d, outKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, c := range n.consumers {
+		if err := g.foldDelete(tx, c, st.Name, outKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, m := range n.mergeConsumers {
+		if err := g.foldMergeSide(tx, m.node, m.alias, outKey, nil, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.mdimConsumers {
+		if err := g.deleteMultiDim(tx, d, outKey, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.odimConsumers {
+		if err := g.putVersion(tx, d, outKey, nil, 0, dirty); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// publishOutput stores a stage's changed output for one key and cascades
+// it, as retractOutput does a retraction.
+func (g *Graph) publishOutput(tx *stagestore.Tx, n *graphNode, outKey, out []byte, dirty Dirty) error {
+	st := n.def
 	if err := tx.PutOut(st.Name, outKey, out); err != nil {
 		return err
 	}
@@ -913,12 +1254,22 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 		}
 	}
 	for _, c := range n.consumers {
-		if err := g.foldUpsert(tx, c, outKey, obj, 0, dirty); err != nil {
+		if err := g.foldUpsert(tx, c, st.Name, outKey, obj, 0, dirty); err != nil {
 			return err
 		}
 	}
 	for _, m := range n.mergeConsumers {
 		if err := g.foldMergeSide(tx, m.node, m.alias, outKey, obj, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.mdimConsumers {
+		if err := g.putMultiDim(tx, d, outKey, obj, 0, dirty); err != nil {
+			return err
+		}
+	}
+	for _, d := range n.odimConsumers {
+		if err := g.putVersion(tx, d, outKey, obj, 0, dirty); err != nil {
 			return err
 		}
 	}
@@ -963,9 +1314,12 @@ func mergeInKey(alias string, key []byte) []byte {
 // refoldOutput computes a key's output object from its retained inputs.
 // live=false means the key has no qualifying inputs and its output (and
 // downstream memberships) retract.
-func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live bool, err error) {
+func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) (out []byte, live bool, err error) {
 	if len(st.Merge) > 0 {
 		return g.refoldMerge(tx, st, outKey)
+	}
+	if st.incrementalAggregate() {
+		return g.refoldAggregateIncremental(tx, st, outKey, delta)
 	}
 	if st.Reduce == "aggregate" {
 		return g.refoldAggregate(tx, st, outKey)
@@ -980,9 +1334,12 @@ func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out [
 	// object of the bytewise-LARGEST input identity (real reshape inputs
 	// are 1:1 with keys; the tiebreak only decides pathological
 	// collisions, deterministically).
-	type scoped struct{ data, parent any }
+	type scoped struct {
+		data, parent any
+		src          string
+	}
 	var winner *scoped
-	scanErr := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
+	scanErr := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
 		_, payload := decodeRetained(val)
 		data, parent, err := unpackStageInput(st, payload)
 		if err != nil {
@@ -991,13 +1348,13 @@ func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte) (out [
 		if ok, err := g.inputQualifies(tx, st, data, parent); err != nil || !ok {
 			return err
 		}
-		winner = &scoped{data, parent}
+		winner = &scoped{data, parent, st.inputSource(inKey)}
 		return nil
 	})
 	if scanErr != nil || winner == nil {
 		return nil, false, scanErr
 	}
-	return g.emitReshape(tx, st, winner.data, winner.parent)
+	return g.emitReshape(tx, st, winner.data, winner.parent, winner.src)
 }
 
 // joinOnKey renders an input's reference to a join's dimension row: every
@@ -1039,7 +1396,7 @@ func joinOnKey(j *Join, obj, parent any) []byte {
 func (g *Graph) joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (any, error) {
 	named := false
 	for i := range st.Joins {
-		if st.Joins[i].As != "" {
+		if st.Joins[i].As != "" && !st.Joins[i].Fan {
 			named = true
 			break
 		}
@@ -1058,33 +1415,18 @@ func (g *Graph) joinLookupScope(tx *stagestore.Tx, st *Stage, obj, parent any) (
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		if j.As == "" {
-			continue
+		if j.As == "" || j.Fan {
+			continue // a fan join's matched row is already in the pair
 		}
-		scope[j.As] = nil
-		onKey := joinOnKey(j, obj, parent)
-		if onKey == nil {
-			continue
-		}
-		stored, err := tx.GetDim(st.Name, j.target(), onKey)
+		row, err := g.joinRow(tx, st, i, j, obj, parent)
 		if err != nil {
 			return nil, err
 		}
-		if stored == nil {
-			continue
-		}
-		_, payload := decodeRetained(stored)
-		dimObj, err := DecodeObject(payload)
-		if err != nil {
-			return nil, err
-		}
-		if Match(j.Where, dimObj) {
-			scope[j.As] = dimObj
-		}
+		scope[j.As] = row
 	}
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		if !j.Optional {
+		if !j.Optional || j.Fan {
 			continue
 		}
 		if scope[j.As] != nil {
@@ -1100,27 +1442,17 @@ func (g *Graph) inputQualifies(tx *stagestore.Tx, st *Stage, obj, parent any) (b
 	n := g.byName[st.Name]
 	for i := range st.Joins {
 		j := &st.Joins[i]
-		if j.Optional {
-			continue // a LEFT lookup never gates membership; absence scopes as null (counted at lookup)
+		if j.Optional || j.Fan {
+			continue // a LEFT lookup never gates membership (counted at lookup); a fan join gated at fan time
 		}
 		// present: a dimension row exists at the input's On value AND
 		// matches the join's Where. A normal join requires it; an Absent
 		// (anti-)join forbids it — one rule: fail when present == Absent.
-		present := false
-		if onKey := joinOnKey(j, obj, parent); onKey != nil {
-			stored, err := tx.GetDim(st.Name, j.target(), onKey)
-			if err != nil {
-				return false, err
-			}
-			if stored != nil {
-				_, payload := decodeRetained(stored)
-				dimObj, err := DecodeObject(payload)
-				if err != nil {
-					return false, err
-				}
-				present = Match(j.Where, dimObj)
-			}
+		row, err := g.joinRow(tx, st, i, j, obj, parent)
+		if err != nil {
+			return false, err
 		}
+		present := row != nil
 		if present {
 			n.joinFlows[i].hits.Add(1)
 		} else {
@@ -1170,7 +1502,7 @@ func (g *Graph) refoldMerge(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte
 	if !Match(st.When, scope) {
 		return nil, false, nil
 	}
-	return g.emitReshape(tx, st, scope, nil)
+	return g.emitReshape(tx, st, scope, nil, "")
 }
 
 // emitReshape renders a stage's emit fields from one input object — the
@@ -1185,7 +1517,7 @@ func (g *Graph) refoldMerge(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte
 // so later refolds of the key succeed without it (the same argument
 // entity-decode failures already rely on). Store/retention integrity
 // errors stay UNWRAPPED: those must wedge loudly, not skip.
-func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]byte, bool, error) {
+func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any, src string) ([]byte, bool, error) {
 	obj, err := g.joinLookupScope(tx, st, obj, parent)
 	if err != nil {
 		return nil, false, err
@@ -1205,7 +1537,7 @@ func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]by
 				v = nil // a missing field is null, per the language
 			}
 		} else {
-			if v, err = Eval(e.compiled, obj, parent); err != nil {
+			if v, err = Eval(e.compiled, withSource(obj, src), parent); err != nil {
 				return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 			}
 		}
@@ -1224,10 +1556,13 @@ func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any) ([]by
 // event itself un-deletes the key. The live key emits from its
 // bytewise-largest non-delete input, like a reshape.
 func (g *Graph) refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
-	type scoped struct{ data, parent any }
+	type scoped struct {
+		data, parent any
+		src          string
+	}
 	var winner *scoped
 	dead := false
-	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
+	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
 		if dead {
 			return nil
 		}
@@ -1236,7 +1571,8 @@ func (g *Graph) refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]by
 		if err != nil {
 			return err
 		}
-		if Match(st.DeleteWhen, data) {
+		src := st.inputSource(inKey)
+		if Match(st.DeleteWhen, withSource(data, src)) {
 			dead = true
 			winner = nil
 			return nil
@@ -1244,13 +1580,13 @@ func (g *Graph) refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]by
 		if ok, err := g.inputQualifies(tx, st, data, parent); err != nil || !ok {
 			return err
 		}
-		winner = &scoped{data, parent}
+		winner = &scoped{data, parent, src}
 		return nil
 	})
 	if err != nil || dead || winner == nil {
 		return nil, false, err
 	}
-	return g.emitReshape(tx, st, winner.data, winner.parent)
+	return g.emitReshape(tx, st, winner.data, winner.parent, winner.src)
 }
 
 // refoldLatest recomputes an argmax key: the winner is the retained input
@@ -1263,10 +1599,13 @@ func (g *Graph) refoldLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]by
 func (g *Graph) refoldLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
 	type ranked struct {
 		order, tie  any
+		sortKey     []byte
+		inKey       []byte
 		obj, parent any
+		src         string
 	}
 	var winner *ranked
-	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
+	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
 		_, payload := decodeRetained(val)
 		obj, parent, err := unpackStageInput(st, payload)
 		if err != nil {
@@ -1275,9 +1614,24 @@ func (g *Graph) refoldLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byt
 		if ok, err := g.inputQualifies(tx, st, obj, parent); err != nil || !ok {
 			return err
 		}
-		ov, _ := ResolvePath(st.OrderBy, obj, parent)
-		tv, _ := ResolvePath(st.TieBy, obj, parent)
-		cand := &ranked{order: ov, tie: tv, obj: obj, parent: parent}
+		cand := &ranked{inKey: append([]byte(nil), inKey...), obj: obj, parent: parent, src: st.inputSource(inKey)}
+		if len(st.winOrder) > 0 {
+			// The list form: order and tie keys compare as one sort key in
+			// the shared value order; the greatest wins, and the input
+			// identity breaks an exact tie.
+			if cand.sortKey, err = latestSortKey(st, withSource(obj, cand.src), parent); err != nil {
+				g.noteLatestOrderError(st, err)
+				return nil
+			}
+			if winner == nil {
+				winner = cand
+			} else if c := bytes.Compare(cand.sortKey, winner.sortKey); c > 0 || (c == 0 && bytes.Compare(cand.inKey, winner.inKey) > 0) {
+				winner = cand
+			}
+			return nil
+		}
+		cand.order, _ = ResolvePath(st.OrderBy, obj, parent)
+		cand.tie, _ = ResolvePath(st.TieBy, obj, parent)
 		if winner == nil {
 			winner = cand
 			return nil
@@ -1294,7 +1648,38 @@ func (g *Graph) refoldLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byt
 	if err != nil || winner == nil {
 		return nil, false, err
 	}
-	return g.emitReshape(tx, st, winner.obj, winner.parent)
+	return g.emitReshape(tx, st, winner.obj, winner.parent, winner.src)
+}
+
+// latestSortKey encodes a latest stage's list-form order and tie keys for
+// one input, as a window stage's sort key is encoded.
+func latestSortKey(st *Stage, data, parent any) ([]byte, error) {
+	var key []byte
+	for _, keys := range [][]winKey{st.winOrder, st.winTie} {
+		for _, k := range keys {
+			v, err := Eval(k.expr, data, parent)
+			if err != nil {
+				return nil, err
+			}
+			if key, err = appendSortKey(key, v, k.desc, k.nullsFirst); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return key, nil
+}
+
+// noteLatestOrderError warns once that a latest stage's order key failed
+// on an input: like a window row whose order cannot evaluate, the input
+// takes no part in the argmax (worker goroutine only).
+func (g *Graph) noteLatestOrderError(st *Stage, err error) {
+	n := g.byName[st.Name]
+	if n == nil || n.latestOrderWarned {
+		return
+	}
+	n.latestOrderWarned = true
+	zap.L().Warn("[stage] a latest orderBy/tieBy expression failed on an input — such inputs never win; if every input fails, the stage's output is silently empty",
+		zap.String("stage", st.Name), zap.Error(err))
 }
 
 // compareStageValues orders two payload values for argmax: nulls sort
@@ -1370,9 +1755,10 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 	maxs := make([]any, len(st.Emit))
 	counts := make([]int, len(st.Emit))
 	collects := make([][]any, len(st.Emit))
+	accs := make([]aggAcc, len(st.aggSlots))
 	count := 0
 
-	err := tx.InputsFor(st.Name, outKey, func(_, val []byte) error {
+	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
 		_, payload := decodeRetained(val)
 		obj, parent, err := unpackStageInput(st, payload)
 		if err != nil {
@@ -1389,8 +1775,17 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 		if err != nil {
 			return err
 		}
+		obj = withSource(obj, st.inputSource(inKey))
+		for k := range st.aggSlots {
+			if err := st.aggSlots[k].add(&accs[k], obj, parent); err != nil {
+				return cluster.Permanent(fmt.Errorf("stage %q %s(…): %w", st.Name, st.aggSlots[k].fn, err))
+			}
+		}
 		for i := range st.Emit {
 			e := &st.Emit[i]
+			if e.Expr != "" {
+				continue // an expr over aggregate calls evaluates after the fold
+			}
 			// Per-emit where (SQL's FILTER): this input skips THIS
 			// field's fold only — membership already counted above.
 			if len(e.Where) > 0 && !MatchScoped(e.Where, obj, parent) {
@@ -1450,12 +1845,48 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 	if count == 0 {
 		return nil, false, nil
 	}
+	results := make(aggResults, len(st.aggSlots))
+	for k := range st.aggSlots {
+		results[k] = st.aggSlots[k].result(&accs[k])
+	}
+	return g.aggregateOutput(st, results, legacyFolds{sums: sums, mins: mins, maxs: maxs, counts: counts, collects: collects})
+}
+
+// legacyFolds are a key's folded legacy emit arms, by emit index.
+type legacyFolds struct {
+	sums     []*big.Rat
+	mins     []any
+	maxs     []any
+	counts   []int
+	collects [][]any // in input-key order (distinct and sort apply here)
+}
+
+// aggregateOutput renders an aggregate key's output from its folded slot
+// results and legacy arms: having, then each emit. The one rendering both
+// the full refold and the fold state (agg_incremental.go) go through.
+func (g *Graph) aggregateOutput(st *Stage, results aggResults, lf legacyFolds) ([]byte, bool, error) {
+	sums, mins, maxs, counts, collects := lf.sums, lf.mins, lf.maxs, lf.counts, lf.collects
+	var err error
+	if st.havingCompiled != nil {
+		// SQL's HAVING: only TRUE keeps the key (false, null, and a data
+		// error hold it back, as a when arm does).
+		if v, err := Eval(st.havingCompiled, results, nil); err != nil || v != true {
+			if n := g.byName[st.Name]; n != nil {
+				n.havingRejected.Add(1)
+			}
+			return nil, false, nil
+		}
+	}
 
 	emitted := make(map[string]any, len(st.Emit))
 	for i := range st.Emit {
 		e := &st.Emit[i]
 		var v any
 		switch {
+		case e.Expr != "":
+			if v, err = Eval(e.compiled, results, nil); err != nil {
+				return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
+			}
 		case e.Count:
 			v = json.Number(fmt.Sprintf("%d", counts[i]))
 		case e.Collect != "":
@@ -1494,17 +1925,10 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 }
 
 // stageValue renders an evaluator value into its stored JSON form:
-// rationals become exact minimal-decimal json.Numbers, scalars pass
-// through, null stays null.
+// rationals become exact minimal-decimal json.Numbers, date/time values
+// their canonical text, scalars pass through, null stays null.
 func stageValue(v any) (any, error) {
-	if r, ok := v.(*big.Rat); ok {
-		text, err := FormatRat(r)
-		if err != nil {
-			return nil, err
-		}
-		return json.Number(text), nil
-	}
-	return v, nil
+	return Materialize(v)
 }
 
 // sortCollectValues orders evaluator scalars deterministically: numbers
@@ -1526,19 +1950,32 @@ func collectLess(a, b any) bool {
 		return a.(*big.Rat).Cmp(b.(*big.Rat)) < 0
 	case 1:
 		return a.(string) < b.(string)
-	default:
+	case 2:
 		return !a.(bool) && b.(bool)
+	case 3:
+		au, _ := timeInstantUs(a)
+		bu, _ := timeInstantUs(b)
+		return au < bu
+	default:
+		return intervalCmpValue(a.(intervalVal)).Cmp(intervalCmpValue(b.(intervalVal))) < 0
 	}
 }
 
+// collectFamily ranks the value families: numbers, strings, bools, then
+// date/time values (one timeline), then intervals. New families only ever
+// append, so an existing fold's order never moves.
 func collectFamily(v any) int {
 	switch v.(type) {
 	case *big.Rat:
 		return 0
 	case string:
 		return 1
-	default:
+	case bool:
 		return 2
+	case timestampVal, dateVal:
+		return 3
+	default:
+		return 4
 	}
 }
 
@@ -1549,15 +1986,7 @@ func distinctCollectValues(vals []any) []any {
 	seen := make(map[string]bool, len(vals))
 	out := vals[:0]
 	for _, v := range vals {
-		var key string
-		switch t := v.(type) {
-		case *big.Rat:
-			key = "n|" + t.RatString()
-		case string:
-			key = "s|" + t
-		case bool:
-			key = fmt.Sprintf("b|%t", t)
-		}
+		key := collectDistinctKey(v)
 		if seen[key] {
 			continue
 		}
@@ -1565,6 +1994,24 @@ func distinctCollectValues(vals []any) []any {
 		out = append(out, v)
 	}
 	return out
+}
+
+// collectDistinctKey is a value's identity for a distinct collect.
+func collectDistinctKey(v any) string {
+	switch t := v.(type) {
+	case *big.Rat:
+		return "n|" + t.RatString()
+	case string:
+		return "s|" + t
+	case bool:
+		return fmt.Sprintf("b|%t", t)
+	case timestampVal, dateVal:
+		us, _ := timeInstantUs(t)
+		return fmt.Sprintf("t|%d", us)
+	case intervalVal:
+		return "i|" + intervalCmpValue(t).String()
+	}
+	return ""
 }
 
 // fanJoinName is the reserved reverse-index name a forEach stage uses to

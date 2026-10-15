@@ -1,7 +1,7 @@
 //go:build backup
 
 // Package backup_test is the end-to-end round-trip for the backup primitives
-// (docs/operations/backup.md) against the REAL binary. Offline: boot a node,
+// against the REAL binary. Offline: boot a node,
 // write state, confirm `committed backup` refuses while it's live, stop it,
 // back it up, restore into a fresh directory, boot a node on the restored
 // directory, and confirm the state survived. Live: back the node up over its

@@ -12,9 +12,9 @@ import (
 
 // A 0.7.10 projection config PARKS on 0.8.0 — the arrays of tables were
 // renamed to plural nouns. The refusal must name the replacement, not read as
-// a typo: api-compatibility.md promises "a spelling the vocabulary refuses on
-// purpose is refused naming its replacement", and upgrade.md sends operators
-// here. The type-level ledger only covers documents still saying
+// a typo: the compatibility promise is that a spelling the vocabulary refuses
+// on purpose is refused naming its replacement, and the upgrade guide sends
+// operators here. The type-level ledger only covers documents still saying
 // type = "sql-projection"; a config that already said type = "projection" —
 // the common 0.7.10 shape — lands on the projection parser instead.
 func TestProjection_RemovedSpellingsNameTheirReplacement(t *testing.T) {

@@ -85,7 +85,7 @@ func TestRenderUniqueidentifier(t *testing.T) {
 		"canonical is RFC 4122 lowercase — what PostgreSQL's uuid ingests as")
 }
 
-func TestSessionUUIDRendering(t *testing.T) {
+func TestSessionRendering(t *testing.T) {
 	cases := []struct {
 		name          string
 		checkpoint    uint32
@@ -103,9 +103,39 @@ func TestSessionUUIDRendering(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rendering, rerender := sessionUUIDRendering(c.checkpoint, c.hasCheckpoint, c.gateOpen)
+			rendering, rerender := sessionRendering(c.checkpoint, c.hasCheckpoint, c.gateOpen)
 			require.Equal(t, c.rendering, rendering)
 			require.Equal(t, c.rerender, rerender)
+		})
+	}
+}
+
+// renderTemporal spells each date/time type as the source shows it — the
+// renderings PostgreSQL and MySQL ingest the same values as.
+func TestRenderTemporal(t *testing.T) {
+	utc := func(h, m, s, ns int) time.Time { return time.Date(2024, 1, 15, h, m, s, ns, time.UTC) }
+	ist := time.FixedZone("", 5*3600+1800)
+	cases := []struct {
+		name string
+		v    time.Time
+		col  temporalCol
+		want string
+	}{
+		{"date", utc(0, 0, 0, 0), temporalCol{typ: "DATE"}, "2024-01-15"},
+		{"time(1)", time.Date(1, 1, 1, 12, 30, 45, 500000000, time.UTC), temporalCol{typ: "TIME", scale: 1}, "12:30:45.5"},
+		{"time(0)", time.Date(1, 1, 1, 23, 59, 59, 0, time.UTC), temporalCol{typ: "TIME"}, "23:59:59"},
+		{"datetime2(7)", utc(12, 30, 45, 123456700), temporalCol{typ: "DATETIME2", scale: 7}, "2024-01-15 12:30:45.1234567"},
+		{"datetime2(3) pads to its scale", utc(12, 30, 45, 780000000), temporalCol{typ: "DATETIME2", scale: 3}, "2024-01-15 12:30:45.780"},
+		{"datetime2(0)", utc(12, 30, 45, 0), temporalCol{typ: "DATETIME2"}, "2024-01-15 12:30:45"},
+		{"datetime rounds its 1/300 s tick", utc(12, 30, 45, 126666667), temporalCol{typ: "DATETIME", scale: 3}, "2024-01-15 12:30:45.127"},
+		{"datetime tick carrying into the next day", time.Date(2024, 1, 15, 23, 59, 59, 999666667, time.UTC), temporalCol{typ: "DATETIME", scale: 3}, "2024-01-16 00:00:00.000"},
+		{"smalldatetime", utc(12, 31, 0, 0), temporalCol{typ: "SMALLDATETIME"}, "2024-01-15 12:31:00"},
+		{"datetimeoffset keeps its offset", time.Date(2024, 1, 15, 12, 30, 45, 120000000, ist), temporalCol{typ: "DATETIMEOFFSET", scale: 2}, "2024-01-15 12:30:45.12+05:30"},
+		{"datetimeoffset at UTC is +00:00, not Z", utc(12, 30, 45, 0), temporalCol{typ: "DATETIMEOFFSET"}, "2024-01-15 12:30:45+00:00"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, renderTemporal(c.v, c.col))
 		})
 	}
 }

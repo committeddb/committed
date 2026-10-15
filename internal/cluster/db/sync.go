@@ -26,8 +26,7 @@ import (
 // exactly this shape: retry, the stuck tracker's replicated + alertable signal,
 // and the operator's manual dead-letter skip + replay. No new operational
 // state, no new escape hatch. Transient — never permanent — because a panic is
-// an unknown, and auto-dead-lettering would skip data on a guess (the
-// stall-visibly posture stuck-syncables.md documents).
+// an unknown, and auto-dead-lettering would skip data on a guess.
 //
 // PII: the returned error carries only the panic's TYPE — sync errors reach
 // replicated stuck records, and a panic value can embed row data. The full
@@ -82,17 +81,35 @@ func (db *DB) callSyncBatch(ctx context.Context, id string, bs cluster.BatchSync
 // every consecutive idle iteration and caps at Max; any progress
 // (state change, successful read, successful sync) resets it to Min.
 //
-// Trade-off: a freshly-committed entry takes up to syncBackoffMax to
-// be picked up by an already-idle worker, but actively-syncing
-// workers stay at syncBackoffMin and pay no measurable latency.
-// 500ms is fine for the current "syncs trail the log by some bounded
-// amount" semantics; if a future caller needs sub-millisecond sync
-// latency, the right answer is option 3 from the audit (notification
-// channel from ApplyCommitted), not lowering this constant.
+// A worker idle because it is CAUGHT UP also wakes the moment an entry
+// applies (idleWait, on the applied broadcast), so a fresh entry reaches an
+// idle worker at once rather than after up to syncBackoffMax. A worker idle
+// for any other reason — retrying a failed sync or checkpoint, not the
+// owner — waits out the backoff only, so a failing destination is never
+// retried at the apply rate.
 const (
 	syncBackoffMin = 1 * time.Millisecond
 	syncBackoffMax = 500 * time.Millisecond
 )
+
+// idleWait waits out an idle worker's backoff. A worker that is caught up
+// also wakes when wake closes (the applied broadcast, taken before the read
+// that found the end of the log); any other idle worker waits out the
+// backoff only. Reports false when ctx ends.
+func idleWait(ctx context.Context, backoff time.Duration, caughtUp bool, wake <-chan struct{}) bool {
+	if !caughtUp {
+		wake = nil // a nil channel never fires
+	}
+	t := time.NewTimer(backoff)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-wake:
+	case <-ctx.Done():
+		return false
+	}
+	return true
+}
 
 // Batch limits when the Syncable implements BatchSyncable: proposals buffer
 // until min(Every, syncBatchCap) accumulate or MaxAge elapses since the first
@@ -154,6 +171,24 @@ func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.Stag
 	defer releaseFromZero()
 	r := db.storage.Reader("") // from index 0; entries ≤ frontier are skipped below
 	folded := 0
+	// Fold in runs: a key the run touches many times refolds once (a long
+	// stream's recovery would otherwise refold it once per input).
+	const recoveryRun = 1000
+	run := make([]*cluster.Actual, 0, recoveryRun)
+	flush := func() error {
+		if len(run) == 0 {
+			return nil
+		}
+		if err := rec.FoldStagesOnly(run); err != nil {
+			return err
+		}
+		folded += len(run)
+		if handle != nil {
+			handle.stageRecoveryFolded.Store(run[len(run)-1].Index)
+		}
+		run = run[:0]
+		return nil
+	}
 	for {
 		// The scan can cover the whole log; without this check a
 		// delete/replace's cancel cannot interrupt it, the drain times
@@ -174,13 +209,15 @@ func (db *DB) recoverStageState(ctx context.Context, id string, rec cluster.Stag
 		if a.Index > checkpoint {
 			break
 		}
-		if err := rec.FoldStagesOnly(a); err != nil {
-			return err
+		run = append(run, a)
+		if len(run) == recoveryRun {
+			if err := flush(); err != nil {
+				return err
+			}
 		}
-		folded++
-		if handle != nil {
-			handle.stageRecoveryFolded.Store(a.Index)
-		}
+	}
+	if err := flush(); err != nil {
+		return err
 	}
 	db.logger.Info("stage state re-derived to the checkpoint", zap.String("id", id),
 		zap.Int("actuals_folded", folded), zap.Uint64("checkpoint", checkpoint))
@@ -614,6 +651,10 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			return nil
 		default:
 		}
+		// Taken before this iteration reads, so an entry applied after
+		// the read found the end of the log still wakes the idle wait.
+		wake := db.appliedNotify()
+		caughtUp := false
 
 		// Run one iteration of the state machine and decide whether
 		// the iteration made progress. Progress is defined as: state
@@ -793,6 +834,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 				// Caught up: if a re-materialization's replay has covered its
 				// target, sweep and clear.
 				db.completeRematerializationIfDone(ctx, id, s, &remat, lastSeen)
+				caughtUp = lastBumped == lastSeen
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)
 			default:
@@ -930,12 +972,10 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			continue
 		}
 
-		// Idle iteration. Sleep with backoff, but stay interruptible
-		// by ctx cancellation so registry replace and Close get prompt
-		// shutdowns.
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
+		// Idle iteration. Sleep with backoff — or, caught up, until an
+		// entry applies — but stay interruptible by ctx cancellation so
+		// registry replace and Close get prompt shutdowns.
+		if !idleWait(ctx, backoff, caughtUp, wake) {
 			return nil
 		}
 		backoff *= 2
@@ -997,6 +1037,29 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// persisted", cluster.CheckpointPolicy).
 	syncedSinceBump := 0
 	var pendingBumpIndex uint64
+	// eofBump: the caught-up checkpoint, proposed without waiting (see
+	// caughtUpBump). settleBump folds its outcome into the accumulators.
+	eofBump := &caughtUpBump{db: db}
+	defer eofBump.release()
+	settleBump := func(block bool) bool {
+		index, count := eofBump.index, eofBump.count
+		ok, err := eofBump.settle(ctx, block)
+		if !ok {
+			return false
+		}
+		if err != nil {
+			// Not durably applied; pendingBumpIndex stays armed, and the next
+			// EOF or stride boundary proposes it again.
+			db.logger.Warn("caught-up checkpoint error, will retry",
+				zap.String("id", id), zap.Error(err))
+			return false
+		}
+		syncedSinceBump = max(syncedSinceBump-count, 0)
+		if pendingBumpIndex == index {
+			pendingBumpIndex = 0
+		}
+		return true
+	}
 	// fzPin: this worker's from-0 read pin — see the single-flush worker.
 	var fzPin fromZeroPin
 	defer fzPin.release()
@@ -1059,6 +1122,15 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		if shouldSnapshot {
 			prospectivePending = batch[len(batch)-1].Index
 		}
+		if prospectivePending != 0 && prospectiveCount >= every && eofBump.inFlight() {
+			// Checkpoints apply in the order proposed: settle the caught-up
+			// one first, then recount what this one covers.
+			settleBump(true)
+			prospectiveCount = syncedSinceBump + len(batch)
+			if !shouldSnapshot {
+				prospectivePending = pendingBumpIndex
+			}
+		}
 		if prospectivePending != 0 && prospectiveCount >= every {
 			if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: prospectivePending, InterpretationIndex: interpPin}); err != nil {
 				// The bump did not durably apply (ctx canceled, or
@@ -1090,20 +1162,20 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 	// bumpPending persists the latest validated boundary regardless of the
 	// cadence stride — the reader-EOF flush ("persist whenever it catches
 	// up"), so a low-traffic syncable's checkpoint never lags behind its
-	// consumed head for long. A failure is retried at the next EOF or stride
-	// boundary; the pending index stays armed.
+	// consumed head for long. It proposes without waiting, one at a time: a
+	// newer boundary waits for the bump in flight to resolve. A failure is
+	// retried at the next EOF or stride boundary; the pending index stays
+	// armed.
 	bumpPending := func() bool {
-		if pendingBumpIndex == 0 {
-			return false
+		progressed := settleBump(false)
+		if pendingBumpIndex == 0 || eofBump.inFlight() {
+			return progressed
 		}
-		if err := db.proposeSyncableIndex(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex, InterpretationIndex: interpPin}); err != nil {
+		if err := eofBump.propose(ctx, &cluster.SyncableIndex{ID: id, Index: pendingBumpIndex, InterpretationIndex: interpPin}, syncedSinceBump); err != nil {
 			db.logger.Warn("proposeSyncableIndex error at EOF, will retry",
 				zap.String("id", id), zap.Error(err))
-			return false
 		}
-		syncedSinceBump = 0
-		pendingBumpIndex = 0
-		return true
+		return progressed
 	}
 
 	for {
@@ -1114,6 +1186,9 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 		if db.syncBreaker.tripped(id) {
 			return nil
 		}
+		// Taken before this iteration reads; see syncSingle.
+		wake := db.appliedNotify()
+		caughtUp := false
 		select {
 		case <-ctx.Done():
 			return nil
@@ -1134,7 +1209,10 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// propose while not the owner, and the new owner re-derives its
 			// position from the durable checkpoint — the un-persisted tail
 			// (< every) is simply re-delivered there, within the documented
-			// re-delivery window.
+			// re-delivery window. A caught-up bump already in flight is
+			// resolved first, as a synchronous one would have been.
+			settleBump(true)
+			eofBump.release()
 			syncedSinceBump = 0
 			pendingBumpIndex = 0
 			// Do NOT clear the stuck record on leadership loss — it is cluster-wide;
@@ -1251,6 +1329,9 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 				if !retryBatch {
 					db.completeRematerializationIfDone(ctx, id, s, &remat, pendingBumpIndex)
 				}
+				// A bump in flight counts as caught up: its apply wakes the
+				// idle wait, and the next EOF settles it.
+				caughtUp = !retryBatch && len(batch) == 0 && (pendingBumpIndex == 0 || eofBump.inFlight())
 			case readErr != nil:
 				db.logSyncReadError(id, readErr)
 			default:
@@ -1293,9 +1374,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			continue
 		}
 
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
+		if !idleWait(ctx, backoff, caughtUp, wake) {
 			return nil
 		}
 		backoff *= 2
@@ -1404,8 +1483,7 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 // Re-syncing the replayed range is safe ONLY because the Syncable contract
 // requires downstream idempotency under replay (see the cluster.Syncable
 // doc); a non-idempotent sink will double-emit, which is the operator's
-// responsibility today. The opt-in mechanism to bound that is tracked in
-// .claude-scratch/tickets/sync-two-phase-syncable.md.
+// responsibility today.
 //
 // On a successful (durable) bump the round-trip latency is recorded to
 // committed_sync_bump_duration_seconds so the extra cost is observable.
@@ -1463,6 +1541,19 @@ func (db *DB) logSyncReadError(id string, readErr error) {
 const featureLevelInterpretationPin uint64 = 2
 
 func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex) error {
+	p, err := db.syncableIndexProposal(i)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	err = db.Propose(ctx, p)
+	if err == nil && db.metrics != nil {
+		db.metrics.SyncBumpCompleted(time.Since(start))
+	}
+	return err
+}
+
+func (db *DB) syncableIndexProposal(i *cluster.SyncableIndex) (*cluster.Proposal, error) {
 	if i.InterpretationIndex != 0 && !db.featureEnabled(featureLevelInterpretationPin) {
 		pinned := *i
 		pinned.InterpretationIndex = 0
@@ -1470,15 +1561,84 @@ func (db *DB) proposeSyncableIndex(ctx context.Context, i *cluster.SyncableIndex
 	}
 	entity, err := cluster.NewUpsertSyncableIndexEntity(i)
 	if err != nil {
+		return nil, err
+	}
+	return &cluster.Proposal{Entities: []*cluster.Entity{entity}}, nil
+}
+
+// caughtUpBump is a batch worker's caught-up checkpoint in flight: proposed
+// without waiting, so a worker that has synced everything goes straight back
+// to reading instead of holding the next entry for a raft round trip. At most
+// one is in flight, and every other checkpoint the worker proposes waits for
+// it first (settle with block), so the worker's checkpoints apply in the
+// order it proposed them and the stored checkpoint never moves backwards.
+type caughtUpBump struct {
+	db    *DB
+	rid   uint64
+	ack   <-chan error
+	index uint64
+	count int // the synced-since-checkpoint count the bump covers
+	start time.Time
+}
+
+func (b *caughtUpBump) inFlight() bool { return b.ack != nil }
+
+// propose submits the checkpoint at index. Only when none is in flight.
+func (b *caughtUpBump) propose(ctx context.Context, i *cluster.SyncableIndex, count int) error {
+	p, err := b.db.syncableIndexProposal(i)
+	if err != nil {
 		return err
 	}
-
-	start := time.Now()
-	err = db.Propose(ctx, &cluster.Proposal{Entities: []*cluster.Entity{entity}})
-	if err == nil && db.metrics != nil {
-		db.metrics.SyncBumpCompleted(time.Since(start))
+	rid, ack, err := b.db.proposeAsync(ctx, p)
+	if err != nil {
+		return err
 	}
-	return err
+	b.rid, b.ack, b.index, b.count, b.start = rid, ack, i.Index, count, time.Now()
+	return nil
+}
+
+// settle resolves the bump in flight: without block it only looks, with block
+// it waits (bounded by the propose timeout, like db.Propose). ok reports
+// whether it resolved; err is the bump's outcome. An unresolved bump past the
+// propose timeout resolves as ErrProposalUnknown, as db.Propose does.
+func (b *caughtUpBump) settle(ctx context.Context, block bool) (ok bool, err error) {
+	if b.ack == nil {
+		return false, nil
+	}
+	left := b.db.proposeTimeout - time.Since(b.start)
+	if !block {
+		select {
+		case err = <-b.ack:
+		default:
+			if left > 0 {
+				return false, nil
+			}
+			err = ErrProposalUnknown
+		}
+	} else {
+		t := time.NewTimer(max(left, 0))
+		defer t.Stop()
+		select {
+		case err = <-b.ack:
+		case <-t.C:
+			err = ErrProposalUnknown
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	if err == nil && b.db.metrics != nil {
+		b.db.metrics.SyncBumpCompleted(time.Since(b.start))
+	}
+	b.release()
+	return true, err
+}
+
+// release stops waiting for the bump in flight, if any.
+func (b *caughtUpBump) release() {
+	if b.ack != nil {
+		b.db.unregisterWaiter(b.rid)
+		b.ack = nil
+	}
 }
 
 // syncableProgressReporter is the optional Storage extension that exposes the

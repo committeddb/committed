@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/PaesslerAG/jsonpath"
 )
@@ -21,8 +22,20 @@ import (
 // deliberate EXCEPTION to blanket propagation: or/and/not follow SQL's
 // three-valued logic (null is UNKNOWN, so null or true = true and null and
 // false = false), `x in (...)` is its expansion into equalities, and
-// `x is [not] null` is the one predicate that never returns null. Keywords
-// match case-insensitively, like the function names. Because only division can
+// `x is [not] null` is the one predicate that never returns null. `case`
+// is SQL's conditional: the first WHEN that is TRUE selects its THEN (null
+// and false both fall through), no match and no ELSE is null, and only the
+// selected branch evaluates — so a data error in an unselected branch never
+// surfaces (the guard idiom `case when $.n = 0 then null else … end`).
+// The string functions follow PostgreSQL over code points: `||` propagates
+// null and `concat` skips it (both render a number in canonical digits and
+// a boolean as true/false); `lower`/`upper` use Unicode SIMPLE case mapping
+// (locale-free, so `ß` stays `ß` where PG's `upper` gives `ẞ`; a Go
+// toolchain's Unicode-table bump can, rarely, change a mapping — Unicode 11
+// gave Georgian new capitals); `trim`/`ltrim`/`rtrim` strip spaces (or the
+// characters of a second argument); `like` is case-sensitive and anchored,
+// with % (any run), _ (one character), and \ as the escape.
+// Keywords match case-insensitively, like the function names. Because only division can
 // produce a value with no finite decimal representation, every `/` must be
 // dominated by a round/trunc (or comparison — booleans never materialize a
 // decimal) ancestor in its tree, checked at admission: a bare quotient that
@@ -34,21 +47,32 @@ import (
 //	orExpr     := andExpr ('or' andExpr)*
 //	andExpr    := notExpr ('and' notExpr)*
 //	notExpr    := 'not' notExpr | comparison
-//	comparison := additive (compareOp additive
-//	              | 'in' '(' additive (',' additive)* ')'
+//	comparison := concat (compareOp concat
+//	              | 'not'? 'in' '(' concat (',' concat)* ')'
+//	              | 'not'? 'like' concat
+//	              | 'not'? 'between' concat 'and' concat
 //	              | 'is' 'not'? 'null')?
+//	concat     := additive ('||' additive)*
 //	additive   := multiplicative (('+'|'-') multiplicative)*
 //	multiplicative := unary (('*'|'/') unary)*
-//	unary      := '-' unary | primary
-//	primary    := NUMBER | STRING | TRUE | FALSE | PATH
+//	unary      := '-' unary | postfix
+//	postfix    := primary ('::' TYPE)*
+//	primary    := NUMBER | STRING | TRUE | FALSE | NULL | PATH | caseExpr
+//	              | ('cast' | 'try_cast') '(' expr 'as' TYPE ')'
 //	              | IDENT '(' expr (',' expr)* ')' | '(' expr ')'
+//	caseExpr   := 'case' expr? ('when' expr 'then' expr)+ ('else' expr)? 'end'
 //	compareOp  := '=' | '<>' | '<' | '<=' | '>' | '>='
 //
 // NUMBER is a plain decimal literal (no exponent form); STRING is a
 // SQL-style single-quoted literal with '' as the escaped quote (needed by
 // real formulas like nullif($.GroupName, '')); PATH is a `$…` jsonpath
-// into the event payload; IDENT names one of the closed function set:
-// coalesce, nullif, round, trunc (matched case-insensitively).
+// into the event payload; IDENT names one of the closed function set
+// (exprFunctionList, matched case-insensitively). `||` binds looser than
+// `+`/`-` and tighter than comparison, as in PostgreSQL. TYPE is a cast
+// target (castTypes); casts and the math functions live in lang_cast.go.
+// `x between a and b` is `a <= x and x <= b`. A `case`
+// with an operand is the simple form (`case x when a then …`): each WHEN
+// is `x = a`, so a null operand matches no branch.
 
 // exprMaxBits caps the combined numerator+denominator size of any
 // intermediate value — unreachable for admissible formulas (the domination
@@ -89,6 +113,21 @@ type exprIsNull struct {
 
 type exprBool struct{ val bool }
 
+type exprNull struct{}
+
+// exprLike is `operand like pattern` (`not like` wraps it in exprNot).
+type exprLike struct{ operand, pattern Node }
+
+// exprCase is both CASE forms: operand is nil for the searched form
+// (whens are predicates) and set for the simple form (whens are values
+// compared to the operand).
+type exprCase struct {
+	operand Node
+	whens   []Node
+	thens   []Node
+	els     Node // nil: no ELSE (an unmatched case is null)
+}
+
 func (exprNum) node()    {}
 func (exprStr) node()    {}
 func (exprPath) node()   {}
@@ -99,6 +138,9 @@ func (exprNot) node()    {}
 func (exprIn) node()     {}
 func (exprIsNull) node() {}
 func (exprBool) node()   {}
+func (exprNull) node()   {}
+func (exprCase) node()   {}
+func (exprLike) node()   {}
 
 // ── lexing ──────────────────────────────────────────────────────────────
 
@@ -147,7 +189,7 @@ func lexExpr(src string) ([]exprToken, error) {
 					}
 					continue
 				}
-				if strings.ContainsRune(" \t\n\r+-*/(),=<>", rune(src[i])) {
+				if strings.ContainsRune(" \t\n\r+-*/(),=<>|:", rune(src[i])) {
 					break
 				}
 				i++
@@ -198,7 +240,22 @@ func lexExpr(src string) ([]exprToken, error) {
 				toks = append(toks, exprToken{"op", ">", i})
 				i++
 			}
-		case strings.ContainsRune("+-*/(),=", rune(c)):
+		case c == ':':
+			// :: casts; a single : separates an array slice's bounds.
+			if i+1 < len(src) && src[i+1] == ':' {
+				toks = append(toks, exprToken{"op", "::", i})
+				i += 2
+			} else {
+				toks = append(toks, exprToken{"op", ":", i})
+				i++
+			}
+		case c == '|':
+			if i+1 >= len(src) || src[i+1] != '|' {
+				return nil, fmt.Errorf("unexpected character %q at position %d (concatenation is ||)", "|", i)
+			}
+			toks = append(toks, exprToken{"op", "||", i})
+			i += 2
+		case strings.ContainsRune("+-*/(),=[]", rune(c)):
 			toks = append(toks, exprToken{"op", string(c), i})
 			i++
 		default:
@@ -214,6 +271,19 @@ func lexExpr(src string) ([]exprToken, error) {
 type exprParser struct {
 	toks []exprToken
 	i    int
+	// aggs collects aggregate calls as fold slots; nil means aggregates
+	// are not allowed here (everywhere but an aggregate stage's emit expr
+	// and having). inAgg rejects a nested aggregate.
+	aggs  *[]exprAgg
+	inAgg bool
+	// wins collects window calls as row slots; nil means window functions
+	// are not allowed here (everywhere but a window stage's emit expr).
+	// inWin rejects a nested window call.
+	wins  *[]exprWin
+	inWin bool
+	// subscripts counts the open [ … ] a bound is parsed inside (a lone
+	// : is a slice separator there, a mistyped cast anywhere else).
+	subscripts int
 }
 
 func (p *exprParser) peek() exprToken { return p.toks[p.i] }
@@ -229,11 +299,37 @@ func (p *exprParser) expectOp(op string) error {
 }
 
 var exprFunctions = map[string]struct{ minArgs, maxArgs int }{
-	"coalesce": {2, 16},
-	"nullif":   {2, 2},
-	"round":    {2, 2},
-	"trunc":    {1, 2},
+	"coalesce":     {2, 16},
+	"nullif":       {2, 2},
+	"round":        {2, 2},
+	"trunc":        {1, 2},
+	"concat":       {1, 16},
+	"lower":        {1, 1},
+	"upper":        {1, 1},
+	"trim":         {1, 2},
+	"ltrim":        {1, 2},
+	"rtrim":        {1, 2},
+	"substring":    {2, 3},
+	"length":       {1, 1},
+	"char_length":  {1, 1},
+	"replace":      {3, 3},
+	"starts_with":  {2, 2},
+	"abs":          {1, 1},
+	"ceil":         {1, 1},
+	"ceiling":      {1, 1},
+	"floor":        {1, 1},
+	"mod":          {2, 2},
+	"greatest":     {1, 16},
+	"least":        {1, 16},
+	"date_trunc":   {2, 2},
+	"date_part":    {2, 2},
+	"to_timestamp": {1, 1},
+	"make_date":    {3, 3},
+	"cardinality":  {1, 1},
 }
+
+// exprFunctionList names the closed set for error messages.
+const exprFunctionList = "coalesce, nullif, round, trunc, concat, lower, upper, trim, ltrim, rtrim, substring, length, char_length, replace, starts_with, abs, ceil, ceiling, floor, mod, greatest, least, date_trunc, date_part, to_timestamp, make_date, cardinality, source() (stages only); extract(field from x); (array)[i] and (array)[lo:hi]"
 
 // atKeyword reports whether the next token is the given SQL keyword
 // (identifiers double as keywords, matched case-insensitively; a `$`
@@ -288,17 +384,52 @@ func (p *exprParser) parseNot() (Node, error) {
 }
 
 func (p *exprParser) parseComparison() (Node, error) {
-	l, err := p.parseAdditive()
+	l, err := p.parseConcat()
 	if err != nil {
 		return nil, err
 	}
 	if t := p.peek(); t.kind == "op" && (t.text == "=" || t.text == "<>" || t.text == "<" || t.text == "<=" || t.text == ">" || t.text == ">=") {
 		p.next()
-		r, err := p.parseAdditive()
+		r, err := p.parseConcat()
 		if err != nil {
 			return nil, err
 		}
 		return exprBin{t.text, l, r}, nil
+	}
+	// `x not in (…)` / `x not like p` are SQL's spellings of not(x in …) /
+	// not(x like p) — three-valued, so a null stays null.
+	negate := false
+	if p.atKeyword("not") {
+		if nt := p.toks[p.i+1]; nt.kind == "ident" && (strings.EqualFold(nt.text, "in") || strings.EqualFold(nt.text, "like") || strings.EqualFold(nt.text, "between")) {
+			p.next()
+			negate = true
+		}
+	}
+	if p.atKeyword("between") {
+		p.next()
+		lo, err := p.parseConcat()
+		if err != nil {
+			return nil, err
+		}
+		if !p.atKeyword("and") {
+			t := p.peek()
+			return nil, fmt.Errorf("expected and in between at position %d, got %q", t.pos, t.text)
+		}
+		p.next()
+		hi, err := p.parseConcat()
+		if err != nil {
+			return nil, err
+		}
+		// SQL's definition, three-valued logic included.
+		return negateIf(exprBin{"and", exprBin{"<=", lo, l}, exprBin{"<=", l, hi}}, negate), nil
+	}
+	if p.atKeyword("like") {
+		p.next()
+		pat, err := p.parseConcat()
+		if err != nil {
+			return nil, err
+		}
+		return negateIf(exprLike{l, pat}, negate), nil
 	}
 	if p.atKeyword("in") {
 		p.next()
@@ -307,7 +438,7 @@ func (p *exprParser) parseComparison() (Node, error) {
 		}
 		var list []Node
 		for {
-			m, err := p.parseAdditive()
+			m, err := p.parseConcat()
 			if err != nil {
 				return nil, err
 			}
@@ -321,7 +452,7 @@ func (p *exprParser) parseComparison() (Node, error) {
 			}
 			return nil, fmt.Errorf("expected \",\" or \")\" at position %d, got %q", nt.pos, nt.text)
 		}
-		return exprIn{l, list}, nil
+		return negateIf(exprIn{l, list}, negate), nil
 	}
 	if p.atKeyword("is") {
 		p.next()
@@ -329,6 +460,9 @@ func (p *exprParser) parseComparison() (Node, error) {
 		if p.atKeyword("not") {
 			p.next()
 			negate = true
+		}
+		if p.atKeyword("distinct") {
+			return p.parseDistinctFrom(l, negate)
 		}
 		if !p.atKeyword("null") {
 			t := p.peek()
@@ -338,6 +472,61 @@ func (p *exprParser) parseComparison() (Node, error) {
 		return exprIsNull{l, negate}, nil
 	}
 	return l, nil
+}
+
+// parseDistinctFrom parses the rest of `x IS [NOT] DISTINCT FROM y` —
+// SQL's null-safe comparison: two nulls are not distinct, a null and a
+// value are, and two values compare as = does; the result is never null.
+// It desugars to the CASE that defines it.
+func (p *exprParser) parseDistinctFrom(l Node, negate bool) (Node, error) {
+	p.next() // distinct
+	if !p.atKeyword("from") {
+		t := p.peek()
+		return nil, fmt.Errorf("expected from after is distinct at position %d, got %q", t.pos, t.text)
+	}
+	p.next()
+	r, err := p.parseConcat()
+	if err != nil {
+		return nil, err
+	}
+	if negate { // is not distinct from
+		return exprCase{
+			whens: []Node{exprIsNull{l, false}, exprIsNull{r, false}},
+			thens: []Node{exprIsNull{r, false}, exprBool{false}},
+			els:   exprBin{"=", l, r},
+		}, nil
+	}
+	return exprCase{
+		whens: []Node{exprIsNull{l, false}, exprIsNull{r, false}},
+		thens: []Node{exprIsNull{r, true}, exprBool{true}},
+		els:   exprBin{"<>", l, r},
+	}, nil
+}
+
+func negateIf(n Node, negate bool) Node {
+	if negate {
+		return exprNot{n}
+	}
+	return n
+}
+
+func (p *exprParser) parseConcat() (Node, error) {
+	l, err := p.parseAdditive()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		t := p.peek()
+		if t.kind != "op" || t.text != "||" {
+			return l, nil
+		}
+		p.next()
+		r, err := p.parseAdditive()
+		if err != nil {
+			return nil, err
+		}
+		l = exprBin{"||", l, r}
+	}
 }
 
 func (p *exprParser) parseAdditive() (Node, error) {
@@ -387,7 +576,7 @@ func (p *exprParser) parseUnary() (Node, error) {
 		}
 		return exprNeg{operand}, nil
 	}
-	return p.parsePrimary()
+	return p.parsePostfix()
 }
 
 func (p *exprParser) parsePrimary() (Node, error) {
@@ -422,9 +611,38 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		if fn == "true" || fn == "false" {
 			return exprBool{fn == "true"}, nil
 		}
+		if fn == "null" {
+			return exprNull{}, nil
+		}
+		if fn == "case" {
+			return p.parseCase()
+		}
+		if fn == "cast" || fn == "try_cast" {
+			return p.parseCastCall(fn == "try_cast")
+		}
+		if fn == "extract" {
+			return p.parseExtract()
+		}
+		if fn == "source" && p.peek().kind == "op" && p.peek().text == "(" {
+			return p.parseSource(t.pos)
+		}
+		if windowFns[fn] || (p.wins != nil && aggregateFns[fn]) {
+			if nt := p.peek(); nt.kind == "op" && nt.text == "(" {
+				return p.parseWinCall(fn, t.pos)
+			}
+		}
+		if aggregateFns[fn] {
+			if nt := p.peek(); nt.kind == "op" && nt.text == "(" {
+				return p.parseAggCall(fn, t.pos)
+			}
+		}
+		if typ, ok := typedLiteralTypes[fn]; ok && p.peek().kind == "str" {
+			// PG's typed literal: date '2024-01-15', interval '30 days'.
+			return exprCast{exprStr{p.next().text}, typ, false}, nil
+		}
 		spec, ok := exprFunctions[fn]
 		if !ok {
-			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is coalesce, nullif, round, trunc)", t.text, t.pos)
+			return nil, fmt.Errorf("unknown function %q at position %d (the closed set is %s; case … end is the conditional)", t.text, t.pos, exprFunctionList)
 		}
 		if err := p.expectOp("("); err != nil {
 			return nil, err
@@ -447,6 +665,17 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		}
 		if len(args) < spec.minArgs || len(args) > spec.maxArgs {
 			return nil, fmt.Errorf("%s takes %d–%d arguments, got %d", fn, spec.minArgs, spec.maxArgs, len(args))
+		}
+		if fn == "date_trunc" || fn == "date_part" {
+			allowed := func(string) bool { return true }
+			if fn == "date_trunc" {
+				allowed = func(u string) bool { return truncUnits[u] }
+			}
+			u, err := timeUnitLiteral(args[0], fn, allowed)
+			if err != nil {
+				return nil, err
+			}
+			args[0] = exprStr{u}
 		}
 		if (fn == "round" || fn == "trunc") && len(args) == 2 {
 			s, err := scaleLiteral(args[1], fn)
@@ -471,6 +700,107 @@ func (p *exprParser) parsePrimary() (Node, error) {
 		}
 	}
 	return nil, fmt.Errorf("unexpected %q at position %d", t.text, t.pos)
+}
+
+// parseCase parses the rest of a CASE after its `case` keyword: an
+// optional operand (the simple form), one or more WHEN … THEN arms, an
+// optional ELSE, and END.
+func (p *exprParser) parseCase() (Node, error) {
+	var c exprCase
+	if p.atKeyword("end") || p.atKeyword("else") || p.atKeyword("then") {
+		t := p.peek()
+		return nil, fmt.Errorf("case needs at least one when … then at position %d, got %q", t.pos, t.text)
+	}
+	if !p.atKeyword("when") {
+		operand, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		c.operand = operand
+	}
+	for p.atKeyword("when") {
+		p.next()
+		w, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if !p.atKeyword("then") {
+			t := p.peek()
+			return nil, fmt.Errorf("expected then at position %d, got %q", t.pos, t.text)
+		}
+		p.next()
+		th, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		c.whens = append(c.whens, w)
+		c.thens = append(c.thens, th)
+	}
+	if len(c.whens) == 0 {
+		t := p.peek()
+		return nil, fmt.Errorf("case needs at least one when … then at position %d, got %q", t.pos, t.text)
+	}
+	if p.atKeyword("else") {
+		p.next()
+		e, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		c.els = e
+	}
+	if !p.atKeyword("end") {
+		t := p.peek()
+		return nil, fmt.Errorf("expected when, else, or end in case at position %d, got %q", t.pos, t.text)
+	}
+	p.next()
+	if err := checkCaseResultFamilies(c); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// checkCaseResultFamilies rejects a CASE whose result branches are LITERALS
+// of different families (`then 1 else 'x'`) — a certain bug, caught at
+// admission. Non-literal branches are not typed (payload paths are
+// dynamic), so a runtime mix is allowed and the column's coercion decides.
+func checkCaseResultFamilies(c exprCase) error {
+	branches := append([]Node{}, c.thens...)
+	if c.els != nil {
+		branches = append(branches, c.els)
+	}
+	first := ""
+	for _, b := range branches {
+		fam := literalFamily(b)
+		if fam == "" {
+			continue
+		}
+		if first == "" {
+			first = fam
+			continue
+		}
+		if fam != first {
+			return fmt.Errorf("case result branches mix literal types (%s and %s) — every branch should produce the same kind of value", first, fam)
+		}
+	}
+	return nil
+}
+
+// literalFamily names a literal node's value family ("" for non-literals
+// and for null, which belongs to every family).
+func literalFamily(n Node) string {
+	switch x := n.(type) {
+	case exprNum:
+		return "number"
+	case exprNeg:
+		if _, ok := x.operand.(exprNum); ok {
+			return "number"
+		}
+	case exprStr:
+		return "string"
+	case exprBool:
+		return "boolean"
+	}
+	return ""
 }
 
 // scaleLiteral enforces the spec's scale rule: round/trunc scale is a
@@ -504,7 +834,7 @@ func scaleLiteral(n Node, fn string) (int64, error) {
 // rounding materializes everything beneath it.
 func checkMaterializable(n Node, dominated bool) error {
 	switch x := n.(type) {
-	case exprNum, exprStr, exprPath, exprBool:
+	case exprNum, exprStr, exprPath, exprBool, exprNull, exprSource:
 		return nil
 	case exprNeg:
 		return checkMaterializable(x.operand, dominated)
@@ -523,7 +853,12 @@ func checkMaterializable(n Node, dominated bool) error {
 		}
 		return checkMaterializable(x.r, childDominated)
 	case exprCall:
-		childDominated := dominated || x.fn == "round" || x.fn == "trunc"
+		// round/trunc/ceil/floor materialize what lies beneath them.
+		childDominated := dominated
+		switch x.fn {
+		case "round", "trunc", "ceil", "ceiling", "floor", "to_timestamp":
+			childDominated = true
+		}
 		for _, a := range x.args {
 			if err := checkMaterializable(a, childDominated); err != nil {
 				return err
@@ -544,6 +879,69 @@ func checkMaterializable(n Node, dominated bool) error {
 		return nil
 	case exprIsNull:
 		return checkMaterializable(x.operand, true)
+	case exprWin:
+		return checkWinMaterializable(x, dominated)
+	case exprSubscript:
+		// The bounds are positions, never stored; the result is the
+		// array's elements, stored as the array would be.
+		for _, b := range []Node{x.lo, x.hi} {
+			if b != nil {
+				if err := checkMaterializable(b, true); err != nil {
+					return err
+				}
+			}
+		}
+		return checkMaterializable(x.operand, dominated)
+	case exprAgg:
+		// avg is an exact quotient (like /); count's argument is only
+		// tested for null; sum/min/max store values derived from theirs.
+		if x.fn == "avg" && !dominated {
+			return fmt.Errorf("avg(...) is an exact quotient with no finite decimal form to store — wrap it in round(..., scale) or trunc(...)")
+		}
+		if x.arg != nil {
+			if err := checkMaterializable(x.arg, dominated || x.fn == "count"); err != nil {
+				return err
+			}
+		}
+		for _, o := range x.order {
+			if err := checkMaterializable(o.expr, true); err != nil {
+				return err
+			}
+		}
+		if x.filter != nil {
+			return checkMaterializable(x.filter, true)
+		}
+		return nil
+	case exprCast:
+		// An integer cast rounds, and a boolean cast never stores a decimal;
+		// numeric and text casts carry the value through as it is.
+		return checkMaterializable(x.operand, dominated || x.typ == "integer" || x.typ == "bigint" || x.typ == "boolean")
+	case exprLike:
+		if err := checkMaterializable(x.operand, true); err != nil {
+			return err
+		}
+		return checkMaterializable(x.pattern, true)
+	case exprCase:
+		// The operand and the WHENs are compared/tested, never stored; the
+		// results inherit the enclosing context, so round(case … end, 2)
+		// dominates every branch.
+		if x.operand != nil {
+			if err := checkMaterializable(x.operand, true); err != nil {
+				return err
+			}
+		}
+		for i := range x.whens {
+			if err := checkMaterializable(x.whens[i], true); err != nil {
+				return err
+			}
+			if err := checkMaterializable(x.thens[i], dominated); err != nil {
+				return err
+			}
+		}
+		if x.els != nil {
+			return checkMaterializable(x.els, dominated)
+		}
+		return nil
 	}
 	return fmt.Errorf("unhandled expression node %T", n)
 }
@@ -586,8 +984,10 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return x.val, nil
 	case exprBool:
 		return x.val, nil
+	case exprNull:
+		return nil, nil
 	case exprPath:
-		v, err := ResolvePath(x.path, payload, parent)
+		v, err := ResolvePath(x.path, rowObject(payload), parent)
 		if err != nil {
 			// A missing field is null (the spec's null semantics) — payload
 			// shapes legitimately vary across a topic's event types.
@@ -598,6 +998,9 @@ func Eval(n Node, payload, parent any) (any, error) {
 		v, err := Eval(x.operand, payload, parent)
 		if err != nil || v == nil {
 			return nil, err
+		}
+		if iv, ok := v.(intervalVal); ok {
+			return negInterval(iv), nil
 		}
 		r, err := ratOperand(v)
 		if err != nil {
@@ -620,13 +1023,35 @@ func Eval(n Node, payload, parent any) (any, error) {
 		return !b, nil
 	case exprIn:
 		return evalIn(x, payload, parent)
+	case exprCase:
+		return evalCase(x, payload, parent)
+	case exprLike:
+		return evalLike(x, payload, parent)
+	case exprCast:
+		return evalCast(x, payload, parent)
+	case exprAgg:
+		res, ok := payload.(aggResults)
+		if !ok {
+			return nil, fmt.Errorf("internal: aggregate %s evaluated outside a fold", x.fn)
+		}
+		return res[x.slot], nil
+	case exprSubscript:
+		return evalSubscript(x, payload, parent)
+	case exprSource:
+		return evalSource(payload)
+	case exprWin:
+		row, ok := payload.(windowRow)
+		if !ok {
+			return nil, fmt.Errorf("internal: window function %s evaluated outside a window stage", x.fn)
+		}
+		return row.res[x.slot], nil
 	case exprIsNull:
 		// A PATH operand tests presence directly, skipping scalar
 		// normalization: `$.cust is not null` legitimately asks about a
 		// looked-up row or a merge side — SQL's row-valued IS NULL — and
 		// an object in a value position stays an error everywhere else.
 		if p, ok := x.operand.(exprPath); ok {
-			v, err := ResolvePath(p.path, payload, parent)
+			v, err := ResolvePath(p.path, rowObject(payload), parent)
 			if err != nil {
 				v = nil // missing = null, per the language
 			}
@@ -666,6 +1091,21 @@ func evalBin(x exprBin, payload, parent any) (any, error) {
 			return !eq, nil
 		}
 		return eq, nil
+	case "<", "<=", ">", ">=":
+		return orderedCompare(x.op, l, r)
+	case "||":
+		ls, err := renderText(l, "||")
+		if err != nil {
+			return nil, err
+		}
+		rs, err := renderText(r, "||")
+		if err != nil {
+			return nil, err
+		}
+		return ls + rs, nil
+	}
+	if v, ok, err := evalTimeArith(x.op, l, r); ok {
+		return v, err
 	}
 	lr, err := ratOperand(l)
 	if err != nil {
@@ -687,14 +1127,6 @@ func evalBin(x exprBin, payload, parent any) (any, error) {
 			return nil, fmt.Errorf("division by zero (guard the divisor with nullif(x, 0))")
 		}
 		return capBits(new(big.Rat).Quo(lr, rr))
-	case "<":
-		return lr.Cmp(rr) < 0, nil
-	case "<=":
-		return lr.Cmp(rr) <= 0, nil
-	case ">":
-		return lr.Cmp(rr) > 0, nil
-	case ">=":
-		return lr.Cmp(rr) >= 0, nil
 	}
 	return nil, fmt.Errorf("unhandled operator %q", x.op)
 }
@@ -748,8 +1180,312 @@ func evalCall(x exprCall, payload, parent any) (any, error) {
 			scale = x.args[1].(exprNum).val.Num().Int64() // literal, checked at parse
 		}
 		return scaleRat(r, scale, x.fn == "round"), nil
+	case "concat":
+		// PG's concat: null arguments are skipped, never propagated.
+		var sb strings.Builder
+		for _, a := range x.args {
+			v, err := Eval(a, payload, parent)
+			if err != nil {
+				return nil, err
+			}
+			if v == nil {
+				continue
+			}
+			s, err := renderText(v, "concat")
+			if err != nil {
+				return nil, err
+			}
+			sb.WriteString(s)
+		}
+		return sb.String(), nil
+	case "abs", "ceil", "ceiling", "floor", "mod", "greatest", "least":
+		return evalMathCall(x, payload, parent)
+	case "cardinality":
+		return evalCardinality(x, payload, parent)
+	case "date_trunc", "date_part", "to_timestamp", "make_date":
+		return evalTimeCall(x, payload, parent)
+	case "lower", "upper", "trim", "ltrim", "rtrim", "substring", "length", "char_length", "replace", "starts_with":
+		// Strict, as in PG: any null argument makes the result null. Every
+		// argument evaluates first, so a data error surfaces regardless of
+		// which argument is null.
+		args := make([]any, len(x.args))
+		for i, a := range x.args {
+			v, err := Eval(a, payload, parent)
+			if err != nil {
+				return nil, err
+			}
+			args[i] = v
+		}
+		for _, v := range args {
+			if v == nil {
+				return nil, nil
+			}
+		}
+		return evalStringFn(x.fn, args)
 	}
 	return nil, fmt.Errorf("unhandled function %q", x.fn)
+}
+
+// orderedCompare is SQL's < <= > >= within one family: numbers exactly,
+// strings byte-wise (code-point order — PostgreSQL's COLLATE "C", never a
+// locale collation, which library upgrades can reorder), booleans
+// false < true. It orders by collectLess, the order min/max and collect
+// fold by, so an expression and a fold can never disagree. Mixed families
+// are a data error, as in PG (there is no text < numeric).
+func orderedCompare(op string, l, r any) (any, error) {
+	l, r, err := coerceTimePair(l, r)
+	if err != nil {
+		return nil, err
+	}
+	lf, rf := orderFamily(l), orderFamily(r)
+	if lf == "" || rf == "" || lf != rf {
+		return nil, fmt.Errorf("%s compares two values of the same kind, got %s and %s", op, describeValue(l), describeValue(r))
+	}
+	less, greater := collectLess(l, r), collectLess(r, l)
+	switch op {
+	case "<":
+		return less, nil
+	case "<=":
+		return !greater, nil
+	case ">":
+		return greater, nil
+	}
+	return !less, nil
+}
+
+func orderFamily(v any) string {
+	switch v.(type) {
+	case *big.Rat:
+		return "number"
+	case string:
+		return "text"
+	case bool:
+		return "boolean"
+	case timestampVal, dateVal:
+		return "time" // a date, timestamp, and timestamptz compare on one timeline
+	case intervalVal:
+		return "interval"
+	}
+	return ""
+}
+
+func evalStringFn(fn string, args []any) (any, error) {
+	s, err := stringArg(args[0], fn)
+	if err != nil {
+		return nil, err
+	}
+	switch fn {
+	case "lower":
+		return strings.ToLower(s), nil
+	case "upper":
+		return strings.ToUpper(s), nil
+	case "length", "char_length":
+		return new(big.Rat).SetInt64(int64(utf8.RuneCountInString(s))), nil
+	case "trim", "ltrim", "rtrim":
+		cut := " " // PG trims spaces only, never tabs or newlines
+		if len(args) == 2 {
+			if cut, err = stringArg(args[1], fn); err != nil {
+				return nil, err
+			}
+		}
+		switch fn {
+		case "ltrim":
+			return strings.TrimLeft(s, cut), nil
+		case "rtrim":
+			return strings.TrimRight(s, cut), nil
+		}
+		return strings.Trim(s, cut), nil
+	case "replace":
+		from, err := stringArg(args[1], fn)
+		if err != nil {
+			return nil, err
+		}
+		to, err := stringArg(args[2], fn)
+		if err != nil {
+			return nil, err
+		}
+		if from == "" {
+			return s, nil
+		}
+		return strings.ReplaceAll(s, from, to), nil
+	case "starts_with":
+		prefix, err := stringArg(args[1], fn)
+		if err != nil {
+			return nil, err
+		}
+		return strings.HasPrefix(s, prefix), nil
+	case "substring":
+		return substringRunes(s, args[1:])
+	}
+	return nil, fmt.Errorf("unhandled function %q", fn)
+}
+
+// substringRunes is PG's substring(s, start[, count]) over code points:
+// positions are 1-based, the window [start, start+count) is clipped to
+// the string (so a start below 1 eats into the count), and a negative
+// count is an error.
+func substringRunes(s string, args []any) (any, error) {
+	start, err := intArg(args[0], "substring")
+	if err != nil {
+		return nil, err
+	}
+	runes := []rune(s)
+	n := int64(len(runes))
+	end := n + 1
+	if len(args) == 2 {
+		count, err := intArg(args[1], "substring")
+		if err != nil {
+			return nil, err
+		}
+		if count < 0 {
+			return nil, fmt.Errorf("substring length must not be negative, got %d", count)
+		}
+		end = start + count
+	}
+	from, to := max(start, 1), min(end, n+1)
+	if to <= from {
+		return "", nil
+	}
+	return string(runes[from-1 : to-1]), nil
+}
+
+// evalLike is SQL's LIKE: null on either side is null; both sides must be
+// strings.
+func evalLike(x exprLike, payload, parent any) (any, error) {
+	v, err := Eval(x.operand, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	pv, err := Eval(x.pattern, payload, parent)
+	if err != nil {
+		return nil, err
+	}
+	if v == nil || pv == nil {
+		return nil, nil
+	}
+	s, err := stringArg(v, "like")
+	if err != nil {
+		return nil, err
+	}
+	pat, err := stringArg(pv, "like")
+	if err != nil {
+		return nil, err
+	}
+	return likeMatch(s, pat)
+}
+
+// likeMatch is PG's LIKE over code points: % matches any run (including
+// none), _ exactly one character, \ makes the next pattern character
+// literal; case-sensitive and anchored at both ends. The match is the
+// greedy two-pointer algorithm with single-% backtracking — O(len(s) ·
+// len(pattern)) worst case, never exponential.
+func likeMatch(s, pattern string) (bool, error) {
+	type elem struct {
+		kind byte // 'l' literal, '_' one character, '%' any run
+		r    rune
+	}
+	var pat []elem
+	pr := []rune(pattern)
+	for i := 0; i < len(pr); i++ {
+		switch pr[i] {
+		case '\\':
+			if i+1 == len(pr) {
+				return false, fmt.Errorf("like pattern must not end with the escape character \\")
+			}
+			i++
+			pat = append(pat, elem{'l', pr[i]})
+		case '%', '_':
+			pat = append(pat, elem{byte(pr[i]), 0})
+		default:
+			pat = append(pat, elem{'l', pr[i]})
+		}
+	}
+	str := []rune(s)
+	si, pi := 0, 0
+	starP, starS := -1, 0
+	for si < len(str) {
+		switch {
+		case pi < len(pat) && (pat[pi].kind == '_' || pat[pi].kind == 'l' && pat[pi].r == str[si]):
+			si++
+			pi++
+		case pi < len(pat) && pat[pi].kind == '%':
+			starP, starS = pi, si
+			pi++
+		case starP >= 0:
+			starS++
+			si, pi = starS, starP+1
+		default:
+			return false, nil
+		}
+	}
+	for pi < len(pat) && pat[pi].kind == '%' {
+		pi++
+	}
+	return pi == len(pat), nil
+}
+
+// renderText is the implicit text rendering `||` and concat apply: strings
+// pass through, numbers render in canonical digits (FormatRat — 1.50 is
+// "1.5"), booleans as true/false.
+func renderText(v any, fn string) (string, error) {
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case *big.Rat:
+		return FormatRat(t)
+	case bool:
+		if t {
+			return "true", nil
+		}
+		return "false", nil
+	case timestampVal, dateVal, intervalVal:
+		m, err := Materialize(t)
+		if err != nil {
+			return "", err
+		}
+		return m.(string), nil
+	}
+	return "", fmt.Errorf("%s needs text, a number, or a boolean, got %s", fn, describeValue(v))
+}
+
+func stringArg(v any, fn string) (string, error) {
+	if s, ok := v.(string); ok {
+		return s, nil
+	}
+	return "", fmt.Errorf("%s needs a string, got %s", fn, describeValue(v))
+}
+
+// intArg reads an integral number within PG's integer range — the
+// position/length arguments of substring.
+func intArg(v any, fn string) (int64, error) {
+	r, ok := v.(*big.Rat)
+	if !ok || !r.IsInt() {
+		return 0, fmt.Errorf("%s needs an integer position/length, got %s", fn, describeValue(v))
+	}
+	if !r.Num().IsInt64() || r.Num().Int64() < -1<<31 || r.Num().Int64() > 1<<31-1 {
+		return 0, fmt.Errorf("%s position/length %s is out of the integer range", fn, r.Num())
+	}
+	return r.Num().Int64(), nil
+}
+
+func describeValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return fmt.Sprintf("the string %q", t)
+	case *big.Rat:
+		if s, err := FormatRat(t); err == nil {
+			return "the number " + s
+		}
+		return "a number"
+	case bool:
+		return "a boolean"
+	case []any:
+		return "an array"
+	case timestampVal, dateVal, intervalVal:
+		m, _ := Materialize(t)
+		return fmt.Sprintf("the %s %s", describeTimeType(t), m)
+	}
+	return fmt.Sprintf("%T", v)
 }
 
 // evalConnective applies SQL's three-valued logic — null is UNKNOWN, so
@@ -804,6 +1540,50 @@ func boolOperand(v any, op string) (val, isNull bool, err error) {
 	default:
 		return false, false, fmt.Errorf("%s needs boolean operands (comparisons/predicates), got %T", op, v)
 	}
+}
+
+// evalCase selects the first branch whose WHEN is TRUE (searched form) or
+// equals the operand (simple form); null and false fall through, as in
+// SQL. Evaluation is lazy: WHENs after the match and every unselected
+// result never run, so their data errors cannot surface — unlike the
+// connectives, whose operands always evaluate.
+func evalCase(x exprCase, payload, parent any) (any, error) {
+	var operand any
+	if x.operand != nil {
+		v, err := Eval(x.operand, payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		operand = v
+	}
+	for i, w := range x.whens {
+		wv, err := Eval(w, payload, parent)
+		if err != nil {
+			return nil, err
+		}
+		matched := false
+		if x.operand != nil {
+			// x = a: a null on either side is UNKNOWN, never a match.
+			if operand != nil && wv != nil {
+				if matched, err = exprEqual(operand, wv); err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			b, isNull, err := boolOperand(wv, "case when")
+			if err != nil {
+				return nil, err
+			}
+			matched = !isNull && b
+		}
+		if matched {
+			return Eval(x.thens[i], payload, parent)
+		}
+	}
+	if x.els != nil {
+		return Eval(x.els, payload, parent)
+	}
+	return nil, nil
 }
 
 // evalIn is x = m1 or x = m2 ... with SQL's semantics folded in: a null
@@ -902,6 +1682,18 @@ func ratOperand(v any) (*big.Rat, error) {
 }
 
 func exprEqual(a, b any) (bool, error) {
+	_, aArr := a.([]any)
+	_, bArr := b.([]any)
+	if aArr || bArr {
+		return false, fmt.Errorf("an array (array_agg's result) does not compare")
+	}
+	a, b, err := coerceTimePair(a, b)
+	if err != nil {
+		return false, err
+	}
+	if fa := orderFamily(a); (fa == "time" || fa == "interval") && fa == orderFamily(b) {
+		return !collectLess(a, b) && !collectLess(b, a), nil
+	}
 	ar, aNum := a.(*big.Rat)
 	br, bNum := b.(*big.Rat)
 	if aNum && bNum {

@@ -117,7 +117,7 @@ func TestRaftRestart_CrashWindowGapWithLargeTail(t *testing.T) {
 // TestRaftRestart_LearnerMembershipSurvivesRestart drives a membership change
 // through the REAL Ready loop and confirms the out-of-band durable state it
 // produces survives a restart — the raft-loop half of the durability-watermark
-// rule (docs/event-log-architecture.md). AddLearner runs the conf pre-pass
+// rule. AddLearner runs the conf pre-pass
 // (applyConfChange stages the ConfState and persists the peer URL) before
 // ApplyCommittedBatch writes the ConfState atomically with the applied index,
 // so both are durable once the applied index passes the conf entry. A learner

@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestApplyDeterminism is the load-bearing regression test for the
-// determinism contract documented in
-// docs/event-log-architecture.md § "Determinism requirement". Three
+// TestApplyDeterminism is the load-bearing regression test for the apply
+// determinism contract: the same committed entries produce identical state on
+// every node. Three
 // fresh wal.Storage instances are constructed on disjoint temp dirs,
 // the SAME raft entries are applied to each in the same order, and
 // every bbolt bucket's contents are required to match exactly across
@@ -104,13 +104,9 @@ func TestApplyDeterminism(t *testing.T) {
 			"node %d appliedIndex mismatch", i)
 	}
 
-	// Snapshot every node's raft entry log and compare side-by-side.
-	// The ticket calls for hashing each node's "permanent event log
-	// directory contents (or raft entry log today, until
-	// permanent-event-log.md lands)". The entry log is what raft
-	// replicates and what the future permanent log will be derived
-	// from, so checking it locks in determinism on both sides of the
-	// permanent-log split.
+	// Snapshot every node's raft entry log and compare side-by-side. The
+	// entry log is what raft replicates and what the permanent event log is
+	// derived from.
 	//
 	// Today this is mostly a check on raft itself (raft's contract is
 	// "every node sees the same committed entries in the same order"),

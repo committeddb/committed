@@ -16,13 +16,14 @@ import (
 
 // encodePosition marshals the durable checkpoint. Plain proto — this dialect
 // has no legacy format to magic-byte around.
-func encodePosition(version uint64, progress *dialectpb.SnapshotProgress, epoch uint64, snapshotted []string, rendering uint32) (cluster.Position, error) {
+func encodePosition(version uint64, progress *dialectpb.SnapshotProgress, epoch uint64, snapshotted []string, rendering, temporal uint32) (cluster.Position, error) {
 	bs, err := proto.Marshal(&dialectpb.SQLServerPosition{
 		Version:           version,
 		SnapshotProgress:  progress,
 		RefreshEpoch:      epoch,
 		SnapshottedTables: snapshotted,
 		UuidRendering:     rendering,
+		TemporalRendering: temporal,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode position: %w", err)
@@ -39,17 +40,17 @@ func (d *SQLServerDialect) snapshot(ctx context.Context, s *session, progress *d
 	// The inline checkpoints record every configured table as snapshotted
 	// (the registry the completion checkpoint will carry), at the session's
 	// base version and epoch.
-	version, epoch, snapshotted, rendering := s.version, s.epoch, config.Tables, s.rendering
+	version, epoch, snapshotted, rendering, temporal := s.version, s.epoch, config.Tables, s.rendering, s.temporal
 	return sql.RunSnapshot(ctx, sql.SnapshotRun{
 		Config:    config,
-		Reader:    sqlserverSnapshotReader{db: s.db, canonicalUUID: s.canonicalUUID()},
+		Reader:    sqlserverSnapshotReader{db: s.db, render: s.renderings()},
 		Tables:    config.Tables,
 		Progress:  progress,
 		Epoch:     epoch,
 		BatchSize: config.Options.BatchSizeOr(defaultSnapshotBatchSize),
 		Readers:   1,
 		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
-			return encodePosition(version, p, epoch, snapshotted, rendering)
+			return encodePosition(version, p, epoch, snapshotted, rendering, temporal)
 		},
 		BatchHook: d.snapshotBatchHook,
 		Proposals: s.pr,
@@ -64,15 +65,15 @@ func (d *SQLServerDialect) snapshot(ctx context.Context, s *session, progress *d
 const defaultSnapshotBatchSize = 1000
 
 // sqlserverSnapshotReader is the dialect's snapshot adapter: one keyset
-// batch per call (readBatch). canonicalUUID is the session's
-// uniqueidentifier rendering (see renderUniqueidentifier).
+// batch per call (readBatch). render is the session's renderings (see
+// scanRowValues).
 type sqlserverSnapshotReader struct {
-	db            *gosql.DB
-	canonicalUUID bool
+	db     *gosql.DB
+	render renderings
 }
 
 func (r sqlserverSnapshotReader) ReadBatch(ctx context.Context, table string, spec *sql.TopicSpec, lastPK string, haveLastPK bool, batchSize int) ([]*cluster.Entity, string, int, error) {
-	return readBatch(ctx, r.db, table, spec, lastPK, haveLastPK, batchSize, r.canonicalUUID)
+	return readBatch(ctx, r.db, table, spec, lastPK, haveLastPK, batchSize, r.render)
 }
 
 // readBatch reads up to batchSize rows past the keyset cursor in one short
@@ -94,7 +95,7 @@ func readBatch(
 	lastPK string,
 	haveLastPK bool,
 	batchSize int,
-	canonicalUUID bool,
+	render renderings,
 ) ([]*cluster.Entity, string, int, error) {
 	ref := resolveTableRef(table)
 	pkCols := spec.PrimaryKey
@@ -149,13 +150,13 @@ func readBatch(
 	if err != nil {
 		return nil, "", 0, err
 	}
-	cats, uuidCols := columnCategories(colTypes)
+	cats, cr := columnCategories(colTypes)
 
 	var entities []*cluster.Entity
 	var lastKey string
 	count := 0
 	for rows.Next() {
-		m, err := scanRowValues(rows, cols, uuidCols, canonicalUUID)
+		m, err := scanRowValues(rows, cols, cr, render)
 		if err != nil {
 			return nil, "", 0, err
 		}

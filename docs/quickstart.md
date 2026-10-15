@@ -105,7 +105,7 @@ is tracking the source live. (`lag` is bytes behind the source; `phase` is
 > `wal_level`/role/`REPLICA IDENTITY`, or MySQL binlog settings and grants — what
 > committed creates for you, the snapshot→streaming lifecycle, and the
 > troubleshooting are in
-> [`docs/operations/cdc-setup.md`](operations/cdc-setup.md).
+> [`docs/ingestables.md`](ingestables.md).
 
 <details><summary>What each config is</summary>
 
@@ -120,7 +120,7 @@ is tracking the source live. (`lag` is bytes behind the source; `phase` is
   every column 1:1, no per-column boilerplate. `credit` has a **composite key**
   `["movie_id", "billing"]` — many cast/crew per movie — so the rows don't collide.
 
-See [README § API tour](../README.md#api-tour) for the config shapes.
+See the [API tour](api-tour.md) for the config shapes.
 </details>
 
 ## 4. Build the read model — one projection
@@ -202,6 +202,6 @@ docker compose down -v
 
 - [docs/read-models.md](read-models.md) — the full projection / aggregate /
   enrichment / fan-out reference.
-- [docs/event-log-architecture.md](event-log-architecture.md) — why the log is
+- [docs/architecture/event-log-architecture.md](architecture/event-log-architecture.md) — why the log is
   the source of truth and the read model is disposable.
-- [docs/consistency.md](consistency.md) — the consistency model.
+- [docs/architecture/consistency.md](architecture/consistency.md) — the consistency model.

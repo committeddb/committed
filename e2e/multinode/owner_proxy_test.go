@@ -19,8 +19,7 @@ import (
 // TestMultiNodeSyncableOwnerProxy covers the syncable owner-proxy http
 // behaviors that only a real second node can exercise truthfully (the
 // cluster.Cluster retirement converted the http suite to live single-node
-// engines, where these hops have no counterparty — see
-// tickets/multinode-http-proxy-coverage.md):
+// engines, where these hops have no counterparty):
 //
 //  1. GET /syncable/{id}/status?readPosition=true on a NON-owner proxies the
 //     whole request to the pinned owner's announced API URL — the scan

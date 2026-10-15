@@ -38,8 +38,7 @@ func (s *Storage) newBoltTmpPath(boltPath, prefix string) string {
 // The snapshot's Data field holds the serialized bbolt database. The
 // permanent event log and time-series store are NOT in the snapshot —
 // they live on every node's local disk and are too large to ship
-// through raft. This is the "metadata snapshot install" shape from
-// docs/event-log-architecture.md § "Severe lag": a follower that
+// through raft. This is the "metadata snapshot install" shape: a follower that
 // receives this snapshot and whose permanent event log is already
 // current finishes catchup via normal raft replication; a follower too
 // far behind tripls the storage invariant and fatal-exits.
@@ -420,6 +419,14 @@ func (s *Storage) refreshAfterRestore() {
 	// adopting the completed bound above, so runPendingScrub compares against the
 	// fresh value).
 	s.signalScrub()
+	// The swapped-in bbolt carries the leader's type registrations and scrub
+	// time; re-seed the in-memory supersede state from them, as Open does.
+	if err := s.view(func(tx *bolt.Tx) error {
+		s.scrubRequestedAt.Store(loadScrubRequestedAt(tx))
+		return s.seedCorrectionWrite(tx, s.AppliedIndex())
+	}); err != nil {
+		s.logger.Warn("restore: seed supersede scrub state", zap.Error(err))
+	}
 	if err := s.validateConfigSecrets(); err != nil {
 		s.logger.Warn("restore: validate config secrets", zap.Error(err))
 	}

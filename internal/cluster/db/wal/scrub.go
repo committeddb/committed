@@ -18,8 +18,7 @@ import (
 )
 
 // This file implements the RTBF scrubber: physical removal of already-delete-
-// proposed entities from the permanent event log. The mechanism is documented
-// in docs/event-log-architecture.md § "Right-to-be-forgotten / deletes".
+// proposed entities from the permanent event log.
 //
 // Flow:
 //   - A Scrub command commits carrying an upper-bound raft index B (the freeze
@@ -47,11 +46,17 @@ func (s *Storage) handleScrub(e *cluster.Entity, raftIndex uint64) error {
 	if err := sc.Unmarshal(e.Data); err != nil {
 		return err
 	}
+	var requestedAt int64
 	if err := s.update(func(tx *bolt.Tx) error {
+		var err error
+		if requestedAt, err = recordScrubRequestedAt(tx, sc.TimestampUnixNano); err != nil {
+			return err
+		}
 		return recordScrubHistory(tx, raftIndex, sc.UpperBound)
 	}); err != nil {
 		return err
 	}
+	s.scrubRequestedAt.Store(requestedAt)
 	if sc.UpperBound <= s.lastScrubbedBound.Load() {
 		return nil
 	}
@@ -302,15 +307,15 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64, eraseMax uint64) 
 	}
 	idx := pe.GetIndex()
 	remove := func(typeID string, key []byte, isDelete bool) bool {
-		tk := string(tombstoneKey(typeID, key))
+		tk := tombstoneKey(typeID, key)
 		// RTBF: spare deletes (the tombstone must survive).
 		if !isDelete {
-			if d := sel[tk]; d != 0 && idx < d {
+			if d := sel[string(tk)]; d != 0 && idx < d {
 				return true
 			}
 		}
 		// Metadata GC: drop anything below the latest entry for this key.
-		if m := msel[tk]; m != 0 && idx < m {
+		if m := msel[string(tk)]; m != 0 && idx < m {
 			return true
 		}
 		return false
@@ -371,7 +376,17 @@ func scrubFilterEntry(raw []byte, sel, msel map[string]uint64, eraseMax uint64) 
 // handled by RTBF, not here). Runs in scrub phase A under the event publication read lock. Appends
 // can continue; entries at index > bound are excluded.
 func (s *Storage) metadataSupersessions(bound uint64) (map[string]uint64, error) {
-	selection := newMetadataSelection()
+	scrubTypes, err := s.scrubTypesAt(bound)
+	if err != nil {
+		return nil, err
+	}
+	return s.selectSupersessions(bound, scrubTypes)
+}
+
+// selectSupersessions is metadataSupersessions' scan, given the types declared
+// scrub as of bound.
+func (s *Storage) selectSupersessions(bound uint64, scrubTypes map[string]bool) (map[string]uint64, error) {
+	selection := newMetadataSelection(scrubTypes)
 	err := s.scanEventEntries(bound, selection.observe)
 	if err != nil {
 		return nil, err
@@ -643,14 +658,15 @@ func (s *Storage) hasMetadataBacklog() bool {
 }
 
 // HasScrubBacklog reports whether the next scrub has anything to physically
-// remove — either RTBF erasure (a delete-tombstone beyond the highest completed
-// bound) or enough accumulated superseded metadata to be worth an O(N) rewrite.
+// remove — RTBF erasure (a delete-tombstone beyond the highest completed
+// bound), enough accumulated superseded metadata to be worth an O(N) rewrite,
+// or a write to a scrub-declared type once the supersede ceiling has elapsed.
 // It is the single "is there scrubbable work?" signal the automatic scheduler
 // (db.scrubScheduler) consults, deliberately covering both jobs the one rewrite
 // pass does, so an idle cadence tick skips the rewrite. A metadata-heavy,
 // RTBF-free cluster triggers via the metadata term (see metadata-gc-scrubber).
 func (s *Storage) HasScrubBacklog() bool {
-	return s.hasRTBFBacklog() || s.hasMetadataBacklog()
+	return s.hasRTBFBacklog() || s.hasMetadataBacklog() || s.hasSupersedeBacklog()
 }
 
 // hasRTBFBacklog reports whether any tombstone records a delete at an index

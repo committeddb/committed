@@ -42,6 +42,10 @@ var (
 	// uint64 highwater of the highest applied source sequence. Drives
 	// effectively-once ingest dedup — see ingest_source_seq.go.
 	ingestSourceSeqBucket = []byte("ingestSourceSeq")
+	// ingestOrderBucket maps an ingestable id to the (IngestSeq,
+	// IngestSession) of its last accepted sequenced proposal. Never swept.
+	// See ingest_order.go.
+	ingestOrderBucket = []byte("ingestOrder")
 	// eventTombstoneBucket records, per user-defined (topic) (type, key), the
 	// raft indices at which it was delete-proposed. The RTBF scrubber consults
 	// it to physically remove a subject's PII from the permanent event log. See
@@ -58,8 +62,7 @@ var (
 	// node's self-announced advertised HTTP API base URL. Written from the
 	// apply path (handleNodeAPIURL) so the mapping replicates to every node and
 	// rides along in snapshots; read by the leader-read proxy to resolve a
-	// peer's (in particular the leader's) API address. See member_api_url.go
-	// and raft-leader-read-proxy.md.
+	// peer's (in particular the leader's) API address. See member_api_url.go.
 	memberAPIURLBucket = []byte("memberAPIURLs")
 	// memberPeerURLBucket maps a raft node id (8 big-endian bytes) to its raft
 	// PEER URL (the address the transport dials for raft messages), stored as the
@@ -230,8 +233,8 @@ var buckets = func() [][]byte {
 	for _, ie := range internalEntities {
 		bs = append(bs, ie.bucket)
 	}
-	return append(bs, ingestSourceSeqBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
-		scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
+	return append(bs, ingestSourceSeqBucket, ingestOrderBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
+		typeOnSupersedeBucket, scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
 }()
 
 type StateType int
@@ -267,8 +270,8 @@ type Storage struct {
 	// reader whose window overlaps the change then always sees a different
 	// value after, which a bump before the change could not guarantee.
 	entryLogEpoch atomic.Uint64
-	// eventLog is the permanent event log — the "forever" tier described
-	// in docs/event-log-architecture.md. ApplyCommitted mirrors every
+	// eventLog is the permanent event log — the "forever" tier. ApplyCommitted
+	// mirrors every
 	// committed raft entry into it, keyed by raft index. Unlike EntryLog,
 	// eventLog is never compacted: it is the canonical store that
 	// syncables read from, and the one a rebuild rsync covers.
@@ -417,6 +420,16 @@ type Storage struct {
 	// O(total-log) rewrite only fires when it reclaims a meaningful fraction
 	// of what it rewrites. Reset with metadataBacklog.
 	metadataBacklogBytes atomic.Int64
+	// correctionWrite is the highest raft index at which a write to a type
+	// declaring onSupersede = "scrub" (on a kind the volume gate doesn't count)
+	// applied. Above lastScrubbedBound it means superseded versions may be
+	// waiting; hasSupersedeBacklog paces their scrub by supersedeScrubCeiling.
+	// Non-durable and leader-local like metadataBacklog; Open and a restore
+	// re-seed it conservatively (seedCorrectionWrite).
+	correctionWrite atomic.Uint64
+	// scrubRequestedAt mirrors the persisted proposer time of the latest
+	// applied Scrub command (unix nanoseconds; 0 if none), the ceiling's start.
+	scrubRequestedAt atomic.Int64
 	// StateLog persists raft's HardState and snapshot. Records are written
 	// only when the state actually changes, and appendState truncates behind
 	// the newest Snapshot + HardState records, so the log holds a handful of
@@ -499,6 +512,16 @@ type Storage struct {
 	// stateIndex.
 	lastSnapSeq      uint64
 	lastHardStateSeq uint64
+	// persistedTerm / persistedVote / persistedCommit are the newest HardState
+	// record on disk, so flushHardState can tell whether the in-memory one is
+	// newer. Same goroutine discipline as lastHardStateSeq.
+	persistedTerm   uint64
+	persistedVote   uint64
+	persistedCommit uint64
+	// stateMu serializes state-log writes (appendState): Save and
+	// persistPendingSnapshot run on the raft goroutine, flushHardState on a
+	// live backup's and Close's.
+	stateMu sync.Mutex
 	// hardStateBytesSinceSnap accumulates the bytes of HardState records
 	// written since lastSnapSeq. When they outgrow one snapshot record
 	// (lastSnapBytes, floored at stateLogReanchorFloor), appendState
@@ -545,6 +568,10 @@ type Storage struct {
 	// regression test: a Ready batch of N entries must cost 1+1 ops, not N+N.
 	eventLogWriteOps     atomic.Int64
 	appliedIndexPersists atomic.Int64
+	// kvWriteOps counts every bbolt write transaction (each commit is two
+	// syncs when fsync is on), for the same regression tests: a Ready of N
+	// data entries must cost one data commit, not one per entry.
+	kvWriteOps atomic.Int64
 
 	// appliedIndex is the highest raft entry index that ApplyCommitted has
 	// fully applied. Bumped after each successful per-entry apply (and
@@ -603,6 +630,17 @@ type Storage struct {
 	// (ApplyCommitted) and Open; the atomic is for race-free reads from the
 	// HTTP status path on other goroutines, not CAS.
 	dataEventIndex atomic.Uint64
+
+	// ingestRejected holds the raft indexes of sequenced ingest proposals
+	// rejected at apply, until the apply notifier takes them (see
+	// TakeIngestRejected). Node-local and transient.
+	ingestRejected sync.Map
+	// ingestRejectedTotal counts those rejections since Open.
+	ingestRejectedTotal atomic.Int64
+
+	// applyDelayForTest, when non-zero, delays each ApplyCommittedBatch:
+	// the adversarial suite's slow apply. Zero in production.
+	applyDelayForTest atomic.Int64
 
 	// interpretationRegistry is the compiled restatements snapshot — immutable,
 	// swapped whole by handleRestatement / Open (reloadInterpretationRegistry),
@@ -980,6 +1018,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		return nil, err
 	}
 	ws.hardState = st
+	ws.persistedTerm, ws.persistedVote, ws.persistedCommit = st.GetTerm(), st.GetVote(), st.GetCommit()
 	ws.snapshot = snap
 	// The membership the next snapshot stamps: the crash-authoritative copy,
 	// else the persisted snapshot's (a data dir from before confStateBucket).
@@ -1107,6 +1146,12 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		return nil, fmt.Errorf("recover fetched event generation: %w", err)
 	}
 	ws.lastScrubbedBound.Store(completed)
+	if err := ws.view(func(tx *bolt.Tx) error {
+		ws.scrubRequestedAt.Store(loadScrubRequestedAt(tx))
+		return ws.seedCorrectionWrite(tx, ws.AppliedIndex())
+	}); err != nil {
+		return nil, fmt.Errorf("load supersede scrub state: %w", err)
+	}
 	if ws.safeMode {
 		// Safe mode (see WithSafeMode): no background scrub — a pending bound
 		// stays durably recorded and resumes on the next normal open. Close
@@ -1161,6 +1206,13 @@ func (s *Storage) Close() error {
 		// Likewise the sealer: it compresses sealed event-log segments and must
 		// not be mid-swap when the handle closes.
 		s.stopSealer()
+
+		// A clean shutdown records the current commit index, which Save
+		// writes only with a term or vote change (see persistedTerm): a
+		// restart, or an offline backup of this directory, starts from it.
+		if err := s.flushHardState(); err != nil {
+			s.logger.Warn("persist the commit index at close", zap.Error(err))
+		}
 
 		finalErr = s.EntryLog.Close()
 
@@ -1298,6 +1350,7 @@ func (s *Storage) view(fn func(tx *bolt.Tx) error) error {
 // calls proceed in parallel (bbolt itself serializes writers) and
 // RestoreSnapshot waits for them all to drain.
 func (s *Storage) update(fn func(tx *bolt.Tx) error) error {
+	s.kvWriteOps.Add(1)
 	s.kvMu.RLock()
 	defer s.kvMu.RUnlock()
 	return s.keyValueStorage.Update(fn)

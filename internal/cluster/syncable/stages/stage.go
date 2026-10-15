@@ -2,6 +2,7 @@ package stages
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -59,8 +60,14 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 			if lit == nil {
 				continue
 			}
+			if s, ok := lit.(string); ok {
+				if _, isNum := numericDigits(s); isNum {
+					return fmt.Errorf("%s: when entry for %q: %s = %q is a quoted number — write it unquoted to compare numerically (as text, \"10\" sorts before \"9\"); for a deliberate text comparison of digits use an expr arm", where, cl.Path, arm, s)
+				}
+				continue
+			}
 			if _, ok := ratFromScalar(lit); !ok {
-				return fmt.Errorf("%s: when entry for %q: %s takes a numeric literal (values compare numerically, SQL-style), got %T", where, cl.Path, arm, lit)
+				return fmt.Errorf("%s: when entry for %q: %s takes a number or text literal, got %T", where, cl.Path, arm, lit)
 			}
 		}
 	}
@@ -74,10 +81,17 @@ func ValidateWhen(clauses []WhenClause, where string) error {
 // chain by name in manifest order; a table source consumes a stage's
 // output via `from = "<stage name>"`.
 type Stage struct {
-	Name    string       `json:"name,omitempty"`
-	From    string       `json:"from,omitempty"`
-	KeyPath []string     `json:"keyPath,omitempty"`
-	When    []WhenClause `json:"when,omitempty"`
+	Name string `json:"name,omitempty"`
+	From string `json:"from,omitempty"`
+	// FromList is SQL's UNION ALL: the stage reads every listed topic or
+	// prior stage as rows of ONE input stream (the TOML spelling is a list
+	// `from`). Each input's identity is (source name, input key), so equal
+	// keys from different sources stay separate rows, and source() names
+	// the input's source. Two or more entries; a single source is From,
+	// whose fingerprint a list never touches.
+	FromList []string     `mapstructure:"fromList" json:"fromList,omitempty"`
+	KeyPath  []string     `json:"keyPath,omitempty"`
+	When     []WhenClause `json:"when,omitempty"`
 	// Reduce: "" (reshape: one input object → one output object),
 	// "aggregate" (fold arms over the key's retained inputs), or "latest"
 	// (argmax: the key's output is the emit of the WINNING input by
@@ -95,6 +109,16 @@ type Stage struct {
 	TieByType   string `json:"tieByType,omitempty"`
 	Joins       []Join `json:"joins,omitempty"`
 	Emit        []Emit `json:"emit,omitempty"`
+	// Having filters an aggregate stage's FOLDED keys — SQL's HAVING: an
+	// expression over aggregate calls (`count(*) > 5`), evaluated after
+	// the fold. A key whose having is not TRUE has no output: it retracts
+	// downstream, and re-enters when the predicate flips back.
+	Having string `mapstructure:"having" json:"having,omitempty"`
+	// aggSlots are the aggregate calls of the emit exprs and having, in
+	// fold order; havingCompiled is Having's AST. Populated by
+	// ValidateShapes.
+	aggSlots       []exprAgg
+	havingCompiled Node
 	// ForEach fans each input into N element-inputs (the deliberately
 	// multi-valued path selects them): keyPath and emit/join paths resolve
 	// against the ELEMENT, `$parent.` reaches the enclosing input, and a
@@ -164,6 +188,37 @@ type Stage struct {
 	// part. One entry per keyPath position; a single value broadcasts.
 	// Joins addressing this stage inherit these types (like Normalize).
 	KeyType []string `mapstructure:"keyType" json:"keyType,omitempty"`
+	// PartitionBy, WindowOrderBy, and WindowTieBy declare a window stage's
+	// window (reduce = "window") — SQL's named WINDOW w AS (PARTITION BY …
+	// ORDER BY …). A window stage keeps ONE ROW PER INPUT, keyed by the
+	// input's own key, and its emit exprs read each row's position in its
+	// ordered partition through window calls (row_number(), lag(x),
+	// sum(x) …). PartitionBy groups rows (paths or expressions, like
+	// keyPath; none = one partition); WindowOrderBy is the business order
+	// (expressions, each optionally asc|desc and nulls first|last), whose
+	// equal values make rows PEERS (rank and the running aggregates treat
+	// peers alike, as PostgreSQL does); WindowTieBy orders rows within a
+	// peer group — required when a tie-sensitive function (row_number,
+	// lag/lead, first_value/last_value) is used — and the input key breaks
+	// any tie left after it. The TOML spelling is orderBy/tieBy; the
+	// field names differ from latest's single-path OrderBy/TieBy so that
+	// existing configs keep their fingerprints.
+	//
+	// WindowOrderBy/WindowTieBy are also latest's LIST form (orderBy/tieBy
+	// written as a list, an expression, or with a direction): the winner
+	// is the input with the greatest (order, tie) sort key in the value
+	// order — so desc means the earliest wins, and, as in PostgreSQL's
+	// DISTINCT ON … ORDER BY … DESC, a null order value is greatest unless
+	// declared nulls first — with the input identity breaking an exact
+	// tie. A single bare path keeps the single-path form and its
+	// comparison (OrderBy/OrderByType), byte-identical.
+	PartitionBy   []string `mapstructure:"partitionBy" json:"partitionBy,omitempty"`
+	WindowOrderBy []string `mapstructure:"windowOrderBy" json:"windowOrderBy,omitempty"`
+	WindowTieBy   []string `mapstructure:"windowTieBy" json:"windowTieBy,omitempty"`
+	// winOrder/winTie are the compiled order keys and winSlots the window
+	// calls of the emit exprs, in slot order. Populated by ValidateShapes.
+	winOrder, winTie []winKey
+	winSlots         []exprWin
 }
 
 // FanArm is one arm of a multi-arm fan (see Stage.Fan).
@@ -176,6 +231,70 @@ type FanArm struct {
 // multi-arm fan) — the guards that care about "fanned" care about both.
 func (st *Stage) hasFan() bool {
 	return st.ForEach != "" || len(st.Fan) > 0
+}
+
+// Sources lists the stage's input sources: its From, or every entry of
+// its FromList (nil for a merge).
+func (st *Stage) Sources() []string {
+	if len(st.FromList) > 0 {
+		return st.FromList
+	}
+	if st.From != "" {
+		return []string{st.From}
+	}
+	return nil
+}
+
+// isUnion reports whether the stage reads several sources (FromList).
+func (st *Stage) isUnion() bool { return len(st.FromList) > 0 }
+
+// inputKey is an input's identity in the stage: the source's key
+// verbatim for a single source; for a union, (source name, key) through
+// the composite encoding, so equal keys from different sources stay
+// distinct — and a window stage's rows, which key by this identity,
+// decode as a two-part key (source, input key) at a table.
+func (st *Stage) inputKey(src string, key []byte) []byte {
+	if !st.isUnion() {
+		return key
+	}
+	return []byte(OutKey([]string{src, string(key)}))
+}
+
+// inputSource recovers the source an input came from, given its
+// identity in the stage (inputKey, framed by fanInKey for a fanned
+// element). "" means a merge stage, which has no source.
+func (st *Stage) inputSource(inKey []byte) string {
+	if !st.isUnion() {
+		return st.From
+	}
+	if st.hasFan() || st.fanJoin() >= 0 {
+		// A fanned element's identity is fanInKey's frame: the parent
+		// input's identity, length-prefixed, then the element key.
+		n64, w := binary.Uvarint(inKey)
+		if w <= 0 {
+			return ""
+		}
+		rest := inKey[w:]
+		n := int(n64) //nolint:gosec // G115: bounds-checked against len(rest) next line; a forged length fails there
+		if n < 0 || n > len(rest) {
+			return ""
+		}
+		inKey = rest[:n]
+	}
+	return st.identitySource(inKey)
+}
+
+// identitySource recovers the source of an input identity (inputKey's
+// result, never fan-framed).
+func (st *Stage) identitySource(inKey []byte) string {
+	if !st.isUnion() {
+		return st.From
+	}
+	parts, err := cluster.DecodeCompositeKey(string(inKey), 2)
+	if err != nil {
+		return ""
+	}
+	return parts[0]
 }
 
 // MergeEntry names one merged upstream and its alias in the tuple
@@ -271,6 +390,149 @@ type Join struct {
 	// coercion. A stage join INHERITS the joined stage's KeyType
 	// (BuildGraph resolves it) and rejects a declaration here.
 	OnType []string `mapstructure:"onType" json:"onType,omitempty"`
+	// Fan makes a named join MULTIPLY rows, as SQL's join does over a
+	// non-unique column: the stage's fold unit becomes the PAIR (input,
+	// matched row), one per row matching on and where, each its own
+	// element with identity (input key, matched producer key) — a forEach
+	// element's identity. keyPath, when, and emits see the input as $. and
+	// the matched row as $.<as>. (fold time included: the matched row is
+	// part of the fold unit). With optional, an input with no match is one
+	// element with a null alias (LEFT JOIN). Requires as and field (a join
+	// by key matches at most one row); one fan join per stage, and none
+	// beside forEach/fan arms. A topic join may declare field when it
+	// fans: every entity carrying the value matches.
+	Fan bool `mapstructure:"fan" json:"fan,omitempty"`
+	// OrderBy and TieBy choose WHICH matching row a join resolves to: the
+	// greatest by orderBy, then tieBy (both window-style order keys —
+	// expressions over the JOINED row, each optionally asc|desc and nulls
+	// first|last), with the producer key as a hidden floor. SQL's LATERAL
+	// (… ORDER BY … DESC LIMIT 1). Without orderBy a field join resolves
+	// to the bytewise-largest producer key's row, as before. Requires
+	// field (a join by key matches at most one row) and tieBy; a topic
+	// join may declare field when it orders.
+	OrderBy []string `mapstructure:"orderBy" json:"orderBy,omitempty"`
+	TieBy   []string `mapstructure:"tieBy" json:"tieBy,omitempty"`
+	// AsOf bounds an ordered join in business time — SQL's ASOF JOIN: only
+	// rows whose (single, ascending) orderBy value is <= the input's asOf
+	// value are eligible, so an order prices at the rate in effect at its
+	// own time, and a backfilled or corrected version re-resolves exactly
+	// the inputs in [its time, the next version). An expression over the
+	// INPUT (fold-time scope: no aliases). A null asOf, or a null orderBy
+	// value, is never eligible; comparing different families (a time
+	// against a number) is a data error.
+	AsOf string `mapstructure:"asOf" json:"asOf,omitempty"`
+
+	// orderKeys/tieKeys/asOfExpr are the compiled OrderBy/TieBy/AsOf
+	// (validateOrderedJoin).
+	orderKeys, tieKeys []winKey
+	asOfExpr           Node
+}
+
+// ordered reports whether a join resolves through its ordered index.
+func (j *Join) ordered() bool { return len(j.OrderBy) > 0 }
+
+// validateOrderedJoin holds an ordered join's rules (OrderBy/TieBy/AsOf)
+// and compiles them in place.
+func validateOrderedJoin(j *Join, jw string) error {
+	switch {
+	case len(j.OrderBy) == 0 && len(j.TieBy) > 0:
+		return fmt.Errorf("%s: tieBy breaks orderBy's ties — declare orderBy", jw)
+	case len(j.OrderBy) == 0 && j.AsOf != "":
+		return fmt.Errorf("%s: asOf bounds the join's orderBy — declare orderBy (the version's business time) and tieBy", jw)
+	case len(j.OrderBy) == 0:
+		return nil
+	case j.Field == "":
+		return fmt.Errorf("%s: orderBy chooses among the rows matching a field — a join by key matches at most one row; declare field", jw)
+	case len(j.TieBy) == 0:
+		return fmt.Errorf("%s: an ordered join needs tieBy — two versions with equal orderBy values would otherwise resolve by key bytes; a version id is the usual choice", jw)
+	case j.Fan:
+		return fmt.Errorf("%s: fan keeps every match, so orderBy has nothing to choose — drop one", jw)
+	}
+	var err error
+	if j.orderKeys, err = compileWinKeys(j.OrderBy, jw+": orderBy"); err != nil {
+		return err
+	}
+	if j.tieKeys, err = compileWinKeys(j.TieBy, jw+": tieBy"); err != nil {
+		return err
+	}
+	for _, k := range append(append([]winKey(nil), j.orderKeys...), j.tieKeys...) {
+		if UsesSource(k.expr) || exprReferencesParent(k.expr) {
+			return fmt.Errorf("%s: orderBy/tieBy read the joined row — source() and $parent have no meaning there", jw)
+		}
+	}
+	if j.AsOf == "" {
+		j.asOfExpr = nil
+		return nil
+	}
+	switch {
+	case len(j.orderKeys) != 1:
+		return fmt.Errorf("%s: asOf compares against ONE orderBy key (the version's time) — got %d", jw, len(j.orderKeys))
+	case j.orderKeys[0].desc:
+		return fmt.Errorf("%s: asOf finds the latest version at or before the input's time, so its orderBy key ascends — drop desc (a forward as-of is not supported)", jw)
+	case j.orderKeys[0].nullsFirst:
+		return fmt.Errorf("%s: a null orderBy value is never eligible under asOf — drop nulls first", jw)
+	}
+	if j.asOfExpr, err = Compile(j.AsOf); err != nil {
+		return fmt.Errorf("%s: asOf: %w", jw, err)
+	}
+	if UsesSource(j.asOfExpr) || exprReferencesParent(j.asOfExpr) {
+		return fmt.Errorf("%s: asOf reads the input — source() and $parent are not supported there", jw)
+	}
+	if a, b := castFamily(j.asOfExpr), castFamily(j.orderKeys[0].expr); a != "" && b != "" && a != b {
+		return fmt.Errorf("%s: asOf is a %s but orderBy is a %s — the bound compares within one family; cast both alike", jw, a, b)
+	}
+	return nil
+}
+
+// castFamily names the comparison family a cast declares ("" when the
+// expression's type is not declared by a cast).
+func castFamily(n Node) string {
+	c, ok := n.(exprCast)
+	if !ok {
+		return ""
+	}
+	switch c.typ {
+	case "numeric", "integer", "bigint":
+		return "number"
+	case "timestamptz", "timestamp", "date":
+		return "date/time"
+	case "text":
+		return "text"
+	case "interval":
+		return "interval"
+	case "boolean":
+		return "boolean"
+	}
+	return ""
+}
+
+// fanJoin returns the index of the stage's fan join, or -1.
+func (st *Stage) fanJoin() int {
+	for i := range st.Joins {
+		if st.Joins[i].Fan {
+			return i
+		}
+	}
+	return -1
+}
+
+// validateFanJoin holds a fan join's own rules (see Join.Fan).
+func validateFanJoin(st *Stage, j *Join, jw string) error {
+	switch {
+	case j.As == "":
+		return fmt.Errorf("%s: fan multiplies rows by the matched rows — name them with as", jw)
+	case j.Absent:
+		return fmt.Errorf("%s: fan with absent: an anti-join has no row to fan", jw)
+	case j.Field == "":
+		return fmt.Errorf("%s: fan needs field — a join by key matches at most one row (topic entity keys and stage keys are unique); fan joins on a non-unique field", jw)
+	case st.hasFan():
+		return fmt.Errorf("%s: fan beside forEach/fan arms — one fan per fold unit; fan the payload in a prior stage", jw)
+	case st.Reduce == "window":
+		return fmt.Errorf("%s: fan on a window stage — fan in a prior stage keyed by the pair, and window its outputs", jw)
+	case st.Reduce == "liveSet":
+		return fmt.Errorf("%s: fan on a liveSet: delete evidence would be per pair, and a delete-shaped input with no match would be silently lost — fan in a prior stage and liveSet its outputs", jw)
+	}
+	return nil
 }
 
 // target returns the join's dimension source name (topic or stage).
@@ -336,14 +598,30 @@ func ValidateShapes(stages []Stage) error {
 		if strings.ContainsAny(st.Name, "[]") {
 			return fmt.Errorf("%s: brackets in stage names are reserved for the engine's synthesized re-key stages (\"<stage>[<field>]\")", where)
 		}
-		if st.From == "" && len(st.Merge) == 0 {
-			return fmt.Errorf("%s: from is required — a topic id, or a prior stage's name (or merge, to combine prior stages by key)", where)
+		if st.From == "" && len(st.FromList) == 0 && len(st.Merge) == 0 {
+			return fmt.Errorf("%s: from is required — a topic id, or a prior stage's name (or a list of them, or merge, to combine prior stages by key)", where)
 		}
-		if st.From != "" && len(st.Merge) > 0 {
+		if st.From != "" && len(st.FromList) > 0 {
+			return fmt.Errorf("%s: from is one source or a list of sources, not both", where)
+		}
+		if len(st.Sources()) > 0 && len(st.Merge) > 0 {
 			return fmt.Errorf("%s: exactly one of from or merge (a stage consumes one input stream, or combines prior stages by key)", where)
 		}
-		if st.From != "" && (st.From == st.Name || (!names[st.From] && IndexOf(stages, st.From) >= 0)) {
-			return fmt.Errorf("%s: from %q references a stage at or after this one — stages chain in manifest order (move the producer above its consumer)", where, st.From)
+		if len(st.FromList) == 1 {
+			return fmt.Errorf("%s: a from list takes two or more sources — one source is from = %q", where, st.FromList[0])
+		}
+		seenSrc := make(map[string]bool, len(st.FromList))
+		for _, src := range st.Sources() {
+			if src == "" {
+				return fmt.Errorf("%s: from lists an empty source name", where)
+			}
+			if seenSrc[src] {
+				return fmt.Errorf("%s: from lists %q twice — a source's rows are already all in the union; listing it again would count each row twice", where, src)
+			}
+			seenSrc[src] = true
+			if src == st.Name || (!names[src] && IndexOf(stages, src) >= 0) {
+				return fmt.Errorf("%s: from %q references a stage at or after this one — stages chain in manifest order (move the producer above its consumer)", where, src)
+			}
 		}
 		names[st.Name] = true
 		if len(st.Merge) > 0 {
@@ -351,11 +629,17 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 		}
-		if len(st.KeyPath) == 0 && len(st.Merge) == 0 {
+		if len(st.KeyPath) == 0 && len(st.Merge) == 0 && st.Reduce != "window" {
 			return fmt.Errorf("%s: keyPath is required (one path per key part; several = a composite key)", where)
 		}
+		if st.Reduce != "window" && len(st.PartitionBy) > 0 {
+			return fmt.Errorf("%s: partitionBy declares a window — it is only for reduce = \"window\"", where)
+		}
+		if st.Reduce != "window" && st.Reduce != "latest" && (len(st.WindowOrderBy) > 0 || len(st.WindowTieBy) > 0) {
+			return fmt.Errorf("%s: orderBy/tieBy order a window's rows or choose latest's winner — they are only for reduce = \"window\" or \"latest\"", where)
+		}
 		for _, kp := range st.KeyPath {
-			if err := RejectMultiValued(kp, where+": keyPath"); err != nil {
+			if err := validateKeyPart(kp, where+": keyPath"); err != nil {
 				return err
 			}
 		}
@@ -408,6 +692,10 @@ func ValidateShapes(stages []Stage) error {
 			}
 		}
 		switch st.Reduce {
+		case "window":
+			if err := validateWindowStage(st, where); err != nil {
+				return err
+			}
 		case "", "aggregate":
 			if st.OrderBy != "" || st.TieBy != "" {
 				return fmt.Errorf("%s: orderBy/tieBy are only for reduce = \"latest\"", where)
@@ -420,6 +708,12 @@ func ValidateShapes(stages []Stage) error {
 				return fmt.Errorf("%s: orderBy/tieBy are only for reduce = \"latest\"", where)
 			}
 		case "latest":
+			if len(st.WindowOrderBy) > 0 || len(st.WindowTieBy) > 0 {
+				if err := validateLatestOrderList(st, where); err != nil {
+					return err
+				}
+				break
+			}
 			if st.OrderBy == "" {
 				return fmt.Errorf("%s: reduce = \"latest\" needs orderBy — a BUSINESS field; arrival order diverges under backfill", where)
 			}
@@ -439,7 +733,7 @@ func ValidateShapes(stages []Stage) error {
 				}
 			}
 		default:
-			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", \"liveSet\", or omit for a reshape stage)", where, st.Reduce)
+			return fmt.Errorf("%s: reduce %q is invalid (want \"latest\", \"aggregate\", \"liveSet\", \"window\", or omit for a reshape stage)", where, st.Reduce)
 		}
 		if st.ForEach != "" && !MultiValuedPath(st.ForEach) {
 			return fmt.Errorf("%s: forEach path [%s] is single-valued — forEach fans an array into element-inputs; drop it for one input per entity", where, st.ForEach)
@@ -462,9 +756,25 @@ func ValidateShapes(stages []Stage) error {
 			return err
 		}
 		joinAliases := make(map[string]bool, len(st.Joins))
+		// foldTimeAliases are the aliases fold-time positions may not
+		// address: every named join's but a fan join's, whose matched row
+		// is part of the fold unit itself.
+		foldTimeAliases := map[string]bool{}
 		fieldJoinSpaces := map[string]string{}
+		fans := 0
 		for ji, j := range st.Joins {
 			jw := fmt.Sprintf("%s join %d (%q)", where, ji+1, j.target())
+			if err := validateOrderedJoin(&st.Joins[ji], jw); err != nil {
+				return err
+			}
+			if j.Fan {
+				if err := validateFanJoin(st, &j, jw); err != nil {
+					return err
+				}
+				if fans++; fans > 1 {
+					return fmt.Errorf("%s: a second fan join — two would multiply into a cross product of matches; fan in one stage and join the next downstream", jw)
+				}
+			}
 			if !ValidNormalize(j.Normalize) {
 				return fmt.Errorf("%s: normalize %q is not supported (want %q)", jw, j.Normalize, NormalizeLower)
 			}
@@ -475,7 +785,7 @@ func ValidateShapes(stages []Stage) error {
 				return fmt.Errorf("%s: %q is a stage — join it with from = %q (topic joins address topics)", jw, j.Topic, j.Topic)
 			}
 			if j.Field != "" {
-				if j.From == "" {
+				if j.From == "" && !j.Fan && !j.ordered() {
 					return fmt.Errorf("%s: field addresses a STAGE's emitted field — a topic join addresses the entity key; drop field, or fold the topic through a stage first", jw)
 				}
 				if len(j.On) != 1 {
@@ -485,10 +795,12 @@ func ValidateShapes(stages []Stage) error {
 					return err
 				}
 				space := j.Normalize + "\x00" + strings.Join(j.OnType, ",")
-				if prior, ok := fieldJoinSpaces[j.From+"\x00"+j.Field]; ok && prior != space {
+				if prior, ok := fieldJoinSpaces[j.From+"\x00"+j.Field]; ok && prior != space && !j.Fan && !j.ordered() {
 					return fmt.Errorf("%s: two field joins address %s[%s] with different normalize/onType — the synthesized re-key stage has ONE key space; declare them identically", jw, j.From, j.Field)
 				}
-				fieldJoinSpaces[j.From+"\x00"+j.Field] = space
+				if !j.Fan && !j.ordered() {
+					fieldJoinSpaces[j.From+"\x00"+j.Field] = space
+				}
 			}
 			if j.From != "" {
 				fi := IndexOf(stages, j.From)
@@ -512,7 +824,7 @@ func ValidateShapes(stages []Stage) error {
 			}
 			if j.From != "" && j.Field == "" {
 				if fi := IndexOf(stages, j.From); fi >= 0 {
-					if arity, _, _ := ResolvedKeySpace(stages, fi); len(j.On) != arity {
+					if arity, _, _ := ResolvedKeySpace(stages, fi); arity != KeyArityProducer && len(j.On) != arity {
 						return fmt.Errorf("%s: on has %d path(s) but stage %q keys by %d path(s) — a stage join's on addresses the joined stage's key, so the arities must match, in the same order", jw, len(j.On), j.From, arity)
 					}
 				}
@@ -521,6 +833,9 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 			if err := RejectParentPaths(j.Where, jw+" where"); err != nil {
+				return err
+			}
+			if err := RejectSourceInWhens(j.Where, jw+" where", "a join's where filters the joined row, which has no source; test the input's source in the stage's when"); err != nil {
 				return err
 			}
 			if j.As != "" {
@@ -537,6 +852,9 @@ func ValidateShapes(stages []Stage) error {
 					return fmt.Errorf("%s: a second join aliased %q — aliases are unique per stage", jw, j.As)
 				}
 				joinAliases[j.As] = true
+				if !j.Fan {
+					foldTimeAliases[j.As] = true
+				}
 			}
 			if j.Optional && j.As == "" {
 				return fmt.Errorf("%s: optional is only meaningful with as — an unnamed join only filters, and an optional filter is no filter", jw)
@@ -548,8 +866,8 @@ func ValidateShapes(stages []Stage) error {
 				return err
 			}
 		}
-		if len(joinAliases) > 0 {
-			if err := rejectFoldTimeAliasRefs(st, joinAliases, where); err != nil {
+		if len(foldTimeAliases) > 0 {
+			if err := rejectFoldTimeAliasRefs(st, foldTimeAliases, where); err != nil {
 				return err
 			}
 		}
@@ -565,6 +883,7 @@ func ValidateShapes(stages []Stage) error {
 			return fmt.Errorf("%s: emit needs at least one field", where)
 		}
 		emitted := make(map[string]bool, len(st.Emit))
+		st.aggSlots, st.havingCompiled, st.winSlots = nil, nil, nil
 		for k := range st.Emit {
 			e := &st.Emit[k]
 			ew := fmt.Sprintf("%s emit %q", where, e.Field)
@@ -588,12 +907,19 @@ func ValidateShapes(stages []Stage) error {
 				}
 			}
 			if st.Reduce == "aggregate" { //nolint:gocritic // if-else reads clearer than switch here
-				if folds != 1 || plain != 0 {
-					return fmt.Errorf("%s: an aggregate stage's emit carries exactly one of sum, min, max, count, or collect", ew)
+				if folds+plain != 1 || e.From != "" {
+					return fmt.Errorf("%s: an aggregate stage's emit carries exactly one of sum, min, max, count, collect, or an expr over aggregate calls (round(sum($.a) / count(*), 2))", ew)
+				}
+				if e.Expr != "" && len(e.Where) > 0 {
+					return fmt.Errorf("%s: where filters a single fold arm — inside an expr, filter each aggregate call: sum($.x) filter (where …)", ew)
 				}
 			} else {
 				if plain != 1 || folds != 0 {
-					return fmt.Errorf("%s: a reshape stage's emit carries exactly one of from or expr", ew)
+					kind := "reshape"
+					if st.Reduce != "" {
+						kind = st.Reduce
+					}
+					return fmt.Errorf("%s: a %s stage's emit carries exactly one of from or expr", ew, kind)
 				}
 			}
 			if e.Distinct && e.Collect == "" {
@@ -617,6 +943,22 @@ func ValidateShapes(stages []Stage) error {
 					return err
 				}
 			}
+			if st.Reduce == "aggregate" && e.Expr != "" {
+				compiled, err := compileAggregate(e.Expr, &st.aggSlots)
+				if err != nil {
+					return fmt.Errorf("%s: %w", ew, err)
+				}
+				e.compiled = compiled
+				continue
+			}
+			if st.Reduce == "window" && e.Expr != "" {
+				compiled, err := compileWindowExpr(e.Expr, &st.winSlots)
+				if err != nil {
+					return fmt.Errorf("%s: %w", ew, err)
+				}
+				e.compiled = compiled
+				continue
+			}
 			for _, src := range []string{e.Expr, e.Sum, e.Min, e.Max, e.Collect} {
 				if src == "" {
 					continue
@@ -628,8 +970,55 @@ func ValidateShapes(stages []Stage) error {
 				e.compiled = compiled
 			}
 		}
+		if st.Reduce == "window" {
+			if err := validateWindowFrames(st, where); err != nil {
+				return err
+			}
+		}
+		if st.Reduce == "window" && len(st.WindowTieBy) == 0 {
+			for _, w := range st.winSlots {
+				if tieSensitiveFns[w.fn] {
+					return fmt.Errorf("%s: %s(…) depends on the order WITHIN ties (rows with equal orderBy values) — declare tieBy (an id or sequence column is the usual choice); rank, dense_rank, and the running aggregates treat ties as peers and need none", where, w.fn)
+				}
+			}
+		}
+		if st.Having != "" {
+			if st.Reduce != "aggregate" {
+				return fmt.Errorf("%s: having filters an aggregate stage's folded keys (SQL's HAVING) — on other stages the condition is the stage's when", where)
+			}
+			compiled, err := compileAggregate(st.Having, &st.aggSlots)
+			if err != nil {
+				return fmt.Errorf("%s having: %w", where, err)
+			}
+			st.havingCompiled = compiled
+		}
+		if len(st.Merge) > 0 && stageUsesSource(st) {
+			return fmt.Errorf("%s: source() names an input's from source — a merge has no from (its sides are aliased: test $.<alias> is not null)", where)
+		}
 	}
 	return nil
+}
+
+// validateLatestOrderList checks a latest stage's list form — orderBy and
+// tieBy as window-style order keys (expressions, each optionally
+// asc|desc and nulls first|last) — and compiles them in place.
+func validateLatestOrderList(st *Stage, where string) error {
+	switch {
+	case st.OrderBy != "" || st.TieBy != "":
+		return fmt.Errorf("%s: orderBy and tieBy are both single paths or both order-key lists", where)
+	case st.OrderByType != "" || st.TieByType != "":
+		return fmt.Errorf("%s: orderByType/tieByType are for single-path orderBy/tieBy; order keys compare in the value order — cast instead ($.ts::numeric, $.at::timestamptz)", where)
+	case len(st.WindowOrderBy) == 0:
+		return fmt.Errorf("%s: reduce = \"latest\" needs orderBy — a BUSINESS field; arrival order diverges under backfill", where)
+	case len(st.WindowTieBy) == 0:
+		return fmt.Errorf("%s: reduce = \"latest\" needs tieBy — ties are real in the field (37 of 276,286 measured) and an unbroken tie folds nondeterministically; an id column is the usual choice", where)
+	}
+	var err error
+	if st.winOrder, err = compileWinKeys(st.WindowOrderBy, where+": orderBy"); err != nil {
+		return err
+	}
+	st.winTie, err = compileWinKeys(st.WindowTieBy, where+": tieBy")
+	return err
 }
 
 // validateMergeStage checks the merge form: at least two prior stages,
@@ -675,6 +1064,11 @@ func validateMergeStage(stages []Stage, st *Stage, names map[string]bool, where 
 			if err := validateKeyTypes(e.KeyType, len(e.KeyPath), ew+" keyType"); err != nil {
 				return err
 			}
+			for _, kp := range e.KeyPath {
+				if err := validateKeyPart(kp, ew+": keyPath"); err != nil {
+					return err
+				}
+			}
 		} else {
 			if len(e.KeyPath) > 0 || len(e.KeyType) > 0 || e.Normalize != "" {
 				return fmt.Errorf("%s: keyPath/keyType/normalize are only for TOPIC sides — a stage side's key space is the stage's own", ew)
@@ -718,7 +1112,7 @@ func validateMergeStage(stages []Stage, st *Stage, names map[string]bool, where 
 	for ei := range st.Merge[1:] {
 		e := &st.Merge[ei+1]
 		arity, kt, norm := mergeSideSpace(stages, e)
-		if arity != baseArity {
+		if arity != baseArity && arity != KeyArityProducer && baseArity != KeyArityProducer {
 			return fmt.Errorf("%s: merged sides disagree on key arity (%q keys by %d part(s), %q by %d) — merged sides pair by key, so their key spaces must agree", where, baseName, baseArity, mergeSideName(e), arity)
 		}
 		if !equalKeyTypes(baseKT, kt, baseArity) {
@@ -797,12 +1191,26 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 	// inputSet: for a stage-fed, unfanned stage, input-scope paths
 	// address the upstream's emit set. Fanned stages' input paths are
 	// element-scope (dynamic); merges' input is the tuple (aliases).
+	// A union's input is any of its sources' rows, so a path is
+	// unemitted only when NO source can carry it — and any topic source
+	// makes the shape dynamic.
 	var inputSet map[string]bool
 	inputFrom := ""
-	if st.From != "" && !st.hasFan() && len(st.Merge) == 0 {
-		if s, ok := emitSets[st.From]; ok {
-			inputSet = s
-			inputFrom = st.From
+	if len(st.Sources()) > 0 && !st.hasFan() && len(st.Merge) == 0 {
+		union := map[string]bool{}
+		for _, src := range st.Sources() {
+			s, ok := emitSets[src]
+			if !ok {
+				union = nil
+				break
+			}
+			for f := range s {
+				union[f] = true
+			}
+		}
+		if union != nil {
+			inputSet = union
+			inputFrom = strings.Join(st.Sources(), `", "`)
 		}
 	}
 	check := func(path, pos string) error {
@@ -853,9 +1261,24 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 		return nil
 	}
 	for _, kp := range st.KeyPath {
-		if err := check(kp, "keyPath"); err != nil {
-			return err
+		var kerr error
+		walkKeyPaths(kp, func(p string) {
+			if kerr == nil {
+				kerr = check(p, "keyPath")
+			}
+		})
+		if kerr != nil {
+			return kerr
 		}
+	}
+	var werr error
+	windowKeyPathRefs(st, func(p, pos string) {
+		if werr == nil {
+			werr = check(p, pos)
+		}
+	})
+	if werr != nil {
+		return werr
 	}
 	if err := checkWhens(st.When, "when"); err != nil {
 		return err
@@ -891,9 +1314,13 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 				return err
 			}
 		}
-		if e.compiled != nil {
+		compiled := e.compiled
+		if compiled == nil && e.Expr != "" {
+			compiled = compileForPathCheck(st, e.Expr)
+		}
+		if compiled != nil {
 			var werr error
-			walkExprPaths(e.compiled, func(p string) {
+			walkExprPaths(compiled, func(p string) {
 				if werr == nil {
 					werr = check(p, pos)
 				}
@@ -906,6 +1333,19 @@ func rejectUnemittedFieldPaths(stages []Stage, st *Stage, emitSets map[string]ma
 			return err
 		}
 	}
+	if st.Having != "" {
+		if compiled := compileForPathCheck(st, st.Having); compiled != nil {
+			var werr error
+			walkExprPaths(compiled, func(p string) {
+				if werr == nil {
+					werr = check(p, "having")
+				}
+			})
+			if werr != nil {
+				return werr
+			}
+		}
+	}
 	return nil
 }
 
@@ -915,7 +1355,11 @@ func unemittedErr(where, pos, path, producer, field string, set map[string]bool)
 		names = append(names, f)
 	}
 	sort.Strings(names)
-	return fmt.Errorf("%s: %s path [%s] reads field %q which stage %q never emits — a stage's emitted fields {%s} are the whole surface a consumer can address (a missing field here is a config inconsistency, not a null)", where, pos, path, field, producer, strings.Join(names, ", "))
+	who := fmt.Sprintf("stage %q never emits", producer)
+	if strings.Contains(producer, `", "`) {
+		who = fmt.Sprintf(`none of the union's stages "%s" emits`, producer)
+	}
+	return fmt.Errorf("%s: %s path [%s] reads field %q which %s — a stage's emitted fields {%s} are the whole surface a consumer can address (a missing field here is a config inconsistency, not a null)", where, pos, path, field, who, strings.Join(names, ", "))
 }
 
 // pathFirstSegment splits "$.a.b[0].c" into ("a", "b[0].c"); non-$.
@@ -985,9 +1429,24 @@ func rejectFoldTimeAliasRefs(st *Stage, aliases map[string]bool, where string) e
 		return err
 	}
 	for _, kp := range st.KeyPath {
-		if err := checkPath(kp, "keyPath"); err != nil {
-			return err
+		var kerr error
+		walkKeyPaths(kp, func(p string) {
+			if kerr == nil {
+				kerr = checkPath(p, "keyPath")
+			}
+		})
+		if kerr != nil {
+			return kerr
 		}
+	}
+	var werr error
+	windowKeyPathRefs(st, func(p, pos string) {
+		if werr == nil {
+			werr = checkPath(p, pos)
+		}
+	})
+	if werr != nil {
+		return werr
 	}
 	if st.ForEach != "" {
 		if err := checkPath(st.ForEach, "forEach"); err != nil {
@@ -1006,6 +1465,17 @@ func rejectFoldTimeAliasRefs(st *Stage, aliases map[string]bool, where string) e
 		for _, on := range st.Joins[ji].On {
 			if err := checkPath(on, "join on"); err != nil {
 				return err
+			}
+		}
+		if n := st.Joins[ji].asOfExpr; n != nil {
+			var aerr error
+			walkExprPaths(n, func(p string) {
+				if aerr == nil {
+					aerr = checkPath(p, "join asOf")
+				}
+			})
+			if aerr != nil {
+				return aerr
 			}
 		}
 	}
@@ -1058,8 +1528,27 @@ func ResolvedKeySpace(stages []Stage, i int) (arity int, keyType []string, norma
 	if len(st.Merge) > 0 {
 		return mergeSideSpace(stages, &st.Merge[0])
 	}
+	if st.Reduce == "window" {
+		// A window stage's rows key by the INPUT's key: a prior stage's
+		// key space, inherited — or a topic's entity keys, whose shape is
+		// the producer's (KeyArityProducer).
+		// A union's rows key by (source, input key): two parts, but the
+		// input key's own shape is each source's, so arity is unchecked.
+		if fi := IndexOf(stages, st.From); fi >= 0 && fi < i {
+			return ResolvedKeySpace(stages, fi)
+		}
+		return KeyArityProducer, nil, ""
+	}
 	return len(st.KeyPath), st.KeyType, st.Normalize
 }
+
+// KeyArityProducer is the resolved arity of a key space the PRODUCER
+// shapes — a window stage over a topic keys its rows by the topic's
+// entity keys, single or composite as the producer writes them. Arity
+// checks skip it: as with a topic join's on, the arity is the config
+// author's contract (a composite entity key decodes by the consumer's
+// declared column count).
+const KeyArityProducer = -1
 
 // ProbeKey renders a caller's key parts in stage i's RESOLVED key
 // space — typed per position, normalized, composed through the
@@ -1074,7 +1563,7 @@ func ResolvedKeySpace(stages []Stage, i int) (arity int, keyType []string, norma
 // errors loudly.
 func ProbeKey(sts []Stage, i int, keyParts []string) (string, bool, error) {
 	arity, kts, norm := ResolvedKeySpace(sts, i)
-	if len(keyParts) != arity {
+	if arity != KeyArityProducer && len(keyParts) != arity {
 		return "", false, fmt.Errorf("stage %q keys by %d part(s) but the probe carries %d — pass one probeKey per keyPath position, in order", sts[i].Name, arity, len(keyParts))
 	}
 	parts := make([]string, len(keyParts))

@@ -46,8 +46,7 @@ type Raft struct {
 	leaderState  *LeaderState
 	tickInterval time.Duration
 	// compactMaxSize and compactMaxAge implement the "10GB or 1hr"
-	// policy described in docs/event-log-architecture.md §
-	// "Compaction policy". maybeCompact fires when either threshold is
+	// compaction policy. maybeCompact fires when either threshold is
 	// crossed; 0 disables that limb. Both zero disables automatic
 	// compaction entirely.
 	compactMaxSize uint64
@@ -62,12 +61,27 @@ type Raft struct {
 	// Set before ApplyConfChange exposes a configuration, so membership
 	// waiters can require Raft to acknowledge its entry through Advance.
 	lastMembershipIndex atomic.Uint64
-	// lastCompactTime is the wall-clock moment of the most recent
-	// compaction (or startRaft time if no compaction has happened).
-	// The age limb of the policy fires when (time.Now() -
-	// lastCompactTime) exceeds compactMaxAge. Mutated only from the
-	// serveChannels goroutine.
-	lastCompactTime time.Time
+	// lastCompactTime is the wall-clock moment (UnixNano) of the most
+	// recent compaction (or startRaft time if no compaction has happened).
+	// The age limb of the policy fires when (time.Now() - lastCompactTime)
+	// exceeds compactMaxAge. Written by the Ready loop (finishCompaction),
+	// read by the apply goroutine (prepareCompaction).
+	lastCompactTime atomic.Int64
+	// pendingCompactTo is the raft-log truncation point a snapshot has been
+	// taken for (prepareCompaction, on the apply goroutine, where the state
+	// matches the applied index exactly) and the Ready loop has not yet cut
+	// (finishCompaction, serialized with Save's appends). 0 = none.
+	pendingCompactTo atomic.Uint64
+
+	// applyQ hands committed entries to the apply goroutine (runApply), so a
+	// slow apply never stops this node's clock: ticks, elections, leases and
+	// replication all run on the Ready loop. queuedTo and appliedTo are the
+	// last raft index queued and applied; their gap bounds proposals (see
+	// ApplyBacklog). applyDoneC closes when runApply exits.
+	applyQ     *applyQueue
+	queuedTo   atomic.Uint64
+	appliedTo  atomic.Uint64
+	applyDoneC chan struct{}
 	// compactionPressure is a hint set by db's disk-usage watcher when free
 	// space drops to critical/full: while set, maybeCompact triggers on every
 	// Ready iteration (subject to the same compact-point safety constraints)
@@ -84,7 +98,7 @@ type Raft struct {
 	// so blocking db.Propose can release waiters once their proposal has
 	// been applied. nil disables the callback (used by raft_test which
 	// constructs Raft directly without a db.DB).
-	applyNotifier func(data []byte)
+	applyNotifier func(index uint64, data []byte)
 
 	// appliedIndexNotifier is invoked once per Ready iteration that
 	// applied at least one committed entry (i.e. AppliedIndex advanced).
@@ -164,7 +178,7 @@ func NewRaft(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, p
 	return newRaftWithOptions(id, ps, s, proposeC, proposeConfC, nil, nil, nil, cfg.logger, cfg)
 }
 
-func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
+func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-chan []byte, proposeConfC <-chan *raftpb.ConfChangeV2, applyNotifier func(index uint64, data []byte), appliedIndexNotifier func(), lostNotifier func([]uint64), logger *zap.Logger, cfg options) (<-chan error, *Raft) {
 	errorC := make(chan error)
 
 	n := &Raft{
@@ -177,7 +191,8 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-cha
 		tickInterval:         cfg.tickInterval,
 		compactMaxSize:       cfg.compactMaxSize,
 		compactMaxAge:        cfg.compactMaxAge,
-		lastCompactTime:      time.Now(),
+		applyQ:               newApplyQueue(),
+		applyDoneC:           make(chan struct{}),
 		storage:              s,
 		applyNotifier:        applyNotifier,
 		appliedIndexNotifier: appliedIndexNotifier,
@@ -195,6 +210,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-cha
 		logger:  logger,
 		metrics: cfg.metrics,
 	}
+	n.lastCompactTime.Store(time.Now().UnixNano())
 	// Install the truncation lost-notifier on the storage BEFORE startRaft
 	// spawns serveChannels (the sole appendEntries caller, where the
 	// callback fires). Setting it here, on this goroutine, before the spawn
@@ -264,8 +280,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// so a partitioned-then-rejoining node cannot disrupt the cluster
 		// by force-stepping-down a healthy leader with an inflated term.
 		// Recommended by Ongaro's thesis §9.6 and used by every production
-		// etcd-raft deployment. See docs/event-log-architecture.md
-		// § "PreVote and election timeout".
+		// etcd-raft deployment.
 		PreVote: true,
 		// CheckQuorum is PreVote's required companion for the DIRECTIONAL
 		// partition case. etcd raft's PreVote grant logic allows peers to
@@ -369,6 +384,11 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	n.reconcileTransportFromMembership()
 
 	go n.serveRaft()
+	// Seed the apply marks from the durable applied index: raft re-delivers
+	// everything above it on start.
+	n.appliedTo.Store(n.storage.AppliedIndex())
+	n.queuedTo.Store(n.storage.AppliedIndex())
+	go n.runApply()
 	go n.serveChannels()
 }
 
@@ -416,10 +436,9 @@ func (n *Raft) reconcileTransportFromMembership() {
 // the durable applied index, and once the watermark passes the conf-change entry
 // raft's c.Applied SUPPRESSES its re-delivery. So a swallowed write error would
 // let the watermark move past a peer URL that is now permanently absent — the
-// exact durability-watermark violation that produced confstate-lost-in-crash-
-// window (docs/event-log-architecture.md § "The central invariant", Face 2). The
-// peer URL is out-of-band, re-delivery-suppressed state, so it owes strategy (2):
-// write it atomically with the applied index, or refuse to advance the watermark
+// exact durability-watermark violation: the applied index must never pass
+// state that was not durably written. The peer URL is out-of-band,
+// re-delivery-suppressed state, so it owes strategy (2): write it atomically with the applied index, or refuse to advance the watermark
 // past a lost write. Crashing does the latter — a restart finds the applied index
 // unadvanced, raft re-delivers the conf change, and this re-runs (PutMemberPeerURL
 // is idempotent LWW). Matches the fatal-on-disk-error posture ApplyCommittedBatch
@@ -650,6 +669,12 @@ func (n *Raft) serveChannels() {
 		select {
 		case <-ticker.C:
 			n.node.Tick()
+			// An idle node applies no batches, so the apply goroutine never
+			// gets to prepare a compaction; do it here while apply is idle
+			// (the age limb must fire on an idle cluster too: a member added
+			// to it is sent the latest snapshot, which must include it).
+			n.applyQ.ifIdle(n.prepareCompaction)
+			n.finishCompaction()
 		case rd := <-n.node.Ready():
 			status := n.node.Status()
 			isLeader := status.RaftState == raft.StateLeader
@@ -703,6 +728,22 @@ func (n *Raft) serveChannels() {
 			// duration; the node is not-ready meanwhile. A false return is
 			// a storage without an event log (the fail-fast path below says
 			// so) or the node closing.
+			// A Ready carrying a snapshot or a membership change runs in
+			// step with apply, as it always did: it first waits for every
+			// queued batch to apply. A snapshot install replaces bbolt and
+			// its catch-up appends to the event log, neither of which may
+			// race an apply; a conf change's ConfState is written
+			// atomically with the applied index of ITS batch, and raft must
+			// see it applied (Advance) before the notifiers wake a waiter
+			// that proposes the next one. Both are rare. Every other Ready
+			// hands its committed entries to the apply goroutine and
+			// advances at once, so this loop never waits on apply.
+			syncApply := !raft.IsEmptySnap(rd.Snapshot) || hasConfChange(rd.CommittedEntries)
+			if syncApply && !n.applyQ.drain() {
+				closeRaftStop()
+				return
+			}
+
 			releaseCatchUp := func() {}
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				if needIndex, needGen, needed := n.snapshotNeedsCatchUp(rd.Snapshot); needed {
@@ -729,23 +770,31 @@ func (n *Raft) serveChannels() {
 				return
 			}
 			n.transport.Send(rd.Messages)
+			if !syncApply {
+				releaseCatchUp()
+				if k := len(rd.CommittedEntries); k > 0 {
+					n.queuedTo.Store(rd.CommittedEntries[k-1].GetIndex())
+					n.applyQ.push(rd.CommittedEntries)
+				}
+				// raft may count these entries applied before they are:
+				// what it uses its applied index for is held back
+				// regardless (a conf change runs in step above; compaction
+				// trails the durable applied index).
+				n.node.Advance()
+				n.finishCompaction()
+				continue
+			}
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				n.processSnapshot(rd.Snapshot)
+				if idx := n.storage.AppliedIndex(); idx > n.appliedTo.Load() {
+					n.appliedTo.Store(idx)
+					n.queuedTo.Store(max(n.queuedTo.Load(), idx))
+				}
 			}
 			// The storage's own maintenance held off during a catch-up (a
 			// pending scrub) may run now, over the finished log and the
 			// installed metadata.
 			releaseCatchUp()
-			// Apply MUST complete before Advance() per the etcd raft
-			// contract. Apply errors are crash-fatal: continuing past a
-			// half-applied entry diverges the state machine, retrying
-			// risks masking programming bugs, and disk failures leave
-			// the node inconsistent in a way that's worse to keep
-			// running than to crash. (Same posture etcd's raftexample
-			// takes.) The batch call hoists the per-entry fsyncs (event-log
-			// append, appliedIndex persist) to per-Ready; the loop below
-			// keeps the per-entry bookkeeping (notifier, conf changes,
-			// metrics) in entry order.
 			// Apply conf-changes FIRST — BEFORE ApplyCommittedBatch advances
 			// the durable applied index. applyConfChange calls
 			// node.ApplyConfChange (which computes the authoritative ConfState)
@@ -782,7 +831,7 @@ func (n *Raft) serveChannels() {
 					// this node now proposes v2 exclusively. etcd raft still
 					// applies v1 (ConfChangeI.AsV2 promotes it), so replaying it
 					// keeps an upgraded node consistent with what the old leader
-					// committed. See docs/operations/membership.md.
+					// committed.
 					var cc raftpb.ConfChange
 					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
 						n.sendRaftError(err) // guarded — see the v2 twin above
@@ -792,84 +841,25 @@ func (n *Raft) serveChannels() {
 					n.applyConfChange(&cc, cc.Context)
 				}
 			}
-
-			applyStart := time.Now()
-			if err := n.storage.ApplyCommittedBatch(rd.CommittedEntries); err != nil {
-				n.logger.Fatal("apply committed entries", zap.Int("count", len(rd.CommittedEntries)), zap.Error(err))
+			if k := len(rd.CommittedEntries); k > 0 {
+				n.queuedTo.Store(max(n.queuedTo.Load(), rd.CommittedEntries[k-1].GetIndex()))
 			}
-			applyDur := time.Since(applyStart)
-			// Advance HERE — the entries are saved and applied, which is all
-			// raft asks — and before anything below observes "applied":
+			// Advance HERE — after the apply, before anything observes
+			// "applied":
 			//
 			//   - raft's own applied index moves only at Advance. The applied
-			//     broadcast below wakes waiters that may propose next (a
-			//     membership change proposes the next conf change the moment
-			//     the previous one shows in the configuration), and raft
-			//     silently drops a conf change proposed while its applied
-			//     index has not passed the previous one. Firing the broadcast
-			//     before Advance let exactly that happen (a CI hang,
-			//     2026-09-05). After Advance, "applied" means raft agrees.
+			//     broadcast wakes waiters that may propose next (a membership
+			//     change proposes the next conf change the moment the previous
+			//     one shows in the configuration), and raft silently drops a
+			//     conf change proposed while its applied index has not passed
+			//     the previous one. Firing the broadcast before Advance let
+			//     exactly that happen (a CI hang, 2026-09-05). After Advance,
+			//     "applied" means raft agrees.
 			//   - raft's storage contract forbids compacting past raft's own
-			//     applied index; maybeCompact below compacts relative to the
-			//     durable applied index, which after a batch of more than the
-			//     safety buffer is ahead of raft's until Advance.
-			//
-			// Nothing between here and the old placement fed raft: the
-			// notifiers, metrics, the storage invariant, and compaction all
-			// read storage, which raft already reads concurrently.
-			n.node.Advance()
-			for _, entry := range rd.CommittedEntries {
-				if n.metrics != nil {
-					// Batch-amortized share: per-entry apply is no longer
-					// individually timed; the shares sum to the batch's
-					// true duration so rate/latency aggregates stay honest.
-					n.metrics.EntryApplied(entry.GetIndex(), applyDur/time.Duration(len(rd.CommittedEntries)))
-				}
-				// Fire the apply notifier once the storage apply has
-				// succeeded, so blocking db.Propose unblocks promptly. The
-				// notifier is no-op if nil (raft_test path) or if the
-				// proposal's RequestID is 0 (system-internal proposers
-				// or pre-PR2 entries).
-				if n.applyNotifier != nil && entry.GetType() == raftpb.EntryNormal && entry.Data != nil {
-					n.applyNotifier(entry.Data)
-				}
-			}
-
-			// AppliedIndex advanced this iteration (every committed entry
-			// bumps it, regardless of type), so wake any LinearizableRead
-			// blocked on AppliedIndex >= its ReadIndex. Fired once per
-			// Ready rather than per entry to keep the broadcast cheap.
-			if n.appliedIndexNotifier != nil && len(rd.CommittedEntries) > 0 {
-				n.appliedIndexNotifier()
-			}
-
-			if n.metrics != nil {
-				fi, _ := n.storage.FirstIndex()
-				li, _ := n.storage.LastIndex()
-				n.metrics.SetIndexRange(fi, li)
-				// Surface degraded configs (persisted but not buildable on
-				// this node — usually a missing ${VAR} secret). Optional
-				// interface so only real storage reports it; the in-memory
-				// test double doesn't implement it.
-				if r, ok := n.storage.(configBuildErrorReporter); ok {
-					n.metrics.SetConfigBuildErrors(r.ConfigBuildErrorCount())
-				}
-			}
-
-			// Storage invariant: P_local == R_local. See
-			// docs/event-log-architecture.md § "The central invariant"
-			// (Face 1 — the storage highwatermark). A snapshot that would
-			// advance the raft side past the event log is caught up from
-			// a peer before it is saved (above), so a violation here is a
-			// storage that cannot catch up or a bug — and this node cannot
-			// safely keep serving reads or voting on a log with a gap.
-			n.checkStorageInvariant()
-
-			// If configured, trim the raft log up to a safe point so we
-			// don't retain consensus transport indefinitely. The
-			// permanent event log keeps the events forever; the raft
-			// log only exists to move entries between peers and to
-			// satisfy the `appliedIndex` replay window.
+			//     applied index; compaction works from the durable applied
+			//     index, which after a batch of more than the safety buffer is
+			//     ahead of raft's until Advance.
+			n.applyBatch(rd.CommittedEntries, n.node.Advance)
 			n.maybeCompact()
 		case <-n.raftStopC:
 			return
@@ -945,7 +935,14 @@ func (n *Raft) stopTransport() {
 func (n *Raft) Close() error {
 	n.closeOnce.Do(func() {
 		close(n.closeC)
+		// Stop the apply goroutine after its current batch (the queued ones
+		// are durable in the raft log; a restart replays them), which also
+		// releases a Ready loop waiting in drain.
+		if n.applyQ != nil {
+			n.applyQ.stop()
+		}
 		<-n.serveChannelsDoneC
+		<-n.applyDoneC
 		n.stopTransport()
 		if n.node != nil {
 			n.node.Stop()
@@ -1114,8 +1111,7 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 }
 
 // checkStorageInvariant enforces P_local == R_local after every Ready
-// iteration. See docs/event-log-architecture.md § "The storage
-// invariant" for the full rationale. Briefly:
+// iteration:
 //
 //   - P_local is storage.EventIndex() — the highest raft index this
 //     node has durably written to its permanent event log.
@@ -1129,8 +1125,7 @@ func (n *Raft) dispatchReadStates(states []raft.ReadState) {
 // advanced appliedIndex past the permanent event log highwatermark — and
 // the Ready loop fills the event log from a peer before it saves such a
 // snapshot (catchup.go), so a violation means the storage could not catch
-// up. The node fatal-exits with a pointer to the rebuild runbook; see
-// docs/operations/rebuild.md.
+// up. The node fatal-exits with a pointer to the rebuild runbook.
 func (n *Raft) checkStorageInvariant() {
 	p := n.storage.EventIndex()
 	r := n.storage.AppliedIndex()
@@ -1157,8 +1152,7 @@ func (n *Raft) checkStorageInvariant() {
 
 // maybeCompact trims the raft log up to a safe point when either
 // compactMaxSize or compactMaxAge is exceeded — the "10GB or 1hr"
-// policy described in docs/event-log-architecture.md § "Compaction
-// policy". Safety constraints from the same doc:
+// compaction policy. Safety constraints:
 //
 //   - Compact point must be ≤ this node's permanent event log
 //     highwatermark (EventIndex), so we never forget a raft entry
@@ -1175,6 +1169,18 @@ func (n *Raft) checkStorageInvariant() {
 // that fall behind still receive an InstallSnapshot if the leader's
 // log has moved past them; that's the intended shape.
 func (n *Raft) maybeCompact() {
+	n.prepareCompaction()
+	n.finishCompaction()
+}
+
+// prepareCompaction decides whether to compact and, if so, takes the
+// metadata snapshot. It runs where the state matches the applied index
+// exactly: on the apply goroutine between batches, or in step on the Ready
+// loop. The raft-log cut it prepares is left to finishCompaction.
+func (n *Raft) prepareCompaction() {
+	if n.pendingCompactTo.Load() > n.lastCompactedIndex.Load() {
+		return // a prepared cut is still waiting for the Ready loop
+	}
 	// Disk pressure is an independent trigger limb: it fires even when both
 	// the size and age limbs are disabled, so a node under disk pressure
 	// still compacts whatever is safe to free space. The compact-point
@@ -1199,7 +1205,7 @@ func (n *Raft) maybeCompact() {
 		}
 	}
 	if !triggered && n.compactMaxAge > 0 {
-		if time.Since(n.lastCompactTime) >= n.compactMaxAge {
+		if time.Since(time.Unix(0, n.lastCompactTime.Load())) >= n.compactMaxAge {
 			triggered = true
 			reason = "age"
 		}
@@ -1244,25 +1250,152 @@ func (n *Raft) maybeCompact() {
 	// makes a lagging follower replay an already-applied conf-change (etcd's
 	// Changer panics "config is already joint") and bricks a crashed install (the
 	// embedded applied index sits ahead of the snapshot Index). Only the raft-log
-	// truncation below trails by safetyBuffer, preserving the AppendEntries window.
+	// truncation trails by safetyBuffer, preserving the AppendEntries window.
 	if _, err := n.storage.CreateSnapshot(applied, nil); err != nil {
 		n.logger.Warn("create snapshot for compaction", zap.Uint64("index", applied), zap.Error(err))
+		return
+	}
+	n.logger.Debug("raft log compaction prepared",
+		zap.Uint64("snapshotIndex", applied),
+		zap.Uint64("compactTo", compactTo),
+		zap.String("reason", reason))
+	n.pendingCompactTo.Store(compactTo)
+}
+
+// finishCompaction cuts the raft log at the point prepareCompaction took a
+// snapshot for. Ready loop only: the cut is serialized with Save's appends,
+// which share the entry log lock-free.
+func (n *Raft) finishCompaction() {
+	compactTo := n.pendingCompactTo.Load()
+	if compactTo <= n.lastCompactedIndex.Load() {
 		return
 	}
 	if err := n.storage.Compact(compactTo); err != nil {
 		if errors.Is(err, cluster.ErrCompactionDeferred) {
 			n.logger.Debug("raft log compaction deferred by a layout freeze; retrying next cycle", zap.Uint64("compactTo", compactTo))
-		} else {
-			n.logger.Warn("compact raft log", zap.Uint64("compactTo", compactTo), zap.Error(err))
+			return
 		}
+		n.logger.Warn("compact raft log", zap.Uint64("compactTo", compactTo), zap.Error(err))
+		// Prepare again from scratch next time.
+		n.pendingCompactTo.Store(n.lastCompactedIndex.Load())
 		return
 	}
 	n.lastCompactedIndex.Store(compactTo)
-	n.lastCompactTime = time.Now()
-	n.logger.Debug("raft log compacted",
-		zap.Uint64("snapshotIndex", applied),
-		zap.Uint64("compactTo", compactTo),
-		zap.String("reason", reason))
+	n.lastCompactTime.Store(time.Now().UnixNano())
+	n.logger.Debug("raft log compacted", zap.Uint64("compactTo", compactTo))
+}
+
+// hasConfChange reports whether entries hold a membership change.
+func hasConfChange(entries []*raftpb.Entry) bool {
+	for _, e := range entries {
+		if t := e.GetType(); t == raftpb.EntryConfChange || t == raftpb.EntryConfChangeV2 {
+			return true
+		}
+	}
+	return false
+}
+
+// runApply is the apply goroutine: it applies the Ready loop's committed
+// entries in order, then prepares any due compaction while the state still
+// matches the applied index.
+func (n *Raft) runApply() {
+	defer close(n.applyDoneC)
+	for {
+		entries, ok := n.applyQ.pop()
+		if !ok {
+			return
+		}
+		n.applyBatch(entries, nil)
+		n.prepareCompaction()
+		n.applyQ.done()
+	}
+}
+
+// applyBatch applies one Ready's committed entries and announces them:
+// waiters, the applied broadcast, metrics, the storage invariant. advance,
+// when set, runs after the apply and before the announcements (the in-step
+// path's node.Advance).
+//
+// Apply errors are crash-fatal: continuing past a half-applied entry diverges
+// the state machine, retrying risks masking programming bugs, and disk
+// failures leave the node inconsistent in a way that's worse to keep running
+// than to crash. (Same posture etcd's raftexample takes.) The batch call
+// hoists the per-entry fsyncs (event-log append, appliedIndex persist) to
+// per-Ready; the loop below keeps the per-entry bookkeeping (notifier,
+// metrics) in entry order.
+func (n *Raft) applyBatch(entries []*raftpb.Entry, advance func()) {
+	applyStart := time.Now()
+	if len(entries) > 0 {
+		if err := n.storage.ApplyCommittedBatch(entries); err != nil {
+			n.logger.Fatal("apply committed entries", zap.Int("count", len(entries)), zap.Error(err))
+		}
+	}
+	applyDur := time.Since(applyStart)
+	if advance != nil {
+		advance()
+	}
+	if len(entries) == 0 {
+		// A snapshot-only Ready still checks the invariant: an installed
+		// snapshot past this node's event log must stop it.
+		n.checkStorageInvariant()
+		return
+	}
+	n.appliedTo.Store(entries[len(entries)-1].GetIndex())
+	for _, entry := range entries {
+		if n.metrics != nil {
+			// Batch-amortized share: per-entry apply is no longer
+			// individually timed; the shares sum to the batch's
+			// true duration so rate/latency aggregates stay honest.
+			n.metrics.EntryApplied(entry.GetIndex(), applyDur/time.Duration(len(entries)))
+		}
+		// Fire the apply notifier once the storage apply has
+		// succeeded, so blocking db.Propose unblocks promptly. The
+		// notifier is no-op if nil (raft_test path) or if the
+		// proposal's RequestID is 0 (system-internal proposers
+		// or pre-PR2 entries).
+		if n.applyNotifier != nil && entry.GetType() == raftpb.EntryNormal && entry.Data != nil {
+			n.applyNotifier(entry.GetIndex(), entry.Data)
+		}
+	}
+
+	// AppliedIndex advanced (every committed entry bumps it, regardless of
+	// type), so wake any LinearizableRead blocked on AppliedIndex >= its
+	// ReadIndex. Fired once per batch rather than per entry to keep the
+	// broadcast cheap.
+	if n.appliedIndexNotifier != nil {
+		n.appliedIndexNotifier()
+	}
+
+	if n.metrics != nil {
+		fi, _ := n.storage.FirstIndex()
+		li, _ := n.storage.LastIndex()
+		n.metrics.SetIndexRange(fi, li)
+		// Surface degraded configs (persisted but not buildable on
+		// this node — usually a missing ${VAR} secret). Optional
+		// interface so only real storage reports it; the in-memory
+		// test double doesn't implement it.
+		if r, ok := n.storage.(configBuildErrorReporter); ok {
+			n.metrics.SetConfigBuildErrors(r.ConfigBuildErrorCount())
+		}
+	}
+
+	// Storage invariant: P_local == R_local (the event log never trails
+	// the applied index). A snapshot that would
+	// advance the raft side past the event log is caught up from
+	// a peer before it is saved (above), so a violation here is a
+	// storage that cannot catch up or a bug — and this node cannot
+	// safely keep serving reads or voting on a log with a gap.
+	n.checkStorageInvariant()
+}
+
+// ApplyBacklog is how many committed entries this node has queued but not
+// yet applied.
+func (n *Raft) ApplyBacklog() uint64 {
+	q, a := n.queuedTo.Load(), n.appliedTo.Load()
+	if q <= a {
+		return 0
+	}
+	return q - a
 }
 
 // processSnapshot installs a snapshot delivered by the raft Ready
@@ -1275,8 +1408,7 @@ func (n *Raft) maybeCompact() {
 // A successful restore leaves appliedIndex at snap.Metadata.Index. If
 // this node's permanent event log is behind that index, the Ready
 // loop's checkStorageInvariant fatal-exits at the end of the current
-// iteration — by design. See docs/event-log-architecture.md §
-// "Severe lag — v1 manual rebuild". A RestoreSnapshot error here is
+// iteration — by design. A RestoreSnapshot error here is
 // also fatal; a half-applied snapshot leaves the node in a hybrid
 // state that is worse than crashing and letting an operator rebuild.
 func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
@@ -1329,7 +1461,7 @@ type httpTransportRaft struct {
 // the first heartbeat lands evades both the library panic and this guard;
 // closing that needs member-incarnation identity (protocol-level), and the
 // true prevention is operational either way — members are rebuilt, never
-// restored (docs/operations/rebuild.md). A LastIndex read error skips the
+// restored. A LastIndex read error skips the
 // guard rather than fatal-ing on a read; the library panic remains the
 // backstop.
 func (n *httpTransportRaft) Process(ctx context.Context, m *raftpb.Message) error {

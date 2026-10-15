@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# The event-store acceptance workload, run from a bench bundle (see
+# bundle.sh). It runs on a load machine that has Docker and SSH access to the
+# cluster machines, and for each committed build and source engine:
+# starts the cluster, starts the source and read-model databases, runs
+# eventstore-load, collects the results, and tears it all down.
+#
+#   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [-- eventstore-load flags]
+#
+# Environment:
+#   BENCH_NODES        cluster machine addresses, space-separated; "local" runs
+#                      the nodes on this machine (BENCH_LOCAL_NODES, default 3)
+#   BENCH_SSH_USER     SSH user on the cluster machines
+#   BENCH_SSH_KEY      SSH key for them
+#   BENCH_DATA_DIR     data directory on every machine (default ./local-data)
+#   BENCH_RESULTS_DIR  where results go (default ./results)
+#   BENCH_RUN_ID, BENCH_INSTANCE_TYPES   recorded in the results
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+labels=$(ls "$here/bin" | grep -v '^eventstore-load$' | paste -sd, -)
+engines=postgres
+while [ $# -gt 0 ]; do
+  case $1 in
+  --labels) labels=$2; shift 2 ;;
+  --engines) engines=$2; shift 2 ;;
+  --) shift; break ;;
+  *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+load_args=("$@")
+
+DATA=${BENCH_DATA_DIR:-$here/local-data}
+RESULTS=${BENCH_RESULTS_DIR:-$here/results}
+NODES=${BENCH_NODES:-local}
+PW=BenchPassw0rd2026 # throwaway databases on a throwaway rig
+API_PORT=18080
+PEER_PORT=18079
+mkdir -p "$DATA" "$RESULTS"
+
+if [ "$NODES" = local ]; then
+  n=${BENCH_LOCAL_NODES:-3}
+  hosts=()
+  for i in $(seq 1 "$n"); do hosts+=(127.0.0.1); done
+  src_host=127.0.0.1
+else
+  read -r -a hosts <<<"$NODES"
+  src_host=$(hostname -I | awk '{print $1}')
+fi
+count=${#hosts[@]}
+
+api_port() { if [ "$NODES" = local ]; then echo $((API_PORT + ($1 - 1) * 10000)); else echo $API_PORT; fi; }
+peer_port() { if [ "$NODES" = local ]; then echo $((PEER_PORT + ($1 - 1) * 10000)); else echo $PEER_PORT; fi; }
+node_dir() { if [ "$NODES" = local ]; then echo "$DATA/node$1"; else echo "$DATA/bench"; fi; }
+
+# on_node i command: run a shell command on node i.
+on_node() {
+  local i=$1; shift
+  if [ "$NODES" = local ]; then
+    sh -c "$*"
+  else
+    ssh -i "$BENCH_SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+      "$BENCH_SSH_USER@${hosts[$((i - 1))]}" "$*"
+  fi
+}
+
+install_committed() {
+  local label=$1 i
+  for i in $(seq 1 "$count"); do
+    local dir; dir=$(node_dir "$i")
+    on_node "$i" "mkdir -p '$dir'"
+    if [ "$NODES" = local ]; then
+      cp "$here/bin/$label/committed" "$dir/committed-bin"
+    else
+      scp -q -i "$BENCH_SSH_KEY" -o BatchMode=yes "$here/bin/$label/committed" \
+        "$BENCH_SSH_USER@${hosts[$((i - 1))]}:$dir/committed-bin"
+    fi
+  done
+}
+
+peers() {
+  local i out=
+  for i in $(seq 1 "$count"); do
+    out="$out${out:+,}$i=http://${hosts[$((i - 1))]}:$(peer_port "$i")"
+  done
+  echo "$out"
+}
+
+start_nodes() {
+  local i p; p=$(peers)
+  for i in $(seq 1 "$count"); do
+    local dir; dir=$(node_dir "$i")
+    on_node "$i" "rm -rf '$dir/data' && mkdir -p '$dir/data' && cd '$dir' || exit 1; \
+      APP_DB_PASSWORD=$PW COMMITTED_NODE_ID=$i COMMITTED_API_ADDR=:$(api_port "$i") \
+      COMMITTED_PEER_URL=http://${hosts[$((i - 1))]}:$(peer_port "$i") COMMITTED_PEERS=$p \
+      COMMITTED_DATA_DIR='$dir/data' nohup ./committed-bin node > node.log 2>&1 < /dev/null & echo \$! > '$dir/pid'"
+  done
+}
+
+stop_nodes() {
+  local i
+  for i in $(seq 1 "$count"); do
+    local dir; dir=$(node_dir "$i")
+    on_node "$i" "if [ -f '$dir/pid' ]; then kill \$(cat '$dir/pid') 2>/dev/null; \
+      for t in \$(seq 50); do kill -0 \$(cat '$dir/pid') 2>/dev/null || break; sleep 0.2; done; \
+      kill -9 \$(cat '$dir/pid') 2>/dev/null; rm -f '$dir/pid'; fi; true" || true
+  done
+}
+
+collect_nodes() {
+  local out=$1 i
+  mkdir -p "$out/nodes"
+  for i in $(seq 1 "$count"); do
+    local dir; dir=$(node_dir "$i")
+    if [ "$NODES" = local ]; then
+      cp "$dir/node.log" "$out/nodes/node$i.log" 2>/dev/null || true
+    else
+      scp -q -i "$BENCH_SSH_KEY" -o BatchMode=yes "$BENCH_SSH_USER@${hosts[$((i - 1))]}:$dir/node.log" \
+        "$out/nodes/node$i.log" 2>/dev/null || true
+    fi
+  done
+}
+
+stop_dbs() { docker rm -f bench-src bench-read >/dev/null 2>&1 || true; }
+
+wait_for() { # wait_for description command...
+  local what=$1; shift
+  for _ in $(seq 120); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done
+  echo "run.sh: $what not ready" >&2; return 1
+}
+
+# start_dbs engine: the read-model Postgres and the source, empty. Sets the
+# connection settings for eventstore-load.
+start_dbs() {
+  local engine=$1
+  stop_dbs
+  docker run -d --name bench-read -e POSTGRES_USER=committed -e POSTGRES_PASSWORD=$PW -e POSTGRES_DB=app \
+    -p 55433:5432 postgres:16 -c max_connections=300 >/dev/null
+  read_dsn="postgres://committed:$PW@127.0.0.1:55433/app?sslmode=disable"
+  read_url="postgres://committed:\${APP_DB_PASSWORD}@$src_host:55433/app?search_path=read&sslmode=disable"
+  case $engine in
+  postgres)
+    docker run -d --name bench-src -e POSTGRES_USER=committed -e POSTGRES_PASSWORD=$PW -e POSTGRES_DB=app \
+      -p 55432:5432 postgres:16 -c wal_level=logical -c max_connections=300 >/dev/null
+    wait_for "source postgres" docker exec bench-src pg_isready -U committed -d app -h 127.0.0.1
+    src_dsn="postgres://committed:$PW@127.0.0.1:55432/app?sslmode=disable"
+    src_url="postgres://committed:\${APP_DB_PASSWORD}@$src_host:55432/app?sslmode=disable"
+    ;;
+  mysql)
+    docker run -d --name bench-src -e MYSQL_ROOT_PASSWORD=$PW -e MYSQL_DATABASE=app -p 53306:3306 mysql:9 \
+      --gtid-mode=ON --enforce-gtid-consistency=ON --binlog-row-metadata=FULL --max-connections=500 >/dev/null
+    wait_for "source mysql" docker exec bench-src mysql -uroot -p$PW -h127.0.0.1 -e "SELECT 1" app
+    src_dsn="root:$PW@tcp(127.0.0.1:53306)/app"
+    src_url="mysql://root:\${APP_DB_PASSWORD}@$src_host:53306/app"
+    ;;
+  sqlserver)
+    docker run -d --name bench-src --platform linux/amd64 -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=$PW \
+      -p 51433:1433 mcr.microsoft.com/mssql/server:2022-latest >/dev/null
+    wait_for "source sql server" docker exec bench-src /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $PW -Q "SELECT 1"
+    docker exec bench-src /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $PW -Q "CREATE DATABASE app" >/dev/null
+    src_dsn="sqlserver://sa:$PW@127.0.0.1:51433?database=app"
+    src_url="sqlserver://sa:\${APP_DB_PASSWORD}@$src_host:51433?database=app"
+    ;;
+  *) echo "run.sh: unknown engine $engine" >&2; return 2 ;;
+  esac
+  wait_for "read-model postgres" docker exec bench-read pg_isready -U committed -d app -h 127.0.0.1
+}
+
+cleanup() { stop_nodes; stop_dbs; }
+trap cleanup EXIT
+
+nodes_flag=
+for i in $(seq 1 "$count"); do nodes_flag="$nodes_flag${nodes_flag:+,}http://${hosts[$((i - 1))]}:$(api_port "$i")"; done
+
+{
+  echo "run ${BENCH_RUN_ID:-local} on $(uname -srm), $(nproc 2>/dev/null || sysctl -n hw.ncpu) cpus"
+  echo "nodes: ${hosts[*]} (${BENCH_NODE_AZS:-})  load: ${BENCH_LOAD_AZ:-}  ${BENCH_INSTANCE_TYPES:-}"
+} | tee "$RESULTS/environment.txt"
+
+status=0
+IFS=, read -r -a label_list <<<"$labels"
+IFS=, read -r -a engine_list <<<"$engines"
+for label in "${label_list[@]}"; do
+  install_committed "$label"
+  for engine in "${engine_list[@]}"; do
+    out="$RESULTS/$label/$engine"
+    mkdir -p "$out"
+    echo "=== $label / $engine"
+    "$here/bin/$label/committed" --version >"$out/version.txt" 2>&1 || true
+    start_dbs "$engine"
+    start_nodes
+    set +e
+    "$here/bin/eventstore-load" -nodes "$nodes_flag" -engine "$engine" -label "$label" \
+      -recipe "$here/recipe/event-store-read-models.md" -results "$out" \
+      -src-dsn "$src_dsn" -src-url "$src_url" -read-dsn "$read_dsn" -read-url "$read_url" \
+      ${load_args[@]+"${load_args[@]}"} 2>&1 | tee "$out/load.log"
+    rc=${PIPESTATUS[0]}
+    set -e
+    [ "$rc" -eq 0 ] || status=$rc
+    stop_nodes
+    collect_nodes "$out"
+    docker logs bench-src >"$out/source.log" 2>&1 || true
+    stop_dbs
+  done
+done
+exit $status

@@ -82,8 +82,7 @@ func loadPeers(id uint64) db.Peers {
 // "committed member add/remove" commands (the /v1/membership API) for
 // live membership changes. A node joining an existing cluster sets
 // COMMITTED_JOIN=true so its COMMITTED_PEERS seeds the transport without
-// bootstrapping a competing configuration. See
-// docs/operations/membership.md.
+// bootstrapping a competing configuration.
 //
 // When raw is empty the node bootstraps a single-node cluster
 // advertising selfURL (COMMITTED_PEER_URL) for itself — the historical

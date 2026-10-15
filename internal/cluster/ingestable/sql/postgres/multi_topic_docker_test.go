@@ -161,11 +161,11 @@ func TestPostgresMultiTopicSnapshotRoutesToOwnTopics(t *testing.T) {
 	}
 }
 
-// TestPostgresMultiTopicMixedTransactionSplitsByTopic: a single source transaction
-// touching BOTH tables is emitted as one HOMOGENEOUS proposal per topic (never one
-// proposal spanning topics), each correctly typed and carrying a strictly-increasing
-// non-zero SourceSeq so the per-ingestable dedup keeps both.
-func TestPostgresMultiTopicMixedTransactionSplitsByTopic(t *testing.T) {
+// TestPostgresMultiTopicTransactionIsOneProposal: a source transaction touching
+// BOTH tables lands as ONE proposal holding both topics' rows in source order,
+// with the transaction's bundled resume position — so it commits as a unit and
+// no reader ever sees half of it.
+func TestPostgresMultiTopicTransactionIsOneProposal(t *testing.T) {
 	createMultiTopicTables(t, false) // no seed — this test exercises the CDC path
 
 	slot, pub := "slot_mt_cdc", "pub_mt_cdc"
@@ -199,9 +199,9 @@ func TestPostgresMultiTopicMixedTransactionSplitsByTopic(t *testing.T) {
 	require.NoError(t, tx.Commit())
 	db.Close()
 
-	// Collect CDC proposals until both topics' rows arrive.
+	// Collect the CDC proposals carrying the transaction's rows.
 	var cdc []*cluster.Proposal
-	seen := map[string]*cluster.Entity{}
+	seen := map[string]bool{}
 	deadline := time.After(30 * time.Second)
 	for len(seen) < 2 {
 		select {
@@ -209,12 +209,15 @@ func TestPostgresMultiTopicMixedTransactionSplitsByTopic(t *testing.T) {
 			if isRefreshMarkerProposal(p) {
 				continue
 			}
-			topic := requireHomogeneous(t, p)
-			require.NotZero(t, p.SourceSeq, "a CDC proposal carries a non-zero SourceSeq")
-			cdc = append(cdc, p)
+			relevant := false
 			for _, e := range p.Entities {
-				require.Equal(t, topic, e.Type.ID)
-				seen[string(e.Key)] = e
+				if k := string(e.Key); k == "o9" || k == "c9" {
+					relevant = true
+					seen[k] = true
+				}
+			}
+			if relevant {
+				cdc = append(cdc, p)
 			}
 		case <-po:
 		case <-deadline:
@@ -222,25 +225,17 @@ func TestPostgresMultiTopicMixedTransactionSplitsByTopic(t *testing.T) {
 		}
 	}
 
-	// The mixed transaction produced at least two proposals — one per topic — and
-	// their SourceSeqs are distinct and strictly increasing in emit order (the
-	// per-topic sub-index at one LSN), so the dedup drops neither.
-	require.GreaterOrEqual(t, len(cdc), 2, "a two-topic transaction emits at least one proposal per topic")
-	topics := map[string]bool{}
-	for i, p := range cdc {
-		topics[p.Entities[0].Type.ID] = true
-		if i > 0 {
-			require.Greater(t, p.SourceSeq, cdc[i-1].SourceSeq,
-				"per-topic proposals at one coordinate must get strictly-increasing SourceSeqs")
-		}
-	}
-	require.True(t, topics[mtOrdersType.ID] && topics[mtCustomersType.ID],
-		"both topics must appear as their own homogeneous proposal")
-
-	require.Equal(t, mtOrdersType.ID, seen["o9"].Type.ID)
-	require.JSONEq(t, `{"id":"o9","amount":"999"}`, string(seen["o9"].Data))
-	require.Equal(t, mtCustomersType.ID, seen["c9"].Type.ID)
-	require.JSONEq(t, `{"cust_id":"c9","name":"Zoe"}`, string(seen["c9"].Data))
+	require.Len(t, cdc, 1, "a two-table transaction must land as ONE proposal")
+	p := cdc[0]
+	require.Len(t, p.Entities, 2)
+	require.Equal(t, "o9", string(p.Entities[0].Key), "rows keep source order")
+	require.Equal(t, mtOrdersType.ID, p.Entities[0].Type.ID)
+	require.JSONEq(t, `{"id":"o9","amount":"999"}`, string(p.Entities[0].Data))
+	require.Equal(t, "c9", string(p.Entities[1].Key))
+	require.Equal(t, mtCustomersType.ID, p.Entities[1].Type.ID)
+	require.JSONEq(t, `{"cust_id":"c9","name":"Zoe"}`, string(p.Entities[1].Data))
+	require.NotZero(t, p.SourceSeq, "a CDC proposal carries a non-zero SourceSeq")
+	require.NotEmpty(t, p.Position, "the transaction's resume position rides the proposal")
 
 	cancel()
 	select {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
@@ -390,6 +391,9 @@ func (s *Storage) ApplyFsyncOpsForTest() (eventLogWrites, appliedIndexPersists i
 	return s.eventLogWriteOps.Load(), s.appliedIndexPersists.Load()
 }
 
+// KVWriteOpsForTest is the number of bbolt write transactions so far.
+func (s *Storage) KVWriteOpsForTest() int64 { return s.kvWriteOps.Load() }
+
 // AppendEventsForTest publishes entries to the event log WITHOUT applying their
 // entities to bbolt — reproducing the mid-batch / p>r state where a committed
 // entry is durable and reader-visible but its type is not yet applied. Used to
@@ -431,3 +435,11 @@ func (s *Storage) RetryDegradedBuildsForTest() {
 // entry reads — the seam the racing-mutation fallback tests use to land a
 // concurrent Compact or full-wipe conflicting append mid-read.
 func SetEntryReadRaceHookForTest(f func()) { entryReadRaceTestHook = f }
+
+// SetSupersedeScrubCeilingForTest shrinks the supersede ceiling so a test can
+// exercise the scheduler's time bound. Returns a func that restores it.
+func SetSupersedeScrubCeilingForTest(d time.Duration) func() {
+	old := supersedeScrubCeiling
+	supersedeScrubCeiling = d
+	return func() { supersedeScrubCeiling = old }
+}

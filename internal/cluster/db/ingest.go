@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -61,7 +63,39 @@ const (
 	// this depth and restart re-emission by the dialect read window (10k),
 	// both idempotent for seq-0 rows.
 	ingestPipelineDepth = 1024
+
+	// ingestPipelineBytes bounds the in-flight window's estimated size, well
+	// under raft's uncommitted-entries limit (MaxUncommittedEntriesSize, 1
+	// GiB), past which raft drops proposals.
+	ingestPipelineBytes = 64 << 20
 )
+
+// featureLevelIngestOrder gates the ingest ordering check (see
+// cluster.Proposal.IngestSeq): a worker numbers and pipelines its ordered
+// proposals only once every member announces version.FeatureLevel >= 3, so
+// no member applies a sequenced proposal without the check.
+const featureLevelIngestOrder uint64 = 3
+
+// newIngestSession returns a random, non-zero ordering session id.
+func newIngestSession() uint64 {
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		// Same posture as randomRequestIDBase: crypto/rand does not fail on a
+		// supported platform.
+		panic("db: crypto/rand failed generating an ingest session: " + err.Error())
+	}
+	return binary.LittleEndian.Uint64(b[:]) | 1
+}
+
+// proposalBytes estimates a proposal's marshaled size for the in-flight
+// window's byte bound.
+func proposalBytes(p *cluster.Proposal) int {
+	n := len(p.Position)
+	for _, e := range p.Entities {
+		n += len(e.Key) + len(e.Data) + 64
+	}
+	return n
+}
 
 // ingressLifecycle owns the inner Ingest goroutine plus the channels
 // the user-supplied Ingestable writes to. db.ingest creates one and
@@ -326,7 +360,7 @@ func (db *DB) deleteIngest(id string) {
 		// and on a single-node cluster nobody else will tear down either —
 		// warn loudly: an orphaned replication slot pins the source's WAL.
 		if db.safeMode {
-			db.logger.Warn("safe mode: ingestable deleted; source-side teardown skipped (no worker was built) — a replication slot/publication may remain at the source and pin its WAL; drop it manually (see docs/operations/cdc-setup.md)",
+			db.logger.Warn("safe mode: ingestable deleted; source-side teardown skipped (no worker was built) — a replication slot/publication may remain at the source and pin its WAL; drop it manually (see docs/ingestables.md)",
 				zap.String("id", id))
 		}
 		return
@@ -459,7 +493,7 @@ func (db *DB) newIngestWorker(id string, i cluster.Ingestable) *workerHandle {
 			// (P_local==R_local). Every index <= commit is committed and therefore
 			// guaranteed to apply (or the node fatals), so this returns once the
 			// position reflects all committed data — restoring the effectively-once
-			// ingest contract (docs/event-log-architecture.md) at the one point it
+			// ingest contract at the one point it
 			// can be: before the re-read. It sits here, at the shared freeze exit,
 			// because every ingestExitFreeze path has the same hazard. Fix #1 keeps
 			// the wait short (apply is no longer scrub-starved); a longer wait is the
@@ -558,114 +592,246 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 	// resume position past the dropped batch).
 	dataProposeFailed := false
 
-	// The snapshot pipeline: bare snapshot rows (SourceSeq 0, no bundled
-	// Position, no refresh marker) are submitted WITHOUT waiting for apply,
-	// up to ingestPipelineDepth in flight, so raft coalesces their entries
-	// into shared Ready fsyncs. ONLY those rows pipeline: they are
-	// independent single-row transactions whose relative log order is
-	// meaningless (unique keys within a snapshot), so a leader-flap hole
-	// re-filled after restart cannot reorder anything observable. Everything
-	// ORDERED — CDC transactions (seq>0, source order must survive into the
-	// immutable log), bundled-position rows (checkpoint must trail every row
-	// it covers), refresh markers (sweep must follow the rows it stamps) —
-	// first DRAINS the pipeline to success and then proposes synchronously.
-	// Any submit or ack failure arms the position barrier and freezes; the
-	// supervisor's restart-from-durable-position re-emits at most one read
-	// window of seq-0 rows (upsert-idempotent duplicates, today's crash
-	// semantics).
+	// The pipeline: proposals submitted WITHOUT waiting for apply, up to
+	// ingestPipelineDepth (and ingestPipelineBytes) in flight, so raft
+	// coalesces their entries into shared Ready fsyncs. Two kinds ride it:
+	//
+	//   - Bare snapshot rows (SourceSeq 0, no bundled Position, no refresh
+	//     marker): independent single-row transactions whose relative log
+	//     order is meaningless (unique keys within a snapshot), so a
+	//     leader-flap hole re-filled after restart cannot reorder anything
+	//     observable.
+	//   - In an ordering session (feature level 3), every ORDERED proposal:
+	//     CDC transactions (source order must survive into the immutable
+	//     log), bundled-position rows and standalone checkpoints (a
+	//     checkpoint must trail every row it covers), refresh markers (the
+	//     sweep must follow the rows it stamps). Each is numbered
+	//     (cluster.Proposal.IngestSeq) and apply rejects one that does not
+	//     directly follow the last accepted, so a proposal lost before commit
+	//     can never be skipped by a later one. An ordered proposal still waits
+	//     for in-flight bare rows, which its checkpoint may cover.
+	//
+	// Below the feature level an ordered proposal first DRAINS the pipeline
+	// to success and then proposes synchronously. Any submit or ack failure
+	// arms the position barrier and freezes; the supervisor's
+	// restart-from-durable-position re-emits what never applied (bare rows
+	// as upsert-idempotent duplicates, today's crash semantics).
 	type inflight struct {
 		rid uint64
 		ack <-chan error
+		at  time.Time
+		// bytes is the proposal's estimated size, against
+		// ingestPipelineBytes.
+		bytes int
+		// sequenced marks an ordered proposal stamped with IngestSeq; the
+		// rest are bare snapshot rows.
+		sequenced bool
+		// done runs once the proposal applied, in submission order (OnDurable,
+		// clearing the frozen gauge).
+		done func()
+		// For the freeze log line.
+		sourceSeq, ingestSeq uint64
+		topic                string
 	}
 	pipeline := make([]inflight, 0, ingestPipelineDepth)
+	pipelineBytes, unsequencedInFlight := 0, 0
 	defer func() {
 		// Whatever path exits the worker, no waiter may leak.
 		for _, f := range pipeline {
 			db.unregisterWaiter(f.rid)
 		}
 	}()
-	// awaitOldest blocks on the front in-flight ack. ctx cancellation
-	// resolves to ctx.Err() (worker shutdown).
-	awaitOldest := func() error {
+	// popOldest removes the front in-flight proposal.
+	popOldest := func() inflight {
 		f := pipeline[0]
 		pipeline = pipeline[1:]
-		defer db.unregisterWaiter(f.rid)
+		pipelineBytes -= f.bytes
+		if !f.sequenced {
+			unsequencedInFlight--
+		}
+		db.unregisterWaiter(f.rid)
+		return f
+	}
+	// awaitOldest blocks on the front in-flight ack and, on success, runs
+	// its done. ctx cancellation resolves to ctx.Err() (worker shutdown).
+	awaitOldest := func() (inflight, error) {
+		f := pipeline[0]
 		// Backstop timer, mirroring db.Propose: a proposal raft DROPS without a
 		// leader change (uncommitted-entries buffer full, an expired transfer, or a
 		// leaderless-window submit the Old==0 fail-fast skip doesn't cover) is
 		// absorbed by forwardProposeErr, so this ack would never fire and the
-		// snapshot worker would hang here forever — silently, with a healthy-looking
+		// worker would hang here forever — silently, with a healthy-looking
 		// gauge. Surface it as ErrProposalUnknown so the worker freezes visibly and
-		// the supervisor restarts from the durable position (snapshot re-read is
-		// upsert-idempotent). NewTimer+Stop, not time.After, so a fast ack doesn't
-		// leave a 30s timer pinned per drained row.
-		timer := time.NewTimer(db.proposeTimeout)
+		// the supervisor restarts from the durable position. NewTimer+Stop, not
+		// time.After, so a fast ack doesn't leave a timer pinned per drained row.
+		timer := time.NewTimer(max(time.Until(f.at.Add(db.proposeTimeout)), 0))
 		defer timer.Stop()
+		var err error
 		select {
-		case err := <-f.ack:
-			return err
+		case err = <-f.ack:
 		case <-timer.C:
-			return ErrProposalUnknown
+			err = ErrProposalUnknown
 		case <-ctx.Done():
-			return ctx.Err()
+			err = ctx.Err()
 		}
+		popOldest()
+		if err == nil && f.done != nil {
+			f.done()
+		}
+		return f, err
 	}
 	// drainPipeline awaits every in-flight ack in FIFO order; the first
 	// failure abandons (unregisters) the rest — the worker is about to
 	// freeze, and their outcomes no longer matter.
-	drainPipeline := func() error {
+	drainPipeline := func() (inflight, error) {
 		for len(pipeline) > 0 {
-			if err := awaitOldest(); err != nil {
-				return err
+			if f, err := awaitOldest(); err != nil {
+				return f, err
 			}
 		}
-		return nil
+		return inflight{}, nil
 	}
 	// submitPipelined submits without waiting, mirroring
 	// proposeIngestData's disk-pressure pause, and applies backpressure by
-	// awaiting the oldest ack once the window is full.
-	submitPipelined := func(p *cluster.Proposal) error {
+	// awaiting the oldest ack once the window is full. A failed ack it
+	// awaits is returned with the proposal it belonged to.
+	submitPipelined := func(p *cluster.Proposal, sequenced bool, done func()) (inflight, error) {
 		// The validation tripwire runs in db.Propose, which this pipelined
 		// lane bypasses (proposeAsync directly) — so run it here: divergent
-		// SNAPSHOT rows announce too. A signal, never a gate.
+		// rows announce too. A signal, never a gate.
 		db.announceDivergences(ctx, p)
+		f := inflight{
+			at: time.Now(), bytes: proposalBytes(p), sequenced: sequenced, done: done,
+			sourceSeq: p.SourceSeq, ingestSeq: p.IngestSeq, topic: proposalTopic(p),
+		}
 		pauseBackoff := ingestBackoffMin
 		for {
 			rid, ack, err := db.proposeAsync(ctx, p)
 			if err == nil {
-				pipeline = append(pipeline, inflight{rid: rid, ack: ack})
+				f.rid, f.ack = rid, ack
+				pipeline = append(pipeline, f)
+				pipelineBytes += f.bytes
+				if !sequenced {
+					unsequencedInFlight++
+				}
 				break
 			}
 			if !errors.Is(err, cluster.ErrInsufficientStorage) {
-				return err
+				return f, err
 			}
 			db.logger.Warn("ingest paused: insufficient disk space, will retry",
 				zap.String("id", p.IngestableID),
 				zap.Duration("backoff", pauseBackoff))
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return f, ctx.Err()
 			case <-time.After(pauseBackoff):
 			}
 			pauseBackoff = min(pauseBackoff*2, ingestBackoffMax)
 		}
-		if len(pipeline) >= ingestPipelineDepth {
-			return awaitOldest()
+		for len(pipeline) >= ingestPipelineDepth || pipelineBytes > ingestPipelineBytes {
+			if g, err := awaitOldest(); err != nil {
+				return g, err
+			}
 		}
-		return nil
+		return inflight{}, nil
+	}
+	// awaitDurable queues done behind the in-flight proposals, so a
+	// dropped duplicate reports durable in order; with nothing in flight it
+	// runs now.
+	awaitDurable := func(done func()) {
+		if len(pipeline) == 0 {
+			done()
+			return
+		}
+		ack := make(chan error, 1)
+		ack <- nil
+		pipeline = append(pipeline, inflight{ack: ack, at: time.Now(), sequenced: true, done: done})
+	}
+
+	// The ordering session (see cluster.Proposal.IngestSeq): once every
+	// member can apply the ordering check, each run of the inner Ingest is a
+	// session whose ordered proposals are numbered and pipelined; below the
+	// level the ordered lane stays serial.
+	var order struct {
+		on      bool
+		next    uint64
+		session uint64
+		start   bool
+		// dedupTxn and dedupSeq are the dedup record as it will stand once
+		// everything this session submitted applies: the applied record at
+		// session start, folded with each submitted proposal. A dialect that
+		// reconnects inside a session re-emits from its last handed-off
+		// position, which may be a part still in flight; the applied record
+		// alone would not see it. Exact, because a session's proposals apply
+		// in order or the session ends (any failure freezes, and the next
+		// session reseeds from the applied record).
+		dedupTxn string
+		dedupSeq uint64
+	}
+	startSession := func() {
+		order.on = db.featureEnabled(featureLevelIngestOrder)
+		if !order.on {
+			return
+		}
+		last, _ := db.storage.IngestOrder(id)
+		order.next, order.session, order.start = last+1, newIngestSession(), true
+		order.dedupTxn, order.dedupSeq = db.storage.IngestSourceDedup(id)
+	}
+	stamp := func(p *cluster.Proposal) {
+		p.IngestableID = id
+		p.IngestSeq, p.IngestSession, p.IngestSessionStart = order.next, order.session, order.start
+		order.next++
+		order.start = false
+		if p.SourceSeq > 0 {
+			txn := ""
+			if p.TxnScopedDedup {
+				txn = p.SourceTxnID
+			}
+			order.dedupTxn, order.dedupSeq = cluster.FoldSourceDedup(order.dedupTxn, order.dedupSeq, txn, p.SourceSeq)
+		}
+	}
+	// proposeFailed logs a failed data proposal and reports whether the
+	// worker must freeze: every failure freezes, except a ctx cancellation
+	// (the worker shutting down).
+	proposeFailed := func(err error, f inflight, entities int) bool {
+		// Arm the position barrier BEFORE classifying the error: no later
+		// standalone checkpoint may pass this hole, whatever the caller
+		// decides.
+		dataProposeFailed = true
+		db.logger.Warn("ingest propose failed; freezing the worker (the supervisor restarts it from the durable resume position). If this is ErrProposalTooLarge, one row or transaction exceeds COMMITTED_MAX_PROPOSAL_BYTES — raise the cap and restart, or split the source write",
+			zap.String("id", id),
+			zap.Uint64("sourceSeq", f.sourceSeq),
+			zap.Uint64("ingestSeq", f.ingestSeq),
+			zap.String("topic", f.topic),
+			zap.Int("entities", entities),
+			zap.Int("inFlight", len(pipeline)),
+			zap.Error(err))
+		if ctx.Err() != nil {
+			return false
+		}
+		if db.metrics != nil {
+			db.metrics.IngestError(id, "propose")
+			db.metrics.IngestFrozen(id, true)
+		}
+		return true
 	}
 
 	// loseOwnership tears the running ingress session down the moment this node
 	// stops owning the ingestable (a leadership change on a leader-based
 	// ingestable). It cancels the inner Ingest — releasing the source's
 	// replication slot / read cursor — flips the local ownership flag, and
-	// ABANDONS the in-flight snapshot pipeline. Those bare rows (SourceSeq 0)
-	// never advanced the durable position, so restart-from-position re-reads
-	// them idempotently; abandoning rather than draining keeps a deposed
-	// session's residue from contaminating the next session's pipeline (a stale
-	// flap-lost ack would otherwise spuriously freeze the fresh worker). Called
-	// from the data cases (prompt teardown while the source is active) and the
-	// timer branch (the idle path). Idempotent.
+	// ABANDONS the in-flight pipeline without reporting anything durable.
+	// Bare snapshot rows (SourceSeq 0) never advanced the durable position, so
+	// restart-from-position re-reads them idempotently. A sequenced proposal
+	// may still commit after this: the ordering check then accepts it only
+	// ahead of the next session's first proposal, which it rejects (and the
+	// next session restarts past it), or rejects it behind that proposal.
+	// Abandoning rather than draining keeps a deposed session's residue from
+	// contaminating the next session's pipeline (a stale flap-lost ack would
+	// otherwise spuriously freeze the fresh worker). Called from the data
+	// cases (prompt teardown while the source is active) and the timer branch
+	// (the idle path). Idempotent.
 	loseOwnership := func() {
 		db.logger.Info("stopping ingestion: node no longer owns this ingestable", zap.String("id", id))
 		isNode = false
@@ -674,6 +840,15 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 			db.unregisterWaiter(f.rid)
 		}
 		pipeline = pipeline[:0]
+		pipelineBytes, unsequencedInFlight = 0, 0
+	}
+	// front is the oldest in-flight ack, or nil (blocks forever in a
+	// select) with nothing in flight.
+	front := func() <-chan error {
+		if len(pipeline) == 0 {
+			return nil
+		}
+		return pipeline[0].ack
 	}
 
 	for {
@@ -698,6 +873,19 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				db.metrics.IngestFrozen(id, true)
 			}
 			return ingestExitFreeze
+		case err := <-front():
+			// The oldest in-flight proposal resolved: report it durable, in
+			// submission order, or freeze.
+			f := popOldest()
+			if err != nil {
+				if proposeFailed(err, f, 0) {
+					return ingestExitFreeze
+				}
+				continue
+			}
+			if f.done != nil {
+				f.done()
+			}
 		case proposal := <-ingress.proposalChan:
 			if db.isNode(id) {
 				// Stamp the ingestable id so the apply path advances this
@@ -724,6 +912,11 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				// non-CDC / legacy) is never deduped.
 				if proposal.SourceSeq > 0 {
 					storedTxn, storedSeq := db.storage.IngestSourceDedup(id)
+					if order.on {
+						// In flight is not yet applied: compare against
+						// what this session has submitted (see stamp).
+						storedTxn, storedSeq = order.dedupTxn, order.dedupSeq
+					}
 					scalarRegime := storedTxn == ""
 					// The regime FLIP (scalar → transaction-scoped) waits on
 					// the cluster feature level: the record the flip writes
@@ -781,6 +974,8 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 						if db.metrics != nil {
 							db.metrics.IngestDedupSkipped(id)
 						}
+						// The applied copy is durable, so this one is too.
+						awaitDurable(proposal.Durable)
 						backoff = ingestBackoffMin
 						continue
 					case proposal.LineageRegressed && !lineageRideNoted:
@@ -821,90 +1016,104 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				// Never gates — see census.go.
 				census.observe(ctx, proposal)
 
-				// Lane split. Bare snapshot rows pipeline; ordered
-				// proposals (CDC, bundled-position rows, markers) drain the
-				// pipeline to success first and then propose synchronously —
-				// proposeIngestData retries (not drops) on disk-pressure
-				// rejection so a full disk pauses ingestion cleanly without
-				// advancing the position past uncommitted data.
+				// Lane split. Bare snapshot rows pipeline unsequenced. In an
+				// ordering session, every ordered proposal (CDC, bundled-position
+				// rows, markers) is numbered and pipelined too: the apply-side
+				// check keeps the log in source order with none skipped. It
+				// waits only for in-flight bare rows, which its checkpoint may
+				// cover. Below the feature level, ordered proposals drain the
+				// pipeline to success and then propose synchronously.
+				// proposeIngestData and submitPipelined retry (not drop) on
+				// disk-pressure rejection, so a full disk pauses ingestion
+				// cleanly without advancing the position past uncommitted data.
+				bare := proposal.SourceSeq == 0 && len(proposal.Position) == 0 && !containsRefreshBoundary(proposal)
+				var f inflight
 				var err error
-				if proposal.SourceSeq == 0 && len(proposal.Position) == 0 && !containsRefreshBoundary(proposal) {
-					err = submitPipelined(proposal)
-				} else {
-					err = drainPipeline()
+				switch {
+				case bare:
+					f, err = submitPipelined(proposal, false, nil)
+				case order.on:
+					if unsequencedInFlight > 0 {
+						f, err = drainPipeline()
+					}
 					if err == nil {
+						stamp(proposal)
+						p := proposal
+						f, err = submitPipelined(p, true, func() {
+							p.Durable()
+							if len(p.Position) > 0 {
+								// A committed bundled checkpoint advanced the
+								// durable position — real progress. Clear the
+								// frozen gauge (the supervisor no longer clears
+								// it on restart).
+								db.clearIngestFrozen(id)
+							}
+						})
+					}
+				default:
+					f, err = drainPipeline()
+					if err == nil {
+						f = inflight{sourceSeq: proposal.SourceSeq, topic: proposalTopic(proposal)}
 						err = db.proposeIngestData(ctx, proposal)
+					}
+					if err == nil {
+						// Propose returns once the proposal is applied.
+						proposal.Durable()
+						if len(proposal.Position) > 0 {
+							// A committed bundled checkpoint advanced the
+							// durable position — real progress. A poison
+							// proposal never reaches here, so this never flaps
+							// against a freeze.
+							db.clearIngestFrozen(id)
+						}
 					}
 				}
 				if err != nil {
-					// Arm the position barrier BEFORE classifying the error:
-					// no later standalone checkpoint may pass this hole,
-					// whatever the branches below decide.
-					dataProposeFailed = true
-					db.logger.Warn("ingest propose failed; freezing the worker (the supervisor restarts it from the durable resume position). If this is ErrProposalTooLarge, one row or transaction exceeds COMMITTED_MAX_PROPOSAL_BYTES — raise the cap and restart, or split the source write",
-						zap.String("id", id),
-						zap.Uint64("sourceSeq", proposal.SourceSeq),
-						zap.String("topic", proposalTopic(proposal)),
-						zap.Int("entities", len(proposal.Entities)),
-						zap.Error(err))
-					// Count real failures only — a ctx cancellation here is
-					// the worker shutting down (replace/Close), not an
-					// ingest error.
-					if db.metrics != nil && ctx.Err() == nil {
-						db.metrics.IngestError(id, "propose")
+					if f.topic == "" && f.sourceSeq == 0 {
+						f = inflight{sourceSeq: proposal.SourceSeq, ingestSeq: proposal.IngestSeq, topic: proposalTopic(proposal)}
 					}
-					if ctx.Err() == nil {
-						// Freeze on EVERY propose failure — the conservative
-						// default. ErrProposalUnknown (status unknown after a
-						// leader change) and ErrProposalLost (entry truncated
-						// before commit) are the classic leader-flap orphan
-						// signals: we don't know (or know it didn't) commit,
-						// and continuing would let the next checkpoint advance
-						// the position past data that never committed. The
-						// same reasoning holds for ANY other failure — a
-						// deterministic rejection like ErrProposalTooLarge or
-						// an error this code has never seen. The worker never
-						// rewrites a proposal to make it fit: a proposal is an
-						// opaque atomic unit whose composition (grouping AND
-						// sizing) belongs to its emitter — snapshot dialects
-						// emit one row per proposal, so only a single row
-						// larger than the cap (or a giant CDC transaction)
-						// lands here, and it freezes loudly. The
-						// pre-barrier bug was exactly a branch that chose to
-						// continue; the default must hold the line, and the
-						// supervisor's restart-from-durable-position is the
-						// one recovery that is always correct — once the durable
-						// position it re-reads is CURRENT. It may lag here: the
-						// pipelined rows and this failed proposal can be
-						// committed-but-unapplied (acks fire at apply, which can
-						// lag commit under a busy Ready loop). The freeze-exit
-						// handler (newIngestWorker) drains apply to the
-						// commit index before the supervisor re-reads the
-						// position, so a committed batch is never re-emitted into
-						// the permanent event log — the effectively-once contract
-						// (docs/event-log-architecture.md). The drain is central
-						// there because every freeze path shares this hazard.
-						//
-						// ingress.stop (from the defer above) cancels the
-						// inner Ingest goroutine cleanly on return,
-						// unblocking its pending positionChan send. The
-						// position value is discarded (we must not advance
-						// past the failed proposal), which is the whole
-						// point of freezing here.
-						if db.metrics != nil {
-							db.metrics.IngestFrozen(id, true)
-						}
+					// Freeze on EVERY propose failure — the conservative
+					// default. ErrProposalUnknown (status unknown after a
+					// leader change) and ErrProposalLost (entry truncated
+					// before commit) are the classic leader-flap orphan
+					// signals: we don't know (or know it didn't) commit,
+					// and continuing would let the next checkpoint advance
+					// the position past data that never committed.
+					// ErrIngestOutOfOrder means an earlier proposal of this
+					// session never committed. The same reasoning holds for
+					// ANY other failure — a deterministic rejection like
+					// ErrProposalTooLarge or an error this code has never
+					// seen. The worker never rewrites a proposal to make it
+					// fit: a proposal is an opaque atomic unit whose
+					// composition (grouping AND sizing) belongs to its
+					// emitter — snapshot dialects emit one row per proposal,
+					// so only a single row larger than the cap (or a giant
+					// CDC transaction) lands here, and it freezes loudly. The
+					// pre-barrier bug was exactly a branch that chose to
+					// continue; the default must hold the line, and the
+					// supervisor's restart-from-durable-position is the one
+					// recovery that is always correct — once the durable
+					// position it re-reads is CURRENT. It may lag here: the
+					// pipelined proposals and this failed one can be
+					// committed-but-unapplied (acks fire at apply, which can
+					// lag commit under a busy Ready loop). The freeze-exit
+					// handler (newIngestWorker) drains apply to the commit
+					// index before the supervisor re-reads the position, so a
+					// committed batch is never re-emitted into the permanent
+					// event log — the effectively-once contract. The drain is
+					// central there because every freeze path shares this
+					// hazard.
+					//
+					// ingress.stop (from the defer above) cancels the inner
+					// Ingest goroutine cleanly on return, unblocking its
+					// pending positionChan send. The position value is
+					// discarded (we must not advance past the failed
+					// proposal), which is the whole point of freezing here.
+					if proposeFailed(err, f, len(proposal.Entities)) {
 						return ingestExitFreeze
 					}
 					// ctx canceled mid-propose: worker shutdown, not an
 					// ingest failure — the next select observes ctx.Done.
-				}
-				if err == nil && len(proposal.Position) > 0 {
-					// A committed bundled checkpoint advanced the durable
-					// position — real progress. Clear the frozen gauge (the
-					// supervisor no longer clears on restart). A poison proposal
-					// never reaches here, so this never flaps against a freeze.
-					db.clearIngestFrozen(id)
 				}
 			} else {
 				// Lost leadership mid-stream: the row we just received belongs
@@ -927,21 +1136,24 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				continue
 			}
 			// A standalone checkpoint summarizes "all data through here
-			// committed" — every pipelined row ahead of it must succeed
-			// before it may propose.
-			if err := drainPipeline(); err != nil {
-				dataProposeFailed = true
-				db.logger.Warn("ingest pipeline drain failed before checkpoint", zap.String("id", id), zap.Error(err))
-				if db.metrics != nil && ctx.Err() == nil {
-					db.metrics.IngestError(id, "propose")
-				}
-				if ctx.Err() == nil {
-					if db.metrics != nil {
-						db.metrics.IngestFrozen(id, true)
+			// committed". Every bare row ahead of it must succeed before it
+			// may propose; in an ordering session, sequenced proposals ahead
+			// of it need not, since the apply check rejects it behind a gap.
+			if !order.on || unsequencedInFlight > 0 {
+				if _, err := drainPipeline(); err != nil {
+					dataProposeFailed = true
+					db.logger.Warn("ingest pipeline drain failed before checkpoint", zap.String("id", id), zap.Error(err))
+					if db.metrics != nil && ctx.Err() == nil {
+						db.metrics.IngestError(id, "propose")
 					}
-					return ingestExitFreeze
+					if ctx.Err() == nil {
+						if db.metrics != nil {
+							db.metrics.IngestFrozen(id, true)
+						}
+						return ingestExitFreeze
+					}
+					continue
 				}
-				continue
 			}
 			if dataProposeFailed {
 				// POSITION BARRIER (see declaration above): a data proposal
@@ -954,7 +1166,20 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				}
 				return ingestExitFreeze
 			}
-			if db.isNode(id) {
+			if order.on {
+				// Numbered and pipelined like any ordered proposal; any
+				// failure freezes.
+				entity, err := cluster.NewUpsertIngestablePositionEntity(&cluster.IngestablePosition{ID: id, Position: position})
+				var f inflight
+				if err == nil {
+					p := &cluster.Proposal{Entities: []*cluster.Entity{entity}}
+					stamp(p)
+					f, err = submitPipelined(p, true, func() { db.clearIngestFrozen(id) })
+				}
+				if err != nil && proposeFailed(err, f, 0) {
+					return ingestExitFreeze
+				}
+			} else if db.isNode(id) {
 				// Block until the position is durably applied. The
 				// unbuffered positionChan means the inner Ingest only
 				// sends a checkpoint AFTER the proposals it covers have
@@ -989,6 +1214,13 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 			backoff = ingestBackoffMin
 		case <-time.After(backoff):
 			progressed := false
+			if len(pipeline) > 0 && time.Since(pipeline[0].at) > db.proposeTimeout {
+				// The oldest in-flight proposal is unresolved past the
+				// propose timeout (see awaitOldest's backstop).
+				if proposeFailed(ErrProposalUnknown, popOldest(), 0) {
+					return ingestExitFreeze
+				}
+			}
 			if isNode && !db.isNode(id) {
 				// leader -> not-leader - stop ingesting. This is the idle path:
 				// the data cases above tear down promptly while the source is
@@ -1007,6 +1239,18 @@ func (db *DB) ingest(ctx context.Context, id string, i cluster.Ingestable) inges
 				// safety net for the leader-state transition (a
 				// leader → not-leader stop() inside this branch
 				// doesn't exit the worker loop).
+				startSession()
+				if order.on && db.raft != nil {
+					// Read the resume state only once this node has applied
+					// everything committed: a new leader may still be
+					// applying its predecessor's last entries. A session
+					// started behind them would number from a stale record
+					// and be rejected at its first proposal.
+					if err := db.waitForApplied(ctx, db.raft.CommitIndex()); err != nil {
+						return ingestExitShutdown
+					}
+					startSession()
+				}
 				ingress.start(ctx, i, db.storage.Position(id))
 				progressed = true
 			}
