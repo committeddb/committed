@@ -55,9 +55,10 @@ const (
 	// endpoints must not hang on an unreachable source.
 	statusQueryTimeout = 5 * time.Second
 	// defaultPollInterval is the CT poll cadence when the config sets none.
-	// Seconds-scale, comparable to the sync workers' backoff ceiling: read
-	// models trail the source by roughly this much at rest.
-	defaultPollInterval = 3 * time.Second
+	// Read models trail the source by up to this much at rest, so it stays
+	// well inside the sub-second commit-to-row the other engines deliver; an
+	// idle poll costs 1 + len(tables) tiny catalog queries (readCTState).
+	defaultPollInterval = 250 * time.Millisecond
 	// ctOwnerProperty is the extended-property marker committed stamps on a
 	// table whose CT it enabled. Ownership must be REMEMBERED, not inferred —
 	// CT is a shared table property, not an owned named object like a PG

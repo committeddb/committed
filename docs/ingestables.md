@@ -981,7 +981,7 @@ tables = ["orders"]           # bare names scope to dbo; "sales.orders" keeps it
 primaryKey = "id"
 
 [sql.options]
-pollInterval = "3s"          # CT poll cadence (default 3s) — read models trail by ~this
+pollInterval = "250ms"       # CT poll cadence (default 250ms) — read models trail by up to this
 batchSize = 1000           # snapshot keyset batch
 ```
 
@@ -992,7 +992,9 @@ batchSize = 1000           # snapshot keyset batch
   current CT version minus the consumed version — the version increments per
   committed transaction.
 - Latency is the **poll cadence**: changes arrive within ~`pollInterval` of
-  committing at the source, comparable to the sync workers' own cadence.
+  committing at the source. An idle poll runs one small catalog query plus
+  one per table; raise `pollInterval` to poll a quiet source less often, at
+  the cost of that much more latency.
 - **Retention** (`CHANGE_RETENTION`, default 2 days when committed enables
   CT) is the binlog-expiry analog: if the cleanup purges changes past the
   consumed version (downtime longer than retention), committed detects it
