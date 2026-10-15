@@ -283,16 +283,6 @@ func (s *Storage) swapBboltToSnapshotData(data []byte, reconciledIndex uint64) e
 	}
 	s.keyValueStorage = db
 
-	// The swapped-in bbolt came from another node's CreateSnapshot. That node
-	// normally already migrated to the versioned-bucket layout before
-	// snapshotting, but a snapshot from a pre-migration node would arrive flat;
-	// run the idempotent migration so forEachCurrent — in every later reader —
-	// sees versioned buckets rather than silently finding nothing. Mirrors Open,
-	// which migrates immediately after bolt.Open.
-	if err := db.Update(migrateToVersionedBuckets); err != nil {
-		return fmt.Errorf("migrate swapped bbolt to versioned buckets: %w", err)
-	}
-
 	// Reconcile appliedIndex to reconciledIndex (the snapshot's raft index). The
 	// serialized bbolt embeds the source node's LIVE appliedIndex, which is >=
 	// the snapshot's raft index (compactTo = applied-8, below applied). Adopting

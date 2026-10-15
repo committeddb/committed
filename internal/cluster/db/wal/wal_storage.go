@@ -897,15 +897,6 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		return nil, err
 	}
 
-	// Migrate flat key=value entries in resource buckets to the versioned
-	// nested-bucket layout. Idempotent: a no-op if already migrated.
-	err = keyValueStorage.Update(func(tx *bolt.Tx) error {
-		return migrateToVersionedBuckets(tx)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("migrate to versioned buckets: %w", err)
-	}
-
 	logger := cfg.logger
 	if logger == nil {
 		logger = zap.NewNop()

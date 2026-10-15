@@ -68,6 +68,54 @@ func TestMetricsDocCatalogComplete(t *testing.T) {
 		"metrics registered in code but missing from docs/operations/metrics.md")
 }
 
+// TestDocsUsePrometheusSuffixes guards the PromQL spellings in the docs: the
+// OTLP→Prometheus conversion appends _total to a counter and _seconds to a
+// histogram in seconds, so a doc naming the bare underscored form points an
+// alert at a series that does not exist. Every underscored mention of a
+// counter or seconds histogram must carry its suffix.
+func TestDocsUsePrometheusSuffixes(t *testing.T) {
+	root := repoRoot(t)
+	instRe := regexp.MustCompile(`meter\.(Int64Counter|Float64Histogram)\("(committed\.[a-z_.]+)"`)
+	suffixed := map[string]string{} // bare underscored name -> its PromQL suffix
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(e.Name())
+		require.NoError(t, err)
+		for _, m := range instRe.FindAllStringSubmatch(string(b), -1) {
+			suffix := "_total"
+			if m[1] == "Float64Histogram" {
+				suffix = "_seconds" // every histogram here is in seconds
+			}
+			suffixed[strings.ReplaceAll(m[2], ".", "_")] = suffix
+		}
+	}
+	require.NotEmpty(t, suffixed)
+
+	tokenRe := regexp.MustCompile(`\bcommitted_[a-z_]+\b`)
+	var wrong []string
+	for _, dir := range []string{"docs", filepath.Join("docs", "operations"), filepath.Join("docs", "recipes")} {
+		files, err := os.ReadDir(filepath.Join(root, dir))
+		require.NoError(t, err)
+		for _, f := range files {
+			if !strings.HasSuffix(f.Name(), ".md") {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(root, dir, f.Name()))
+			require.NoError(t, err)
+			for _, tok := range tokenRe.FindAllString(string(b), -1) {
+				if suffix, ok := suffixed[tok]; ok {
+					wrong = append(wrong, filepath.Join(dir, f.Name())+": "+tok+" (PromQL: "+tok+suffix+")")
+				}
+			}
+		}
+	}
+	require.Empty(t, wrong, "docs name a counter or histogram without its Prometheus suffix")
+}
+
 // TestNoStaleScrapeClaim keeps the "Prometheus scrapes each node" misdirection
 // from returning to the operations docs — committed exports via OTLP push and
 // serves no scrape endpoint.

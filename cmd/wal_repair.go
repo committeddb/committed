@@ -65,7 +65,7 @@ func runWalRepair() error {
 		return err
 	}
 
-	corrupt, torn, incomplete := false, false, false
+	corrupt, torn, incomplete, newer := false, false, false, false
 	for _, d := range results {
 		_, _ = fmt.Fprintf(os.Stdout, "%s: %s — %s\n", d.Dir, d.Status, d.Detail)
 		switch d.Status {
@@ -73,12 +73,17 @@ func runWalRepair() error {
 			incomplete = true
 		case wal.LogCorrupt:
 			corrupt = true
+		case wal.LogNewerFormat:
+			newer = true
 		case wal.LogTornTail:
 			torn = true
 		}
 	}
 
 	switch {
+	case newer:
+		_, _ = fmt.Fprintln(os.Stdout, "\nlog(s) written by a newer committed: run that version or newer on this data directory; nothing was changed")
+		return fmt.Errorf("wal repair: log written by a newer committed; nothing to repair")
 	case incomplete:
 		return fmt.Errorf("wal repair: incomplete segmented tail left unchanged; safe truncation requires establishing the durable event boundary")
 	case corrupt:

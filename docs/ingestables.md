@@ -357,8 +357,9 @@ A few edge cases:
   `ingest` fields are simply absent.
 - If a producer exists but its worker isn't running on the node that answered,
   the producer is still named, with an `ingestError` instead of being dropped.
-- For alerting, the same lag is exported as metrics: `committed.sync.lag` and
-  `committed.ingest.lag`.
+- For alerting, the same lag is exported as metrics: `committed.sync.lag`,
+  and `committed.ingest.lag` (bytes) or `committed.ingest.lag.transactions`
+  (transactions), whichever unit the ingestable reports.
 
 ### TRUNCATE is not propagated (caveat)
 

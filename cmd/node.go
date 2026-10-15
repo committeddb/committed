@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
-	"log"
 	nethttp "net/http"
 	"os"
 	"os/signal"
@@ -223,7 +221,7 @@ docs/operations/ it points to.`,
 			ctx := context.Background()
 			exporter, err := otlpmetricgrpc.New(ctx)
 			if err != nil {
-				log.Fatalf("otel exporter: %v", err)
+				zap.L().Fatal("otel exporter", zap.Error(err))
 			}
 			// Identify the service on every exported metric. Without a
 			// resource the SDK falls back to resource.Default(), whose
@@ -274,7 +272,7 @@ docs/operations/ it points to.`,
 		}
 		s, err := wal.Open(dataDir, p, sync, ingest, walOpts...)
 		if err != nil {
-			log.Fatalf("cannot open storage: %v", err)
+			zap.L().Fatal("cannot open storage", zap.Error(err))
 		}
 
 		var dbOpts []db.Option
@@ -387,8 +385,7 @@ docs/operations/ it points to.`,
 		// sends them through the peer transport with its own TLS and credential.
 		proxyClient, err := loadProxyClient()
 		if err != nil {
-			// G706 false positive: values come from operator-supplied env vars.
-			log.Fatalf("leader-read proxy client: %v", err) //nolint:gosec // G706
+			zap.L().Fatal("leader-read proxy client", zap.Error(err))
 		}
 		if tokens.Split() {
 			dbOpts = append(dbOpts, db.WithPeerDiskReports())
@@ -410,13 +407,13 @@ docs/operations/ it points to.`,
 		dbOpts = append(dbOpts, db.WithPeerToken(tokens.Peer()))
 
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
-		fmt.Printf("Raft Running...\n")
+		zap.L().Info("raft running", zap.Uint64("node_id", id))
 
 		// Observable sync/ingest lag gauges read the live db at scrape time, so
 		// they register after db.New. No-op when metrics are disabled.
 		if meterProvider != nil {
 			if err := metrics.RegisterLagGauges(meterProvider.Meter("committed"), d); err != nil {
-				log.Fatalf("register lag gauges: %v", err)
+				zap.L().Fatal("register lag gauges", zap.Error(err))
 			}
 		}
 
@@ -438,8 +435,7 @@ docs/operations/ it points to.`,
 
 		corsOrigins, err := loadCORSOrigins()
 		if err != nil {
-			// G706 false positive: the value is an operator-supplied env var.
-			log.Fatalf("CORS: %v", err) //nolint:gosec // G706
+			zap.L().Fatal("CORS", zap.Error(err))
 		}
 		if len(corsOrigins) > 0 {
 			httpOpts = append(httpOpts, http.WithCORS(
@@ -470,7 +466,7 @@ docs/operations/ it points to.`,
 		}
 
 		h := http.New(d, httpOpts...)
-		fmt.Printf("API Listening on %s...\n", addr)
+		zap.L().Info("API listening", zap.String("addr", addr))
 
 		// NB: the database parser is registered earlier, before wal.Open (see
 		// above). These three need *d (the ingestable parser) or are simply
@@ -513,9 +509,7 @@ docs/operations/ it points to.`,
 
 		tlsCfg, err := loadAPITLSConfig()
 		if err != nil {
-			// G706 false positive: env-var values are supplied by the
-			// process operator, not an untrusted user.
-			log.Fatalf("API TLS: %v", err) //nolint:gosec // G706
+			zap.L().Fatal("API TLS", zap.Error(err))
 		}
 		if tlsCfg != nil {
 			serverOpts = append(serverOpts, http.WithTLSConfig(tlsCfg))

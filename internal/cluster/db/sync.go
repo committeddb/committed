@@ -1520,6 +1520,11 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 // TestCorruptEntryReadWedgesInsteadOfFatal and
 // TestMisTiledSegmentReadDoesNotFatal.
 func (db *DB) logSyncReadError(id string, readErr error) {
+	if errors.Is(readErr, cluster.ErrNewerFrame) {
+		db.logger.Error("event-log entry written by a newer committed on sync read; this syncable is wedged at that entry (nothing is skipped) and the node stays up — run the newer committed on this node; the entry is not corrupt, so do not repair or rebuild",
+			zap.String("id", id), zap.Error(readErr))
+		return
+	}
 	if errors.Is(readErr, cluster.ErrCorruptEntry) {
 		db.logger.Error("corrupt event-log entry on sync read; this syncable is wedged at the corrupt entry (nothing is skipped) and the node stays up — rebuild this node from a healthy replica, or run `committed wal repair` to check for a torn tail (see docs/operations/rebuild.md)",
 			zap.String("id", id), zap.Error(readErr))

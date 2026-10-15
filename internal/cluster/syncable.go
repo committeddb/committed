@@ -84,6 +84,14 @@ var ErrCompactionDeferred = errors.New("raft-log compaction deferred: a layout f
 // from a healthy replica.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
 
+// ErrNewerFrame marks a stored WAL entry framed by a newer binary: the frame's
+// magic is intact but its version byte is above the one this binary reads.
+// The entry is unreadable here exactly as a corrupt one is, so the error also
+// matches ErrCorruptEntry and every reader refuses it the same way, but the
+// remedy is the opposite: run the binary that wrote it. Repairing or
+// rebuilding would discard sound data.
+var ErrNewerFrame = errors.New("wal: entry written by a newer committed")
+
 // ErrNotSyncableOwner is returned by RebuildSyncable / RematerializeSyncable
 // when this node does not serve the zone-pinned syncable: the verbs' worker
 // drain must run WHERE THE WORKER RUNS (the drain-before-reset ordering that

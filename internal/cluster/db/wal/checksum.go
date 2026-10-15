@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -51,10 +52,25 @@ func appendFrame(dst, payload []byte) []byte {
 	return dst
 }
 
+// newerFrameError is unframe's error for an intact magic carrying a frame
+// version above frameVersion: a newer binary wrote the entry. It matches both
+// cluster.ErrNewerFrame (the diagnosis) and ErrCorruptEntry (every reader
+// refuses an entry it cannot read), and its text names the remedy.
+type newerFrameError struct{ version byte }
+
+func (e newerFrameError) Error() string {
+	return fmt.Sprintf("wal: entry frame version %d is newer than this binary reads (version %d) — the log was written by a newer committed; run that version or newer. This is not corruption: do not repair or rebuild",
+		e.version, frameVersion)
+}
+
+func (e newerFrameError) Is(target error) bool {
+	return target == cluster.ErrNewerFrame || target == ErrCorruptEntry
+}
+
 // unframe inverts frame: it verifies the v1 magic, version, and CRC32C and
-// returns the payload, or ErrCorruptEntry for anything else — a mismatched
-// checksum, an unknown version, a torn header, or bytes with no frame at
-// all. Unframed bytes can only be corruption or a pre-v0.5-beta log, which
+// returns the payload, newerFrameError for an intact magic with a newer
+// version, or ErrCorruptEntry for anything else — a mismatched checksum, an
+// older version, a torn header, or bytes with no frame at all. Unframed bytes can only be corruption or a pre-v0.5-beta log, which
 // sits far below the supported data-dir floor (0.7.3-beta) — never trusted
 // content.
 //
@@ -62,6 +78,9 @@ func appendFrame(dst, payload []byte) []byte {
 // the next Read on a NoCopy log must copy. Today every caller unmarshals
 // immediately, matching the prior `log.Read` behaviour.
 func unframe(raw []byte) ([]byte, error) {
+	if len(raw) >= frameHeaderSize && raw[0] == frameMagic[0] && raw[1] == frameMagic[1] && raw[2] == frameMagic[2] && raw[3] > frameVersion {
+		return nil, newerFrameError{version: raw[3]}
+	}
 	if len(raw) < frameHeaderSize || raw[0] != frameMagic[0] || raw[1] != frameMagic[1] || raw[2] != frameMagic[2] || raw[3] != frameVersion {
 		return nil, ErrCorruptEntry
 	}

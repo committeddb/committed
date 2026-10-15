@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"maps"
 	"net/url"
 	"os"
@@ -32,8 +31,7 @@ func getenvDefault(name, def string) string {
 func nodeID() uint64 {
 	id, err := parseNodeID(os.Getenv("COMMITTED_NODE_ID"))
 	if err != nil {
-		// G706 false positive: the value is an operator-supplied env var.
-		log.Fatalf("%v", err) //nolint:gosec // G706
+		zap.L().Fatal("COMMITTED_NODE_ID", zap.Error(err))
 	}
 	return id
 }
@@ -61,8 +59,7 @@ func parseNodeID(raw string) (uint64, error) {
 func loadPeers(id uint64) db.Peers {
 	peers, err := parsePeers(id, os.Getenv("COMMITTED_PEERS"), getenvDefault("COMMITTED_PEER_URL", "http://127.0.0.1:9022"))
 	if err != nil {
-		// G706 false positive: the value is an operator-supplied env var.
-		log.Fatalf("%v", err) //nolint:gosec // G706
+		zap.L().Fatal("COMMITTED_PEERS", zap.Error(err))
 	}
 	return peers
 }
@@ -243,7 +240,7 @@ func boolEnv(name string) (bool, error) {
 func boolEnvOrExit(name string) bool {
 	v, err := boolEnv(name)
 	if err != nil {
-		log.Fatalf("%v — refusing to start rather than silently treating it as false", err) //nolint:gosec // G706: the value is the operator's own env
+		zap.L().Fatal("refusing to start rather than silently treating it as false", zap.Error(err))
 	}
 	return v
 }

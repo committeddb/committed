@@ -127,7 +127,7 @@ error handling, deletes, and schema evolution:
   columns, executed in manifest order inside the Actual's transaction.
   When two matched rules set the same column, the last rule wins.
   Zero matching rules → zero SQL: no ghost rows, and the
-  `committed_sync_rules_unmatched` counter ticks — the signal that a
+  `committed_sync_rules_unmatched_total` counter ticks — the signal that a
   new event variant shipped without a rule.
 - **Writes are absolute** (`from` extracts from the payload, `value`
   is a literal, `null = true` writes SQL NULL — exactly one per `set`

@@ -12,13 +12,11 @@ import (
 
 type fakeLagProvider struct {
 	sync   map[string]uint64
-	ingest map[string]*uint64
+	ingest map[string]metrics.IngestLag
 }
 
-func (f fakeLagProvider) SyncableLags() map[string]uint64    { return f.sync }
-func (f fakeLagProvider) IngestableLags() map[string]*uint64 { return f.ingest }
-
-func u64(v uint64) *uint64 { return &v }
+func (f fakeLagProvider) SyncableLags() map[string]uint64              { return f.sync }
+func (f fakeLagProvider) IngestableLags() map[string]metrics.IngestLag { return f.ingest }
 
 // collectLag registers the lag gauges against a fresh manual reader, then
 // collects once (reuses the package test's collect helper).
@@ -49,11 +47,15 @@ func gaugeByID(t *testing.T, rm metricdata.ResourceMetrics, name string) map[str
 
 // The gauges read the provider at collection (scrape) time: every syncable is
 // observed (including a caught-up 0), and an ingestable's lag is observed only
-// when known — a nil (MySQL / mid-snapshot / unreachable) is absent, not 0.
+// when known — an unknown one (mid-snapshot / unreachable) is absent, not 0 —
+// on the gauge for its unit.
 func TestLagGauges_ObserveAtCollect(t *testing.T) {
 	rm := collectLag(t, fakeLagProvider{
-		sync:   map[string]uint64{"s1": 7, "s2": 0},
-		ingest: map[string]*uint64{"i1": u64(4096), "i2": nil},
+		sync: map[string]uint64{"s1": 7, "s2": 0},
+		ingest: map[string]metrics.IngestLag{
+			"i1": {Value: 4096},
+			"i3": {Value: 12, Transactions: true},
+		},
 	})
 
 	sync := gaugeByID(t, rm, "committed.sync.lag")
@@ -61,9 +63,11 @@ func TestLagGauges_ObserveAtCollect(t *testing.T) {
 	require.Equal(t, 0.0, sync["s2"], "a caught-up syncable reports lag 0")
 
 	ingest := gaugeByID(t, rm, "committed.ingest.lag")
-	require.Equal(t, 4096.0, ingest["i1"])
-	_, present := ingest["i2"]
-	require.False(t, present, "an unknown (nil) ingest lag must be absent, not 0")
+	require.Equal(t, map[string]float64{"i1": 4096}, ingest,
+		"the bytes gauge carries only byte lags; an unknown one is absent, not 0")
+	txns := gaugeByID(t, rm, "committed.ingest.lag.transactions")
+	require.Equal(t, map[string]float64{"i3": 12}, txns,
+		"a transaction count is never reported as bytes")
 }
 
 // A second provider with a large value confirms the gauge reports the provider's

@@ -42,6 +42,13 @@ take effect on each node as it upgrades:
   snapshot and retried forever. It now snapshots, including through
   parallel snapshot readers. A rolled-back node cannot read such a
   table's mid-snapshot checkpoint and retries until it is upgraded again.
+- **Ingest lag metrics by unit.** `committed.ingest.lag` carried every
+  ingestable's lag as bytes, though MySQL with GTIDs and SQL Server measure
+  theirs in source transactions. Those now report on
+  `committed.ingest.lag.transactions`, and `committed.ingest.lag`
+  (`committed_ingest_lag_bytes` in PromQL) keeps only byte lags. Move any
+  alert on a MySQL-with-GTIDs or SQL Server ingestable's lag to the new
+  gauge, with a threshold in transactions.
 - **A destination with rows and no note stops.** 0.8.0 through 0.8.2 gave
   every SQL and Iceberg destination without a rendering note one on first
   contact (see

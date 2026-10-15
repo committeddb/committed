@@ -3,6 +3,9 @@ package db
 import (
 	"context"
 	"time"
+
+	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
 // lagScrapeTimeout bounds the per-ingestable source query the ingest-lag gauge
@@ -36,13 +39,13 @@ func (db *DB) SyncableLags() map[string]uint64 {
 }
 
 // IngestableLags implements metrics.LagProvider: each configured ingestable's
-// source byte lag, or nil when unknown (MySQL has no scalar binlog distance,
-// the worker is mid-snapshot, or the source was unreachable). Mirrors
+// source lag in its unit, with no entry when unknown (the worker is
+// mid-snapshot, or the source was unreachable). Mirrors
 // GET /v1/ingestable/{id}/status — it makes the same source query, bounded by
 // lagScrapeTimeout per ingestable. An ingestable not configured on this node is
 // skipped (no entry).
-func (db *DB) IngestableLags() map[string]*uint64 {
-	out := map[string]*uint64{}
+func (db *DB) IngestableLags() map[string]metrics.IngestLag {
+	out := map[string]metrics.IngestLag{}
 	cfgs, err := db.Ingestables()
 	if err != nil {
 		return out
@@ -54,7 +57,10 @@ func (db *DB) IngestableLags() map[string]*uint64 {
 		if err != nil {
 			continue
 		}
-		out[c.ID] = st.Lag
+		if st.Lag == nil {
+			continue
+		}
+		out[c.ID] = metrics.IngestLag{Value: *st.Lag, Transactions: st.LagUnit == cluster.LagUnitTransactions}
 	}
 	return out
 }

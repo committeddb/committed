@@ -225,7 +225,7 @@ type Dialect interface {
 // handling, which changed between viper versions.
 type Index struct {
 	IndexName   string `mapstructure:"name"`
-	ColumnNames string `mapstructure:"index"` // comma separated list of columns - why isn't this a slice?
+	ColumnNames string `mapstructure:"index"` // comma-separated columns; the config may also write them as a list (parseIndexes)
 }
 
 type Mapping struct {
