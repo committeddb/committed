@@ -13,8 +13,14 @@ same, and its on-disk state is reused in place.
 ## Upgrading from 0.8.1 to 0.8.2
 
 Follow the rolling binary-upgrade procedure below; no configuration changes.
-0.8.2 raises the cluster feature level to 3 for two changes, which activate
-once every node runs 0.8.2; the PostgreSQL change below needs no feature level:
+0.8.2 raises the cluster feature level to 3 for three changes, which activate
+once every node runs 0.8.2; the changes after them need no feature level and
+take effect on each node as it upgrades:
+
+- **Pipelined ingest:** an ingestable keeps many source transactions in
+  flight instead of one (see
+  [performance.md](performance.md#the-envelope)). Until every node runs
+  0.8.2, ingest stays one transaction at a time.
 
 - **SQL Server date and time rendering:** `date`, `time`, and the zone-less
   datetime types render by declared type instead of as RFC 3339 instants
@@ -27,8 +33,19 @@ once every node runs 0.8.2; the PostgreSQL change below needs no feature level:
   [types.md](../types.md#superseded-versions-onsupersede)): a type that
   declares `onSupersede = "scrub"` on a kind other than `snapshot` is refused
   until every node runs 0.8.2.
-- **PostgreSQL publications** (no feature level; active on each node as it
-  upgrades): committed now records ownership of the publication it creates
+- **Projection stage state is re-derived:** the node-local stage store's
+  format changed, so a projection with stages discards its store and
+  re-derives it from the log the first time a 0.8.2 node runs it. The
+  destination is not rewritten and stays readable, but new entries reach it
+  only after the re-derivation completes; status shows `re-deriving` with
+  progress meanwhile. A large log takes a while, so roll during a quiet
+  period.
+- **SQL Server poll cadence:** a SQL Server ingestable polls Change Tracking
+  every 250 ms by default instead of every 3 s, so read models trail the
+  source by up to 250 ms. An idle poll runs one small catalog query plus one
+  per watched table; set `pollInterval = "3s"` to keep the old cadence (see
+  [ingestables.md](../ingestables.md#lag-retention-and-the-poll-cadence)).
+- **PostgreSQL publications:** committed now records ownership of the publication it creates
   (see [ingestables.md](../ingestables.md#what-committed-creates-for-you)). An
   existing ingestable adopts its publication on its first connection after the
   upgrade, and from then on removes tables no longer in `tables` from it. A
