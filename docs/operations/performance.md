@@ -21,6 +21,7 @@ machines:
 | Ingest snapshot rate | ≥ 5,000 rows/sec | Initial snapshot of a source table (pipelined) |
 | Ingest streaming rate | ≥ 1,000 source transactions/sec per ingestable | Change capture after the snapshot, in source commit order |
 | Source commit to read-model row | ≤ 1.5 s at p99 | An event committed at the source until a projection's row shows it |
+| Projection rate, one aggregate stage into PostgreSQL | ≥ 1,500 events/sec | How fast one projection consumes the log; past this rate its read model falls behind |
 
 Two shapes matter more than any single number:
 
@@ -38,10 +39,11 @@ Two shapes matter more than any single number:
   one write round-trip per transaction. A source that sustains more
   transactions per second than the envelope falls behind; watch `lag` on
   `GET /v1/ingestable/{id}/status`. Separate ingestables stream in parallel.
-- **Reads are not the bottleneck.** Catch-up drains the log ~500× faster
-  than the write path fills it, so a rebuilt destination converges quickly; sync
-  throughput in practice is bounded by the destination database, not the
-  log.
+- **Reading the log is not the bottleneck.** Catch-up reads the log ~500×
+  faster than the write path fills it, so a syncable's rate is set by what
+  it does with each entry: the destination database's writes for a mirror,
+  and the stage's own work as well for a projection (see the projection rate
+  above). A rebuilt projection converges at that rate, not at the read rate.
 
 ## Reference measurements
 
@@ -113,6 +115,28 @@ The 3-node HTTP number is the most conservative of all: real processes, real
 HTTP, follower→leader forwarding, quorum replication, and three nodes
 contending for one laptop disk at only 8-way concurrency. Treat it as a
 floor, not a capacity estimate.
+
+### Three Linux nodes
+
+Measured 2026-10-15 on three AWS i8ge.large machines (2 vCPUs, local NVMe),
+one per availability zone, with the source and read-model databases in
+Docker on a fourth machine in the first node's zone. Same recipe, one event
+per source transaction, 1,000 events/sec for 10 minutes from 32 writers,
+with four streams growing to 10,000 events:
+
+| Source | Commit to row p50 | p99 | Idle append to row | Catch-up after the last append | Second read model from the log |
+|---|---|---|---|---|---|
+| PostgreSQL 16 | 71 ms | 176 ms | 6 ms | 0.4 s | 2,211 events/sec |
+| MySQL 9 | 62 ms | 187 ms | 6 ms | 0.3 s | 2,078 events/sec |
+| SQL Server 2022 | 42 ms | 240 ms | 99 ms | 0.3 s | 2,866 events/sec |
+
+Each read model matched the source exactly. SQL Server's idle latency is its
+change-tracking poll (`pollInterval`, 250 ms by default).
+
+Offered 5,000 events/sec for one minute (PostgreSQL), the ingestable kept
+up: its lag was back to zero when the writers stopped. The projection was the
+slower stage, draining at ~1,800 events/sec; the read model held all 300,000
+events 115 s after the last append (~1,700 events/sec end to end).
 
 ## Re-measuring
 
