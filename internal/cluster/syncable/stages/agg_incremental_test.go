@@ -2,6 +2,7 @@ package stages
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -134,6 +135,7 @@ func runIncrementalCorpus(t *testing.T, sts []Stage) {
 			}
 			return nil
 		}))
+		requireObjectsMatchBytes(t, store, g, st, batch)
 	}
 	n := g.byName["g"]
 	t.Logf("refolds: %d from fold state, %d in full", n.aggIncremental.Load(), n.aggFull.Load())
@@ -233,7 +235,7 @@ func TestIncrementalAggregateStateMatchesRebuild(t *testing.T) {
 			stored, err := tx.GetAcc("g", []byte(k))
 			require.NoError(t, err)
 			stored = bytes.Clone(stored)
-			_, _, err = g.refoldAggregateFull(tx, st, []byte(k))
+			_, _, _, err = g.refoldAggregateFull(tx, st, []byte(k))
 			require.NoError(t, err)
 			rebuilt, err := tx.GetAcc("g", []byte(k))
 			require.NoError(t, err)
@@ -285,4 +287,28 @@ func TestIncrementalAggregateFallbacks(t *testing.T) {
 		require.Nil(t, state, "a key the state cannot account for keeps none")
 		return nil
 	}))
+}
+
+// errRollback discards a check's writes.
+var errRollback = errors.New("rollback")
+
+// requireObjectsMatchBytes: wherever the state path hands publishOutput the
+// rendered object in place of its bytes, the object is exactly what decoding
+// the bytes yields — so consumers see what they would have decoded.
+func requireObjectsMatchBytes(t *testing.T, store *stagestore.Store, g *Graph, st *Stage, batch int) {
+	t.Helper()
+	err := store.Update(func(tx *stagestore.Tx) error {
+		for _, k := range []string{"g0", "g1", "g2"} {
+			out, obj, live, err := g.refoldAggregateFull(tx, st, []byte(k))
+			require.NoError(t, err)
+			if !live || obj == nil {
+				continue
+			}
+			want, err := DecodeObject(out)
+			require.NoError(t, err)
+			require.Equal(t, want, obj, "batch %d key %s", batch, k)
+		}
+		return errRollback
+	})
+	require.ErrorIs(t, err, errRollback)
 }

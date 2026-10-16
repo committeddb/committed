@@ -396,12 +396,31 @@ func dumpStore(t *testing.T, path string) (string, uint64) {
 				if string(name) == "meta" && string(k) == "format" {
 					format = binary.BigEndian.Uint64(v)
 				}
+				if strings.HasSuffix(string(name), ":acc") {
+					v = renderAggState(t, v)
+				}
 				fmt.Fprintf(&sb, "%s\t%s\t%s\n", strconv.Quote(string(name)), strconv.Quote(string(k)), renderValue(v))
 				return nil
 			})
 		})
 	}))
 	return sb.String(), format
+}
+
+// renderAggState renders a fold state in the JSON form, so the reference pins
+// what a state holds rather than how it is encoded: both encodings decode to
+// the same state (decodeAggState), and the encoding has its own pin
+// (TestAggStateBinaryLayout).
+func renderAggState(t *testing.T, v []byte) []byte {
+	t.Helper()
+	if len(v) > 0 && v[0] == '{' {
+		return v
+	}
+	as, err := parseAggState(v)
+	require.NoError(t, err)
+	out, err := encodeAggStateJSON(as)
+	require.NoError(t, err)
+	return out
 }
 
 func renderValue(v []byte) string {

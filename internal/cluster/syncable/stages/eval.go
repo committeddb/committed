@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -392,7 +393,7 @@ func (g *Graph) SweepEpochs(tx *stagestore.Tx, topic string, marker uint64, dirt
 				}
 				continue
 			}
-			if err := g.noteIn(tx, n, sl.outKey, sl.inKey, nil, dirty); err != nil {
+			if err := g.noteIn(tx, n, sl.outKey, sl.inKey, nil, nil, dirty); err != nil {
 				return err
 			}
 			if err := tx.DeleteIn(st.Name, sl.outKey, sl.inKey); err != nil {
@@ -477,7 +478,9 @@ func (d Dirty) delta(n *graphNode, outKey []byte) *aggDelta {
 // noteIn records, for a stage keeping a fold state, that one retained input
 // of outKey changes to cur (nil: removed). Called BEFORE the store write, so
 // the first call for an input in the batch captures its bytes before it.
-func (g *Graph) noteIn(tx *stagestore.Tx, n *graphNode, outKey, inKey, cur []byte, dirty Dirty) error {
+// in, when not nil, is cur already decoded, which the drain then evaluates
+// instead of decoding cur again.
+func (g *Graph) noteIn(tx *stagestore.Tx, n *graphNode, outKey, inKey, cur []byte, in *decodedInput, dirty Dirty) error {
 	if !n.def.incrementalAggregate() {
 		return nil
 	}
@@ -499,7 +502,7 @@ func (g *Graph) noteIn(tx *stagestore.Tx, n *graphNode, outKey, inKey, cur []byt
 		ch = &inputChange{old: bytes.Clone(old)}
 		d.inputs[string(inKey)] = ch
 	}
-	ch.cur = bytes.Clone(cur)
+	ch.cur, ch.curIn = bytes.Clone(cur), in
 	return nil
 }
 
@@ -987,7 +990,7 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey 
 		return err
 	}
 	if prior != nil && !bytes.Equal(prior, outKey) {
-		if err := g.noteIn(tx, n, prior, inKey, nil, dirty); err != nil {
+		if err := g.noteIn(tx, n, prior, inKey, nil, nil, dirty); err != nil {
 			return err
 		}
 		if err := tx.DeleteIn(st.Name, prior, inKey); err != nil {
@@ -1004,7 +1007,11 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey 
 		return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
 	}
 	retained := encodeRetained(gen, inputBytes)
-	if err := g.noteIn(tx, n, outKey, inKey, retained, dirty); err != nil {
+	var in *decodedInput
+	if jsonStable(data) && jsonStable(parent) {
+		in = &decodedInput{data: data, parent: parent}
+	}
+	if err := g.noteIn(tx, n, outKey, inKey, retained, in, dirty); err != nil {
 		return err
 	}
 	if err := tx.PutIn(st.Name, outKey, inKey, retained); err != nil {
@@ -1101,7 +1108,7 @@ func (g *Graph) foldDeleteInput(tx *stagestore.Tx, n *graphNode, inKey []byte, d
 			return err
 		}
 	}
-	if err := g.noteIn(tx, n, outKey, inKey, nil, dirty); err != nil {
+	if err := g.noteIn(tx, n, outKey, inKey, nil, nil, dirty); err != nil {
 		return err
 	}
 	if err := tx.DeleteIn(st.Name, outKey, inKey); err != nil {
@@ -1167,7 +1174,7 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 	if err != nil {
 		return err
 	}
-	out, live, err := g.refoldOutput(tx, st, outKey, dirty.delta(n, outKey))
+	out, obj, live, err := g.refoldOutput(tx, st, outKey, dirty.delta(n, outKey))
 	if err != nil {
 		return err
 	}
@@ -1180,7 +1187,7 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 	if prior != nil && bytes.Equal(prior, out) {
 		return nil // unchanged — suppressed (deterministic bytes make this sound)
 	}
-	return g.publishOutput(tx, n, outKey, out, dirty)
+	return g.publishOutput(tx, n, outKey, out, obj, dirty)
 }
 
 // retractOutput deletes a stage's output for one key and cascades the
@@ -1229,14 +1236,18 @@ func (g *Graph) retractOutput(tx *stagestore.Tx, n *graphNode, outKey []byte, di
 
 // publishOutput stores a stage's changed output for one key and cascades
 // it, as retractOutput does a retraction.
-func (g *Graph) publishOutput(tx *stagestore.Tx, n *graphNode, outKey, out []byte, dirty Dirty) error {
+//
+// obj is out decoded, or nil to decode it here.
+func (g *Graph) publishOutput(tx *stagestore.Tx, n *graphNode, outKey, out []byte, obj any, dirty Dirty) error {
 	st := n.def
 	if err := tx.PutOut(st.Name, outKey, out); err != nil {
 		return err
 	}
-	obj, err := DecodeObject(out)
-	if err != nil {
-		return fmt.Errorf("stage %q: decode own output: %w", st.Name, err)
+	if obj == nil {
+		var err error
+		if obj, err = DecodeObject(out); err != nil {
+			return fmt.Errorf("stage %q: decode own output: %w", st.Name, err)
+		}
 	}
 	if g.OnDelta != nil {
 		if err := g.OnDelta(st.Name, outKey, obj, true); err != nil {
@@ -1313,13 +1324,20 @@ func mergeInKey(alias string, key []byte) []byte {
 
 // refoldOutput computes a key's output object from its retained inputs.
 // live=false means the key has no qualifying inputs and its output (and
-// downstream memberships) retract.
-func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) (out []byte, live bool, err error) {
-	if len(st.Merge) > 0 {
-		return g.refoldMerge(tx, st, outKey)
-	}
+// downstream memberships) retract. obj is out decoded when the refold had
+// it at hand (nil otherwise).
+func (g *Graph) refoldOutput(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) (out []byte, obj any, live bool, err error) {
 	if st.incrementalAggregate() {
 		return g.refoldAggregateIncremental(tx, st, outKey, delta)
+	}
+	out, live, err = g.refoldOutputBytes(tx, st, outKey)
+	return out, nil, live, err
+}
+
+// refoldOutputBytes is refoldOutput for the stages that keep no fold state.
+func (g *Graph) refoldOutputBytes(tx *stagestore.Tx, st *Stage, outKey []byte) (out []byte, live bool, err error) {
+	if len(st.Merge) > 0 {
+		return g.refoldMerge(tx, st, outKey)
 	}
 	if st.Reduce == "aggregate" {
 		return g.refoldAggregate(tx, st, outKey)
@@ -1865,6 +1883,13 @@ type legacyFolds struct {
 // results and legacy arms: having, then each emit. The one rendering both
 // the full refold and the fold state (agg_incremental.go) go through.
 func (g *Graph) aggregateOutput(st *Stage, results aggResults, lf legacyFolds) ([]byte, bool, error) {
+	bs, _, live, err := g.aggregateOutputObject(st, results, lf)
+	return bs, live, err
+}
+
+// aggregateOutputObject is aggregateOutput that also returns the emitted
+// object when it stands for its bytes (jsonStable), nil otherwise.
+func (g *Graph) aggregateOutputObject(st *Stage, results aggResults, lf legacyFolds) ([]byte, any, bool, error) {
 	sums, mins, maxs, counts, collects := lf.sums, lf.mins, lf.maxs, lf.counts, lf.collects
 	var err error
 	if st.havingCompiled != nil {
@@ -1874,7 +1899,7 @@ func (g *Graph) aggregateOutput(st *Stage, results aggResults, lf legacyFolds) (
 			if n := g.byName[st.Name]; n != nil {
 				n.havingRejected.Add(1)
 			}
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
 	}
 
@@ -1885,7 +1910,7 @@ func (g *Graph) aggregateOutput(st *Stage, results aggResults, lf legacyFolds) (
 		switch {
 		case e.Expr != "":
 			if v, err = Eval(e.compiled, results, nil); err != nil {
-				return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
+				return nil, nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 			}
 		case e.Count:
 			v = json.Number(fmt.Sprintf("%d", counts[i]))
@@ -1898,7 +1923,7 @@ func (g *Graph) aggregateOutput(st *Stage, results aggResults, lf legacyFolds) (
 			arr := make([]any, len(vals))
 			for k, cv := range vals {
 				if arr[k], err = stageValue(cv); err != nil {
-					return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
+					return nil, nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 				}
 			}
 			v = arr
@@ -1917,11 +1942,14 @@ func (g *Graph) aggregateOutput(st *Stage, results aggResults, lf legacyFolds) (
 		}
 		emitted[e.Field], err = stageValue(v)
 		if err != nil {
-			return nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
+			return nil, nil, false, cluster.Permanent(fmt.Errorf("stage %q emit %q: %w", st.Name, e.Field, err))
 		}
 	}
 	bs, err := marshalStageObject(emitted)
-	return bs, true, err
+	if err != nil || !jsonStable(emitted) {
+		return bs, nil, true, err
+	}
+	return bs, emitted, true, nil
 }
 
 // stageValue renders an evaluator value into its stored JSON form:
@@ -2093,6 +2121,35 @@ func decodeRetained(val []byte) (uint64, []byte) {
 		return 0, val // pre-encoding store state: rebuilt anyway (format/fingerprint)
 	}
 	return binary.BigEndian.Uint64(val[:8]), val[8:]
+}
+
+// jsonStable reports whether v decodes back from marshalStageObject's bytes
+// as the same value — what DecodeObject yields: json.Number, valid UTF-8
+// strings, bools, nil, and slices and string-keyed maps of those. Such a
+// value can stand in for decoding its own bytes; any other (a Go number, a
+// string Marshal would repair) must be decoded to be seen as stored.
+func jsonStable(v any) bool {
+	switch t := v.(type) {
+	case nil, bool, json.Number:
+		return true
+	case string:
+		return utf8.ValidString(t)
+	case []any:
+		for _, e := range t {
+			if !jsonStable(e) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		for k, e := range t {
+			if !utf8.ValidString(k) || !jsonStable(e) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // marshalStageObject renders a stage object deterministically: Go maps
