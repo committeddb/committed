@@ -57,6 +57,7 @@ type options struct {
 	catchUpBar    time.Duration
 	label         string
 	sqlserverPoll string
+	pinFollower   bool
 }
 
 func main() {
@@ -87,6 +88,7 @@ func main() {
 	flag.DurationVar(&o.catchUpBar, "catch-up-bar", 5*time.Second, "the bar for catch-up after the last append")
 	flag.StringVar(&o.label, "label", "", "a name for this run in the report (e.g. the commit)")
 	flag.StringVar(&o.sqlserverPoll, "sqlserver-poll-interval", "", "set [sql.options] pollInterval on a SQL Server ingestable (default: the recipe's, i.e. none)")
+	flag.BoolVar(&o.pinFollower, "pin-follower", false, "pin the projections to a follower's zone (run.sh starts node i in zone zi), so they sync off the leader")
 	flag.Parse()
 
 	for _, n := range strings.Split(nodes, ",") {

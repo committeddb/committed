@@ -80,6 +80,10 @@ const defaultProposeTimeout = 30 * time.Second
 type Peers map[uint64]string
 
 type DB struct {
+	// zones memoizes each syncable's configured zone by its config bytes
+	// (see syncableZone): the sync loop asks on every entry it reads.
+	zones sync.Map // syncable id -> zoneMemo
+
 	ErrorC      <-chan error
 	proposeC    chan<- []byte
 	confChangeC chan<- *raftpb.ConfChangeV2

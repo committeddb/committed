@@ -45,13 +45,24 @@ func run(ctx context.Context, o options) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
+	zone := ""
+	if o.pinFollower {
+		if zone, err = c.followerZone(ctx); err != nil {
+			return nil, err
+		}
+		logf("projections pinned to zone %s, off the leader", zone)
+	}
+	orders, err := withZone(r.orders, zone)
+	if err != nil {
+		return nil, err
+	}
 	for _, p := range []struct{ path, body string }{
 		{"/v1/type/order-events", r.typ},
 		{"/v1/ingestable/order-events", ingestable},
 		{"/v1/database/read", database},
-		{"/v1/syncable/orders", r.orders},
+		{"/v1/syncable/orders", orders},
 	} {
-		if err := c.post(ctx, p.path, p.body); err != nil {
+		if err := c.postRetrying(ctx, p.path, p.body, time.Minute); err != nil {
 			return nil, err
 		}
 	}
@@ -100,6 +111,9 @@ func run(ctx context.Context, o options) (*Report, error) {
 	if !o.skipRebuild {
 		body, err := r.projectionNamed("orders_v2")
 		if err != nil {
+			return rep, err
+		}
+		if body, err = withZone(body, zone); err != nil {
 			return rep, err
 		}
 		t0 := time.Now()

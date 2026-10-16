@@ -225,6 +225,21 @@ func (d *SQLMockDialect) BindArgs(values []any) []any {
 	return append(values, values...)
 }
 
+// CreateMultiRowUpsertSQL mirrors the mock's simplified CreateSQL: the column
+// list and one placeholder tuple per row, no conflict clause.
+func (d *SQLMockDialect) CreateMultiRowUpsertSQL(config *sql.Config, rows int) string {
+	cols := make([]string, len(config.Mappings))
+	for i, m := range config.Mappings {
+		cols[i] = m.Column
+	}
+	tuple := "(" + strings.TrimSuffix(strings.Repeat("?,", len(cols)), ",") + ")"
+	tuples := make([]string, rows)
+	for i := range tuples {
+		tuples[i] = tuple
+	}
+	return fmt.Sprintf("INSERT INTO %s(%s) VALUES %s", config.Table, strings.Join(cols, ","), strings.Join(tuples, ","))
+}
+
 func (d *SQLMockDialect) CreateEnrichedUpsertSQL(c *sql.Config, enrich map[string]sql.SpineEnrichment) string {
 	return (&dialects.MySQLDialect{}).CreateEnrichedUpsertSQL(c, enrich)
 }

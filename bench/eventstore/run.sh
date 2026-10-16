@@ -5,7 +5,13 @@
 # starts the cluster, starts the source and read-model databases, runs
 # eventstore-load, collects the results, and tears it all down.
 #
-#   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [-- eventstore-load flags]
+#   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [--profile]
+#            [--pinned-labels a] [-- eventstore-load flags]
+#
+# A label in --pinned-labels runs with node i in zone zi and the projections
+# pinned to a follower's zone, so they sync off the leader. It names a build
+# in bin/ like any other label (copy a build to a second name to run it both
+# ways).
 #
 # Environment:
 #   BENCH_NODES        cluster machine addresses, space-separated; "local" runs
@@ -15,15 +21,22 @@
 #   BENCH_DATA_DIR     data directory on every machine (default ./local-data)
 #   BENCH_RESULTS_DIR  where results go (default ./results)
 #   BENCH_RUN_ID, BENCH_INSTANCE_TYPES   recorded in the results
+#   BENCH_PROFILE      set (or pass --profile) to take a 30 s CPU profile and
+#                      a 5 s execution trace from every node every
+#                      BENCH_PROFILE_EVERY seconds (default 90) while the
+#                      workload runs, into <results>/profiles/
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 labels=$(ls "$here/bin" | grep -v '^eventstore-load$' | paste -sd, -)
 engines=postgres
+pinned=
 while [ $# -gt 0 ]; do
   case $1 in
   --labels) labels=$2; shift 2 ;;
   --engines) engines=$2; shift 2 ;;
+  --profile) BENCH_PROFILE=1; shift ;;
+  --pinned-labels) pinned=$2; shift 2 ;;
   --) shift; break ;;
   *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -86,14 +99,15 @@ peers() {
   echo "$out"
 }
 
+# start_nodes [zoned]: with zoned set, node i starts in zone zi.
 start_nodes() {
-  local i p; p=$(peers)
+  local zoned=${1:-} i p; p=$(peers)
   for i in $(seq 1 "$count"); do
     local dir; dir=$(node_dir "$i")
     on_node "$i" "rm -rf '$dir/data' && mkdir -p '$dir/data' && cd '$dir' || exit 1; \
       APP_DB_PASSWORD=$PW COMMITTED_NODE_ID=$i COMMITTED_API_ADDR=:$(api_port "$i") \
       COMMITTED_PEER_URL=http://${hosts[$((i - 1))]}:$(peer_port "$i") COMMITTED_PEERS=$p \
-      COMMITTED_DATA_DIR='$dir/data' nohup ./committed-bin node > node.log 2>&1 < /dev/null & echo \$! > '$dir/pid'"
+      COMMITTED_DATA_DIR='$dir/data' ${zoned:+COMMITTED_ZONE=z$i} ${BENCH_PROFILE:+COMMITTED_PPROF=true} nohup ./committed-bin node > node.log 2>&1 < /dev/null & echo \$! > '$dir/pid'"
   done
 }
 
@@ -166,6 +180,28 @@ start_dbs() {
   wait_for "read-model postgres" docker exec bench-read pg_isready -U committed -d app -h 127.0.0.1
 }
 
+# profile_nodes dir: every BENCH_PROFILE_EVERY seconds, a 30 s CPU profile
+# and then a 5 s execution trace (where goroutines wait, which a CPU profile
+# cannot show) from each node at once, named by node and seconds since the
+# workload began. Runs until killed.
+profile_nodes() {
+  local dir=$1 start i t
+  mkdir -p "$dir"
+  start=$(date +%s)
+  while true; do
+    t=$(($(date +%s) - start))
+    for i in $(seq 1 "$count"); do
+      curl -s -o "$dir/node$i-t$t.pprof" "http://${hosts[$((i - 1))]}:$(api_port "$i")/debug/pprof/profile?seconds=30" &
+    done
+    wait
+    for i in $(seq 1 "$count"); do
+      curl -s -o "$dir/node$i-t$t.trace" "http://${hosts[$((i - 1))]}:$(api_port "$i")/debug/pprof/trace?seconds=5" &
+    done
+    wait
+    sleep "$((${BENCH_PROFILE_EVERY:-90} - 35))"
+  done
+}
+
 cleanup() { stop_nodes; stop_dbs; }
 trap cleanup EXIT
 
@@ -188,15 +224,23 @@ for label in "${label_list[@]}"; do
     echo "=== $label / $engine"
     "$here/bin/$label/committed" --version >"$out/version.txt" 2>&1 || true
     start_dbs "$engine"
-    start_nodes
+    pin=()
+    case ",$pinned," in *",$label,"*) pin=(-pin-follower) ;; esac
+    start_nodes ${pin[@]+zoned}
+    profiler=
+    if [ -n "${BENCH_PROFILE:-}" ]; then
+      profile_nodes "$out/profiles" &
+      profiler=$!
+    fi
     set +e
     "$here/bin/eventstore-load" -nodes "$nodes_flag" -engine "$engine" -label "$label" \
       -recipe "$here/recipe/event-store-read-models.md" -results "$out" \
       -src-dsn "$src_dsn" -src-url "$src_url" -read-dsn "$read_dsn" -read-url "$read_url" \
-      ${load_args[@]+"${load_args[@]}"} 2>&1 | tee "$out/load.log"
+      ${pin[@]+"${pin[@]}"} ${load_args[@]+"${load_args[@]}"} 2>&1 | tee "$out/load.log"
     rc=${PIPESTATUS[0]}
     set -e
     [ "$rc" -eq 0 ] || status=$rc
+    if [ -n "$profiler" ]; then kill "$profiler" 2>/dev/null; wait "$profiler" 2>/dev/null || true; fi
     stop_nodes
     collect_nodes "$out"
     docker logs bench-src >"$out/source.log" 2>&1 || true

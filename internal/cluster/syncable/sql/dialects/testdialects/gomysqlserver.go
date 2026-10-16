@@ -166,6 +166,11 @@ func (d *GoMySQLServerDialect) BindArgs(values []any) []any {
 	return (&dialects.MySQLDialect{}).BindArgs(values)
 }
 
+// CreateMultiRowUpsertSQL mirrors MySQLDialect, as CreateSQL does.
+func (d *GoMySQLServerDialect) CreateMultiRowUpsertSQL(config *sql.Config, rows int) string {
+	return (&dialects.MySQLDialect{}).CreateMultiRowUpsertSQL(config, rows)
+}
+
 func (d *GoMySQLServerDialect) CreateEnrichedUpsertSQL(c *sql.Config, enrich map[string]sql.SpineEnrichment) string {
 	return (&dialects.MySQLDialect{}).CreateEnrichedUpsertSQL(c, enrich)
 }

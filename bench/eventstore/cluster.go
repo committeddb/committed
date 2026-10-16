@@ -82,6 +82,38 @@ func (c *cluster) waitReady(ctx context.Context, limit time.Duration) error {
 	return fmt.Errorf("the cluster was not ready within %s", limit)
 }
 
+// followerZone is the zone of a node that is not the leader: run.sh starts
+// node i (in -nodes order, numbered from 1) in zone zi.
+func (c *cluster) followerZone(ctx context.Context) (string, error) {
+	var st struct {
+		Leader uint64 `json:"leader"`
+	}
+	if err := c.getJSON(ctx, c.nodes[0]+"/v1/node/status", &st); err != nil {
+		return "", err
+	}
+	for i := range c.nodes {
+		if uint64(i+1) != st.Leader { //nolint:gosec // G115: i is a small index
+			return fmt.Sprintf("z%d", i+1), nil
+		}
+	}
+	return "", fmt.Errorf("no follower among %d nodes", len(c.nodes))
+}
+
+// postRetrying posts a config, retrying for up to limit: a zone-pinned
+// syncable is refused until the nodes have announced their zones.
+func (c *cluster) postRetrying(ctx context.Context, path, body string, limit time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for {
+		err := c.post(ctx, path, body)
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		if serr := sleep(ctx, time.Second); serr != nil {
+			return serr
+		}
+	}
+}
+
 func (c *cluster) getJSON(ctx context.Context, url string, v any) error {
 	code, b, err := c.do(ctx, http.MethodGet, url, "")
 	if err != nil {

@@ -215,6 +215,11 @@ type Dialect interface {
 	// The Syncable is otherwise dialect-agnostic, so it delegates this
 	// arrangement here rather than hardcoding the MySQL doubling.
 	BindArgs(values []any) []any
+	// CreateMultiRowUpsertSQL is the keyed CreateSQL for rows rows in one
+	// statement: one VALUES tuple per row, each bound ONCE in mappings order
+	// (never through BindArgs), and on a key conflict each mapped column
+	// takes the proposed row's value. No two rows may share a key.
+	CreateMultiRowUpsertSQL(config *Config, rows int) string
 }
 
 // The mapstructure tags drive viper.UnmarshalKey when parsing the

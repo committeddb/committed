@@ -627,3 +627,36 @@ func (d *PostgreSQLDialect) IsPermanent(err error) bool {
 func (d *PostgreSQLDialect) BindArgs(values []any) []any {
 	return values
 }
+
+// CreateMultiRowUpsertSQL implements Dialect.
+func (d *PostgreSQLDialect) CreateMultiRowUpsertSQL(config *sql.Config, rows int) string {
+	var sqlb strings.Builder
+	cols := make([]string, len(config.Mappings))
+	for i, m := range config.Mappings {
+		cols[i] = pgIdent.Ident(m.Column)
+	}
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(%s) VALUES ", pgIdent.Table(config.Table), strings.Join(cols, ","))
+	n := 0
+	for r := 0; r < rows; r++ {
+		if r > 0 {
+			sqlb.WriteString(",")
+		}
+		sqlb.WriteString("(")
+		for i := range cols {
+			if i > 0 {
+				sqlb.WriteString(",")
+			}
+			n++
+			fmt.Fprintf(&sqlb, "$%d", n)
+		}
+		sqlb.WriteString(")")
+	}
+	fmt.Fprintf(&sqlb, " ON CONFLICT (%s) DO UPDATE SET ", joinIdents(config.PrimaryKey, pgIdent))
+	for i, col := range cols {
+		if i > 0 {
+			sqlb.WriteString(",")
+		}
+		fmt.Fprintf(&sqlb, "%s=EXCLUDED.%s", col, col)
+	}
+	return sqlb.String()
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -803,6 +804,80 @@ func TestProjectionStagesToTable(t *testing.T) {
 	sync(13, cluster.NewDeleteEntity(txnType, []byte("t1")))
 
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A projection whose every table source reads a stage folds a whole batch and
+// drains once, so a key the batch touches several times reaches the table as
+// ONE write of its final value, not one write per input; and the batch's rows
+// go out together, as one multi-row upsert, rather than a statement each.
+func TestProjectionStagesBatchWritesEachKeyOnce(t *testing.T) {
+	txnType := &cluster.Type{ID: "txns", Name: "Txn"}
+	config := &sql.ProjectionConfig{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "job_id", SQLType: "VARCHAR(64)"},
+			{Name: "total", SQLType: "DECIMAL(12,2)"},
+			{Name: "n", SQLType: "INT"},
+		},
+		Stages: []sql.ProjectionStage{{
+			Name: "by-job", From: "txns", KeyPath: []string{"$.jobId"},
+			Reduce: "aggregate", Emit: []sql.StageEmit{{Field: "total", Sum: "$.amount"}, {Field: "n", Count: true}},
+		}},
+		Sources: []sql.ProjectionSource{{
+			FromStage: "by-job",
+			KeyPath:   []string{"$.job"},
+			Rules: []sql.ProjectionRule{{Set: []sql.ProjectionSet{
+				{Column: "total", From: "$.total"},
+				{Column: "n", From: "$.n"},
+			}}},
+		}},
+	}
+
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	ddlConfig := &sql.Config{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Mappings: []sql.Mapping{
+			{Column: "job_id", SQLType: "VARCHAR(64)"},
+			{Column: "total", SQLType: "DECIMAL(12,2)"},
+			{Column: "n", SQLType: "INT"},
+		},
+	}
+	ruleConfig := &sql.Config{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Mappings:   []sql.Mapping{{Column: "job_id"}, {Column: "total"}, {Column: "n"}},
+	}
+	mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+	mock.ExpectPrepare(dialect.CreateSQL(ruleConfig))
+	mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+
+	p := sql.NewProjection(db, config, nil, "job_totals")
+	p.SetStoreDir(t.TempDir())
+	require.NoError(t, p.Init())
+	t.Cleanup(func() { _ = p.Close() })
+
+	mock.ExpectBegin()
+	mock.ExpectExec(dialect.CreateMultiRowUpsertSQL(ruleConfig, 2)).
+		WithArgs("j1", int64(6), int64(3), "j2", int64(4), int64(1)).WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectCommit()
+
+	txn := func(idx uint64, id, job string, amount int) *cluster.Actual {
+		return &cluster.Actual{Index: idx, Entities: []*cluster.Entity{
+			cluster.NewUpsertEntity(txnType, []byte(id), fmt.Appendf(nil, `{"id":%q,"jobId":%q,"amount":%d}`, id, job, amount)),
+		}}
+	}
+	ok, err := p.SyncBatch(context.Background(), []*cluster.Actual{
+		txn(10, "t1", "j1", 1), txn(11, "t2", "j1", 2), txn(12, "t3", "j2", 4), txn(13, "t4", "j1", 3),
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, mock.ExpectationsWereMet(), "j1 is written once, with its final total and count")
 }
 
 // Teardown erases the stage store with the destination — left behind, a

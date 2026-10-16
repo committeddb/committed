@@ -630,3 +630,30 @@ func (d *MySQLDialect) IsPermanent(err error) bool {
 func (d *MySQLDialect) BindArgs(values []any) []any {
 	return append(values, values...)
 }
+
+// CreateMultiRowUpsertSQL implements Dialect. Each update assignment reads the
+// conflicting row's proposed value through VALUES(col), as the aggregate
+// sidecar upsert does, so every value binds once.
+func (d *MySQLDialect) CreateMultiRowUpsertSQL(config *sql.Config, rows int) string {
+	var sqlb strings.Builder
+	cols := make([]string, len(config.Mappings))
+	for i, m := range config.Mappings {
+		cols[i] = mysqlIdent.Ident(m.Column)
+	}
+	fmt.Fprintf(&sqlb, "INSERT INTO %s(%s) VALUES ", mysqlIdent.Table(config.Table), strings.Join(cols, ","))
+	tuple := "(" + strings.TrimSuffix(strings.Repeat("?,", len(cols)), ",") + ")"
+	for r := 0; r < rows; r++ {
+		if r > 0 {
+			sqlb.WriteString(",")
+		}
+		sqlb.WriteString(tuple)
+	}
+	sqlb.WriteString(" ON DUPLICATE KEY UPDATE ")
+	for i, col := range cols {
+		if i > 0 {
+			sqlb.WriteString(",")
+		}
+		fmt.Fprintf(&sqlb, "%s=VALUES(%s)", col, col)
+	}
+	return sqlb.String()
+}

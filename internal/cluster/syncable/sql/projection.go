@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -47,6 +48,17 @@ type Projection struct {
 	stages     *stages.Graph
 	stageStore *stagestore.Store
 	stageSinks map[string][]*projectionSource
+	// topicFed is set when a table source reads a topic directly. A stage-fed
+	// source also sits in sources (under the empty topic, so Close reaches its
+	// statements), so sources being non-empty does not say this.
+	topicFed bool
+	// batchWrites is set when a batch's row writes can go out as multi-row
+	// upserts: the one table source reads a stage, so the batch drain gives
+	// each key at most one write, and nothing else writes the table in
+	// between (no row owner or decorators, no lookup enrichment, no forEach).
+	// pending holds the batch's collected rows while foldStagesBatchTx runs.
+	batchWrites bool
+	pending     *pendingWrites
 	// decorators are the non-owner stage-fed sources, in declaration order —
 	// the sources whose retained stage output a row-owner write pulls (see
 	// pullDecorations).
@@ -238,6 +250,11 @@ type projectionStmt struct {
 	// positionally aligned with rule.Set. Runtime state kept off the
 	// config struct so parsed configs stay pure data.
 	setTrackers cluster.AmbiguityTrackers
+	// multi is the rule's statement config when its batch writes go out as
+	// multi-row upserts (see Projection.batchWrites), with each row count's
+	// SQL built once; nil otherwise.
+	multi    *Config
+	multiSQL map[int]string
 }
 
 // NewProjection constructs a Projection. m may be nil (no metrics);
@@ -462,6 +479,8 @@ func (p *Projection) Init() error {
 		// under the empty key too so Close reaches its statements.
 		if src.FromStage != "" {
 			p.stageSinks[src.FromStage] = append(p.stageSinks[src.FromStage], ps)
+		} else {
+			p.topicFed = true
 		}
 		if ps.updateOnly {
 			p.decorators = append(p.decorators, ps)
@@ -586,6 +605,8 @@ func (p *Projection) Init() error {
 			}
 		}
 	}
+
+	p.enableBatchWrites()
 
 	// Shared row-delete (onDelete=delete-row, and any RTBF delete on such a topic).
 	deleteString := p.dialect.CreateDeleteSQL(ddlConfig)
@@ -824,7 +845,7 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	if p.stages != nil {
 		committed := false
 		berr := p.stageStore.Update(func(stx *stagestore.Tx) error {
-			if len(p.sources) == 0 {
+			if !p.topicFed {
 				// Every table source reads a stage: fold the batch and
 				// drain once, so a key the batch touches many times
 				// refolds once (see stages.Graph.FoldActuals). With
@@ -1183,6 +1204,10 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 			args = append(args, keys...)
 		} else {
 			args = p.dialect.BindArgs(values)
+		}
+		if p.pending != nil && r.multi != nil {
+			p.pending.add(r, values[:len(keys)], values)
+			continue
 		}
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {
 			// Same NUL hint as the plain sink's row apply: name the offending
@@ -1576,10 +1601,114 @@ func (p *Projection) foldStagesBatchTx(ctx context.Context, tx *gosql.Tx, stx *s
 		return nil
 	}
 	defer func() { p.stages.OnDelta = nil }()
+	if p.batchWrites {
+		p.pending = &pendingWrites{}
+		defer func() { p.pending = nil }()
+	}
 	if err := p.stages.FoldActuals(stx, as); err != nil {
 		return err
 	}
+	if err := p.flushPending(ctx, tx); err != nil {
+		return err
+	}
 	return stx.SetFrontier(as[len(as)-1].Index)
+}
+
+// enableBatchWrites decides batchWrites (see the field) once the sources are
+// prepared, and gives each eligible rule its statement config.
+func (p *Projection) enableBatchWrites() {
+	if p.stages == nil || p.topicFed || len(p.config.Sources) != 1 || len(p.decorators) > 0 {
+		return
+	}
+	src := p.config.Sources[0]
+	if src.RowOwner || src.ForEach != "" {
+		return
+	}
+	pss := p.stageSinks[src.FromStage]
+	if len(pss) != 1 {
+		return
+	}
+	for _, r := range pss[0].rules {
+		if len(p.config.ruleEnrichments(r.rule)) > 0 {
+			return
+		}
+	}
+	for _, r := range pss[0].rules {
+		r.multi = p.config.ruleConfig(r.rule)
+		r.multiSQL = map[int]string{}
+	}
+	p.batchWrites = true
+}
+
+// pendingWrites is one batch's collected row upserts, per rule in the order
+// each rule first wrote. A later write to a key a rule already holds replaces
+// it in place, as executing both in turn would.
+type pendingWrites struct {
+	rules []*projectionStmt
+	rows  map[*projectionStmt]*pendingRows
+}
+
+type pendingRows struct {
+	at   map[string]int // key rendering -> index in values
+	vals [][]any
+}
+
+func (w *pendingWrites) add(r *projectionStmt, keys, values []any) {
+	if w.rows == nil {
+		w.rows = map[*projectionStmt]*pendingRows{}
+	}
+	pr := w.rows[r]
+	if pr == nil {
+		pr = &pendingRows{at: map[string]int{}}
+		w.rows[r] = pr
+		w.rules = append(w.rules, r)
+	}
+	var kb strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&kb, "%T:%v\x00", k, k)
+	}
+	row := append([]any(nil), values...)
+	if i, ok := pr.at[kb.String()]; ok {
+		pr.vals[i] = row
+		return
+	}
+	pr.at[kb.String()] = len(pr.vals)
+	pr.vals = append(pr.vals, row)
+}
+
+// maxMultiRowParams bounds one multi-row statement's placeholders, under the
+// 65535 both PostgreSQL and MySQL accept.
+const maxMultiRowParams = 60000
+
+// flushPending executes the collected rows, each rule's in multi-row
+// statements, and empties the collection. A no-op outside a batch fold.
+func (p *Projection) flushPending(ctx context.Context, tx *gosql.Tx) error {
+	w := p.pending
+	if w == nil || len(w.rules) == 0 {
+		return nil
+	}
+	for _, r := range w.rules {
+		rows := w.rows[r].vals
+		per := max(1, maxMultiRowParams/len(r.multi.Mappings))
+		for len(rows) > 0 {
+			n := min(len(rows), per)
+			sqlString, ok := r.multiSQL[n]
+			if !ok {
+				sqlString = p.dialect.CreateMultiRowUpsertSQL(r.multi, n)
+				r.multiSQL[n] = sqlString
+			}
+			args := make([]any, 0, n*len(r.multi.Mappings))
+			for _, row := range rows[:n] {
+				args = append(args, row...)
+			}
+			if _, err := tx.ExecContext(ctx, sqlString, args...); err != nil {
+				return execFailure(fmt.Sprintf("[projection.apply] exec %d-row upsert for rule [%s]", n, r.SQL), err, p.dialect.IsPermanent(err))
+			}
+			rows = rows[n:]
+		}
+	}
+	p.pending = &pendingWrites{}
+	return nil
 }
 
 // StageStats implements cluster.StageIntrospector: each declared stage's
@@ -1708,6 +1837,10 @@ func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, stx *sta
 		live = false
 	}
 	if !live {
+		// A delete or clear must follow every write collected before it.
+		if err := p.flushPending(ctx, tx); err != nil {
+			return err
+		}
 		switch src.onDelete {
 		case onDeleteIgnore:
 			return nil

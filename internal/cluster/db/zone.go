@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
@@ -52,6 +53,31 @@ func zoneOwner(zone string, members map[uint64]struct{}, zones map[uint64]string
 	return owner
 }
 
+// zoneMemo is one syncable's zone as parsed from these config bytes.
+type zoneMemo struct {
+	mimeType string
+	data     []byte
+	zone     string
+}
+
+// syncableZone is the zone cfg configures ("" for none, or for a config that
+// does not parse). The sync loop checks ownership on every entry it reads, so
+// the parse is memoized per syncable and redone only when its stored config
+// bytes change; parsing every time cost the worker a third of its CPU.
+func (db *DB) syncableZone(id string, cfg *cluster.Configuration) string {
+	if v, ok := db.zones.Load(id); ok {
+		if m := v.(zoneMemo); m.mimeType == cfg.MimeType && bytes.Equal(m.data, cfg.Data) {
+			return m.zone
+		}
+	}
+	zone, err := db.parser.SyncableZone(cfg.MimeType, cfg.Data)
+	if err != nil {
+		zone = ""
+	}
+	db.zones.Store(id, zoneMemo{mimeType: cfg.MimeType, data: bytes.Clone(cfg.Data), zone: zone})
+	return zone
+}
+
 // syncableZonePin reports the stored config's pin: its zone (or "" for an
 // unpinned config — today's behavior), whether resolution is ACTIVE (the
 // feature gate), and the resolved owner (0 = unsatisfiable when pinned).
@@ -60,8 +86,8 @@ func (db *DB) syncableZonePin(id string) (zone string, active bool, owner uint64
 	if cfg == nil {
 		return "", false, 0
 	}
-	zone, err := db.parser.SyncableZone(cfg.MimeType, cfg.Data)
-	if err != nil || zone == "" {
+	zone = db.syncableZone(id, cfg)
+	if zone == "" {
 		return "", false, 0
 	}
 	if !db.featureEnabled(featureLevelZonePinning) {

@@ -117,3 +117,20 @@ func encode(m map[string]any) (string, error) {
 	b, err := toml.Marshal(m)
 	return string(b), err
 }
+
+// withZone is a syncable config pinned to zone ("" leaves it as it is).
+func withZone(body, zone string) (string, error) {
+	if zone == "" {
+		return body, nil
+	}
+	m, err := decode(body)
+	if err != nil {
+		return "", err
+	}
+	s, ok := m["syncable"].(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("the syncable has no [syncable] table")
+	}
+	s["zone"] = zone
+	return encode(m)
+}
