@@ -77,6 +77,12 @@ var ErrIngestOutOfOrder = errors.New("db: ingest proposal rejected at apply: out
 // silently. Overridable via WithProposeTimeout (tests drop it to milliseconds).
 const defaultProposeTimeout = 30 * time.Second
 
+// proposeQueueDepth is how many marshaled proposals may wait on proposeC for
+// the raft reader. It covers the ingest pipeline's bursts between the
+// reader's batches; a full queue blocks the proposer, as an unbuffered send
+// did.
+const proposeQueueDepth = 1024
+
 type Peers map[uint64]string
 
 type DB struct {
@@ -319,7 +325,10 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		cfg.maxProposalBytes = DefaultMaxProposalBytes
 	}
 
-	proposeC := make(chan []byte)
+	// Buffered, so a proposer hands off without waiting for the raft reader
+	// to be scheduled, and the reader finds proposals queued to step as one
+	// batch (Raft.collectProposals).
+	proposeC := make(chan []byte, proposeQueueDepth)
 	confChangeC := make(chan *raftpb.ConfChangeV2)
 
 	rpeers := make([]raft.Peer, len(peers))
@@ -603,9 +612,8 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 // returns nil, db.storage.Type/Database/etc. will see the new entity.
 //
 // On ctx cancellation Propose returns ctx.Err() and the waiter is
-// unregistered. The proposal may still be applied later (raft has
-// already accepted it via the proposeC send) — the caller just no
-// longer waits.
+// unregistered. The proposal may still be applied later (the proposeC send
+// queued it for raft) — the caller just no longer waits.
 //
 // System-internal proposers that want to pipeline submissions (ingest
 // position bumps, which collect acks for later drain) use proposeAsync

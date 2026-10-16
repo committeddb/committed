@@ -631,12 +631,22 @@ func (n *Raft) serveChannels() {
 				if !ok {
 					n.proposeC = nil
 				} else {
-					n.logger.Debug("proposal being sent to state machine")
-					// Blocks until accepted by the raft state machine, or until
-					// proposeCtx is cancelled at shutdown (so Close can't deadlock).
-					err := n.node.Propose(proposeCtx, []byte(prop))
-					sendProposeErr(err)
-					n.logger.Debug("proposal accepted by state machine")
+					// Every proposal already queued joins this one in a
+					// single raft step: one hand-off to raft per batch
+					// rather than per proposal, and one Ready for them all.
+					// Each stays its own entry, in submission order.
+					entries, open := n.collectProposals(prop)
+					// Returns once raft has taken the batch, or when
+					// proposeCtx is cancelled at shutdown (so Close can't
+					// deadlock). Step does not wait for raft's verdict: a
+					// batch raft drops (no leader, a leadership transfer,
+					// the uncommitted-entries limit) resolves through each
+					// waiter's leader-change fail-fast or propose timeout,
+					// as a drop always has.
+					sendProposeErr(n.node.Step(proposeCtx, &raftpb.Message{Type: raftpb.MsgProp.Enum(), Entries: entries}))
+					if !open {
+						n.proposeC = nil
+					}
 				}
 			case cc, ok := <-n.proposeConfC:
 				if !ok {
@@ -909,6 +919,35 @@ func (n *Raft) forwardProposeErr(err error, shuttingDown bool) {
 		return
 	}
 	n.sendRaftError(err)
+}
+
+// Proposal batching: a batch stops taking queued proposals once it holds
+// maxProposeBatchEntries or reaches maxProposeBatchBytes (raft's
+// MaxSizePerMsg; raft splits its append messages at that size regardless).
+const (
+	maxProposeBatchEntries = 512
+	maxProposeBatchBytes   = 1024 * 1024
+)
+
+// collectProposals takes first and every proposal already waiting on
+// proposeC, up to the batch caps, without blocking. open is false when it
+// found proposeC closed.
+func (n *Raft) collectProposals(first []byte) (entries []*raftpb.Entry, open bool) {
+	entries = []*raftpb.Entry{{Data: first}}
+	size := len(first)
+	for len(entries) < maxProposeBatchEntries && size < maxProposeBatchBytes {
+		select {
+		case prop, ok := <-n.proposeC:
+			if !ok {
+				return entries, false
+			}
+			entries = append(entries, &raftpb.Entry{Data: prop})
+			size += len(prop)
+		default:
+			return entries, true
+		}
+	}
+	return entries, true
 }
 
 // stopTransport stops the peer transport and blocks until serveRaft has actually
