@@ -208,7 +208,8 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 				corrupt = true
 				d.Status = LogNewerFormat
 				d.Records = total + ordinal
-				d.Detail = fmt.Sprintf("record %d (segment %s, offset %d): %v", total+ordinal, seg.name, off, uerr)
+				msg, _ := cluster.RedactedMessage(uerr)
+				d.Detail = fmt.Sprintf("record %d (segment %s, offset %d): %s", total+ordinal, seg.name, off, msg)
 				return false
 			}
 			// A structurally complete record that fails its checksum: a
