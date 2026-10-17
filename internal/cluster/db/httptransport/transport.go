@@ -104,10 +104,17 @@ const (
 )
 
 type HttpTransport struct {
-	id     uint64
-	seeds  []raft.Peer // initial peers from New, applied in Start (mirrors the old shape)
-	logger *zap.Logger
-	raft   db.TransportRaft
+	id uint64
+	// selfURL is this node's advertised peer URL, sent on every request so a
+	// peer whose address for this node went stale can learn the new one
+	// (self-report, peer_health.go).
+	selfURL string
+	// reports remembers each peer's last self-reported address and when, to
+	// spot two processes reporting as one node.
+	reports sync.Map    // uint64 -> *selfReport
+	seeds   []raft.Peer // initial peers from New, applied in Start (mirrors the old shape)
+	logger  *zap.Logger
+	raft    db.TransportRaft
 	// tlsInfo, if non-nil, is the mTLS configuration used for both the dialing
 	// side (the http.Client's TLS config) and the listening side (wrapped around
 	// stoppableListener via tls.NewListener in Start). nil means plaintext peer
@@ -142,10 +149,12 @@ type peer struct {
 	// addr is the peer's current base URL (canonical scheme://host:port). It
 	// can change while the worker runs (SetPeerAddress), so every reader goes
 	// through baseURL.
-	addr  atomic.Pointer[string]
-	msgc  chan *raftpb.Message
-	stopc chan struct{}
-	done  chan struct{}
+	addr atomic.Pointer[string]
+	// health tracks deliveries to the current address (peer_health.go).
+	health peerHealth
+	msgc   chan *raftpb.Message
+	stopc  chan struct{}
+	done   chan struct{}
 }
 
 // baseURL is the peer's current address.
@@ -210,7 +219,16 @@ func New(id uint64, ps []raft.Peer, l *zap.Logger, r db.TransportRaft, events db
 	fetchTr.ResponseHeaderTimeout = fetchResponseTimeout
 
 	ctx, cancel := context.WithCancel(context.Background())
+	selfURL := ""
+	for _, p := range ps {
+		if p.ID == id {
+			if u, err := cluster.CanonicalPeerURL(string(p.Context)); err == nil {
+				selfURL = u
+			}
+		}
+	}
 	return &HttpTransport{
+		selfURL:     selfURL,
 		id:          id,
 		seeds:       ps,
 		logger:      l,
@@ -350,6 +368,9 @@ func (t *HttpTransport) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sender removed from cluster", http.StatusForbidden)
 		return
 	}
+	if reported := r.Header.Get(senderURLHeader); reported != "" && r.Header.Get(clusterUUIDHeader) != "" {
+		t.observeSelfReport(m.GetFrom(), reported)
+	}
 	if err := t.raft.Process(r.Context(), m); err != nil {
 		http.Error(w, "process error", http.StatusInternalServerError)
 		return
@@ -371,14 +392,14 @@ func (t *HttpTransport) AddPeer(p raft.Peer) error {
 	if _, exists := t.peers[p.ID]; exists {
 		return nil
 	}
-	t.startPeerLocked(p.ID, addr)
+	t.startPeerLocked(p.ID, addr, db.PeerAddressFromMembership)
 	return nil
 }
 
 // SetPeerAddress points the transport at a new address for a peer, starting
 // the peer if the transport doesn't know it. Messages already queued go to the
 // new address.
-func (t *HttpTransport) SetPeerAddress(id uint64, rawURL string) error {
+func (t *HttpTransport) SetPeerAddress(id uint64, rawURL, source string) error {
 	addr, err := cluster.CanonicalPeerURL(rawURL)
 	if err != nil {
 		return err
@@ -387,19 +408,22 @@ func (t *HttpTransport) SetPeerAddress(id uint64, rawURL string) error {
 	defer t.mu.Unlock()
 	pr, exists := t.peers[id]
 	if !exists {
-		t.startPeerLocked(id, addr)
+		t.startPeerLocked(id, addr, source)
 		return nil
 	}
 	if old := pr.baseURL(); old != addr {
 		pr.addr.Store(&addr)
+		pr.health.changed(source)
 		t.logger.Info("raft peer address changed",
-			zap.Uint64("peer", id), zap.String("from", old), zap.String("to", addr))
+			zap.Uint64("peer", id), zap.String("from", old), zap.String("to", addr), zap.String("source", source))
+	} else {
+		pr.health.setSource(source)
 	}
 	return nil
 }
 
 // startPeerLocked registers a peer and starts its worker; t.mu must be held.
-func (t *HttpTransport) startPeerLocked(id uint64, addr string) {
+func (t *HttpTransport) startPeerLocked(id uint64, addr, source string) {
 	pr := &peer{
 		id:    id,
 		msgc:  make(chan *raftpb.Message, peerQueueDepth),
@@ -407,6 +431,7 @@ func (t *HttpTransport) startPeerLocked(id uint64, addr string) {
 		done:  make(chan struct{}),
 	}
 	pr.addr.Store(&addr)
+	pr.health.changed(source)
 	t.peers[id] = pr
 	go t.runPeer(pr)
 }
@@ -489,12 +514,14 @@ func (t *HttpTransport) deliver(pr *peer, m *raftpb.Message) {
 	if err := t.post(pr, m); err != nil {
 		t.logger.Debug("raft peer send failed",
 			zap.Uint64("to", m.GetTo()), zap.Error(err))
+		t.noteFailure(pr, err)
 		t.raft.ReportUnreachable(m.GetTo())
 		if m.GetType() == raftpb.MsgSnap {
 			t.raft.ReportSnapshot(m.GetTo(), raft.SnapshotFailure)
 		}
 		return
 	}
+	pr.health.succeeded()
 	if m.GetType() == raftpb.MsgSnap {
 		t.raft.ReportSnapshot(m.GetTo(), raft.SnapshotFinish)
 	}

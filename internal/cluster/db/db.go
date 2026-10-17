@@ -444,6 +444,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		// and steady-state restarts stay proposal-free.
 		go db.announceZone()
 		go db.announceClusterIdentity()
+		go db.recordAgreedAddresses()
 	}
 
 	// Start the disk-usage watcher last, once db.raft is wired, so its
@@ -1453,6 +1454,12 @@ const (
 // this node. Submission itself can fail fast if ctx fires or the DB is
 // shutting down before the propose loop accepts the change.
 func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id uint64, target membershipTarget) error {
+	// raft drops a conf change proposed while another is still taking effect
+	// (the joint state) with nothing but a log line; refuse it here so the
+	// caller gets a 409 to retry instead of a 60-second settle timeout.
+	if _, _, joint := db.raft.memberStatus(); joint {
+		return cluster.ErrMembershipChangeInProgress
+	}
 	select {
 	case db.confChangeC <- cc:
 	case <-ctx.Done():

@@ -19,6 +19,7 @@ import (
 // matchIndex against commitIndex with its own threshold.
 type MembershipResponse struct {
 	NodeID       uint64           `json:"nodeId"`
+	ClusterID    string           `json:"clusterId,omitempty"`
 	LeaderID     uint64           `json:"leaderId"`
 	Term         uint64           `json:"term"`
 	CommitIndex  uint64           `json:"commitIndex"`
@@ -45,6 +46,11 @@ type MemberResponse struct {
 	MatchIndex *uint64 `json:"matchIndex,omitempty"`
 	Active     *bool   `json:"active,omitempty"`
 	APIURL     string  `json:"apiUrl,omitempty"`
+	// PeerURL is the recorded raft peer address; CurrentPeerURL and its
+	// source are what the answering node's transport uses right now.
+	PeerURL              string `json:"peerUrl,omitempty"`
+	CurrentPeerURL       string `json:"currentPeerUrl,omitempty"`
+	CurrentPeerURLSource string `json:"currentPeerUrlSource,omitempty"`
 }
 
 // GetMembership handles GET /v1/membership. It returns the cluster
@@ -57,6 +63,7 @@ func (h *HTTP) GetMembership(w httpgo.ResponseWriter, r *httpgo.Request) {
 
 	resp := MembershipResponse{
 		NodeID:       m.NodeID,
+		ClusterID:    m.ClusterID,
 		LeaderID:     m.LeaderID,
 		Term:         m.Term,
 		CommitIndex:  m.CommitIndex,
@@ -71,6 +78,10 @@ func (h *HTTP) GetMembership(w httpgo.ResponseWriter, r *httpgo.Request) {
 			MatchIndex: mem.MatchIndex,
 			Active:     mem.Active,
 			APIURL:     mem.APIURL,
+
+			PeerURL:              mem.PeerURL,
+			CurrentPeerURL:       mem.CurrentPeerURL,
+			CurrentPeerURLSource: mem.CurrentPeerURLSource,
 		})
 	}
 
@@ -194,6 +205,8 @@ func writeMembershipError(w httpgo.ResponseWriter, err error, action string) {
 		writeError(w, httpgo.StatusBadRequest, "not_a_learner", redactedMessage(err))
 	case errors.Is(err, cluster.ErrWouldRemoveLastVoter):
 		writeError(w, httpgo.StatusConflict, "would_remove_last_voter", redactedMessage(err))
+	case errors.Is(err, cluster.ErrMembershipChangeInProgress):
+		writeError(w, httpgo.StatusConflict, "membership_change_in_progress", redactedMessage(err))
 	case errors.Is(err, db.ErrMembershipUnsettled):
 		writeError(w, httpgo.StatusServiceUnavailable, "membership_unsettled", redactedMessage(err))
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -202,4 +215,34 @@ func writeMembershipError(w httpgo.ResponseWriter, err error, action string) {
 	default:
 		writeInternalError(w, "failed to "+action+" member", err)
 	}
+}
+
+// SetMemberAddressRequest is the body of PUT /v1/membership/{id}/address.
+type SetMemberAddressRequest struct {
+	URL string `json:"url"`
+}
+
+// SetMemberAddress handles PUT /v1/membership/{id}/address. It records a
+// member's raft peer address cluster-wide, through consensus, and points every
+// node's transport at it; it returns 204 once the change has applied. A voter
+// that moves announces its new address on its own; this is for a node that
+// can't (a moved learner, which never campaigns).
+func (h *HTTP) SetMemberAddress(w httpgo.ResponseWriter, r *httpgo.Request) {
+	raw := r.PathValue("id")
+	id, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || id == 0 {
+		writeErrorf(w, httpgo.StatusBadRequest, "invalid_member_id",
+			"member id %q is not a positive integer", raw)
+		return
+	}
+	req := &SetMemberAddressRequest{}
+	if err := unmarshalBody(r, req); err != nil {
+		h.writeReadError(w, r, err, "invalid_json", "request body is not valid JSON")
+		return
+	}
+	if err := h.db.SetMemberAddress(r.Context(), id, req.URL); err != nil {
+		writeMembershipError(w, err, "set the address of")
+		return
+	}
+	w.WriteHeader(httpgo.StatusNoContent)
 }

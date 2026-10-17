@@ -35,8 +35,12 @@ func (r *recordingTransport) AddPeer(p raft.Peer) error {
 	return nil
 }
 
-func (r *recordingTransport) SetPeerAddress(id uint64, u string) error {
+func (r *recordingTransport) SetPeerAddress(id uint64, u, _ string) error {
 	return r.AddPeer(raft.Peer{ID: id, Context: []byte(u)})
+}
+
+func (r *recordingTransport) PeerAddress(uint64) (db.PeerAddressView, bool) {
+	return db.PeerAddressView{}, false
 }
 func (r *recordingTransport) RemovePeer(id uint64)        {}
 func (r *recordingTransport) Send(msgs []*raftpb.Message) {}

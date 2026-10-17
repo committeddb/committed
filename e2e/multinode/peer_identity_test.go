@@ -3,7 +3,11 @@
 package multinode_test
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,4 +152,116 @@ func runCommitted(t *testing.T, args ...string) {
 	t.Helper()
 	out, err := exec.Command(binPath, args...).CombinedOutput() //nolint:gosec // G204: the test's own binary
 	require.NoError(t, err, "committed %s: %s", strings.Join(args, " "), out)
+}
+
+// recordedPeerURL is node id's recorded peer address as base reports it.
+func recordedPeerURL(t *testing.T, base string, id uint64) string {
+	t.Helper()
+	resp, err := http.Get(base + "/v1/membership") //nolint:gosec // G107: fixed loopback URL
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var m struct {
+		Members []struct {
+			ID      uint64 `json:"id"`
+			PeerURL string `json:"peerUrl"`
+		} `json:"members"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&m) != nil {
+		return ""
+	}
+	for _, mem := range m.Members {
+		if mem.ID == id {
+			return mem.PeerURL
+		}
+	}
+	return ""
+}
+
+func waitRecorded(t *testing.T, nodes []*clusterNode, id uint64, want string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		ok := true
+		for _, n := range nodes {
+			if recordedPeerURL(t, n.base(), id) != want {
+				ok = false
+			}
+		}
+		if ok {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("node %d's address %s was not recorded on every node within 30s", id, want)
+}
+
+// One node moves and nobody touches the others: it rejoins on its own (its
+// election attempts carry its new address; the others switch once their old
+// address for it stops answering) and the leader records the new address
+// cluster-wide. Restarting the others with their old, unedited
+// COMMITTED_PEERS then keeps the recorded address. Before the fix the moved
+// node stayed cut off and the cluster silently ran without it.
+func TestPeers_OneNodeMovesAndHealsOnItsOwn(t *testing.T) {
+	buildBinary(t)
+	nodes := startCluster(t, 3)
+	writeAndCheck(t, nodes, "before_move")
+	oldPeers := peersOf(nodes)
+
+	moved := nodes[2]
+	moved.stopGraceful(t)
+	moved.raftPort = freePort(t)
+	moved.env = nodeEnv(moved.id, moved.dataDir, moved.apiPort, peersOf(nodes), false)
+	moved.start(t)
+	writeAndCheck(t, nodes, "after_move")
+
+	newAddr := fmt.Sprintf("http://127.0.0.1:%d", moved.raftPort)
+	waitRecorded(t, nodes, moved.id, newAddr)
+
+	for _, n := range nodes[:2] {
+		n.stopGraceful(t)
+		n.env = nodeEnv(n.id, n.dataDir, n.apiPort, oldPeers, false) // still names node 3's old address
+		n.start(t)
+		waitReady(t, n.base())
+	}
+	writeAndCheck(t, nodes, "after_restarting_the_others")
+}
+
+// A learner never campaigns, so a moved learner can't announce itself; the
+// operator records its new address and it catches up there.
+func TestPeers_MovedLearnerViaSetAddress(t *testing.T) {
+	buildBinary(t)
+	nodes := startCluster(t, 3)
+	learner := &clusterNode{id: 4, dataDir: t.TempDir(), apiPort: freePort(t), raftPort: freePort(t)}
+	withLearner := append(append([]*clusterNode(nil), nodes...), learner)
+	learner.env = nodeEnv(4, learner.dataDir, learner.apiPort, peersOf(withLearner), true)
+	learner.start(t)
+	t.Cleanup(func() { learner.kill(t) })
+	postJSON(t, http.MethodPost, nodes[0].base()+"/v1/membership",
+		fmt.Sprintf(`{"id":4,"url":"http://127.0.0.1:%d","learner":true}`, learner.raftPort))
+	writeAndCheck(t, withLearner, "learner_caught_up")
+
+	learner.stopGraceful(t)
+	learner.raftPort = freePort(t)
+	learner.env = nodeEnv(4, learner.dataDir, learner.apiPort, peersOf(withLearner), true)
+	learner.start(t)
+	newAddr := fmt.Sprintf("http://127.0.0.1:%d", learner.raftPort)
+	postJSON(t, http.MethodPut, nodes[1].base()+"/v1/membership/4/address", fmt.Sprintf(`{"url":%q}`, newAddr))
+	waitRecorded(t, nodes, 4, newAddr)
+	writeAndCheck(t, withLearner, "after_learner_moved")
+}
+
+func postJSON(t *testing.T, method, url, body string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	require.Lessf(t, resp.StatusCode, 300, "%s %s: %d %s", method, url, resp.StatusCode, out)
 }

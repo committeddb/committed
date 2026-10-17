@@ -111,8 +111,12 @@ func (t *FaultyTransport) FetchEvents(ctx context.Context, req db.EventFetchRequ
 
 func (t *FaultyTransport) Start(stopC <-chan struct{}) error { return t.inner.Start(stopC) }
 func (t *FaultyTransport) AddPeer(p raft.Peer) error         { return t.inner.AddPeer(p) }
-func (t *FaultyTransport) SetPeerAddress(id uint64, u string) error {
-	return t.inner.SetPeerAddress(id, u)
+func (t *FaultyTransport) SetPeerAddress(id uint64, u, source string) error {
+	return t.inner.SetPeerAddress(id, u, source)
+}
+
+func (t *FaultyTransport) PeerAddress(id uint64) (db.PeerAddressView, bool) {
+	return t.inner.PeerAddress(id)
 }
 func (t *FaultyTransport) RemovePeer(id uint64) { t.inner.RemovePeer(id) }
 

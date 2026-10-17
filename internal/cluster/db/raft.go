@@ -42,8 +42,11 @@ type Raft struct {
 	join bool
 	// clusterName is COMMITTED_CLUSTER_NAME, mixed into a new cluster's
 	// derived id; ident is this node's cluster identity (cluster_identity.go).
-	clusterName  string
-	ident        identity
+	clusterName string
+	ident       identity
+	// selfURL is this node's advertised peer URL (its COMMITTED_PEERS entry),
+	// which the leader records cluster-wide (agreed_addresses.go).
+	selfURL      string
 	raftErrorC   chan<- error
 	raftStopC    chan struct{}
 	id           uint64
@@ -355,6 +358,13 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		n.node = raft.StartNode(c, ps)
 	}
 	n.initClusterIdentity(hs.GetTerm() == 0 && !n.join, ps)
+	for _, p := range ps {
+		if p.ID == id {
+			if u, err := cluster.CanonicalPeerURL(string(p.Context)); err == nil {
+				n.selfURL = u
+			}
+		}
+	}
 
 	if n.transportFactory == nil {
 		// A wiring mistake, not a runtime condition: the composition root must
@@ -363,7 +373,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// that can never reach a peer.
 		panic("db: no transport factory configured — wire one with WithTransportFactory")
 	}
-	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger, identity: &n.ident}
+	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger, identity: &n.ident, isMember: n.isMember}
 	// The transport serves peers' catch-up fetches from this node's event
 	// log when the storage has one (wal.Storage); the in-memory doubles do
 	// not, and serve nothing.
@@ -459,6 +469,11 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 		// our own AddNode doesn't try to dial our own URL, and so a
 		// self-removal doesn't tear down a peer that was never added.
 		if ch.GetNodeId() == n.id {
+			if ch.GetType() == raftpb.ConfChangeUpdateNode {
+				// Its own agreed address is still recorded, so a snapshot
+				// carries it to members that never had it.
+				n.applyAgreedAddress(cs, ch.GetNodeId(), ccCtx)
+			}
 			continue
 		}
 		switch ch.GetType() {
@@ -485,6 +500,8 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 				n.logger.Error("conf change: add peer to transport",
 					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
 			}
+		case raftpb.ConfChangeUpdateNode:
+			n.applyAgreedAddress(cs, ch.GetNodeId(), ccCtx)
 		case raftpb.ConfChangeRemoveNode:
 			n.transport.RemovePeer(ch.GetNodeId())
 			// Drop the removed node's announced API URL and durable peer URL so
@@ -540,6 +557,15 @@ func (n *Raft) membershipApplied() bool {
 // Both maps are owned by the caller: Status() returns a Clone of the tracker
 // config, so Voters.IDs() and the Learners map are fresh per call. learners is
 // nil when there are none (a nil-map read is a safe miss).
+// isMember reports whether id is a voter or learner in this node's applied
+// configuration.
+func (n *Raft) isMember(id uint64) bool {
+	voters, learners, _ := n.memberStatus()
+	_, v := voters[id]
+	_, l := learners[id]
+	return v || l
+}
+
 func (n *Raft) memberStatus() (voters, learners map[uint64]struct{}, joint bool) {
 	cfg := n.node.Status().Config
 	return cfg.Voters.IDs(), cfg.Learners, len(cfg.Voters[1]) > 0
@@ -1474,6 +1500,8 @@ func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
 
 type httpTransportRaft struct {
 	node raft.Node
+	// isMember answers the transport's MembershipView question.
+	isMember func(uint64) bool
 	// identity is the node's cluster identity, exposed to the transport
 	// (ClusterIdentifier).
 	*identity
@@ -1530,8 +1558,46 @@ func (n *httpTransportRaft) Process(ctx context.Context, m *raftpb.Message) erro
 	}
 	return n.node.Step(ctx, m)
 }
-func (n *httpTransportRaft) IsIDRemoved(id uint64) bool  { return false }
+func (n *httpTransportRaft) IsIDRemoved(id uint64) bool { return false }
+
+// IsMember implements MembershipView.
+func (n *httpTransportRaft) IsMember(id uint64) bool     { return n.isMember(id) }
 func (n *httpTransportRaft) ReportUnreachable(id uint64) { n.node.ReportUnreachable(id) }
 func (n *httpTransportRaft) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 	n.node.ReportSnapshot(id, status)
+}
+
+// applyAgreedAddress applies an UpdateNode carrying a member's agreed peer
+// address: it overwrites the recorded address and points the transport at it.
+// An UpdateNode for a node that isn't a member (stale, or for a removed node)
+// is ignored, so it can't re-record a removed node's address.
+func (n *Raft) applyAgreedAddress(cs *raftpb.ConfState, id uint64, ccCtx []byte) {
+	if len(ccCtx) == 0 || !confStateHas(cs, id) {
+		return
+	}
+	peerURL, err := cluster.CanonicalPeerURL(string(ccCtx))
+	if err != nil {
+		n.logger.Error("ignoring an agreed peer address that does not parse", zap.Uint64("member", id), zap.Error(err))
+		return
+	}
+	if err := n.storage.PutMemberPeerURL(id, []byte(peerURL)); err != nil {
+		n.logger.Error("recording an agreed peer address", zap.Uint64("member", id), zap.Error(err))
+	}
+	if id == n.id {
+		return
+	}
+	if err := n.transport.SetPeerAddress(id, peerURL, PeerAddressFromAgreed); err != nil {
+		n.logger.Error("applying an agreed peer address", zap.Uint64("member", id), zap.Error(err))
+	}
+}
+
+func confStateHas(cs *raftpb.ConfState, id uint64) bool {
+	for _, set := range [][]uint64{cs.GetVoters(), cs.GetLearners(), cs.GetVotersOutgoing(), cs.GetLearnersNext()} {
+		for _, v := range set {
+			if v == id {
+				return true
+			}
+		}
+	}
+	return false
 }

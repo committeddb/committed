@@ -26,6 +26,8 @@ import (
 const (
 	clusterUUIDHeader = "X-Committed-Cluster-Uuid"
 	targetNodeHeader  = "X-Committed-Target-Node"
+	// senderURLHeader is the sender's advertised peer URL (self-report).
+	senderURLHeader = "X-Committed-Sender-Url"
 )
 
 // identity is the node's cluster identity, nil when the node runs without one.
@@ -46,6 +48,9 @@ func (t *HttpTransport) setPeerHeaders(h http.Header, to uint64) {
 	}
 	if to != 0 {
 		h.Set(targetNodeHeader, strconv.FormatUint(to, 10))
+	}
+	if t.selfURL != "" && !wildcardHost(t.selfURL) {
+		h.Set(senderURLHeader, t.selfURL)
 	}
 	if t.token != "" {
 		h.Set("Authorization", "Bearer "+t.token)
@@ -89,7 +94,8 @@ func (t *HttpTransport) admitPeer(w http.ResponseWriter, r *http.Request, adopt 
 		}
 		if adopt && ci != nil {
 			if err := ci.AdoptClusterID(theirs); err != nil && !errors.Is(err, db.ErrNotAdoptable) {
-				t.refuseCluster(w, r, mine, err.Error())
+				why, _ := cluster.RedactedMessage(err)
+				t.refuseCluster(w, r, mine, why)
 				return false
 			}
 		}
