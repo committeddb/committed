@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/auth"
 	"github.com/committeddb/committed/internal/cluster/db"
 )
@@ -90,7 +91,11 @@ func loadPeers(id uint64) db.Peers {
 // than a loud refusal to start.
 func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
 	if raw == "" {
-		return db.Peers{id: selfURL}, nil
+		u, err := cluster.CanonicalPeerURL(selfURL)
+		if err != nil {
+			return nil, fmt.Errorf("COMMITTED_PEER_URL: %w", err)
+		}
+		return db.Peers{id: u}, nil
 	}
 
 	peers := make(db.Peers)
@@ -112,7 +117,11 @@ func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
 		if _, dup := peers[pid]; dup {
 			return nil, fmt.Errorf("COMMITTED_PEERS has a duplicate peer id %d", pid)
 		}
-		peers[pid] = v
+		u, err := cluster.CanonicalPeerURL(v)
+		if err != nil {
+			return nil, fmt.Errorf("COMMITTED_PEERS entry %q: %w", entry, err)
+		}
+		peers[pid] = u
 	}
 	if len(peers) == 0 {
 		return nil, fmt.Errorf("COMMITTED_PEERS is set but contains no valid peers")

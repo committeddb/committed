@@ -6,7 +6,7 @@
 # eventstore-load, collects the results, and tears it all down.
 #
 #   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [--profile]
-#            [--pinned-labels a] [-- eventstore-load flags]
+#            [--pinned-labels a] [--profile-every SECONDS] [-- eventstore-load flags]
 #
 # A label in --pinned-labels runs with node i in zone zi and the projections
 # pinned to a follower's zone, so they sync off the leader. It names a build
@@ -36,6 +36,7 @@ while [ $# -gt 0 ]; do
   --labels) labels=$2; shift 2 ;;
   --engines) engines=$2; shift 2 ;;
   --profile) BENCH_PROFILE=1; shift ;;
+  --profile-every) BENCH_PROFILE_EVERY=$2; shift 2 ;;
   --pinned-labels) pinned=$2; shift 2 ;;
   --) shift; break ;;
   *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
@@ -121,11 +122,14 @@ stop_nodes() {
   done
 }
 
+# collect_nodes dir: each node's log and the bytes in each area of its data
+# directory (event log, raft log, metadata, projection stores).
 collect_nodes() {
   local out=$1 i
   mkdir -p "$out/nodes"
   for i in $(seq 1 "$count"); do
     local dir; dir=$(node_dir "$i")
+    on_node "$i" "du -sb '$dir/data'/* 2>/dev/null" >"$out/nodes/node$i.du" 2>/dev/null || true
     if [ "$NODES" = local ]; then
       cp "$dir/node.log" "$out/nodes/node$i.log" 2>/dev/null || true
     else

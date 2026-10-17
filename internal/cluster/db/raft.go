@@ -39,7 +39,11 @@ type Raft struct {
 	// raft.RestartNode (empty state, learn membership from the leader)
 	// instead of raft.StartNode (bootstrap from the static peer set). See
 	// WithJoin and the join field on options.
-	join         bool
+	join bool
+	// clusterName is COMMITTED_CLUSTER_NAME, mixed into a new cluster's
+	// derived id; ident is this node's cluster identity (cluster_identity.go).
+	clusterName  string
+	ident        identity
 	raftErrorC   chan<- error
 	raftStopC    chan struct{}
 	id           uint64
@@ -204,6 +208,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-cha
 		tlsInfo:              cfg.tlsInfo,
 		peerToken:            cfg.peerToken,
 		join:                 cfg.join,
+		clusterName:          cfg.clusterName,
 		closeC:               make(chan struct{}),
 		serveChannelsDoneC:   make(chan struct{}),
 
@@ -349,6 +354,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		n.logger.Info("starting node", zap.Uint64("id", id))
 		n.node = raft.StartNode(c, ps)
 	}
+	n.initClusterIdentity(hs.GetTerm() == 0 && !n.join, ps)
 
 	if n.transportFactory == nil {
 		// A wiring mistake, not a runtime condition: the composition root must
@@ -357,12 +363,17 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// that can never reach a peer.
 		panic("db: no transport factory configured — wire one with WithTransportFactory")
 	}
-	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger}
+	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger, identity: &n.ident}
 	// The transport serves peers' catch-up fetches from this node's event
 	// log when the storage has one (wal.Storage); the in-memory doubles do
 	// not, and serve nothing.
 	events, _ := n.storage.(EventServer)
-	t := n.transportFactory(id, ps, n.logger, r, events, n.tlsInfo, n.peerToken)
+	// Each peer's address is chosen once, here, before the transport exists
+	// (choosePeerAddresses): seeding the transport with both COMMITTED_PEERS
+	// and the recorded addresses and letting the first one win is what made a
+	// restore or a restart on new addresses dial the old ones forever.
+	seeds := n.choosePeerAddresses(ps)
+	t := n.transportFactory(id, seeds, n.logger, r, events, n.tlsInfo, n.peerToken)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
 		// wrapper returns a Transport that conforms to the same interface,
@@ -371,17 +382,6 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		t = n.transportWrapper(t)
 	}
 	n.transport = t
-
-	// Reconcile the transport against durable membership BEFORE the raft loop
-	// starts driving it. On a RestartNode/join path raft rebuilds the (possibly
-	// grown) voter set from the persisted ConfState, but the transport above was
-	// seeded ONLY from the static COMMITTED_PEERS set — which a doc-following
-	// operator never updates after growing the cluster. Without this, a
-	// dynamically-added peer has no transport entry after restart and the cluster
-	// wedges leaderless. AddPeer is idempotent, so re-adding a COMMITTED_PEERS
-	// seed is a no-op. (serveRaft calls transport.Start, which also seeds from the
-	// static set and binds this node's listener — order doesn't matter.)
-	n.reconcileTransportFromMembership()
 
 	go n.serveRaft()
 	// Seed the apply marks from the durable applied index: raft re-delivers
@@ -392,13 +392,12 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	go n.serveChannels()
 }
 
-// reconcileTransportFromMembership (re)connects the transport to every member
-// whose raft URL is durably recorded (memberPeerURLBucket), skipping self. It is
-// called after the transport is created at startup and after a snapshot install,
-// so a dynamically-added peer stays reachable even though its live AddPeer (from
-// the original applyConfChange) does not re-run on restart — raft's ConfState and
-// snapshots replicate member IDs only, never addresses. AddPeer is idempotent, so
-// overlapping with the COMMITTED_PEERS seed is harmless.
+// reconcileTransportFromMembership connects the transport to every member whose
+// raft URL is recorded (memberPeerURLBucket) and the transport doesn't know yet,
+// skipping self. Called after a snapshot install, which brings the leader's
+// record of members this node may never have heard of. It only fills: an
+// address the transport already uses is never replaced here. (At startup the
+// addresses are chosen by choosePeerAddresses instead.)
 func (n *Raft) reconcileTransportFromMembership() {
 	for id, rawURL := range n.storage.MemberPeerURLs() {
 		if id == n.id {
@@ -471,10 +470,16 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 				continue
 			}
 			// Persist the peer's raft URL BEFORE wiring the live transport, so
-			// the durable record exists even if the AddPeer below fails — a
-			// restart or snapshot install reconciles the transport from this
-			// bucket instead of the stale static COMMITTED_PEERS set (raft's
-			// ConfState replicates the member id only, never the address).
+			// the durable record exists even if the AddPeer below fails (raft's
+			// ConfState replicates the member id only, never the address). Fill
+			// only: an add never overwrites an address already recorded. A
+			// joiner replays the original bootstrap adds, which carry the
+			// cluster's FIRST addresses; overwriting would re-record addresses
+			// the cluster has since moved off. (Addresses change through a
+			// changed COMMITTED_PEERS at boot and, later, an agreed update.)
+			if _, recorded := n.storage.MemberPeerURLs()[ch.GetNodeId()]; recorded {
+				continue
+			}
 			n.persistPeerURLOrFatal(ch.GetNodeId(), ccCtx)
 			if err := n.transport.AddPeer(raft.Peer{ID: ch.GetNodeId(), Context: ccCtx}); err != nil {
 				n.logger.Error("conf change: add peer to transport",
@@ -1458,6 +1463,7 @@ func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
 			zap.Error(err),
 		)
 	}
+	n.adoptSnapshotIdentity()
 	// The snapshot restored the (ids-only) ConfState into raft and swapped in the
 	// snapshot's bbolt — which carries the durable peer-URL bucket. Reconcile the
 	// transport from it so a node caught up via InstallSnapshot is connected to
@@ -1468,6 +1474,9 @@ func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
 
 type httpTransportRaft struct {
 	node raft.Node
+	// identity is the node's cluster identity, exposed to the transport
+	// (ClusterIdentifier).
+	*identity
 	// lastIndex exposes the raft log's last index for the rewound-member
 	// guard below — a narrow view of Storage so the guard is testable with a
 	// one-method stub.

@@ -22,6 +22,9 @@ import (
 type Transport interface {
 	Start(stopC <-chan struct{}) error
 	AddPeer(peer raft.Peer) error
+	// SetPeerAddress changes the address the transport uses for a peer
+	// (starting the peer if it is unknown). AddPeer only fills.
+	SetPeerAddress(id uint64, rawURL string) error
 	RemovePeer(id uint64)
 	Send(msgs []*raftpb.Message)
 	Stop()

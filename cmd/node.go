@@ -72,16 +72,23 @@ image can be templated per-node by an orchestrator:
                        e.g. "1=http://n1:9022,2=http://n2:9022". The
                        same value is given to every node and must
                        include this node's own COMMITTED_NODE_ID. On the
-                       first boot it bootstraps the cluster; on every boot
-                       it seeds the peer transport. You do NOT need to
-                       update it after growing the cluster — a member added
-                       at runtime has its raft URL persisted and reconciled
-                       onto the transport automatically on restart.
+                       first boot it bootstraps the cluster (and derives the
+                       cluster id); on every boot it supplies peer addresses.
+                       An entry you change wins over the recorded address at
+                       the next boot (machines moved, a restore onto new
+                       machines, a switch to https); an unchanged entry
+                       never overrides it. You do NOT need to update it
+                       after growing the cluster — a member added at runtime
+                       has its raft URL recorded and used on restart.
   COMMITTED_JOIN       when truthy, this node joins an existing cluster
                        instead of bootstrapping a new one: it starts with
                        no raft configuration and learns its membership from
                        the leader after a "committed member add" naming it
                        commits. COMMITTED_PEERS still seeds the transport.
+  COMMITTED_CLUSTER_NAME
+                       optional; mixed into a new cluster's id at its first
+                       boot, so two clusters bootstrapped from identical
+                       COMMITTED_PEERS get different ids.
 
   COMMITTED_DISK_WARN_PERCENT
                        free-space percent at which the disk watcher logs a
@@ -370,6 +377,15 @@ docs/operations/ it points to.`,
 		if boolEnvOrExit("COMMITTED_JOIN") {
 			dbOpts = append(dbOpts, db.WithJoin())
 			zap.L().Info("joining existing cluster (COMMITTED_JOIN set); membership will be learned from the leader")
+		}
+
+		// COMMITTED_CLUSTER_NAME is mixed into a new cluster's id, which every
+		// node derives at its first boot from COMMITTED_PEERS: two clusters
+		// bootstrapped from identical COMMITTED_PEERS (short Kubernetes DNS
+		// names repeated across namespaces) get different ids only if their
+		// names differ. Read only by that first boot.
+		if name := os.Getenv("COMMITTED_CLUSTER_NAME"); name != "" {
+			dbOpts = append(dbOpts, db.WithClusterName(name))
 		}
 
 		// COMMITTED_API_URL is this node's advertised HTTP API base URL. When

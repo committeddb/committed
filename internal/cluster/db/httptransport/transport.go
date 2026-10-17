@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/etcd/client/pkg/v3/transport"
@@ -137,11 +138,22 @@ type HttpTransport struct {
 // peer is a single remote node: a bounded queue of messages to send it, drained
 // by one worker goroutine that POSTs them in order.
 type peer struct {
-	id    uint64
-	url   string
+	id uint64
+	// addr is the peer's current base URL (canonical scheme://host:port). It
+	// can change while the worker runs (SetPeerAddress), so every reader goes
+	// through baseURL.
+	addr  atomic.Pointer[string]
 	msgc  chan *raftpb.Message
 	stopc chan struct{}
 	done  chan struct{}
+}
+
+// baseURL is the peer's current address.
+func (p *peer) baseURL() string { return *p.addr.Load() }
+
+// endpoint joins one of the transport's paths onto the peer's address.
+func (p *peer) endpoint(path string) (string, error) {
+	return url.JoinPath(p.baseURL(), path)
 }
 
 // Factory returns New as a db.TransportFactory — the form the composition root
@@ -301,8 +313,7 @@ func (t *HttpTransport) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if r.Header.Get(clusterIDHeader) != clusterID || r.Header.Get(protocolHeader) != protocolVersion {
-		http.Error(w, "wrong cluster or protocol", http.StatusPreconditionFailed)
+	if !t.admitPeer(w, r, true) {
 		return
 	}
 	// Constant-time compare so a peer that can reach this port (token auth, no
@@ -346,10 +357,12 @@ func (t *HttpTransport) handleMessage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// AddPeer registers a peer and starts its send worker. Idempotent: re-adding an
-// existing id is a no-op (membership replay can re-announce a peer).
+// AddPeer registers a peer and starts its send worker. It only fills: adding
+// an id the transport already knows is a no-op (membership replay re-announces
+// peers); SetPeerAddress is how an address changes.
 func (t *HttpTransport) AddPeer(p raft.Peer) error {
-	if _, err := url.Parse(string(p.Context)); err != nil {
+	addr, err := cluster.CanonicalPeerURL(string(p.Context))
+	if err != nil {
 		return err
 	}
 
@@ -358,16 +371,44 @@ func (t *HttpTransport) AddPeer(p raft.Peer) error {
 	if _, exists := t.peers[p.ID]; exists {
 		return nil
 	}
+	t.startPeerLocked(p.ID, addr)
+	return nil
+}
+
+// SetPeerAddress points the transport at a new address for a peer, starting
+// the peer if the transport doesn't know it. Messages already queued go to the
+// new address.
+func (t *HttpTransport) SetPeerAddress(id uint64, rawURL string) error {
+	addr, err := cluster.CanonicalPeerURL(rawURL)
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	pr, exists := t.peers[id]
+	if !exists {
+		t.startPeerLocked(id, addr)
+		return nil
+	}
+	if old := pr.baseURL(); old != addr {
+		pr.addr.Store(&addr)
+		t.logger.Info("raft peer address changed",
+			zap.Uint64("peer", id), zap.String("from", old), zap.String("to", addr))
+	}
+	return nil
+}
+
+// startPeerLocked registers a peer and starts its worker; t.mu must be held.
+func (t *HttpTransport) startPeerLocked(id uint64, addr string) {
 	pr := &peer{
-		id:    p.ID,
-		url:   string(p.Context),
+		id:    id,
 		msgc:  make(chan *raftpb.Message, peerQueueDepth),
 		stopc: make(chan struct{}),
 		done:  make(chan struct{}),
 	}
-	t.peers[p.ID] = pr
+	pr.addr.Store(&addr)
+	t.peers[id] = pr
 	go t.runPeer(pr)
-	return nil
 }
 
 // RemovePeer stops a peer's worker and drops it from the registry. It does not
@@ -468,16 +509,16 @@ func (t *HttpTransport) post(pr *peer, m *raftpb.Message) error {
 	ctx, cancel := context.WithTimeout(t.baseCtx, requestTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pr.url+raftMessagePath, bytes.NewReader(data))
+	target, err := pr.endpoint(raftMessagePath)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set(clusterIDHeader, clusterID)
-	req.Header.Set(protocolHeader, protocolVersion)
-	if t.token != "" {
-		req.Header.Set("Authorization", "Bearer "+t.token)
-	}
+	t.setPeerHeaders(req.Header, m.GetTo())
 
 	resp, err := t.client.Do(req)
 	if err != nil {

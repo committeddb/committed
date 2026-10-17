@@ -443,6 +443,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		// configured zone differs from the stored one, so zoneless fixtures
 		// and steady-state restarts stay proposal-free.
 		go db.announceZone()
+		go db.announceClusterIdentity()
 	}
 
 	// Start the disk-usage watcher last, once db.raft is wired, so its
@@ -1326,13 +1327,14 @@ func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
 	}
-	if rawURL == "" {
-		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
+	peerURL, err := cluster.CanonicalPeerURL(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %w", cluster.ErrInvalidMember, err)
 	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
 		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: &id}},
-		Context:    []byte(rawURL),
+		Context:    []byte(peerURL),
 	}
 	return db.proposeConfChange(ctx, cc, id, memberVoter)
 }
@@ -1355,13 +1357,14 @@ func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
 	}
-	if rawURL == "" {
-		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
+	peerURL, err := cluster.CanonicalPeerURL(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %w", cluster.ErrInvalidMember, err)
 	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
 		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode.Enum(), NodeId: &id}},
-		Context:    []byte(rawURL),
+		Context:    []byte(peerURL),
 	}
 	return db.proposeConfChange(ctx, cc, id, memberLearner)
 }

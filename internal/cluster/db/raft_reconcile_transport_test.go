@@ -34,6 +34,10 @@ func (r *recordingTransport) AddPeer(p raft.Peer) error {
 	r.added = append(r.added, p)
 	return nil
 }
+
+func (r *recordingTransport) SetPeerAddress(id uint64, u string) error {
+	return r.AddPeer(raft.Peer{ID: id, Context: []byte(u)})
+}
 func (r *recordingTransport) RemovePeer(id uint64)        {}
 func (r *recordingTransport) Send(msgs []*raftpb.Message) {}
 func (r *recordingTransport) Stop()                       {}
@@ -41,64 +45,109 @@ func (r *recordingTransport) FetchEvents(context.Context, db.EventFetchRequest, 
 	return db.EventFetchResult{}, db.ErrNoPeerToFetchFrom
 }
 
-func (r *recordingTransport) addedPeers() []raft.Peer {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]raft.Peer(nil), r.added...)
-}
-
-// TestReconcileTransport_ConnectsDurablePeerMissingFromSeed is the deterministic
-// proof of the fix's reconcile step: a node whose durable membership records a
-// peer (id 2) that the static COMMITTED_PEERS seed omits — the exact
-// grew-then-restarted shape — connects that peer's transport at startup, without
-// the peer ever appearing in the seed. reconcileTransportFromMembership runs
-// synchronously inside NewRaft (before serveRaft), so no election or timing is
-// involved.
-func TestReconcileTransport_ConnectsDurablePeerMissingFromSeed(t *testing.T) {
-	s := NewMemoryStorage()
-	require.NoError(t, s.PutMemberPeerURL(2, []byte("http://n2:2380")))
-
-	spy := &recordingTransport{}
+// startWithSeeds starts a Raft on s with COMMITTED_PEERS ps and returns the
+// transport seeds the node chose (choosePeerAddresses) as id → address.
+func startWithSeeds(t *testing.T, s interface {
+	db.ConsensusStorage
+	db.MembershipStorage
+}, ps []raft.Peer,
+) map[uint64]string {
+	t.Helper()
+	var seeds []raft.Peer
 	proposeC := make(chan []byte)
 	confChangeC := make(chan *raftpb.ConfChangeV2)
-
-	// Seed only self (id 1): node 2 was added dynamically after the seed was
-	// written, so it is absent from COMMITTED_PEERS.
-	ps := []raft.Peer{{ID: 1, Context: []byte("http://n1:2380")}}
 	_, r := db.NewRaft(1, ps, s, proposeC, confChangeC,
 		db.WithTickInterval(50*time.Millisecond),
-		db.WithTransportFactory(func(_ uint64, _ []raft.Peer, _ *zap.Logger, _ db.TransportRaft, _ db.EventServer, _ *tlstransport.TLSInfo, _ string) db.Transport {
-			return spy
+		db.WithTransportFactory(func(_ uint64, peers []raft.Peer, _ *zap.Logger, _ db.TransportRaft, _ db.EventServer, _ *tlstransport.TLSInfo, _ string) db.Transport {
+			seeds = peers
+			return &recordingTransport{}
 		}),
 	)
-	defer r.Close()
-
-	added := spy.addedPeers()
-	require.Len(t, added, 1, "the durable peer absent from the seed must be reconciled")
-	require.Equal(t, uint64(2), added[0].ID)
-	require.Equal(t, "http://n2:2380", string(added[0].Context))
-}
-
-// TestReconcileTransport_SkipsSelf proves reconcile never tries to dial this
-// node's own id even if a stale self entry lingers in durable membership.
-func TestReconcileTransport_SkipsSelf(t *testing.T) {
-	s := NewMemoryStorage()
-	require.NoError(t, s.PutMemberPeerURL(1, []byte("http://n1:2380"))) // self
-	require.NoError(t, s.PutMemberPeerURL(2, []byte("http://n2:2380")))
-
-	spy := &recordingTransport{}
-	proposeC := make(chan []byte)
-	confChangeC := make(chan *raftpb.ConfChangeV2)
-	ps := []raft.Peer{{ID: 1, Context: []byte("http://n1:2380")}}
-	_, r := db.NewRaft(1, ps, s, proposeC, confChangeC,
-		db.WithTickInterval(50*time.Millisecond),
-		db.WithTransportFactory(func(_ uint64, _ []raft.Peer, _ *zap.Logger, _ db.TransportRaft, _ db.EventServer, _ *tlstransport.TLSInfo, _ string) db.Transport {
-			return spy
-		}),
-	)
-	defer r.Close()
-
-	for _, p := range spy.addedPeers() {
-		require.NotEqual(t, uint64(1), p.ID, "reconcile must skip self")
+	r.Close()
+	out := make(map[uint64]string, len(seeds))
+	for _, p := range seeds {
+		out[p.ID] = string(p.Context)
 	}
+	return out
+}
+
+// A member recorded in durable membership but absent from COMMITTED_PEERS —
+// the grew-then-restarted shape — is connected at startup.
+func TestPeerAddresses_RecordedMemberMissingFromEnv(t *testing.T) {
+	s := NewMemoryStorage()
+	require.NoError(t, s.PutMemberPeerURL(2, []byte("http://n2:2380")))
+	seeds := startWithSeeds(t, s, []raft.Peer{{ID: 1, Context: []byte("http://n1:2380")}})
+	require.Equal(t, "http://n2:2380", seeds[2])
+	require.Equal(t, "http://n1:2380", seeds[1], "self is seeded with its own listen address")
+}
+
+// A stale self entry in durable membership never replaces this node's own
+// listen address from COMMITTED_PEERS.
+func TestPeerAddresses_SkipsRecordedSelf(t *testing.T) {
+	s := NewMemoryStorage()
+	require.NoError(t, s.PutMemberPeerURL(1, []byte("http://stale:2380")))
+	require.NoError(t, s.PutMemberPeerURL(2, []byte("http://n2:2380")))
+	seeds := startWithSeeds(t, s, []raft.Peer{{ID: 1, Context: []byte("http://n1:2380")}})
+	require.Equal(t, "http://n1:2380", seeds[1])
+}
+
+// bootStorage adds the node-local last-boot record to the in-memory storage.
+type bootStorage struct {
+	*MemoryStorage
+	last map[uint64]string
+	have bool
+}
+
+func (b *bootStorage) PeersAtLastBoot() (map[uint64]string, bool, error) {
+	return b.last, b.have, nil
+}
+
+func (b *bootStorage) SetPeersAtLastBoot(p map[uint64]string) error {
+	b.last, b.have = p, true
+	return nil
+}
+
+func env(peers map[uint64]string) []raft.Peer {
+	out := make([]raft.Peer, 0, len(peers))
+	for id, u := range peers {
+		out = append(out, raft.Peer{ID: id, Context: []byte(u)})
+	}
+	return out
+}
+
+// The boot-time order of authority for a peer's address (choosePeerAddresses):
+// a COMMITTED_PEERS entry the operator edited since the last boot wins (and is
+// recorded); an unedited one never overrides the recorded address; the first
+// boot without a last-boot record keeps the recorded address.
+func TestPeerAddresses_Precedence(t *testing.T) {
+	old := map[uint64]string{1: "http://n1:9022", 2: "http://n2:9022", 3: "http://n3:9022"}
+	moved := map[uint64]string{1: "http://n1:9022", 2: "http://m2:9022", 3: "http://m3:9022"}
+
+	t.Run("edited since the last boot: env wins and is recorded", func(t *testing.T) {
+		s := &bootStorage{MemoryStorage: NewMemoryStorage(), last: old, have: true}
+		require.NoError(t, s.PutMemberPeerURL(2, []byte(old[2])))
+		require.NoError(t, s.PutMemberPeerURL(3, []byte(old[3])))
+		seeds := startWithSeeds(t, s, env(moved))
+		require.Equal(t, moved[2], seeds[2])
+		require.Equal(t, moved[3], seeds[3])
+		require.Equal(t, moved[2], s.MemberPeerURLs()[2], "the next boot keeps it")
+		require.Equal(t, moved, s.last, "this boot's env is recorded")
+	})
+
+	t.Run("unedited stale env never overrides the recorded address", func(t *testing.T) {
+		s := &bootStorage{MemoryStorage: NewMemoryStorage(), last: old, have: true}
+		require.NoError(t, s.PutMemberPeerURL(2, []byte(moved[2]))) // the cluster agreed node 2 moved
+		require.NoError(t, s.PutMemberPeerURL(3, []byte(old[3])))
+		seeds := startWithSeeds(t, s, env(old))
+		require.Equal(t, moved[2], seeds[2])
+	})
+
+	t.Run("first boot with this rule keeps the recorded address", func(t *testing.T) {
+		s := &bootStorage{MemoryStorage: NewMemoryStorage()}
+		require.NoError(t, s.PutMemberPeerURL(2, []byte(old[2])))
+		seeds := startWithSeeds(t, s, env(moved))
+		require.Equal(t, old[2], seeds[2])
+		require.Equal(t, moved[3], seeds[3], "env fills a member with no record")
+		require.True(t, s.have, "and the env is recorded for next time")
+	})
 }
