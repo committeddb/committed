@@ -66,8 +66,8 @@ func (d *SQLServerDialect) Ingest(ctx context.Context, config *sql.Config, pos c
 	// the same way; a gate that opens mid-session is picked up by the next.
 	// Either promotion re-keys with one re-snapshot.
 	var uuidRerender, temporalRerender bool
-	s.rendering, uuidRerender = sessionRendering(checkpointRendering, len(pos) > 0, d.canonicalUUIDEnabled())
-	s.temporal, temporalRerender = sessionRendering(checkpointTemporal, len(pos) > 0, d.typedTemporalEnabled())
+	s.rendering, uuidRerender = sql.SessionRendering(checkpointRendering, len(pos) > 0, d.canonicalUUIDEnabled())
+	s.temporal, temporalRerender = sql.SessionRendering(checkpointTemporal, len(pos) > 0, d.typedTemporalEnabled())
 	s.rerender = uuidRerender || temporalRerender
 	// epoch stays the RAW checkpoint epoch here (0 when none): the snapshot
 	// decisions (sql.PlanSnapshot) choose the generation from it and the
@@ -130,8 +130,8 @@ type session struct {
 	progress    *dialectpb.SnapshotProgress
 	epoch       uint64
 	snapshotted []string
-	rendering   uint32 // uniqueidentifier (see sessionRendering)
-	temporal    uint32 // date/time types (see sessionRendering)
+	rendering   uint32 // uniqueidentifier (see sql.SessionRendering)
+	temporal    uint32 // date/time types (see sql.SessionRendering)
 
 	rerender bool              // a legacy-rendered checkpoint must re-key before streaming
 	drift    *schemaDriftGuard // per attempt: dedups the divergence Warn

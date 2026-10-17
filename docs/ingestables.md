@@ -357,8 +357,9 @@ A few edge cases:
   `ingest` fields are simply absent.
 - If a producer exists but its worker isn't running on the node that answered,
   the producer is still named, with an `ingestError` instead of being dropped.
-- For alerting, the same lag is exported as metrics: `committed.sync.lag` and
-  `committed.ingest.lag`.
+- For alerting, the same lag is exported as metrics: `committed.sync.lag`,
+  and `committed.ingest.lag` (bytes) or `committed.ingest.lag.transactions`
+  (transactions), whichever unit the ingestable reports.
 
 ### TRUNCATE is not propagated (caveat)
 
@@ -520,12 +521,6 @@ the ingestable, or a slot recreate on Postgres).
 > connection-string password** (HTTP 400) so it is never stored in the replicated
 > log or a snapshot. See [secrets.md](operations/secrets.md).
 
-**Key column types.** Keep `boolean`, `char(n)`, and `inet` columns out of
-`primaryKey`. The snapshot renders these types differently from the change
-stream (`false` vs `f`, for example), so a later update or delete of a
-snapshotted row arrives under a different key: the row is duplicated or never
-removed.
-
 Give each ingestable its own `slotName` and `publication` so they don't collide.
 A runnable, end-to-end Postgres example lives in
 [`examples/movies/`](../examples/movies/) (`source.sql`, `ingest-*.toml`,
@@ -557,10 +552,6 @@ covered with no config change. This needs PostgreSQL 13 or later.
   application that moves a row by inserting the new copy before deleting the
   old one would lose the row, since the delete arrives last under the same
   key.
-- **A partition key of type boolean, `char(n)`, or `inet`** is in the full
-  key, so it hits the key-column limit in
-  [Configuration](#configuration): a table partitioned on such a column (for
-  example, active and archived rows) is not supported yet.
 - **Rows that move between partitions.** An `UPDATE` that changes the partition
   key arrives as a delete of the old row followed by an insert of the new
   one, in one transaction.
@@ -743,8 +734,8 @@ Every other MySQL type is supported: numbers, `DECIMAL` (exact), `BIT`, `DATE`/
 `TIME`/`DATETIME`/`TIMESTAMP`, `CHAR`/`VARCHAR`/`TEXT`/`ENUM`/`SET`, `JSON`, and
 binary (`BLOB`/`BINARY`/`VARBINARY`, emitted as base64). (Postgres has no such
 gap — PostGIS `geometry`/`geography`, `pgvector`, user composite types, and
-arrays all come through as their lossless `::text` form, spelled identically
-on the snapshot and the stream.)
+arrays all come through as their lossless PostgreSQL text form, spelled
+identically on the snapshot and the stream.)
 
 ### Configuration
 

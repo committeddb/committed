@@ -75,8 +75,7 @@ func (t *HttpTransport) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if r.Header.Get(clusterIDHeader) != clusterID || r.Header.Get(protocolHeader) != protocolVersion {
-		http.Error(w, "wrong cluster or protocol", http.StatusPreconditionFailed)
+	if !t.admitPeer(w, r, false) {
 		return
 	}
 	if t.token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+t.token)) != 1 {
@@ -305,15 +304,15 @@ func (t *HttpTransport) fetchFrom(ctx context.Context, pr *peer, req db.EventFet
 	// The stream's own context: cut when the peer stops sending.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, pr.url+eventsPath+q, nil)
+	target, err := pr.endpoint(eventsPath)
 	if err != nil {
 		return res, err
 	}
-	httpReq.Header.Set(clusterIDHeader, clusterID)
-	httpReq.Header.Set(protocolHeader, protocolVersion)
-	if t.token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+t.token)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target+q, nil)
+	if err != nil {
+		return res, err
 	}
+	t.setPeerHeaders(httpReq.Header, pr.id)
 	resp, err := t.fetchClient.Do(httpReq)
 	if err != nil {
 		return res, &peerSkipped{err}

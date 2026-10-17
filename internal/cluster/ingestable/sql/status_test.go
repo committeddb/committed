@@ -21,7 +21,7 @@ func TestSnapshotTableStatus(t *testing.T) {
 	// keyset cursor (PK) is deliberately not surfaced — it is often source PII.
 	progress := &dialectpb.SnapshotProgress{
 		CompletedTables: []string{"region"},
-		LastPkByTable:   map[string]string{"nation": "42"},
+		LastPkByTable:   map[string][]byte{"nation": []byte("42")},
 	}
 	got := sql.SnapshotTableStatus(cfg, progress)
 	require.Equal(t, []cluster.TableSnapshotStatus{

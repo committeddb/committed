@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	twal "github.com/tidwall/wal"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
 	"github.com/committeddb/committed/pkg/segmentlog"
@@ -47,6 +49,10 @@ const (
 	// LogCorrupt: a complete record fails its checksum, or the log is
 	// mid-compaction — not auto-repairable, rebuild from a healthy replica.
 	LogCorrupt LogStatus = "corrupt"
+	// LogNewerFormat: a complete record carries a frame version this binary
+	// does not read — a newer committed wrote it. Sound data: neither
+	// truncated nor spliced; run the newer binary.
+	LogNewerFormat LogStatus = "newer-format"
 )
 
 // Diagnosis is the result of scanning one WAL log directory.
@@ -194,8 +200,17 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 		}
 		var corrupt bool
 		records, incompleteAt := walkSegmentRecords(data, func(ordinal, off, n int, rec []byte) bool {
-			if _, uerr := unframe(rec); uerr == nil {
+			_, uerr := unframe(rec)
+			if uerr == nil {
 				return true
+			}
+			if errors.Is(uerr, cluster.ErrNewerFrame) {
+				corrupt = true
+				d.Status = LogNewerFormat
+				d.Records = total + ordinal
+				msg, _ := cluster.RedactedMessage(uerr)
+				d.Detail = fmt.Sprintf("record %d (segment %s, offset %d): %s", total+ordinal, seg.name, off, msg)
+				return false
 			}
 			// A structurally complete record that fails its checksum: a
 			// bit-flip in committed data, not an unacknowledged torn write.

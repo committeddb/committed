@@ -77,9 +77,7 @@ by `seq_id`, with `data` decoded as JSON.
   read into it. See [`jsonColumns`](../ingestables.md#configuration).
 - **Partitioned tables.** Watch the partitioned root and set `primaryKey` to
   the table's full primary key; see
-  [Partitioned tables](../ingestables.md#partitioned-tables). A table
-  partitioned on a boolean column (for example, active and archived events)
-  is not supported yet.
+  [Partitioned tables](../ingestables.md#partitioned-tables).
 
 ## 2. Build the read model
 

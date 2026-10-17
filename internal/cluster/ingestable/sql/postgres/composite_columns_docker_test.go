@@ -18,9 +18,9 @@ import (
 
 // TestPostgresCompositeAndArrayColumnsRoundTrip pins that the rare column
 // shapes — a user composite type, an array of it, a text array — snapshot
-// through the ::text projection and stream through pgoutput as the SAME
-// bytes: PostgreSQL's I/O-conversion cast to text exists for every data type,
-// so there is no "un-castable column" that could fail a table's snapshot.
+// through each type's output function and stream through pgoutput as the
+// SAME bytes: every data type has an output function, so there is no
+// "un-renderable column" that could fail a table's snapshot.
 func TestPostgresCompositeAndArrayColumnsRoundTrip(t *testing.T) {
 	const table = "pgtest_composite"
 	const slot, pub = "slot_composite", "pub_composite"

@@ -2,8 +2,11 @@ package stages
 
 import (
 	"fmt"
+	"math/rand"
+	"os"
 	"testing"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
@@ -90,5 +93,62 @@ func BenchmarkAggregateLargeGroup(b *testing.B) {
 				})
 			}
 		}
+	}
+}
+
+// BenchmarkAggregateLiveBatches folds the recipe's stage the way a caught-up
+// projection does under load: batches of 500 committed Actuals, one event
+// each, appended to random streams among 20,000, each batch one store
+// transaction and one drain. It reports CPU per event and the store's bytes
+// per event on disk.
+func BenchmarkAggregateLiveBatches(b *testing.B) {
+	const streams, batch = 20000, 500
+	stages := []Stage{{Name: "order", From: "events", KeyPath: []string{"$.stream_id"}, Reduce: "aggregate", Emit: recipeEmits}}
+	cfg := stageConfig(stages...)
+	if err := validateProjectionStageShapes(cfg); err != nil {
+		b.Fatal(err)
+	}
+	g := buildStageGraph(cfg.Stages)
+	dir := b.TempDir()
+	store, _, err := stagestore.Open(dir, "p", "fp")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	typ := &cluster.Type{ID: "events", Name: "events"}
+	rng := rand.New(rand.NewSource(1)) //nolint:gosec // G404: a reproducible workload
+	versions := make([]int, streams)
+	index := uint64(0)
+	next := func() *cluster.Actual {
+		s := rng.Intn(streams)
+		versions[s]++
+		v := versions[s]
+		kind, data := "item_added", fmt.Sprintf(`{"sku":"pen","qty":%d,"price":1.5}`, 1+rng.Intn(5))
+		if v == 1 {
+			kind, data = "order_placed", `{"customer":"ada"}`
+		}
+		index++
+		payload := fmt.Appendf(nil, `{"stream_id":"s%d","version":%d,"type":%q,"data":%s}`, s, v, kind, data)
+		return &cluster.Actual{Index: index, Entities: []*cluster.Entity{
+			cluster.NewUpsertEntity(typ, fmt.Appendf(nil, "s%d-%d", s, v), payload),
+		}}
+	}
+	b.ResetTimer()
+	for range b.N {
+		b.StopTimer()
+		as := make([]*cluster.Actual, batch)
+		for i := range as {
+			as[i] = next()
+		}
+		b.StartTimer()
+		if err := store.Update(func(tx *stagestore.Tx) error { return g.FoldActuals(tx, as) }); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	events := float64(b.N * batch)
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/events, "ns/event")
+	if fi, err := os.Stat(stagestore.FilePath(dir, "p")); err == nil {
+		b.ReportMetric(float64(fi.Size())/events, "store-bytes/event")
 	}
 }

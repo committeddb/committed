@@ -79,6 +79,10 @@ func (d *GoMySQLServerDialect) DestinationDeleteSQL() string {
 	return (&dialects.MySQLDialect{}).DestinationDeleteSQL()
 }
 
+func (d *GoMySQLServerDialect) HasRowsSQL(table string) string {
+	return (&dialects.MySQLDialect{}).HasRowsSQL(table)
+}
+
 func (d *GoMySQLServerDialect) CreateDeleteSQL(config *sql.Config) string {
 	return (&dialects.MySQLDialect{}).CreateDeleteSQL(config)
 }
@@ -160,6 +164,11 @@ func (d *GoMySQLServerDialect) IsPermanent(err error) bool {
 // value doubling applies.
 func (d *GoMySQLServerDialect) BindArgs(values []any) []any {
 	return (&dialects.MySQLDialect{}).BindArgs(values)
+}
+
+// CreateMultiRowUpsertSQL mirrors MySQLDialect, as CreateSQL does.
+func (d *GoMySQLServerDialect) CreateMultiRowUpsertSQL(config *sql.Config, rows int) string {
+	return (&dialects.MySQLDialect{}).CreateMultiRowUpsertSQL(config, rows)
 }
 
 func (d *GoMySQLServerDialect) CreateEnrichedUpsertSQL(c *sql.Config, enrich map[string]sql.SpineEnrichment) string {

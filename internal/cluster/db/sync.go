@@ -722,7 +722,7 @@ func (db *DB) syncSingle(ctx context.Context, id string, s cluster.Syncable, han
 			// The destination's rendering stamp gates serving: rows rendered
 			// by another version must not be written into (rendering_stamp.go).
 			// A pending rematerialization is exempt — its replay converges them.
-			if v := db.verifyRenderingStamp(ctx, id, s); v == renderingPark {
+			if v := db.verifyRenderingStamp(ctx, id, s, cp); v == renderingPark {
 				return nil
 			} else if v == renderingRetry {
 				break // idle backoff, then retry — never a hot loop
@@ -1262,7 +1262,7 @@ func (db *DB) syncBatch(ctx context.Context, id string, s cluster.Syncable, bs c
 			// The destination's rendering stamp gates serving: rows rendered
 			// by another version must not be written into (rendering_stamp.go).
 			// A pending rematerialization is exempt — its replay converges them.
-			if v := db.verifyRenderingStamp(ctx, id, s); v == renderingPark {
+			if v := db.verifyRenderingStamp(ctx, id, s, cp); v == renderingPark {
 				return nil
 			} else if v == renderingRetry {
 				break // idle backoff, then retry — never a hot loop
@@ -1520,6 +1520,11 @@ func (db *DB) syncBatchFallback(ctx context.Context, id string, s cluster.Syncab
 // TestCorruptEntryReadWedgesInsteadOfFatal and
 // TestMisTiledSegmentReadDoesNotFatal.
 func (db *DB) logSyncReadError(id string, readErr error) {
+	if errors.Is(readErr, cluster.ErrNewerFrame) {
+		db.logger.Error("event-log entry written by a newer committed on sync read; this syncable is wedged at that entry (nothing is skipped) and the node stays up — run the newer committed on this node; the entry is not corrupt, so do not repair or rebuild",
+			zap.String("id", id), zap.Error(readErr))
+		return
+	}
 	if errors.Is(readErr, cluster.ErrCorruptEntry) {
 		db.logger.Error("corrupt event-log entry on sync read; this syncable is wedged at the corrupt entry (nothing is skipped) and the node stays up — rebuild this node from a healthy replica, or run `committed wal repair` to check for a torn tail (see docs/operations/rebuild.md)",
 			zap.String("id", id), zap.Error(readErr))

@@ -106,7 +106,14 @@ node's own state cannot be trusted:
   **refuses** anything that is not a torn tail — a bitflip in a committed
   record, mid-log — because that data is genuinely gone locally. *That* is
   when you rebuild (below) — or, on a **single node**, splice the bytes
-  back from a backup of that node:
+  back from a backup of that node.
+
+  If the tool reports the log was **written by a newer committed**
+  (`newer-format`), nothing is damaged: this node is running an older
+  binary than the one that wrote its data. Start it with that version or
+  newer; don't repair or rebuild.
+
+  To splice from a backup:
 
   ```
   committed wal repair --data <node-data-dir> --from <backup.tar.gz>

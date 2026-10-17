@@ -10,6 +10,62 @@ moving on. A node only ever changes its **binary** — its
 `COMMITTED_*` environment (node id, peers, data directory) stays the
 same, and its on-disk state is reused in place.
 
+## Upgrading from 0.8.2 to 0.8.3
+
+Follow the rolling binary-upgrade procedure below; no configuration changes.
+0.8.3 raises the cluster feature level to 4 for two changes, which activate
+once every node runs 0.8.3; the changes after them need no feature level and
+take effect on each node as it upgrades:
+
+- **PostgreSQL snapshot text:** the snapshot renders `boolean`, `char(n)`,
+  and `inet` values (and domains over them) as the change stream does: `t`
+  and `f`, `char(n)` with its padding, a host address without `/32`. Before,
+  a snapshotted row whose key had such a column was keyed differently from
+  its later updates and deletes, so the destination kept stale or duplicate
+  rows. A PostgreSQL ingestable with a `char(n)` or `inet` column, or a
+  `boolean` in `primaryKey`, re-snapshots once after the roll, which re-keys
+  keyed destinations and removes the stale rows; keyless destinations keep
+  both spellings until rebuilt. Other PostgreSQL ingestables are unaffected.
+- **MySQL `BINARY(n)` values:** the change stream pads a `BINARY(n)` value
+  back to `n` bytes, as the snapshot reads it. MySQL's binary log drops the
+  trailing zero bytes, so a value ending in them was keyed and rendered
+  differently by the stream than by the snapshot, and the destination kept
+  stale or duplicate rows. A MySQL ingestable whose tables have a `BINARY`
+  column re-snapshots once after the roll, which re-keys keyed destinations
+  and removes the stale rows; keyless destinations keep both spellings until
+  rebuilt. Other MySQL ingestables are unaffected.
+- **Backups:** an archive taken on 0.8.3 records feature level 4, which a
+  0.8.2 binary refuses to restore.
+- **Binary primary keys snapshot.** A MySQL or SQL Server table whose
+  primary key is a single binary column (`BINARY`, `VARBINARY`, a UUID
+  stored as `BINARY(16)`) holding bytes that are not valid UTF-8 failed its
+  snapshot and retried forever. It now snapshots, including through
+  parallel snapshot readers. A rolled-back node cannot read such a
+  table's mid-snapshot checkpoint and retries until it is upgraded again.
+- **Ingest lag metrics by unit.** `committed.ingest.lag` carried every
+  ingestable's lag as bytes, though MySQL with GTIDs and SQL Server measure
+  theirs in source transactions. Those now report on
+  `committed.ingest.lag.transactions`, and `committed.ingest.lag`
+  (`committed_ingest_lag_bytes` in PromQL) keeps only byte lags. Move any
+  alert on a MySQL-with-GTIDs or SQL Server ingestable's lag to the new
+  gauge, with a threshold in transactions.
+- **A destination with rows and no note stops.** 0.8.0 through 0.8.2 gave
+  every SQL and Iceberg destination without a rendering note one on first
+  contact (see
+  [api-compatibility.md](../architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
+  From 0.8.3, a syncable that has already written to its destination and
+  finds rows there but no note parks rather than guessing which version
+  wrote them. That happens when the destination database is restored from a
+  backup taken before 0.8.0, or the table is rebuilt by hand. The status
+  names the fix: `rematerialize` for a keyed mirror, or `DELETE`, drop the
+  table yourself, and re-POST. An empty table, or one a new syncable is
+  pointed at before it has written anything, still gets its note and is
+  served.
+- **Coming from before 0.8.0?** Upgrade to 0.8.2 first and let every
+  syncable run, so each destination gets its note, then upgrade to 0.8.3.
+  Going straight to 0.8.3 parks every syncable whose table already has rows,
+  and each then needs the fix above (a full replay from the log).
+
 ## Upgrading from 0.8.1 to 0.8.2
 
 Follow the rolling binary-upgrade procedure below; no configuration changes.
@@ -286,6 +342,11 @@ After the last node:
 > re-keyed to the typed date and time rendering (feature level 3, 0.8.2,
 > see [ingestables.md](../ingestables.md#date-and-time-rendering)): a 0.8.1 binary
 > would resume it rendering RFC 3339 instants again — treat it as one-way.
+> Likewise a PostgreSQL ingestable that has re-keyed to the stream's text
+> rendering (feature level 4, 0.8.3): a 0.8.2 binary would snapshot new
+> tables the old way again. And a MySQL ingestable that has re-keyed to
+> padded `BINARY(n)` values (feature level 4, 0.8.3): a 0.8.2 binary would
+> stream them stripped again.
 > Once a type declares `onSupersede = "scrub"` (feature level 3, 0.8.2), do
 > not roll a node back to 0.8.1: the older binary drops the declaration and
 > keeps the superseded versions every 0.8.2 node scrubs, so that node's log
@@ -415,7 +476,9 @@ same quorum rule applies in reverse.
   `committed__destinations` table in the destination database (see
   [api-compatibility.md](../architecture/api-compatibility.md#derived-state-stage-stores-and-destination-renderings)).
   Nothing stops on this upgrade: existing tables get the note the first
-  time 0.8.0 touches them. The note also records whether committed created
+  time 0.8.0 touches them (0.8.3 stops a table with rows and no note
+  instead; see [Upgrading from 0.8.2 to 0.8.3](#upgrading-from-082-to-083)).
+  The note also records whether committed created
   the table, and a table that exists before the upgrade is recorded as one
   it did not: from then on `DELETE /v1/syncable/{id}` leaves that table in
   place (before 0.8.0 it dropped it) — drop it yourself when you mean to.

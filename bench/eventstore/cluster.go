@@ -82,6 +82,88 @@ func (c *cluster) waitReady(ctx context.Context, limit time.Duration) error {
 	return fmt.Errorf("the cluster was not ready within %s", limit)
 }
 
+// followerZone is the zone of a node that is not the leader: run.sh starts
+// node i (in -nodes order, numbered from 1) in zone zi.
+func (c *cluster) followerZone(ctx context.Context) (string, error) {
+	var st struct {
+		Leader uint64 `json:"leader"`
+	}
+	if err := c.getJSON(ctx, c.nodes[0]+"/v1/node/status", &st); err != nil {
+		return "", err
+	}
+	for i := range c.nodes {
+		if uint64(i+1) != st.Leader { //nolint:gosec // G115: i is a small index
+			return fmt.Sprintf("z%d", i+1), nil
+		}
+	}
+	return "", fmt.Errorf("no follower among %d nodes", len(c.nodes))
+}
+
+// waitApplySettled waits until every node reports the same applied index
+// and it has not moved for three polls in a row — the log has stopped
+// growing and every node has applied it. It returns that index.
+func (c *cluster) waitApplySettled(ctx context.Context, limit time.Duration) (uint64, error) {
+	deadline := time.Now().Add(limit)
+	var last uint64
+	steady := 0
+	for time.Now().Before(deadline) {
+		var lo, hi uint64
+		ok := true
+		for i, n := range c.nodes {
+			var st struct {
+				AppliedIndex uint64 `json:"appliedIndex"`
+			}
+			if c.getJSON(ctx, n+"/v1/node/status", &st) != nil {
+				ok = false
+				break
+			}
+			if i == 0 || st.AppliedIndex < lo {
+				lo = st.AppliedIndex
+			}
+			hi = max(hi, st.AppliedIndex)
+		}
+		if ok && lo == hi && hi == last {
+			if steady++; steady >= 3 {
+				return hi, nil
+			}
+		} else {
+			steady = 0
+		}
+		last = hi
+		if err := sleep(ctx, 2*time.Second); err != nil {
+			return 0, err
+		}
+	}
+	return 0, fmt.Errorf("the nodes' applied index did not settle within %s", limit)
+}
+
+// maxSyncLag is the largest lag any node reports for a syncable; known is
+// false while no node reports one.
+func (c *cluster) maxSyncLag(ctx context.Context, id string) (lag uint64, known bool) {
+	for _, n := range c.nodes {
+		var st syncStatus
+		if c.getJSON(ctx, n+"/v1/syncable/"+id+"/status", &st) == nil && st.Lag != nil {
+			lag, known = max(lag, *st.Lag), true
+		}
+	}
+	return lag, known
+}
+
+// postRetrying posts a config, retrying for up to limit: a zone-pinned
+// syncable is refused until the nodes have announced their zones.
+func (c *cluster) postRetrying(ctx context.Context, path, body string, limit time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for {
+		err := c.post(ctx, path, body)
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		if serr := sleep(ctx, time.Second); serr != nil {
+			return serr
+		}
+	}
+}
+
 func (c *cluster) getJSON(ctx context.Context, url string, v any) error {
 	code, b, err := c.do(ctx, http.MethodGet, url, "")
 	if err != nil {

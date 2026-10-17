@@ -57,6 +57,8 @@ type options struct {
 	catchUpBar    time.Duration
 	label         string
 	sqlserverPoll string
+	pinFollower   bool
+	history       int64
 }
 
 func main() {
@@ -87,6 +89,8 @@ func main() {
 	flag.DurationVar(&o.catchUpBar, "catch-up-bar", 5*time.Second, "the bar for catch-up after the last append")
 	flag.StringVar(&o.label, "label", "", "a name for this run in the report (e.g. the commit)")
 	flag.StringVar(&o.sqlserverPoll, "sqlserver-poll-interval", "", "set [sql.options] pollInterval on a SQL Server ingestable (default: the recipe's, i.e. none)")
+	flag.Int64Var(&o.history, "history", 0, "instead of the live workload, bulk-load this many events into the source, snapshot them into the log, and time building the projection over them (postgres only; set -rebuild-limit for large histories)")
+	flag.BoolVar(&o.pinFollower, "pin-follower", false, "pin the projections to a follower's zone (run.sh starts node i in zone zi), so they sync off the leader")
 	flag.Parse()
 
 	for _, n := range strings.Split(nodes, ",") {
@@ -104,6 +108,23 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if o.history > 0 {
+		hrep, err := runHistory(ctx, o)
+		if hrep != nil {
+			if werr := writeHistoryReport(o.results, hrep); werr != nil {
+				fmt.Fprintln(os.Stderr, "eventstore-load: write report:", werr)
+			}
+			fmt.Print(hrep.Summary())
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "eventstore-load:", err)
+			os.Exit(1)
+		}
+		if !hrep.Pass {
+			os.Exit(3)
+		}
+		return
+	}
 	rep, err := run(ctx, o)
 	if rep != nil {
 		if werr := writeReport(o.results, rep); werr != nil {

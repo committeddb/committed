@@ -94,7 +94,24 @@ var (
 //     storing it in the event log as an empty entry. An older binary would
 //     apply it, so a worker numbers nothing until every member is at level
 //     3, and its ordered proposals stay one at a time meanwhile.
-const FeatureLevel uint64 = 3
+//
+// Level 4: 0.8.3.
+//
+//   - PostgreSQL snapshot text by output function
+//     (postgres.featureLevelOutputRendering): boolean as t/f, char(n) padded,
+//     a host inet without /32 — the text the replication stream carries. The
+//     rendering is in entity KEYS (a boolean primary key), so every node
+//     keeps the `::text` cast until the minimum reaches 4; then a session
+//     resuming an old-style checkpoint whose tables have such a column
+//     re-snapshots once. Once by output function it stays so.
+//   - MySQL BINARY(n) padding on the binlog path
+//     (mysql.featureLevelBinaryPadding): a BINARY(n) value padded back to n
+//     bytes, as the snapshot reads it, where the binlog strips its trailing
+//     0x00 bytes. The value is in entity KEYS, so every node streams it
+//     stripped until the minimum reaches 4; then a session resuming a
+//     stripped checkpoint whose tables have a BINARY column re-snapshots
+//     once. Once padded it stays padded.
+const FeatureLevel uint64 = 4
 
 // Info is the JSON shape returned by /version and printed by the
 // --version flag. GoVersion is derived from runtime rather than

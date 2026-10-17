@@ -84,6 +84,14 @@ var ErrCompactionDeferred = errors.New("raft-log compaction deferred: a layout f
 // from a healthy replica.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
 
+// ErrNewerFrame marks a stored WAL entry framed by a newer binary: the frame's
+// magic is intact but its version byte is above the one this binary reads.
+// The entry is unreadable here exactly as a corrupt one is, so the error also
+// matches ErrCorruptEntry and every reader refuses it the same way, but the
+// remedy is the opposite: run the binary that wrote it. Repairing or
+// rebuilding would discard sound data.
+var ErrNewerFrame = errors.New("wal: entry written by a newer committed")
+
 // ErrNotSyncableOwner is returned by RebuildSyncable / RematerializeSyncable
 // when this node does not serve the zone-pinned syncable: the verbs' worker
 // drain must run WHERE THE WORKER RUNS (the drain-before-reset ordering that
@@ -651,7 +659,10 @@ type StageStat struct {
 // rendering version it was last converged under, next to those rows (so it
 // moves, drops, and restores with them). The worker verifies the stamp before
 // it syncs and parks on a mismatch; a rematerialization re-stamps on
-// completion (db/rendering_stamp.go). Resolved through the Unwrap chain
+// completion (db/rendering_stamp.go). An unstamped destination is stamped
+// when committed has not written to it (checkpoint 0) or it holds no rows;
+// one holding rows committed wrote under no stamp (a restore from a
+// pre-stamp backup, a hand rebuild) parks. Resolved through the Unwrap chain
 // (SyncableAs), so mode wrappers forward it.
 type RenderingStamped interface {
 	// RenderingVersion is the version this binary renders.
@@ -661,6 +672,9 @@ type RenderingStamped interface {
 	RenderingStamp(ctx context.Context) (version uint64, present bool, err error)
 	// StampRendering records RenderingVersion as the destination's stamp.
 	StampRendering(ctx context.Context) error
+	// DestinationHasRows reports whether the destination, or any helper
+	// table committed keeps beside it, holds a row.
+	DestinationHasRows(ctx context.Context) (bool, error)
 }
 
 //counterfeiter:generate . SyncableParser

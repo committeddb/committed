@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
-	"log"
 	nethttp "net/http"
 	"os"
 	"os/signal"
@@ -74,16 +72,23 @@ image can be templated per-node by an orchestrator:
                        e.g. "1=http://n1:9022,2=http://n2:9022". The
                        same value is given to every node and must
                        include this node's own COMMITTED_NODE_ID. On the
-                       first boot it bootstraps the cluster; on every boot
-                       it seeds the peer transport. You do NOT need to
-                       update it after growing the cluster — a member added
-                       at runtime has its raft URL persisted and reconciled
-                       onto the transport automatically on restart.
+                       first boot it bootstraps the cluster (and derives the
+                       cluster id); on every boot it supplies peer addresses.
+                       An entry you change wins over the recorded address at
+                       the next boot (machines moved, a restore onto new
+                       machines, a switch to https); an unchanged entry
+                       never overrides it. You do NOT need to update it
+                       after growing the cluster — a member added at runtime
+                       has its raft URL recorded and used on restart.
   COMMITTED_JOIN       when truthy, this node joins an existing cluster
                        instead of bootstrapping a new one: it starts with
                        no raft configuration and learns its membership from
                        the leader after a "committed member add" naming it
                        commits. COMMITTED_PEERS still seeds the transport.
+  COMMITTED_CLUSTER_NAME
+                       optional; mixed into a new cluster's id at its first
+                       boot, so two clusters bootstrapped from identical
+                       COMMITTED_PEERS get different ids.
 
   COMMITTED_DISK_WARN_PERCENT
                        free-space percent at which the disk watcher logs a
@@ -223,7 +228,7 @@ docs/operations/ it points to.`,
 			ctx := context.Background()
 			exporter, err := otlpmetricgrpc.New(ctx)
 			if err != nil {
-				log.Fatalf("otel exporter: %v", err)
+				zap.L().Fatal("otel exporter", zap.Error(err))
 			}
 			// Identify the service on every exported metric. Without a
 			// resource the SDK falls back to resource.Default(), whose
@@ -274,7 +279,7 @@ docs/operations/ it points to.`,
 		}
 		s, err := wal.Open(dataDir, p, sync, ingest, walOpts...)
 		if err != nil {
-			log.Fatalf("cannot open storage: %v", err)
+			zap.L().Fatal("cannot open storage", zap.Error(err))
 		}
 
 		var dbOpts []db.Option
@@ -374,6 +379,15 @@ docs/operations/ it points to.`,
 			zap.L().Info("joining existing cluster (COMMITTED_JOIN set); membership will be learned from the leader")
 		}
 
+		// COMMITTED_CLUSTER_NAME is mixed into a new cluster's id, which every
+		// node derives at its first boot from COMMITTED_PEERS: two clusters
+		// bootstrapped from identical COMMITTED_PEERS (short Kubernetes DNS
+		// names repeated across namespaces) get different ids only if their
+		// names differ. Read only by that first boot.
+		if name := os.Getenv("COMMITTED_CLUSTER_NAME"); name != "" {
+			dbOpts = append(dbOpts, db.WithClusterName(name))
+		}
+
 		// COMMITTED_API_URL is this node's advertised HTTP API base URL. When
 		// set, the node self-announces it so a follower can proxy a leader-only
 		// read (GET /v1/membership) to the leader. Unset leaves the node's API
@@ -387,8 +401,7 @@ docs/operations/ it points to.`,
 		// sends them through the peer transport with its own TLS and credential.
 		proxyClient, err := loadProxyClient()
 		if err != nil {
-			// G706 false positive: values come from operator-supplied env vars.
-			log.Fatalf("leader-read proxy client: %v", err) //nolint:gosec // G706
+			zap.L().Fatal("leader-read proxy client", zap.Error(err))
 		}
 		if tokens.Split() {
 			dbOpts = append(dbOpts, db.WithPeerDiskReports())
@@ -410,13 +423,13 @@ docs/operations/ it points to.`,
 		dbOpts = append(dbOpts, db.WithPeerToken(tokens.Peer()))
 
 		d := db.New(id, peers, s, p, sync, ingest, dbOpts...)
-		fmt.Printf("Raft Running...\n")
+		zap.L().Info("raft running", zap.Uint64("node_id", id))
 
 		// Observable sync/ingest lag gauges read the live db at scrape time, so
 		// they register after db.New. No-op when metrics are disabled.
 		if meterProvider != nil {
 			if err := metrics.RegisterLagGauges(meterProvider.Meter("committed"), d); err != nil {
-				log.Fatalf("register lag gauges: %v", err)
+				zap.L().Fatal("register lag gauges", zap.Error(err))
 			}
 		}
 
@@ -438,8 +451,7 @@ docs/operations/ it points to.`,
 
 		corsOrigins, err := loadCORSOrigins()
 		if err != nil {
-			// G706 false positive: the value is an operator-supplied env var.
-			log.Fatalf("CORS: %v", err) //nolint:gosec // G706
+			zap.L().Fatal("CORS", zap.Error(err))
 		}
 		if len(corsOrigins) > 0 {
 			httpOpts = append(httpOpts, http.WithCORS(
@@ -470,7 +482,7 @@ docs/operations/ it points to.`,
 		}
 
 		h := http.New(d, httpOpts...)
-		fmt.Printf("API Listening on %s...\n", addr)
+		zap.L().Info("API listening", zap.String("addr", addr))
 
 		// NB: the database parser is registered earlier, before wal.Open (see
 		// above). These three need *d (the ingestable parser) or are simply
@@ -513,9 +525,7 @@ docs/operations/ it points to.`,
 
 		tlsCfg, err := loadAPITLSConfig()
 		if err != nil {
-			// G706 false positive: env-var values are supplied by the
-			// process operator, not an untrusted user.
-			log.Fatalf("API TLS: %v", err) //nolint:gosec // G706
+			zap.L().Fatal("API TLS", zap.Error(err))
 		}
 		if tlsCfg != nil {
 			serverOpts = append(serverOpts, http.WithTLSConfig(tlsCfg))
@@ -652,13 +662,14 @@ func dbParser() *syncsql.DBParser {
 	return p
 }
 
-func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader, features ingestablesqlserver.FeatureReader) *ingestablesql.IngestableParser {
+func ingestableParser(t ingestablesql.Typer, epoch ingestablesql.TopicEpochReader, features ingestablesql.FeatureReader) *ingestablesql.IngestableParser {
 	p := ingestablesql.NewIngestableParser(t)
-	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{}
-	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{}
-	// The SQL Server dialect's uniqueidentifier rendering is gated on the
-	// cluster feature level (a mixed-version cluster must not spell one key
-	// two ways), so it reads the db's gate.
+	// The MySQL binlog BINARY(n) padding, the PostgreSQL snapshot text
+	// rendering and the SQL Server uniqueidentifier and date/time renderings
+	// are gated on the cluster feature level (a mixed-version cluster must not
+	// spell one key two ways), so all three read the db's gate.
+	p.Dialects["mysql"] = &ingestablemysql.MySQLDialect{Features: features}
+	p.Dialects["postgres"] = &ingestablepostgres.PostgreSQLDialect{Features: features}
 	p.Dialects["sqlserver"] = &ingestablesqlserver.SQLServerDialect{Features: features}
 	// Wire the delete-surviving per-topic refresh-epoch floor so a same-topic
 	// recreate resumes its generation above the rows still on the sink.

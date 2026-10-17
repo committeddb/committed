@@ -77,9 +77,19 @@ var ErrIngestOutOfOrder = errors.New("db: ingest proposal rejected at apply: out
 // silently. Overridable via WithProposeTimeout (tests drop it to milliseconds).
 const defaultProposeTimeout = 30 * time.Second
 
+// proposeQueueDepth is how many marshaled proposals may wait on proposeC for
+// the raft reader. It covers the ingest pipeline's bursts between the
+// reader's batches; a full queue blocks the proposer, as an unbuffered send
+// did.
+const proposeQueueDepth = 1024
+
 type Peers map[uint64]string
 
 type DB struct {
+	// zones memoizes each syncable's configured zone by its config bytes
+	// (see syncableZone): the sync loop asks on every entry it reads.
+	zones sync.Map // syncable id -> zoneMemo
+
 	ErrorC      <-chan error
 	proposeC    chan<- []byte
 	confChangeC chan<- *raftpb.ConfChangeV2
@@ -315,7 +325,10 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		cfg.maxProposalBytes = DefaultMaxProposalBytes
 	}
 
-	proposeC := make(chan []byte)
+	// Buffered, so a proposer hands off without waiting for the raft reader
+	// to be scheduled, and the reader finds proposals queued to step as one
+	// batch (Raft.collectProposals).
+	proposeC := make(chan []byte, proposeQueueDepth)
 	confChangeC := make(chan *raftpb.ConfChangeV2)
 
 	rpeers := make([]raft.Peer, len(peers))
@@ -430,6 +443,8 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		// configured zone differs from the stored one, so zoneless fixtures
 		// and steady-state restarts stay proposal-free.
 		go db.announceZone()
+		go db.announceClusterIdentity()
+		go db.recordAgreedAddresses()
 	}
 
 	// Start the disk-usage watcher last, once db.raft is wired, so its
@@ -599,9 +614,8 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 // returns nil, db.storage.Type/Database/etc. will see the new entity.
 //
 // On ctx cancellation Propose returns ctx.Err() and the waiter is
-// unregistered. The proposal may still be applied later (raft has
-// already accepted it via the proposeC send) — the caller just no
-// longer waits.
+// unregistered. The proposal may still be applied later (the proposeC send
+// queued it for raft) — the caller just no longer waits.
 //
 // System-internal proposers that want to pipeline submissions (ingest
 // position bumps, which collect acks for later drain) use proposeAsync
@@ -1314,13 +1328,14 @@ func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
 	}
-	if rawURL == "" {
-		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
+	peerURL, err := cluster.CanonicalPeerURL(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %w", cluster.ErrInvalidMember, err)
 	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
 		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: &id}},
-		Context:    []byte(rawURL),
+		Context:    []byte(peerURL),
 	}
 	return db.proposeConfChange(ctx, cc, id, memberVoter)
 }
@@ -1343,13 +1358,14 @@ func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
 	}
-	if rawURL == "" {
-		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
+	peerURL, err := cluster.CanonicalPeerURL(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %w", cluster.ErrInvalidMember, err)
 	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
 		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode.Enum(), NodeId: &id}},
-		Context:    []byte(rawURL),
+		Context:    []byte(peerURL),
 	}
 	return db.proposeConfChange(ctx, cc, id, memberLearner)
 }
@@ -1438,6 +1454,12 @@ const (
 // this node. Submission itself can fail fast if ctx fires or the DB is
 // shutting down before the propose loop accepts the change.
 func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id uint64, target membershipTarget) error {
+	// raft drops a conf change proposed while another is still taking effect
+	// (the joint state) with nothing but a log line; refuse it here so the
+	// caller gets a 409 to retry instead of a 60-second settle timeout.
+	if _, _, joint := db.raft.memberStatus(); joint {
+		return cluster.ErrMembershipChangeInProgress
+	}
 	select {
 	case db.confChangeC <- cc:
 	case <-ctx.Done():

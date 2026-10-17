@@ -75,6 +75,12 @@ var (
 	// Rides along in snapshots (bbolt is serialized whole into CreateSnapshot).
 	// See member_peer_url.go and raft.applyConfChange / reconcileTransport.
 	memberPeerURLBucket = []byte("memberPeerURLs")
+	// clusterIdentityBucket holds the replicated copy of the cluster id (one
+	// key). The authoritative copy is node-local (<dataDir>/cluster-id, see
+	// node_identity.go); this one rides snapshots so a member that has no
+	// local id yet — a joiner — can check the one it adopted against it. See
+	// db/cluster_identity.go.
+	clusterIdentityBucket = []byte("clusterIdentity")
 	// memberVersionBucket maps a raft node id (8 big-endian bytes, the key
 	// cluster.NodeVersionKey produces) to a marshaled cluster.NodeVersion — the
 	// node's self-announced cluster feature level. Entity-driven (written from
@@ -223,6 +229,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},
 	{cluster.IsNodeZone, "handleNodeZone", memberZoneBucket, (*Storage).handleNodeZone},
+	{cluster.IsClusterIdentity, "handleClusterIdentity", clusterIdentityBucket, (*Storage).handleClusterIdentity},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type
@@ -250,6 +257,10 @@ type State struct {
 }
 
 type Storage struct {
+	// rootDir is the node data directory; node-local identity files live at
+	// its top level (node_identity.go), outside the metadata db a snapshot
+	// install replaces.
+	rootDir string
 	// raftLogDir is the on-disk directory tidwall/wal writes entry-log
 	// segments into. Kept around so RaftLogApproxSize can stat the
 	// segment files without poking through tidwall's internals.
@@ -897,15 +908,6 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		return nil, err
 	}
 
-	// Migrate flat key=value entries in resource buckets to the versioned
-	// nested-bucket layout. Idempotent: a no-op if already migrated.
-	err = keyValueStorage.Update(func(tx *bolt.Tx) error {
-		return migrateToVersionedBuckets(tx)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("migrate to versioned buckets: %w", err)
-	}
-
 	logger := cfg.logger
 	if logger == nil {
 		logger = zap.NewNop()
@@ -913,6 +915,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 
 	dbs := make(map[string]cluster.Database)
 	ws = &Storage{
+		rootDir:          dir,
 		eventLayout:      layoutLock{name: "event log", logger: logger},
 		raftLayout:       layoutLock{name: "raft entry log", logger: logger},
 		raftLogDir:       entryLogDir,

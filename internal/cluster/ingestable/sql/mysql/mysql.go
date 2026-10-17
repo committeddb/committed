@@ -26,7 +26,32 @@ import (
 	"github.com/committeddb/committed/internal/cluster/sqlident"
 )
 
-type MySQLDialect struct{}
+type MySQLDialect struct {
+	// Features gates the binlog path's BINARY(n) padding on the cluster
+	// feature level (see featureLevelBinaryPadding). Nil pads (tests).
+	Features sql.FeatureReader
+}
+
+// featureLevelBinaryPadding gates padding a binlog BINARY(n) value back to n
+// bytes. The binlog strips a BINARY value's trailing 0x00 bytes while a
+// SELECT returns them, so the snapshot and the stream keyed the same row
+// differently. The padding reaches entity KEYS, so a cluster where one owner
+// streams one way and the next the other would key the same row twice;
+// every node keeps the stripped value until every member announces level 4.
+// See version.FeatureLevel and sql.SessionRendering.
+const featureLevelBinaryPadding uint64 = 4
+
+// The two binlog BINARY(n) renderings a checkpoint can record
+// (MySQLBinLogPosition.binary_rendering).
+const (
+	binaryRenderingStripped uint32 = 0 // trailing 0x00 bytes stripped, as the binlog carries it; every pre-field checkpoint
+	binaryRenderingPadded   uint32 = 1 // padded to the declared length, as a SELECT returns it
+)
+
+// binaryPaddingEnabled reports whether this node may pad binlog BINARY(n) values.
+func (m *MySQLDialect) binaryPaddingEnabled() bool {
+	return m.Features == nil || m.Features.FeatureEnabled(featureLevelBinaryPadding)
+}
 
 // syncerBackoff{Min,Max} bound the retry interval for connecting the binlog
 // syncer (StartSync) and reconnecting after a stream error. A transient MySQL
@@ -619,6 +644,45 @@ func mysqlTableColumns(ctx context.Context, db *gosql.DB, table string) (cols, g
 	return cols, generated, rows.Err()
 }
 
+// binaryColumns names the watched BINARY(n) columns ("table.column"): the
+// columns whose binlog value the stripped and padded renderings spell
+// differently, in keys and payloads alike.
+func binaryColumns(ctx context.Context, config *sql.Config) ([]string, error) {
+	db, err := openMySQL(config.ConnectionString)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+	var out []string
+	for _, table := range config.Tables {
+		schema, name := splitQualifiedTable(table)
+		rows, err := db.QueryContext(ctx, `
+			SELECT column_name
+			FROM information_schema.columns
+			WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE())
+			  AND table_name = ?
+			  AND data_type = 'binary'
+			ORDER BY ordinal_position`, schema, name)
+		if err != nil {
+			return nil, fmt.Errorf("read BINARY columns of %q: %w", table, err)
+		}
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			out = append(out, table+"."+c)
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos cluster.Position, epochFloor uint64, pr chan<- *cluster.Proposal, po chan<- cluster.Position) error {
 	// Populate Topics before any snapshot/stream goroutine spawns, so per-spec
 	// routing (SpecForTable, specFor, refSpecs) never has to lazily mutate the shared
@@ -635,6 +699,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	var currentEpoch uint64
 	var resumeChunkTag uint64
 	var snapshottedTables []string
+	var checkpointRendering uint32
 	// Snapshot the soft-flush budget once, before the streaming goroutine sends
 	// anything, so no per-row / per-checkpoint read of the mutable global races a
 	// test override (and the budget is stable across this session's reconnects).
@@ -650,6 +715,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 		currentEpoch = posProto.RefreshEpoch
 		resumeChunkTag = posProto.ChunkTag
 		snapshottedTables = posProto.SnapshottedTables
+		checkpointRendering = posProto.BinaryRendering
 		if len(snapshottedTables) == 0 {
 			// Pre-feature checkpoint: grandfather every currently-configured
 			// table as snapshotted. Adds made BEFORE this upgrade are not
@@ -657,6 +723,10 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			snapshottedTables = append([]string(nil), config.Tables...)
 		}
 	}
+	// The session's BINARY(n) rendering, decided ONCE here so every row this
+	// session streams spells a value the same way; a gate that opens
+	// mid-session is picked up by the next.
+	rendering, rerender := sql.SessionRendering(checkpointRendering, pos != nil, m.binaryPaddingEnabled())
 
 	// charsetPlans is the source's collation catalog, read once and reused across
 	// reconnects (collation ids are server-immutable). It lets the stream
@@ -670,6 +740,45 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 	// exits, then reconnects with backoff. Only ctx cancellation
 	// breaks out.
 	for {
+		// A checkpoint whose stream stripped BINARY(n) values, resumed by a
+		// session that pads them, re-keys only when a watched table has a
+		// BINARY column; with none, the promotion is simply recorded by the
+		// next checkpoint. The re-key is the purge recovery applied to a
+		// rendering change: re-emit every row at a bumped epoch from a freshly
+		// captured position, so the closing refresh markers sweep the stripped
+		// spellings on keyed destinations (keyless and append destinations keep
+		// both until rebuilt). Starting from a fresh position also means no
+		// replayed multi-part transaction straddles the change (see chunkTag).
+		// The cleared position routes this iteration through the cold plan,
+		// which bumps one above the floored epoch — above every generation
+		// already on the sink.
+		if rerender {
+			columns, err := binaryColumns(ctx, config)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				zap.L().Warn("read BINARY columns failed, retrying",
+					zap.Duration("backoff", backoff.Delay()),
+					zap.Error(err),
+				)
+				if backoff.Wait(ctx) != nil {
+					return nil
+				}
+				continue
+			}
+			rerender = false
+			if len(columns) > 0 {
+				currentEpoch = sql.FloorEpoch(currentEpoch, epochFloor)
+				zap.L().Warn("binlog BINARY(n) rendering changed (values are now padded to their declared length, as the snapshot reads them, at cluster feature level 4) — re-snapshotting so every key and payload re-keys; the closing refresh markers sweep the old renderings' rows on keyed destinations",
+					zap.Strings("columns", columns),
+					zap.Uint64("refreshEpoch", currentEpoch+1))
+				lastPos = nil
+				lastGTID = ""
+				resumeProgress = nil
+			}
+		}
+
 		// --- snapshot on first run or mid-snapshot resume ---
 		// When there is no saved position, perform a pure-SQL initial
 		// snapshot to capture existing data and determine the binlog
@@ -712,7 +821,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			}
 			plan := sql.PlanSnapshot(kind, resumeProgress, currentEpoch, epochFloor, config.Tables, nil)
 			currentEpoch = plan.Epoch
-			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, plan.Progress, currentEpoch)
+			snapshotPos, snapshotGTID, err := snapshot(ctx, config, pr, po, lastPos, lastGTID, plan.Progress, currentEpoch, rendering)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -749,7 +858,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// snapshot_progress) so a restart after snapshot
 			// completion but before the first binlog commit
 			// starts streaming instead of re-running snapshot.
-			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch, ChunkTag: chunkTag(config, flushBudget), SnapshottedTables: snapshottedTables}
+			posProto := &dialectpb.MySQLBinLogPosition{Name: lastPos.Name, Pos: lastPos.Pos, GtidSet: snapshotGTID, RefreshEpoch: currentEpoch, ChunkTag: chunkTag(config, flushBudget), SnapshottedTables: snapshottedTables, BinaryRendering: rendering}
 			bs, err := proto.Marshal(posProto)
 			if err != nil {
 				return err
@@ -873,6 +982,7 @@ func (m *MySQLDialect) Ingest(ctx context.Context, config *sql.Config, pos clust
 			// baseline, so never trip.
 			chunkingChanged: resumeChunkTag != 0 && resumeChunkTag != chunkTag(config, flushBudget),
 			flushBudget:     flushBudget,
+			rendering:       rendering,
 		}
 		// Seed the consumed GTID set (the same set we resumed by) so streaming
 		// checkpoints carry the full set (snapshot ∪ streamed) and it keeps advancing
@@ -1066,6 +1176,11 @@ type MySQLEventHandler struct {
 	// the budget can't race the streaming goroutine, and the budget stays stable
 	// for the whole session.
 	flushBudget int
+
+	// rendering is the session's BINARY(n) rendering (binaryRendering*),
+	// stamped on every checkpoint; padded restores the trailing 0x00 bytes the
+	// binlog strips.
+	rendering uint32
 
 	// pending accumulates entities from row events until the transaction commits
 	// (an XID event), so one MySQL transaction maps to one cluster.Proposal.
@@ -1482,6 +1597,9 @@ func (h *MySQLEventHandler) rowEntity(ts *tableSchema, spec *sql.TopicSpec, tabl
 		// byte sequence the decoder rejects skips the row (logged) rather than
 		// emitting corrupt data.
 		cell := row[i]
+		if col.padTo > 0 && h.rendering == binaryRenderingPadded {
+			cell = padBinary(cell, col.padTo)
+		}
 		if col.transcode != nil {
 			transcoded, ok, err := transcodeCell(col.transcode, cell)
 			if err != nil {
@@ -1759,7 +1877,7 @@ func (h *MySQLEventHandler) handleXID(ctx context.Context, header *replication.E
 	h.consumedGTID = merged
 	h.curTxnGTID = nil
 
-	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch, ChunkTag: chunkTag(h.config, h.flushBudget), SnapshottedTables: h.snapshottedTables}
+	posProto := &dialectpb.MySQLBinLogPosition{Name: pos.Name, Pos: pos.Pos, RefreshEpoch: h.epoch, ChunkTag: chunkTag(h.config, h.flushBudget), SnapshottedTables: h.snapshottedTables, BinaryRendering: h.rendering}
 	if h.consumedGTID != nil {
 		posProto.GtidSet = h.consumedGTID.String()
 	}
@@ -2092,6 +2210,7 @@ func snapshot(
 	resumeGTID string,
 	resumeProgress *dialectpb.SnapshotProgress,
 	epoch uint64,
+	rendering uint32,
 ) (*mysql.Position, string, error) {
 	db, err := openMySQL(config.ConnectionString)
 	if err != nil {
@@ -2122,7 +2241,7 @@ func snapshot(
 		BatchSize: config.Options.BatchSizeOr(defaultSnapshotBatchSize),
 		Readers:   config.Options.Readers(),
 		Encode: func(p *dialectpb.SnapshotProgress) ([]byte, error) {
-			return encodeProgress(pos, gtid, p, epoch)
+			return encodeProgress(pos, gtid, p, epoch, rendering)
 		},
 		Proposals: pr,
 		Positions: po,
@@ -2179,13 +2298,14 @@ func captureBinlogPosition(ctx context.Context, db *gosql.DB) (mysql.Position, s
 // proposal (Proposal.Position) so rows and checkpoint commit in one atomic raft
 // entry. A shallow copy is enough — proto.Marshal serializes the maps/slices at
 // call time.
-func encodeProgress(pos mysql.Position, gtid string, progress *dialectpb.SnapshotProgress, epoch uint64) ([]byte, error) {
+func encodeProgress(pos mysql.Position, gtid string, progress *dialectpb.SnapshotProgress, epoch uint64, rendering uint32) ([]byte, error) {
 	return proto.Marshal(&dialectpb.MySQLBinLogPosition{
 		Name:             pos.Name,
 		Pos:              pos.Pos,
 		GtidSet:          gtid,
 		SnapshotProgress: progress,
 		RefreshEpoch:     epoch,
+		BinaryRendering:  rendering,
 	})
 }
 

@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/committeddb/committed/internal/cluster"
 )
 
 func TestFrameUnframe_RoundTrip(t *testing.T) {
@@ -90,4 +92,23 @@ func TestUnframe_MagicByteCorruptionRejected(t *testing.T) {
 	framed[0] ^= 0xFF // destroy the magic discriminator
 	_, err := unframe(framed)
 	require.ErrorIs(t, err, ErrCorruptEntry)
+}
+
+// TestUnframe_NewerVersionIsDiagnosedApart: an intact magic with a version
+// above this binary's is a newer binary's entry — unreadable here, so it
+// still matches ErrCorruptEntry, but diagnosed as ErrNewerFrame with the
+// remedy in its text. An older (unknown) version stays plain corruption.
+func TestUnframe_NewerVersionIsDiagnosedApart(t *testing.T) {
+	framed := frame([]byte("from the future"))
+	framed[len(frameMagic)] = frameVersion + 1
+	_, err := unframe(framed)
+	require.ErrorIs(t, err, cluster.ErrNewerFrame)
+	require.ErrorIs(t, err, ErrCorruptEntry, "every reader still refuses it")
+	require.Contains(t, err.Error(), "run that version or newer")
+	require.Contains(t, err.Error(), "not corruption")
+
+	framed[len(frameMagic)] = 0
+	_, err = unframe(framed)
+	require.ErrorIs(t, err, ErrCorruptEntry)
+	require.NotErrorIs(t, err, cluster.ErrNewerFrame, "a version below this binary's is corruption")
 }

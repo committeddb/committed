@@ -207,7 +207,7 @@ leadership to the healthiest such voter (ties broken by replication
 progress) — converting "leader full: cluster rejects everything" into
 "follower full: cluster keeps admitting". Transfers are rate-limited
 (one per minute) and never target a node that hasn't recently reported
-healthy. The `committed_disk_leadership_transfers` counter tracks them.
+healthy. The `committed_disk_leadership_transfers_total` counter tracks them.
 
 **A constrained follower is an operator job, not an automatic one.**
 The cluster keeps admitting writes while a quorum is healthy, which
@@ -244,7 +244,7 @@ Per node:
   `COMMITTED_API_URL`/token) or the leader is unreachable.
 - `committed_disk_cluster_state{level=...}` — the cluster-effective
   level the gate is enforcing, same shape as `committed_disk_state`.
-- `committed_disk_leadership_transfers` — disk-pressure leadership
+- `committed_disk_leadership_transfers_total` — disk-pressure leadership
   hand-offs.
 
 For a one-off diagnosis, `GET /v1/node/status` returns the same

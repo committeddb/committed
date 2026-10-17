@@ -25,7 +25,7 @@ func TestPlanSnapshot(t *testing.T) {
 	})
 
 	t.Run("resume keeps the in-progress epoch and its shape", func(t *testing.T) {
-		seed := &dialectpb.SnapshotProgress{CompletedTables: []string{"a"}, LastPkByTable: map[string]string{"b": "k"}}
+		seed := &dialectpb.SnapshotProgress{CompletedTables: []string{"a"}, LastPkByTable: map[string][]byte{"b": []byte("k")}}
 		p := PlanSnapshot(SnapshotResume, seed, 5, 9, tables, nil)
 		require.Equal(t, uint64(5), p.Epoch, "never bumped mid-snapshot, whatever the floor")
 		require.True(t, p.Marker)

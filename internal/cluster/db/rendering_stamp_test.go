@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // stampedFakeSyncable is a sink that holds derived state in its destination:
@@ -18,6 +20,29 @@ type stampedFakeSyncable struct {
 	renders uint64 // the version "this binary" renders
 	stamp   uint64 // the destination's stamp (0 = never stamped)
 	stamped int    // StampRendering calls
+	hasRows bool   // what DestinationHasRows answers
+	probes  int    // DestinationHasRows calls
+}
+
+func (f *stampedFakeSyncable) DestinationHasRows(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probes++
+	return f.hasRows, nil
+}
+
+// restoreUnstamped stands in for a destination restored from a backup taken
+// before the stamp existed: the note is gone, the rows (or none) remain.
+func (f *stampedFakeSyncable) restoreUnstamped(hasRows bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stamp, f.stamped, f.hasRows = 0, 0, hasRows
+}
+
+func (f *stampedFakeSyncable) probeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.probes
 }
 
 func (f *stampedFakeSyncable) RenderingVersion() uint64 { return f.renders }
@@ -118,15 +143,104 @@ func TestRenderingStamp_MismatchNamesRecreateForSinksThatKeepTheirTable(t *testi
 	require.Contains(t, msg, "cannot drop its destination: recreate the table by hand, then DELETE /v1/syncable/photos-mirror and re-POST")
 }
 
-// 0.8.0 introduces the stamp: a never-stamped destination is stamped with
-// the current version on first contact, then served.
-func TestRenderingStamp_FirstContactStampsThenSyncs(t *testing.T) {
-	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: true}, renders: 2}
+// A syncable that has never checkpointed has written nothing, so an
+// unstamped destination — a table the operator attached, rows and all — is
+// stamped with the current version and served, without probing its rows.
+func TestRenderingStamp_NeverCheckpointedStampsThenSyncs(t *testing.T) {
+	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: true}, renders: 2, hasRows: true}
 	parked := startStampedSyncable(t, sink, sink)
 	require.Eventually(t, func() bool { _, _, synced := sink.stampState(); return synced >= 2 }, 10*time.Second, 10*time.Millisecond, "never synced")
 	stamp, stamped, _ := sink.stampState()
 	require.Equal(t, uint64(2), stamp)
 	require.Equal(t, 1, stamped, "stamped exactly once, before serving")
+	require.Zero(t, sink.probeCount(), "checkpoint 0 needs no row probe")
+	_, ok := parked()
+	require.False(t, ok)
+}
+
+// restartUnstamped syncs two entities under a current stamp until the
+// checkpoint covers them, then restarts the node after restoring the
+// destination with no stamp (hasRows says whether rows came back with it).
+func restartUnstamped(t *testing.T, state *stampedFakeSyncable, syncable cluster.Syncable, hasRows bool) (d *db.DB, s *wal.Storage, parkedMessage func() (string, bool)) {
+	t.Helper()
+	dir := t.TempDir()
+	d1, s1 := openWalDBRematAt(t, dir, syncable)
+	proposeTypeTOML(t, d1, "photos", "photos", "", "")
+	tp, err := s1.ResolveType(cluster.LatestTypeRef("photos"))
+	require.NoError(t, err)
+	for _, k := range []string{"k1", "k2"} {
+		require.NoError(t, d1.Propose(testCtx(t),
+			&cluster.Proposal{Entities: []*cluster.Entity{cluster.NewUpsertEntity(tp, []byte(k), []byte(`{"a":1}`))}}))
+	}
+	require.NoError(t, d1.ProposeSyncable(testCtx(t), &cluster.Configuration{
+		ID: "photos-mirror", MimeType: "text/toml",
+		Data: []byte("[syncable]\nname = \"photos-mirror\"\ntype = \"fake\"\n"),
+	}))
+	require.Eventually(t, func() bool {
+		cp, _, _ := d1.SyncableProgress("photos-mirror")
+		return cp > 0
+	}, 10*time.Second, 10*time.Millisecond, "never checkpointed")
+	require.NoError(t, d1.Close())
+	require.NoError(t, s1.Close())
+
+	state.restoreUnstamped(hasRows)
+	d, s = openWalDBRematAt(t, dir, syncable)
+	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
+	s.RequestSyncReconcile() // what cmd/node.go runs after wiring the parsers: respawn the worker
+	return d, s, func() (string, bool) {
+		rec, ok, err := s.SyncableStuck("photos-mirror")
+		require.NoError(t, err)
+		if !ok || !rec.Parked {
+			return "", false
+		}
+		return rec.Message, true
+	}
+}
+
+// A destination holding rows committed wrote (checkpoint > 0) but carrying
+// no stamp — restored from a backup taken before the stamp existed, or
+// rebuilt by hand — cannot be verified, so the worker parks naming the
+// converging verb instead of writing into it.
+func TestRenderingStamp_UnstampedWithRowsParks(t *testing.T) {
+	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: true}, renders: 2, stamp: 2}
+	_, _, parked := restartUnstamped(t, sink, sink, true)
+	_, _, syncedBefore := sink.stampState()
+	require.Eventually(t, func() bool { _, ok := parked(); return ok }, 10*time.Second, 10*time.Millisecond, "the worker never parked")
+	msg, _ := parked()
+	require.Contains(t, msg, "carries no rendering stamp")
+	require.Contains(t, msg, "POST /v1/syncable/photos-mirror/rematerialize")
+	stamp, stamped, synced := sink.stampState()
+	require.Zero(t, stamp, "an unverifiable destination is never stamped")
+	require.Zero(t, stamped)
+	require.Equal(t, syncedBefore, synced, "nothing is written into unverifiable rows")
+}
+
+// A sink that cannot converge in place names delete + re-POST, and since a
+// destination with no note is one committed cannot tell it created, the
+// operator drops the table — a delete leaves it.
+func TestRenderingStamp_UnstampedWithRowsNamesDropForNonConvergingSinks(t *testing.T) {
+	sink := &teardownFakeSyncable{stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: false}, renders: 2, stamp: 2}}
+	_, _, parked := restartUnstamped(t, &sink.stampedFakeSyncable, sink, true)
+	require.Eventually(t, func() bool { _, ok := parked(); return ok }, 10*time.Second, 10*time.Millisecond, "the worker never parked")
+	msg, _ := parked()
+	require.Contains(t, msg, "DELETE /v1/syncable/photos-mirror, drop the table yourself (it carries no note, so committed cannot tell it created it), then re-POST the config")
+}
+
+// An EMPTY unstamped destination holds nothing to mis-render (a fresh
+// materialization whose stamp write never landed): it is stamped and served.
+func TestRenderingStamp_UnstampedEmptyStampsThenSyncs(t *testing.T) {
+	sink := &stampedFakeSyncable{rematFakeSyncable: rematFakeSyncable{keyed: true}, renders: 2, stamp: 2}
+	d, s, parked := restartUnstamped(t, sink, sink, false)
+	tp, err := s.ResolveType(cluster.LatestTypeRef("photos"))
+	require.NoError(t, err)
+	_, _, syncedBefore := sink.stampState()
+	require.NoError(t, d.Propose(testCtx(t),
+		&cluster.Proposal{Entities: []*cluster.Entity{cluster.NewUpsertEntity(tp, []byte("k3"), []byte(`{"a":1}`))}}))
+	require.Eventually(t, func() bool { _, _, synced := sink.stampState(); return synced > syncedBefore }, 10*time.Second, 10*time.Millisecond, "never served after the restart")
+	stamp, stamped, _ := sink.stampState()
+	require.Equal(t, uint64(2), stamp)
+	require.Equal(t, 1, stamped, "stamped exactly once, before serving")
+	require.Equal(t, 1, sink.probeCount(), "probed once, at checkpoint > 0")
 	_, ok := parked()
 	require.False(t, ok)
 }

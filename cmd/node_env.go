@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"maps"
 	"net/url"
 	"os"
@@ -13,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/auth"
 	"github.com/committeddb/committed/internal/cluster/db"
 )
@@ -32,8 +32,7 @@ func getenvDefault(name, def string) string {
 func nodeID() uint64 {
 	id, err := parseNodeID(os.Getenv("COMMITTED_NODE_ID"))
 	if err != nil {
-		// G706 false positive: the value is an operator-supplied env var.
-		log.Fatalf("%v", err) //nolint:gosec // G706
+		zap.L().Fatal("COMMITTED_NODE_ID", zap.Error(err))
 	}
 	return id
 }
@@ -61,8 +60,7 @@ func parseNodeID(raw string) (uint64, error) {
 func loadPeers(id uint64) db.Peers {
 	peers, err := parsePeers(id, os.Getenv("COMMITTED_PEERS"), getenvDefault("COMMITTED_PEER_URL", "http://127.0.0.1:9022"))
 	if err != nil {
-		// G706 false positive: the value is an operator-supplied env var.
-		log.Fatalf("%v", err) //nolint:gosec // G706
+		zap.L().Fatal("COMMITTED_PEERS", zap.Error(err))
 	}
 	return peers
 }
@@ -93,7 +91,11 @@ func loadPeers(id uint64) db.Peers {
 // than a loud refusal to start.
 func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
 	if raw == "" {
-		return db.Peers{id: selfURL}, nil
+		u, err := cluster.CanonicalPeerURL(selfURL)
+		if err != nil {
+			return nil, fmt.Errorf("COMMITTED_PEER_URL: %w", err)
+		}
+		return db.Peers{id: u}, nil
 	}
 
 	peers := make(db.Peers)
@@ -115,7 +117,11 @@ func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
 		if _, dup := peers[pid]; dup {
 			return nil, fmt.Errorf("COMMITTED_PEERS has a duplicate peer id %d", pid)
 		}
-		peers[pid] = v
+		u, err := cluster.CanonicalPeerURL(v)
+		if err != nil {
+			return nil, fmt.Errorf("COMMITTED_PEERS entry %q: %w", entry, err)
+		}
+		peers[pid] = u
 	}
 	if len(peers) == 0 {
 		return nil, fmt.Errorf("COMMITTED_PEERS is set but contains no valid peers")
@@ -243,7 +249,7 @@ func boolEnv(name string) (bool, error) {
 func boolEnvOrExit(name string) bool {
 	v, err := boolEnv(name)
 	if err != nil {
-		log.Fatalf("%v — refusing to start rather than silently treating it as false", err) //nolint:gosec // G706: the value is the operator's own env
+		zap.L().Fatal("refusing to start rather than silently treating it as false", zap.Error(err))
 	}
 	return v
 }
