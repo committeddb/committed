@@ -167,9 +167,12 @@ committed member remove --id 4 --target http://n1:8080
 ```
 
 The removed node steps out of the configuration once the change commits
-and stops participating. Stop its process afterward; it will not rejoin
-unless explicitly added again. Removing the node that is *serving the
-request* is allowed — it finalizes the change and then leaves.
+and stops participating. Stop its process afterward. A removed id is gone
+for good: the cluster refuses its messages (`403`) and refuses to add it
+again (`400`), because its data may hold a log the cluster has since moved
+past. To bring the machine back, wipe its data directory and add it under a
+**new** id. Removing the node that is *serving the request* is allowed — it
+finalizes the change and then leaves.
 
 > **Quorum:** a removal that would drop the cluster below quorum cannot
 > commit. Removing one node from a three-node cluster leaves two, which
@@ -238,6 +241,64 @@ N}}`) — target node `N` directly, or retry.
 > with its own threshold. (This is the observability the learner-promotion
 > workflow builds on.)
 
+## Peer addresses and cluster identity
+
+Raft replicates member **ids**; each node keeps one current raft address per
+peer. What sets it, strongest first:
+
+1. **An address the cluster agreed on** — recorded through the log, so every
+   node switches to it at once: the address a member was added with, the
+   new address of a voter that moved (below), or one an operator set with
+   `PUT /v1/membership/{id}/address`.
+2. **A peer's own report**, when the address in use has stopped delivering:
+   every peer request carries the sender's advertised address
+   (`COMMITTED_PEERS[self]`, else `COMMITTED_PEER_URL`), accepted only from
+   a current member of this cluster.
+3. **`COMMITTED_PEERS` at boot**, for an entry you changed since the node's
+   last boot — every machine moved, a restore onto new machines, a switch
+   to `https://`. An entry you left unchanged never overrides an address the
+   cluster has agreed on since.
+
+**A voter that moves heals on its own.** Restart it on its new address with its
+own `COMMITTED_PEERS` entry updated (the address it listens on and
+advertises); its election
+attempts carry the new address, its peers switch once the old one stops
+answering, and the leader records it cluster-wide. Nothing else needs to
+change, and restarting the other nodes with their old `COMMITTED_PEERS`
+keeps the recorded address.
+
+**A learner that moves needs an operator.** A learner never campaigns, so
+nobody hears from it; record its new address yourself:
+
+```
+curl -X PUT http://n1:8080/v1/membership/4/address \
+  -H 'Content-Type: application/json' -d '{"url": "http://n4-new:9022"}'
+```
+
+The same call records the address of a voter that is down. It returns `204`
+once the address has applied on the answering node.
+
+`GET /v1/membership` shows, per member, the recorded `peerUrl` and what the
+answering node's transport is using right now (`currentPeerUrl`, and
+`currentPeerUrlSource`: `boot`, `membership`, `self-report` or `agreed`),
+plus the cluster's `clusterId`. A node with no successful delivery to a peer
+for 30 seconds logs `raft peer unreachable: no successful delivery`, naming
+the address and where it came from.
+
+**Every cluster has its own id**, derived at the first boot from
+`COMMITTED_PEERS` and `COMMITTED_CLUSTER_NAME`, and every peer request
+carries it with the node id it is for. A node refuses a request from another
+cluster (`412`) or addressed to another node (`421`) and logs both sides, so
+a stale address that now reaches some other cluster or node is refused
+instead of obeyed. A restored cluster gets a new id ([backup.md](backup.md)).
+
+> **Kubernetes.** Prefer stable DNS names (a StatefulSet's
+> `pod-0.service.namespace` names) in `COMMITTED_PEERS`. Pod-IP addresses
+> work for voters — a rescheduled voter heals as above — but a rescheduled
+> learner waits for a `PUT .../address`. Set `COMMITTED_CLUSTER_NAME` when
+> short names repeat across namespaces, so two clusters bootstrapped from
+> the same `COMMITTED_PEERS` get different ids.
+
 ## CLI reference
 
 ```
@@ -269,6 +330,7 @@ Membership lives under `/v1` (all authenticated):
 GET    /v1/membership                 → membership + replication progress (see "Observing membership")
 POST   /v1/membership                 {"id": 4, "url": "http://n4:9022", "learner": false}
 POST   /v1/membership/{id}/promote    (no body — promote a learner to a voter)
+PUT    /v1/membership/{id}/address    {"url": "http://n4-new:9022"}   (record a member's raft address)
 DELETE /v1/membership/{id}
 ```
 
@@ -307,10 +369,14 @@ standard structured JSON body (`{"code", "message"}`):
 - **Learners.** A learner survives restart as a learner (the role is part
   of the replicated `ConfState`), not silently promoted. Promotion is a
   separate, explicit step (see "Growing safely with a learner").
-- **Restored nodes carry the source's identity.** A node restored from a backup
-  (see [backup.md](backup.md)) keeps the **source node's raft id**. Never start a
-  restored node into a cluster where that id is still alive — two peers sharing one
-  identity is split-brain (conflicting raft state, divergent committed history).
-  Restore only when the source id is gone (total-loss recovery) or bring the
-  restored cluster up network-isolated (cloning); confirm with `GET /v1/membership`
-  first.
+- **Mixed versions.** Membership changes need every member on 0.8.3 or later.
+  Once every member runs it, the leader switches on a guard that every node
+  applies identically: a committed change that is invalid for the
+  configuration it reaches — removing the last voter, adding a voter as a
+  learner, re-adding a removed id — becomes a logged no-op and the caller
+  gets the reason. A member running an older release applies changes
+  without it.
+- **Restored clusters are new clusters.** A cluster restored from a backup
+  has its own cluster id and never talks to the cluster it came from (see
+  [backup.md](backup.md)); a cluster that lost its majority comes back with
+  `committed recover` ([rebuild.md](rebuild.md#when-a-majority-is-lost)).

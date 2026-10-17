@@ -86,7 +86,8 @@ Committed is specifically NOT a database designed for querying.
 ### Recovering
 
 - [Rebuilding a node](docs/operations/rebuild.md) — a node that fell behind
-  catches up by itself; replace one whose disk or state cannot be trusted.
+  catches up by itself; replace one whose disk or state cannot be trusted, or
+  recover a cluster that lost its majority.
 - [Backup and restore](docs/operations/backup.md) — archive a node, stopped or
   live, to a portable tarball for disaster recovery and total-loss rebuilds.
 - [Safe mode](docs/operations/safe-mode.md) — boot with workers held to break a

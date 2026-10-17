@@ -603,6 +603,17 @@ func (n *Raft) membershipApplied() bool {
 	return st.Applied >= n.lastMembershipIndex.Load()
 }
 
+// membershipIdle reports that this node sees no membership change in
+// progress — the configuration isn't joint and its last change has applied —
+// and has applied everything it knows committed.
+func (n *Raft) membershipIdle() bool {
+	st := n.node.Status()
+	if len(st.Config.Voters[1]) > 0 || st.Applied < n.lastMembershipIndex.Load() {
+		return false
+	}
+	return st.Applied >= st.GetCommit()
+}
+
 // memberStatus reports the current raft configuration as observed by this
 // node: voters is the union of the incoming and (during a joint transition)
 // outgoing voter sets, learners is the learner set, and joint is true while

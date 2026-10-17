@@ -5,10 +5,9 @@
 // while the node is STOPPED — the directory is then quiescent, so the whole
 // of it (the raft entry/state logs, the permanent event log, and the BoltDB
 // metadata) is trivially consistent and can be archived with a plain file
-// walk. Restore unpacks the archive into a fresh data directory; a node
-// started against it recovers exactly as it would from its own disk — there
-// is no raft-state reconstruction, the restored directory IS a node's
-// directory.
+// walk. Restore unpacks the archive into a fresh data directory, and the
+// restore command rewrites it as a member of a new cluster (RestoreWith's
+// prepare step; see wal.RestoreAs) — the log and state stay as they were.
 //
 // The node holds an exclusive OS lock on its BoltDB file for its whole life, so
 // a backup cannot be read from a running node's directory by a second process —

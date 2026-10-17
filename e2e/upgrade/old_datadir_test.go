@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -145,6 +146,48 @@ func runOldDataDirEra(t *testing.T, bin string, era fixtureEra) {
 	second := startNode(t, bin, dataDir, port)
 	t.Cleanup(func() { second.stopGraceful(t, base) })
 	waitReady(t, base)
+}
+
+// A data dir written by an old release restores, through this build's
+// backup and restore, into a new cluster that boots and replays the whole old
+// log. (Restore rewrites the directory with this build's storage engine, so
+// every era's bytes must open under it.)
+func TestOldDataDir_RestoresIntoANewCluster(t *testing.T) {
+	bin := buildBinary(t)
+	for _, era := range fixtureEras {
+		t.Run(era.name, func(t *testing.T) {
+			src := filepath.Join(projectRoot(t), "e2e", "upgrade", "testdata", era.name, "datadir")
+			if _, err := os.Stat(src); err != nil {
+				captureFixture(t, era)
+			}
+			dataDir := filepath.Join(t.TempDir(), "datadir")
+			copyDir(t, src, dataDir)
+
+			archive := filepath.Join(t.TempDir(), "old.tar.gz")
+			runOrFail(t, bin, "backup", "--data", dataDir, "--to", archive, "--node-id", "1")
+			restored := filepath.Join(t.TempDir(), "restored")
+			runOrFail(t, bin, "restore", "--from", archive, "--data", restored, "--node-id", "1", "--new-cluster")
+
+			port := freePort(t)
+			base := fmt.Sprintf("http://127.0.0.1:%d", port)
+			node := startNode(t, bin, restored, port)
+			t.Cleanup(func() { node.stopGraceful(t, base) })
+			waitReady(t, base)
+
+			sink := newWebhookSink()
+			defer sink.srv.Close()
+			postWebhookSyncable(t, base, "era-restored", "movie", sink.srv.URL)
+			sink.awaitKeys(t, "upsert", "mv1", "mv2", "mv3", "mv4")
+		})
+	}
+}
+
+func runOrFail(t *testing.T, bin string, args ...string) {
+	t.Helper()
+	out, err := exec.Command(bin, args...).CombinedOutput() //nolint:gosec // G204: the test's own binary
+	if err != nil {
+		t.Fatalf("committed %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
 }
 
 // --- webhook sink ---

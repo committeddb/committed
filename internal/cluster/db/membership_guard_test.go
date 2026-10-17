@@ -57,3 +57,16 @@ func TestMembership_GuardRefusalReachesTheProposer(t *testing.T) {
 	require.NoError(t, d.AddLearner(testCtx(t), 2, "http://127.0.0.1:29333"),
 		"the next change goes through")
 }
+
+// raft drops a membership change proposed while another is pending — here the
+// leader's own address record, as right after a cluster starts. The
+// operator's change is proposed again and takes effect instead of timing out.
+func TestMembership_DroppedChangeIsProposedAgain(t *testing.T) {
+	db.SetMembershipReproposeIntervalForTest(t, 100*time.Millisecond)
+	d, _ := newWalDB(t)
+	for i := 2; i <= 6; i++ {
+		require.NoError(t, d.ProposeUpdateNodeForTest(testCtx(t), 1, "http://127.0.0.1:29340"))
+		require.NoError(t, d.AddLearner(testCtx(t), uint64(i), "http://127.0.0.1:29341"),
+			"learner %d is added although its first proposal met a pending change", i)
+	}
+}

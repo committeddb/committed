@@ -24,6 +24,10 @@ type options struct {
 	eventCacheSegments int
 	safeMode           bool
 	sealerIdleInterval time.Duration
+	// offline opens a stopped node's directory for maintenance (restore,
+	// recover): no parser, so persisted configs are neither validated nor
+	// built — no database connection from a command-line tool.
+	offline bool
 }
 
 // WithoutFsync disables fsync on the underlying key-value store, trading

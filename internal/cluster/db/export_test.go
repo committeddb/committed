@@ -221,6 +221,20 @@ func NewRaftForCompactionTest(s raftStorage, maxSize uint64, maxAge time.Duratio
 	return n
 }
 
+// ProposeUpdateNodeForTest proposes an address UpdateNode without waiting, as
+// the leader's agreed-address loop does.
+func (db *DB) ProposeUpdateNodeForTest(ctx context.Context, id uint64, peerURL string) error {
+	return db.proposeUpdateNode(ctx, id, peerURL)
+}
+
+// SetMembershipReproposeIntervalForTest shortens how long a dropped membership
+// change waits before it is proposed again.
+func SetMembershipReproposeIntervalForTest(t interface{ Cleanup(func()) }, d time.Duration) {
+	old := membershipReproposeInterval
+	membershipReproposeInterval = d
+	t.Cleanup(func() { membershipReproposeInterval = old })
+}
+
 // SetSnapshotLacksMemberForTest marks the held snapshot as missing a member,
 // as applying an add does.
 func (n *Raft) SetSnapshotLacksMemberForTest() { n.snapshotLacksMember.Store(true) }
@@ -653,7 +667,7 @@ func (db *DB) RaftAppliedCoversStorageForTest() bool { return db.raft.raftApplie
 // WaitForVoterForTest drives waitForMembership(memberVoter) directly, for the
 // bounded-wait test.
 func (db *DB) WaitForVoterForTest(ctx context.Context, id uint64) error {
-	return db.waitForMembership(ctx, id, memberVoter, db.raft.rejectionsSoFar())
+	return db.waitForMembership(ctx, id, memberVoter, db.raft.rejectionsSoFar(), nil)
 }
 
 // SetMembershipSettleTimeoutForTest shortens the settle timeout; returns the

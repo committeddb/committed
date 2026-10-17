@@ -64,13 +64,13 @@ node's own state cannot be trusted:
 
   This node's data directory went *backward* — it previously acknowledged
   (and possibly voted on) entries its log no longer contains. In practice:
-  a member was restored from a backup. This is not the same as being
-  behind (the node catches that up automatically); a rewound node has
-  broken its promises to the cluster, and running it endangers cluster
-  safety, so it exits immediately and on every restart until rebuilt.
-  **Members are rebuilt, never restored** — backup/restore is for
-  single-node deployments and whole-cluster recovery, where every node
-  rewinds together and no stale memory of the old state survives.
+  a filesystem or volume snapshot was rolled back under a running cluster.
+  This is not the same as being behind (the node catches that up
+  automatically); a rewound node has broken its promises to the cluster,
+  and running it endangers cluster safety, so it exits immediately and on
+  every restart until rebuilt. **Members are rebuilt, never restored** —
+  a restored node belongs to a new cluster ([backup.md](backup.md)), so a
+  running cluster refuses it.
 
 - The node's disk is damaged (bit rot, a partial restore, or an in-record
   corruption of a committed entry) and `committed` refuses to start, or a
@@ -160,8 +160,9 @@ Rebuild is NOT the right response when:
   but watch `catchingUp`.
 
 - The cluster has lost quorum. Rebuild won't help — a fresh node needs a
-  live quorum to join and a peer to fetch from. Fix quorum first (bring up
-  enough surviving nodes, or perform a consensus-recovery operation).
+  live quorum to join and a peer to fetch from. Bring enough voters back to
+  form a majority; if they are gone for good, recover from a survivor
+  ([below](#when-a-majority-is-lost)).
 
 ## Procedure
 
@@ -204,6 +205,52 @@ catches up as a learner (no effect on quorum); between promote and remove
 it is three of four with one dead, so the new node is commit-critical for
 that step; after remove it is three of three. At no point is it two of
 two. The old id leaves last.
+
+## When a majority is lost
+
+If a majority of voters is gone for good — two of three disks lost, say —
+the survivors can't elect a leader and never will. `committed recover`
+turns **one** stopped survivor into the only member of a new cluster, with
+its whole log:
+
+```bash
+# 1. Stop every survivor. Pick the one whose log reaches furthest: the
+#    highest appliedIndex on GET /v1/node/status before it stopped, or
+#    the newest last write you can confirm on it.
+sudo systemctl stop committed
+
+# 2. On that survivor (here node 1):
+committed recover --data /var/lib/committed --node-id 1
+# node 1 is now the only member of cluster 3c1d8e42-77a0-4d5b-a1f3-c9e2b6047d18; its log is committed through index 48211
+# removed members: 2, 3 — they must never run again with their old data; ...
+
+# 3. Start it with COMMITTED_PEERS naming only itself.
+#      COMMITTED_NODE_ID=1
+#      COMMITTED_PEERS=1=http://n1:9022
+sudo systemctl start committed
+```
+
+What it does, offline (it refuses a running node):
+
+- reads the membership the log holds through its last entry, and refuses a
+  learner (its log can lack committed entries) or an id that isn't a member;
+- leaves a joint configuration, if the log ended in one, then removes every
+  other voter and learner;
+- **commits the whole log**, including entries the old cluster had not yet
+  committed — there is nobody left to agree with;
+- gives the node a **new cluster id**, so the old members are refused if
+  they ever come back, and drops the old cluster's recorded addresses.
+
+Then grow the cluster again the normal way: each other machine starts with
+an **empty** data directory under a **new** node id, in join mode, and is
+added as a learner and promoted ([membership.md](membership.md#growing-safely-with-a-learner)).
+The removed ids can't be added back.
+
+> **The old majority must never run again.** Wipe the other survivors'
+> data directories before re-adding the machines. Entries committed by the
+> old cluster after the survivor's last entry are lost: that is the price
+> of recovering without a majority, and why you recover from the survivor
+> whose log reaches furthest.
 
 ## Verification
 

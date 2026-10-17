@@ -13,6 +13,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
+	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 func confChangeEntry(t *testing.T, term, index uint64, cc *pb.ConfChangeV2) *pb.Entry {
@@ -226,4 +227,29 @@ func TestRestoreAs_ReplaysTheTailWithTheGuard(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, m.IsVoter(2), "the guard refused the demotion: %v", m.ConfState)
 	require.Empty(t, m.ConfState.GetLearners())
+}
+
+// A directory whose event log is segmented restores too: the offline open
+// recognizes the engine that wrote it.
+func TestRestoreAs_SegmentedEventLog(t *testing.T) {
+	dir := t.TempDir()
+	segmented := wal.WithSegmentedEventLog(segmentlog.LogOptions{})
+	s, err := wal.Open(dir, nil, nil, nil, wal.WithoutFsync(), segmented)
+	require.NoError(t, err)
+	s.ConfState(&pb.ConfState{Voters: []uint64{1}})
+	entries := []*pb.Entry{addNode(t, 1, 1, "http://old-1:7000"), apiURLEntry(t, 2, 1, "http://old-1:8080")}
+	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(1), Commit: proto.Uint64(2)}, entries, &pb.Snapshot{}))
+	require.NoError(t, s.ApplyCommittedBatch(entries))
+	require.NoError(t, s.Close())
+
+	id := mintID(t)
+	_, err = wal.RestoreAs(dir, id, 1)
+	require.NoError(t, err)
+
+	s, err = wal.Open(dir, nil, nil, nil, wal.WithoutFsync(), segmented)
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+	rep, ok := s.ReplicatedClusterID()
+	require.True(t, ok)
+	require.Equal(t, id, rep)
 }

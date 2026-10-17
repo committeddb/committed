@@ -15,6 +15,7 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
@@ -1473,15 +1474,29 @@ func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id
 		return cluster.ErrMembershipChangeInProgress
 	}
 	rejections := db.raft.rejectionsSoFar()
-	select {
-	case db.confChangeC <- cc:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-db.ctx.Done():
-		return db.ctx.Err()
+	propose := func() error {
+		select {
+		case db.confChangeC <- proto.Clone(cc).(*raftpb.ConfChangeV2):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-db.ctx.Done():
+			return db.ctx.Err()
+		}
 	}
-	return db.waitForMembership(ctx, id, target, rejections)
+	if err := propose(); err != nil {
+		return err
+	}
+	return db.waitForMembership(ctx, id, target, rejections, propose)
 }
+
+// membershipReproposeInterval is how long a membership change may go without
+// taking effect, with nothing else in progress, before waitForMembership
+// proposes it again. raft drops a change proposed while another is pending —
+// the leader's own address record or guard marker, say, right after a
+// cluster starts — with nothing but a log line. A var so tests can shorten
+// it.
+var membershipReproposeInterval = 2 * time.Second
 
 // membershipSettleTimeout bounds waitForMembership when the caller's ctx
 // carries no deadline. raft can silently drop a conf change (a previous one
@@ -1515,7 +1530,15 @@ var ErrMembershipUnsettled = errors.New("membership change not applied within th
 // error once the configuration has settled (a refused change still passes
 // through a joint configuration, and the caller's next change must not meet
 // it), since the change will never take effect.
-func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershipTarget, rejections uint64) error {
+//
+// repropose, when not nil, proposes the change again. It runs when the change
+// has gone membershipReproposeInterval without taking effect while this node
+// sees no change in progress and has applied everything it knows committed —
+// so raft dropped it. A second copy is harmless: raft drops it while the first
+// is pending, and applying an add, promote or remove that already took effect
+// changes nothing. (Only a node that is caught up re-proposes, so a lagging
+// node can't slip a stale copy in behind a later change.)
+func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershipTarget, rejections uint64, repropose func() error) error {
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeoutCause(ctx, membershipSettleTimeout, ErrMembershipUnsettled)
@@ -1537,6 +1560,12 @@ func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershi
 			return !isVoter && !isLearner
 		}
 	}
+	var tick <-chan time.Time
+	if repropose != nil {
+		ticker := time.NewTicker(membershipReproposeInterval)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
 	for {
 		if settled() {
 			return nil
@@ -1556,6 +1585,12 @@ func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershi
 		}
 		select {
 		case <-ch:
+		case <-tick:
+			if db.raft.rejectedSince(rejections, id) == nil && db.raft.membershipIdle() {
+				if err := repropose(); err != nil {
+					return err
+				}
+			}
 		case <-ctx.Done():
 			if cause := context.Cause(ctx); errors.Is(cause, ErrMembershipUnsettled) {
 				return cause

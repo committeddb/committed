@@ -1,8 +1,8 @@
 # Backup and restore
 
 This runbook covers `committed backup` and `committed restore` — archiving a
-node's state to a portable tarball and reconstituting it into a fresh data
-directory. A backup is taken either from a **stopped** node's data directory
+node's state to a portable tarball and reconstituting it, on new machines, as
+a new cluster. A backup is taken either from a **stopped** node's data directory
 or, with `--live`, from a **running** node over its API; the archive is the
 same and restores the same way.
 
@@ -124,21 +124,56 @@ directory behind a symlink, resolve it to the real path before backing up.
 
 ## Restoring
 
-Restore into a **fresh, empty** directory (restore refuses to overwrite
-existing data), then start a node against it:
+A restore recreates the cluster on new machines from **one archive** — the
+newest you have — restored onto every machine, each as a different member of
+the backed-up cluster. The restored cluster is a **new cluster** with its own
+cluster id: it never exchanges a message with the cluster the archive came
+from, or with another restore of the same archive.
+
+Restore each machine into a **fresh, empty** directory (restore refuses to
+overwrite existing data). The first machine mints the new cluster and prints
+a seed; the others pass that seed:
 
 ```bash
-committed restore --from /backups/committed-2026-06-19.tar.gz --data /var/lib/committed-restored
-# then start a node pointed at the restored dir, with the SAME identity:
-COMMITTED_NODE_ID=1 COMMITTED_PEERS='1=http://...' COMMITTED_DATA_DIR=/var/lib/committed-restored committed node
+# machine 1
+committed restore --from /backups/committed-2026-06-19.tar.gz \
+  --data /var/lib/committed --node-id 1 --new-cluster
+# restored 41 files into /var/lib/committed (backup taken 2026-06-19T02:00:00Z, from node 2)
+# node 1 of a new cluster 5f0c2a61-8d3e-4b7a-9c15-2e7d4f8a90b3 (members: 1, 2, 3)
+# restore the other members from this same archive with --cluster-id 9b2e7d10-4c6a-4f2e-8b91-73a5c0d2e6f4
+
+# machines 2 and 3
+committed restore --from /backups/committed-2026-06-19.tar.gz \
+  --data /var/lib/committed --node-id 2 --cluster-id 9b2e7d10-4c6a-4f2e-8b91-73a5c0d2e6f4
+committed restore --from /backups/committed-2026-06-19.tar.gz \
+  --data /var/lib/committed --node-id 3 --cluster-id 9b2e7d10-4c6a-4f2e-8b91-73a5c0d2e6f4
 ```
 
-The restored directory **is** a node's directory — the node recovers from it
-exactly as it would after a normal restart. Start it with the **same**
-`COMMITTED_NODE_ID` and `COMMITTED_PEERS` the source node used. Restore drops a
-`RESTORED.json` marker recording where the backup came from. If the archive
-was taken live, staged projections rebuild their stores from the log before
-resuming (see [Taking a backup live](#taking-a-backup-live)).
+Then start each node with the `COMMITTED_NODE_ID` it was restored as and a
+`COMMITTED_PEERS` naming the **new** machines' addresses:
+
+```bash
+COMMITTED_NODE_ID=1 \
+COMMITTED_PEERS='1=http://new-n1:9022,2=http://new-n2:9022,3=http://new-n3:9022' \
+COMMITTED_DATA_DIR=/var/lib/committed committed node
+```
+
+- **`--node-id`** must be a member of the backed-up cluster (restore lists
+  the members, and refuses an id that isn't one). Give every machine a
+  different one. The restored directory remembers it: a node started on it
+  under another `COMMITTED_NODE_ID` refuses to start.
+- **A single-node cluster** is the same with one machine: `--node-id 1
+  --new-cluster`.
+- **Addresses come from `COMMITTED_PEERS`.** Restore drops the old cluster's
+  recorded peer and API addresses, so nothing sends the restored nodes to the
+  old machines; each node announces its own API address when it starts.
+- **Ingestables and syncables start automatically.** The restored cluster is
+  the production cluster now: it resumes reading its sources and writing its
+  destinations from where the archive left off.
+
+Restore drops a `RESTORED.json` marker recording where the backup came from.
+If the archive was taken live, staged projections rebuild their stores from
+the log before resuming (see [Taking a backup live](#taking-a-backup-live)).
 
 Restore validates the manifest, refuses an archive that isn't a committed
 backup or declares an incompatible format version, and rejects any archive
@@ -146,47 +181,45 @@ entry whose path would escape the target directory.
 
 Restore is **atomic and crash-durable**: it unpacks into a staging directory
 alongside the target and renames it into place only after the whole archive
-validates, so a failed restore (a truncated archive, a full disk) leaves the
-target directory untouched and a retry is never blocked by a half-restored
-directory. Before the publish it `fsync`s every staged file's content and every
-staged directory, and after the rename it `fsync`s the target's parent — so a
-crash can never surface a torn or zero-length restored file. The publish itself is
-a single rename, which the [crash-consistent filesystem](../architecture/storage-architecture.md)
-requirement makes atomic: after any crash the target is either absent (retry it)
-or fully populated and durable, never partial. Restore is fully re-runnable.
+validates and the directory has been rewritten for the new cluster, so a
+failed restore (a truncated archive, a full disk, a `--node-id` that isn't a
+member) leaves the target directory untouched and a retry is never blocked by
+a half-restored directory. Before the publish it `fsync`s every staged file's
+content and every staged directory, and after the rename it `fsync`s the
+target's parent — so a crash can never surface a torn or zero-length restored
+file. The publish itself is a single rename, which the
+[crash-consistent filesystem](../architecture/storage-architecture.md)
+requirement makes atomic: after any crash the target is either absent (retry
+it) or fully populated and durable, never partial. Restore is fully
+re-runnable.
 
-### Cluster identity
+### One archive, every machine
 
-A restored node keeps the **source cluster's identity** — the same
-`COMMITTED_NODE_ID` and the same view of its peers. Restoring is for recovering or
-*cloning* a cluster, not merging two — pulling data from a different cluster into
-this one is an ETL job, not a restore.
+Restore every machine from the **same** archive. Archives of different nodes,
+or taken at different times, hold different histories, and raft cannot
+reconcile them: a cluster formed from them could lose or rewrite committed
+entries. So the cluster id folds in the archive's contents, and a machine
+restored from a different archive gets a different id even with the same seed
+— the others refuse it at first contact (`412`, logged as `refused a peer
+request from another cluster`). Any member's archive is complete, since every
+node holds the full log; use the newest.
 
-> **Never start a restored node into a cluster where its source is still alive.**
-> The restore carries the source node's raft identity, so the restored node and
-> the original both claim the same node id in the same cluster. Two peers sharing
-> one identity is **split-brain**: conflicting raft state, and a cluster that can
-> commit divergent history. Restore is safe in exactly two shapes — **total-loss
-> recovery**, where the **whole cluster** is being recreated from the archive
-> (nothing from the old cluster survives to disagree with it); and **cloning**,
-> where the restored cluster comes up **network-isolated** from the original
-> (its own peer addresses, unable to reach the source's members). If unsure
-> whether the source id is still live, check `GET /v1/membership` on the running
-> cluster before starting the restored node. See also
-> [membership.md](membership.md).
+### Restore is for recovery, not cloning
 
-> **Restore is NOT how you recover a member of a still-running cluster** — even
-> with that member cleanly stopped first. The restored log is REWOUND to the
-> backup point, but the surviving leader both remembers a higher matchIndex for
-> that node id and has usually compacted its raft log past the backup point; on
-> the leader's first heartbeat the restored node fatal-exits with
-> `raft state rewound: the leader's heartbeat commits beyond this node's log`
-> (committed's own guard, which fires before raft's own
-> `tocommit(...) out of range` panic would). This is protecting the cluster
-> from a member whose log went backwards, not a recoverable hiccup.
-> Recovering one member of a live cluster is the **rebuild** flow — a fresh
-> node that fetches current state from a healthy peer ([rebuild.md](rebuild.md))
-> — not a restore.
+A restored cluster runs as production: its ingestables read their sources and
+its syncables write their destinations. Running one beside the cluster it was
+restored from would have two clusters doing that work — consuming the same
+replication slots, writing the same tables. Restore when the original is gone
+(total loss), or after stopping it for good. Copying a cluster for testing
+beside a live original is not supported.
+
+Restore is also **not** how you recover one member of a running cluster: a
+restored node belongs to a new cluster, so the running one refuses it.
+Recovering one member is the **rebuild** flow — a fresh node that fetches
+current state from a healthy peer ([rebuild.md](rebuild.md)). A cluster that
+lost its majority but still has a survivor is brought back with
+`committed recover` ([rebuild.md](rebuild.md#when-a-majority-is-lost)), not a
+restore.
 
 ### Version compatibility
 
@@ -246,11 +279,7 @@ not committed:
 - **On restore:** restoring a backup **resurrects** the PII of every subject
   deleted-and-scrubbed *after* that backup was taken — those deletes happened
   later and aren't in the archive. (The manifest's `eventLogGeneration` is the
-  scrub bound the archived event log reflects. A node restored from it that
-  then joins peers whose logs are at a newer generation discards that log and
-  fetches theirs whole — see [rebuild.md](rebuild.md) — so within a live
-  cluster the resurrection does not survive the rejoin; it does survive a
-  whole-cluster restore.) committed keeps **no ledger of erased
+  scrub bound the archived event log reflects.) committed keeps **no ledger of erased
   subjects** — a right-to-be-forgotten delete physically removes the data from
   the log, leaving nothing to enumerate. You must therefore record RTBF requests
   in your own compliance system and **re-issue any that post-date the backup**

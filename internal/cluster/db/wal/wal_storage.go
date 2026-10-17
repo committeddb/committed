@@ -1089,13 +1089,13 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 	// node is missing, before opening database connections or spawning
 	// workers below. See validateConfigSecrets for why missing secrets
 	// are fatal while other parse errors are left to the paths below.
-	if err = ws.validateConfigSecrets(); err != nil {
-		return nil, err
-	}
-
-	err = ws.loadDatabases()
-	if err != nil {
-		return nil, err
+	if !cfg.offline {
+		if err = ws.validateConfigSecrets(); err != nil {
+			return nil, err
+		}
+		if err = ws.loadDatabases(); err != nil {
+			return nil, err
+		}
 	}
 
 	// NOTE: ingestable workers for configs applied in a previous run are

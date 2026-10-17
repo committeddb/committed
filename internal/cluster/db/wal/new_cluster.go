@@ -19,7 +19,9 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/durablefs"
+	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 // A restored or recovered data directory becomes a member of a new cluster:
@@ -200,10 +202,19 @@ func Recover(dir string, nodeID uint64) (*Recovered, error) {
 }
 
 // openStopped opens a stopped node's directory for offline maintenance: the
-// exclusive lock refuses a running node, and safe mode holds the background
-// workers.
+// exclusive lock refuses a running node, safe mode holds the background
+// workers, persisted configs aren't built, and the event log opens with
+// whichever engine wrote it.
 func openStopped(dir string) (*Storage, error) {
-	s, err := Open(dir, nil, nil, nil, WithSafeMode(), WithLogger(zap.NewNop()))
+	opts := []Option{WithSafeMode(), WithLogger(zap.NewNop()), func(o *options) { o.offline = true }}
+	segmented, err := segmentlog.RecognizeDirectory(datadir.EventsDir(dir))
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", datadir.EventsDir(dir), err)
+	}
+	if segmented {
+		opts = append(opts, WithSegmentedEventLog(segmentlog.LogOptions{Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}}))
+	}
+	s, err := Open(dir, nil, nil, nil, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("open %s (is the node stopped?): %w", dir, err)
 	}
