@@ -221,6 +221,10 @@ func NewRaftForCompactionTest(s raftStorage, maxSize uint64, maxAge time.Duratio
 	return n
 }
 
+// SetSnapshotLacksMemberForTest marks the held snapshot as missing a member,
+// as applying an add does.
+func (n *Raft) SetSnapshotLacksMemberForTest() { n.snapshotLacksMember.Store(true) }
+
 // MaybeCompactForTest exposes maybeCompact so unit tests can drive the
 // decision logic without wiring up a full Ready loop.
 func (n *Raft) MaybeCompactForTest() {

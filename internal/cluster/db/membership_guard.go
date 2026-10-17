@@ -53,6 +53,7 @@ const membershipGuardMarker = "committed:membership-guard"
 type confChangeRejection struct {
 	seq    uint64
 	nodeID uint64
+	change raftpb.ConfChangeType
 	err    error
 }
 
@@ -102,22 +103,34 @@ func (n *Raft) rejectedSince(seq, id uint64) error {
 // commits at index, and returns cc. It reads raft's current configuration —
 // the one cc applies to. cc is the entry's own decoded copy.
 func (n *Raft) guardConfChange(cc *raftpb.ConfChangeV2, index uint64) *raftpb.ConfChangeV2 {
-	if len(cc.Changes) == 0 {
-		return cc // leaving a joint configuration
-	}
 	since, on := n.storage.MembershipGuardIndex()
-	if !on || index <= since {
+	if !on || index <= since || len(cc.Changes) == 0 {
 		return cc
 	}
 	// A change applies only to a configuration that isn't joint (raft's leader
 	// refuses one proposed during a joint configuration), so the voters are
 	// the incoming set alone.
-	voters := maps.Clone(map[uint64]struct{}(n.node.Status().Config.Voters[0]))
+	voters := map[uint64]struct{}(n.node.Status().Config.Voters[0])
+	for _, r := range refuseInvalidChanges(cc, voters, n.storage.RemovedMembers(), since) {
+		n.logger.Warn("membership change not applied: invalid for the configuration it reached",
+			zap.Uint64("index", index), zap.Uint64("node", r.nodeID), zap.String("change", r.change.String()), zap.Error(r.err))
+		r.seq = n.guard.rejections.Add(1)
+		n.guard.last.Store(&r)
+	}
+	return cc
+}
+
+// refuseInvalidChanges zeroes the node id of each invalid change in cc, an
+// entry past the guard's switch-on index since, and returns the refusals.
+// voters is the voter set cc applies to (it is not modified); removed maps each
+// removed id to the index that removed it. Shared by the live guard and the
+// offline replay (LogMembership), so both reach the same verdict.
+func refuseInvalidChanges(cc *raftpb.ConfChangeV2, voters map[uint64]struct{}, removed map[uint64]uint64, since uint64) []confChangeRejection {
+	voters = maps.Clone(voters)
 	if voters == nil {
 		voters = map[uint64]struct{}{}
 	}
-	removed := n.storage.RemovedMembers()
-
+	var refused []confChangeRejection
 	for _, ch := range cc.Changes {
 		id := ch.GetNodeId()
 		if id == 0 {
@@ -138,10 +151,7 @@ func (n *Raft) guardConfChange(cc *raftpb.ConfChangeV2, index uint64) *raftpb.Co
 			}
 		}
 		if err != nil {
-			n.logger.Warn("membership change not applied: invalid for the configuration it reached",
-				zap.Uint64("index", index), zap.Uint64("node", id), zap.String("change", ch.GetType().String()), zap.Error(err))
-			seq := n.guard.rejections.Add(1)
-			n.guard.last.Store(&confChangeRejection{seq: seq, nodeID: id, err: err})
+			refused = append(refused, confChangeRejection{nodeID: id, change: ch.GetType(), err: err})
 			zero := uint64(0)
 			ch.NodeId = &zero
 			continue
@@ -153,7 +163,7 @@ func (n *Raft) guardConfChange(cc *raftpb.ConfChangeV2, index uint64) *raftpb.Co
 			delete(voters, id)
 		}
 	}
-	return cc
+	return refused
 }
 
 // proposeMembershipGuard switches the guard on: the leader proposes the

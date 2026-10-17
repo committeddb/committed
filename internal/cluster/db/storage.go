@@ -341,6 +341,11 @@ type MembershipStorage interface {
 	RemovedMembers() map[uint64]uint64
 	SetMembershipGuardIndex(index uint64) error
 	MembershipGuardIndex() (uint64, bool)
+	// AddressesIgnoredThrough returns the index at or below which entries
+	// carry a previous cluster's addresses — a restore or recover rewrote the
+	// directory as a new cluster — so applying them records no address. 0
+	// otherwise.
+	AddressesIgnoredThrough() uint64
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

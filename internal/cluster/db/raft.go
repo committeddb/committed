@@ -67,6 +67,12 @@ type Raft struct {
 	// channels goroutine to assert compaction progress without racing
 	// the writer.
 	lastCompactedIndex atomic.Uint64
+	// snapshotLacksMember is set when a member was added after the snapshot
+	// this node holds: raft makes a node ignore a snapshot whose membership
+	// doesn't include it, so once the log is compacted a new member could only
+	// catch up from the next compaction's snapshot. prepareCompaction takes
+	// one at once instead.
+	snapshotLacksMember atomic.Bool
 	// Set before ApplyConfChange exposes a configuration, so membership
 	// waiters can require Raft to acknowledge its entry through Advance.
 	lastMembershipIndex atomic.Uint64
@@ -361,6 +367,9 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	}
 	n.initClusterIdentity(hs.GetTerm() == 0 && !n.join, ps)
 	n.refreshRemoved()
+	if s, ok := n.storage.(interface{ SnapshotLacksMember() bool }); ok && s.SnapshotLacksMember() {
+		n.snapshotLacksMember.Store(true)
+	}
 	for _, p := range ps {
 		if p.ID == id {
 			if u, err := cluster.CanonicalPeerURL(string(p.Context)); err == nil {
@@ -501,8 +510,17 @@ func (n *Raft) applyConfChange(entry raftpb.ConfChangeI, index uint64) {
 		if ch.GetType() == raftpb.ConfChangeRemoveNode {
 			n.recordRemovedOrFatal(ch.GetNodeId(), index)
 		}
+		if ch.GetType() == raftpb.ConfChangeAddNode || ch.GetType() == raftpb.ConfChangeAddLearnerNode {
+			n.snapshotLacksMember.Store(true)
+		}
 		if ch.GetType() == raftpb.ConfChangeUpdateNode && string(ccCtx) == membershipGuardMarker {
 			n.switchOnGuardOrFatal(index)
+			continue
+		}
+		if index <= n.storage.AddressesIgnoredThrough() && ch.GetType() != raftpb.ConfChangeRemoveNode {
+			// A previous cluster's address (this directory was restored or
+			// recovered): COMMITTED_PEERS and self-report supply this
+			// cluster's.
 			continue
 		}
 		// A node needs no transport entry for itself: skip self so applying
@@ -1297,7 +1315,15 @@ func (n *Raft) prepareCompaction() {
 	// safety constraints below are unchanged, so this can never compact past
 	// applied/event-log highwater.
 	pressure := n.compactionPressure.Load()
-	if n.compactMaxSize == 0 && n.compactMaxAge == 0 && !pressure {
+	// A member added after the held snapshot can't install it; once the log
+	// is compacted (a never-compacted log serves it from index 1), take a
+	// snapshot that includes it whatever the policy says.
+	membership := false
+	if n.snapshotLacksMember.Load() {
+		first, err := n.storage.FirstIndex()
+		membership = err == nil && first > 1
+	}
+	if n.compactMaxSize == 0 && n.compactMaxAge == 0 && !pressure && !membership {
 		return
 	}
 
@@ -1320,7 +1346,7 @@ func (n *Raft) prepareCompaction() {
 			reason = "age"
 		}
 	}
-	if !triggered {
+	if !triggered && !membership {
 		return
 	}
 
@@ -1336,7 +1362,7 @@ func (n *Raft) prepareCompaction() {
 	// small enough that compaction still buys real disk savings, large enough that
 	// a short network blip doesn't force a snapshot install.
 	const safetyBuffer = uint64(8)
-	if applied <= safetyBuffer {
+	if applied <= safetyBuffer && !membership {
 		return
 	}
 
@@ -1349,8 +1375,13 @@ func (n *Raft) prepareCompaction() {
 	if applied > n.storage.EventIndex() {
 		return
 	}
-	compactTo := applied - safetyBuffer
-	if compactTo <= n.lastCompactedIndex.Load() {
+	var compactTo uint64
+	if applied > safetyBuffer {
+		compactTo = applied - safetyBuffer
+	}
+	// Only the policy cuts the log; a snapshot for a new member doesn't.
+	cut := triggered && compactTo > n.lastCompactedIndex.Load()
+	if !cut && !membership {
 		return
 	}
 
@@ -1363,6 +1394,13 @@ func (n *Raft) prepareCompaction() {
 	// truncation trails by safetyBuffer, preserving the AppendEntries window.
 	if _, err := n.storage.CreateSnapshot(applied, nil); err != nil {
 		n.logger.Warn("create snapshot for compaction", zap.Uint64("index", applied), zap.Error(err))
+		return
+	}
+	if membership {
+		n.snapshotLacksMember.Store(false)
+	}
+	if !cut {
+		n.logger.Debug("snapshot taken for a new member", zap.Uint64("snapshotIndex", applied))
 		return
 	}
 	n.logger.Debug("raft log compaction prepared",

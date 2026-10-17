@@ -66,9 +66,41 @@ func TestPeers_EveryNodeMovesAddress(t *testing.T) {
 	writeAndCheck(t, nodes, "after_move")
 }
 
+// restoreAll restores every node from one archive into a fresh directory,
+// as the documented total-loss procedure does: the first with --new-cluster,
+// the rest with the seed it printed. The original directories are gone.
+func restoreAll(t *testing.T, nodes []*clusterNode, archive string) string {
+	t.Helper()
+	var seed string
+	for _, n := range nodes {
+		restored := filepath.Join(t.TempDir(), "restored")
+		args := []string{"restore", "--from", archive, "--data", restored, "--node-id", fmt.Sprint(n.id)}
+		if seed == "" {
+			out := runCommitted(t, append(args, "--new-cluster")...)
+			seed = seedFrom(t, out)
+		} else {
+			runCommitted(t, append(args, "--cluster-id", seed)...)
+		}
+		require.NoError(t, os.RemoveAll(n.dataDir), "the original machine is gone")
+		n.dataDir = restored
+	}
+	return seed
+}
+
+// seedFrom is the cluster seed restore --new-cluster printed.
+func seedFrom(t *testing.T, out string) string {
+	t.Helper()
+	const marker = "with --cluster-id "
+	i := strings.Index(out, marker)
+	require.GreaterOrEqual(t, i, 0, "restore --new-cluster prints a seed: %s", out)
+	return strings.Fields(out[i+len(marker):])[0]
+}
+
 // A total-loss restore onto new machines: every node's data directory is
-// gone, each is restored from a backup into a fresh directory, and the
-// cluster starts on new addresses. Before the fix it never formed.
+// gone, each machine is restored from one archive as a different member, and
+// the cluster starts on new addresses. Before the fix it never formed. A
+// restored directory refuses to start as a node other than the one it was
+// restored as.
 func TestPeers_RestoreOntoNewAddresses(t *testing.T) {
 	buildBinary(t)
 	nodes := startCluster(t, 3)
@@ -77,16 +109,17 @@ func TestPeers_RestoreOntoNewAddresses(t *testing.T) {
 		n.stopGraceful(t)
 	}
 
-	archives := t.TempDir()
-	for _, n := range nodes {
-		archive := filepath.Join(archives, fmt.Sprintf("node%d.tar.gz", n.id))
-		runCommitted(t, "backup", "--data", n.dataDir, "--to", archive, "--node-id", fmt.Sprint(n.id))
-		restored := filepath.Join(t.TempDir(), "restored")
-		runCommitted(t, "restore", "--from", archive, "--data", restored)
-		require.NoError(t, os.RemoveAll(n.dataDir), "the original machine is gone")
-		n.dataDir = restored
-	}
+	archive := filepath.Join(t.TempDir(), "cluster.tar.gz")
+	runCommitted(t, "backup", "--data", nodes[0].dataDir, "--to", archive, "--node-id", "1")
+	restoreAll(t, nodes, archive)
+
 	moveTo(t, nodes)
+	wrong := exec.Command(binPath, "node") //nolint:gosec // G204: the test's own binary
+	wrong.Env = nodeEnv(2, nodes[0].dataDir, nodes[0].apiPort, peersOf(nodes), false)
+	out, err := wrong.CombinedOutput()
+	require.Error(t, err, "a directory restored as node 1 does not start as node 2")
+	require.Contains(t, string(out), "restored or recovered as another node")
+
 	for _, n := range nodes {
 		n.start(t)
 	}
@@ -95,6 +128,78 @@ func TestPeers_RestoreOntoNewAddresses(t *testing.T) {
 	}
 	requireTypeListed(t, nodes[1].base(), "before_loss")
 	writeAndCheck(t, nodes, "after_restore")
+}
+
+// Machines restored from archives taken at different times can't form one
+// cluster, even with one seed: node 3's archive is older, so its cluster id
+// differs and the others refuse it. (Mixing them could make raft panic or
+// truncate committed history.)
+func TestPeers_RestoreFromMixedArchivesIsRefused(t *testing.T) {
+	buildBinary(t)
+	nodes := startCluster(t, 3)
+	writeAndCheck(t, nodes, "first")
+	nodes[2].stopGraceful(t)
+	older := filepath.Join(t.TempDir(), "older.tar.gz")
+	runCommitted(t, "backup", "--data", nodes[2].dataDir, "--to", older, "--node-id", "3")
+	nodes[2].start(t)
+	waitReady(t, nodes[2].base())
+	writeAndCheck(t, nodes, "second")
+	for _, n := range nodes {
+		n.stopGraceful(t)
+	}
+	newer := filepath.Join(t.TempDir(), "newer.tar.gz")
+	runCommitted(t, "backup", "--data", nodes[0].dataDir, "--to", newer, "--node-id", "1")
+
+	seed := restoreAll(t, nodes[:2], newer)
+	restored := filepath.Join(t.TempDir(), "restored")
+	runCommitted(t, "restore", "--from", older, "--data", restored, "--node-id", "3", "--cluster-id", seed)
+	nodes[2].dataDir = restored
+
+	moveTo(t, nodes)
+	for _, n := range nodes {
+		n.start(t)
+	}
+	waitReady(t, nodes[0].base())
+	waitReady(t, nodes[1].base())
+	writeAndCheck(t, nodes[:2], "third")
+	nodes[2].waitForLog(t, "refused a peer request from another cluster", 30*time.Second)
+	require.False(t, statusOK(nodes[2].base()+"/ready"), "node 3 never joins")
+}
+
+// The majority is lost: nodes 2 and 3 are gone. recover makes node 1 the
+// only member of a new cluster with its whole log; it commits on its own,
+// refuses the old members, and grows again with a new node.
+func TestPeers_RecoverFromLostMajority(t *testing.T) {
+	buildBinary(t)
+	nodes := startCluster(t, 3)
+	writeAndCheck(t, nodes, "before_loss")
+	for _, n := range nodes {
+		n.stopGraceful(t)
+	}
+
+	survivor := nodes[0]
+	out := runCommitted(t, "recover", "--data", survivor.dataDir, "--node-id", "1")
+	require.Contains(t, out, "removed members: 2, 3")
+	survivor.env = nodeEnv(1, survivor.dataDir, survivor.apiPort, peersOf(nodes[:1]), false)
+	survivor.start(t)
+	waitReady(t, survivor.base())
+	requireTypeListed(t, survivor.base(), "before_loss")
+	writeAndCheck(t, nodes[:1], "after_recover")
+
+	// An old member that comes back with its old data is refused.
+	nodes[1].start(t)
+	survivor.waitForLog(t, "refused a peer request from another cluster", 30*time.Second)
+	nodes[1].kill(t)
+
+	fresh := &clusterNode{id: 4, dataDir: t.TempDir(), apiPort: freePort(t), raftPort: freePort(t)}
+	grown := []*clusterNode{survivor, fresh}
+	fresh.env = nodeEnv(4, fresh.dataDir, fresh.apiPort, peersOf(grown), true)
+	fresh.start(t)
+	t.Cleanup(func() { fresh.kill(t) })
+	addMember(t, survivor.base(), 4, fmt.Sprintf("http://127.0.0.1:%d", fresh.raftPort))
+	waitReady(t, fresh.base())
+	requireTypeListed(t, fresh.base(), "before_loss")
+	writeAndCheck(t, grown, "after_growing")
 }
 
 // Every node of a new cluster derives the same cluster id at its first boot.
@@ -147,11 +252,13 @@ func TestPeers_NodeFromAnotherClusterIsRefused(t *testing.T) {
 	require.False(t, statusOK(nodes[2].base()+"/ready"), "node 3 never joins the cluster")
 }
 
-// runCommitted runs the committed binary with args and fails the test on error.
-func runCommitted(t *testing.T, args ...string) {
+// runCommitted runs the committed binary with args, fails the test on error,
+// and returns its output.
+func runCommitted(t *testing.T, args ...string) string {
 	t.Helper()
 	out, err := exec.Command(binPath, args...).CombinedOutput() //nolint:gosec // G204: the test's own binary
 	require.NoError(t, err, "committed %s: %s", strings.Join(args, " "), out)
+	return string(out)
 }
 
 // recordedPeerURL is node id's recorded peer address as base reports it.

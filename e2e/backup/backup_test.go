@@ -56,11 +56,18 @@ func TestBackupRestore_RoundTrip(t *testing.T) {
 
 	// Restore into a fresh directory.
 	dstDir := filepath.Join(t.TempDir(), "restored")
-	out, err = runCLI(t, bin, "restore", "--from", tarPath, "--data", dstDir)
+	out, err = runCLI(t, bin, "restore", "--from", tarPath, "--data", dstDir, "--node-id", "1", "--new-cluster")
 	require.NoError(t, err, "restore: %s", out)
 	require.FileExists(t, filepath.Join(dstDir, "RESTORED.json"))
 
-	// Boot a node on the restored directory (same id/port; the source is
+	// The restored directory is a new cluster's.
+	srcID, err := os.ReadFile(filepath.Join(srcDir, "cluster-id"))
+	require.NoError(t, err)
+	dstID, err := os.ReadFile(filepath.Join(dstDir, "cluster-id"))
+	require.NoError(t, err)
+	require.NotEqual(t, string(srcID), string(dstID), "a restore gets a new cluster id")
+
+	// Boot a node on the restored directory (same port; the source is
 	// stopped) and confirm it recovers and still has the data.
 	restored := startNode(t, bin, dstDir, port)
 	t.Cleanup(func() { restored.stopGraceful(t, base) })
@@ -96,12 +103,11 @@ func TestLiveBackupRestore_RoundTrip(t *testing.T) {
 	postType(t, base, "live-after")
 	requireTypeListed(t, base, "live-after")
 
-	// A restored node reuses the source's id, so the source must be gone
-	// before it boots (docs: restore is not how a live member is recovered).
+	// The restored node takes the source's port, so stop the source first.
 	node.stopGraceful(t, base)
 
 	dstDir := filepath.Join(t.TempDir(), "restored")
-	out, err = runCLI(t, bin, "restore", "--from", tarPath, "--data", dstDir)
+	out, err = runCLI(t, bin, "restore", "--from", tarPath, "--data", dstDir, "--node-id", "1", "--new-cluster")
 	require.NoError(t, err, "restore: %s", out)
 	require.FileExists(t, filepath.Join(dstDir, "RESTORED.json"))
 

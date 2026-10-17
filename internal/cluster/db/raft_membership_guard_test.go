@@ -101,7 +101,10 @@ func TestMembershipGuard_RefusesInvalidChangesAtApply(t *testing.T) {
 		}
 	}
 	for _, r := range survivors {
-		require.True(t, r.raft.IsRemovedForTest(follower.id), "the transport refuses a removed node's messages")
+		// removeNodeAndWait waits for the leader's apply; the other survivor
+		// applies the removal on its own schedule.
+		require.Eventually(t, func() bool { return r.raft.IsRemovedForTest(follower.id) },
+			membershipSettleTimeout, 5*time.Millisecond, "the transport refuses a removed node's messages")
 	}
 	refused(t, survivors, leader, addNodeCC(follower.id, "http://127.0.0.1:1"))
 	for _, r := range survivors {

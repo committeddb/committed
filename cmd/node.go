@@ -281,6 +281,12 @@ docs/operations/ it points to.`,
 		if err != nil {
 			zap.L().Fatal("cannot open storage", zap.Error(err))
 		}
+		if recorded, ok, err := s.RecordedNodeID(); err != nil {
+			zap.L().Fatal("cannot read the node id recorded in the data directory", zap.Error(err))
+		} else if ok && recorded != id {
+			zap.L().Fatal("this data directory was restored or recovered as another node; set COMMITTED_NODE_ID to it, or restore the directory again as this node",
+				zap.Uint64("COMMITTED_NODE_ID", id), zap.Uint64("data directory's node id", recorded))
+		}
 
 		var dbOpts []db.Option
 		if m != nil {

@@ -77,3 +77,19 @@ func DeriveClusterID(peers map[uint64]string, name string) ClusterID {
 	copy(c[:], h.Sum(nil))
 	return c
 }
+
+// RestoredClusterID is the id of a cluster restored from a backup: the seed
+// `committed restore --new-cluster` prints, folded with the archive's
+// fingerprint. Every machine restored from one archive with one seed gets the
+// same id; a machine restored from a different archive gets a different one
+// and is refused at first contact, as is a second restore of the same archive
+// (a new seed).
+func RestoredClusterID(seed ClusterID, archiveFingerprint []byte) ClusterID {
+	h := sha256.New()
+	h.Write([]byte("committed restored cluster id v1\x00"))
+	h.Write(seed[:])
+	h.Write(archiveFingerprint)
+	var c ClusterID
+	copy(c[:], h.Sum(nil))
+	return c
+}

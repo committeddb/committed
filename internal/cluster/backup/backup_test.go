@@ -459,3 +459,37 @@ func TestRestore_RefusesNewerFeatureLevel(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "feature level")
 }
+
+// The prepare step runs on the verified staging tree before publish; a failed
+// prepare leaves the target untouched, like any other restore failure.
+func TestRestoreWith_PrepareRunsBeforePublish(t *testing.T) {
+	src, _ := writeTree(t)
+	var buf bytes.Buffer
+	_, err := backup.Create(&buf, src, 7, time.Now())
+	require.NoError(t, err)
+	archive := buf.Bytes()
+
+	dst := filepath.Join(t.TempDir(), "restored")
+	_, err = backup.RestoreWith(bytes.NewReader(archive), dst, time.Now(), func(staging string, _ *backup.Manifest) error {
+		require.FileExists(t, filepath.Join(staging, "metadata", "bbolt.db"))
+		return os.ErrInvalid
+	})
+	require.ErrorIs(t, err, os.ErrInvalid)
+	require.NoDirExists(t, dst, "a failed prepare publishes nothing")
+
+	_, err = backup.RestoreWith(bytes.NewReader(archive), dst, time.Now(), func(staging string, _ *backup.Manifest) error {
+		return os.WriteFile(filepath.Join(staging, "prepared"), []byte("yes"), 0o600)
+	})
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(dst, "prepared"))
+}
+
+// An archive's fingerprint is its content — the same files in any order,
+// taken at any time — and changes with any file.
+func TestManifestFingerprint(t *testing.T) {
+	a := backup.Manifest{CreatedAt: "then", Files: []backup.FileEntry{fileEntry("a", "1"), fileEntry("b", "2")}}
+	b := backup.Manifest{CreatedAt: "now", Files: []backup.FileEntry{fileEntry("b", "2"), fileEntry("a", "1")}}
+	c := backup.Manifest{Files: []backup.FileEntry{fileEntry("a", "1"), fileEntry("b", "3")}}
+	require.Equal(t, a.Fingerprint(), b.Fingerprint())
+	require.NotEqual(t, a.Fingerprint(), c.Fingerprint())
+}

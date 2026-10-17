@@ -937,6 +937,8 @@ func (ms *MemoryStorage) SetMembershipGuardIndex(index uint64) error {
 	return nil
 }
 
+func (ms *MemoryStorage) AddressesIgnoredThrough() uint64 { return 0 }
+
 func (ms *MemoryStorage) MembershipGuardIndex() (uint64, bool) {
 	ms.peerURLMu.Lock()
 	defer ms.peerURLMu.Unlock()

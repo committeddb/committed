@@ -37,3 +37,18 @@ func TestDeriveClusterID(t *testing.T) {
 	renumbered := map[uint64]string{1: "http://n1:9022", 2: "http://n2:9022", 4: "http://n3:9022"}
 	require.NotEqual(t, DeriveClusterID(a, ""), DeriveClusterID(renumbered, ""))
 }
+
+// One seed and one archive give one id; another seed (a second restore) or
+// another archive gives another.
+func TestRestoredClusterID(t *testing.T) {
+	seed, err := NewClusterID()
+	require.NoError(t, err)
+	other, err := NewClusterID()
+	require.NoError(t, err)
+	archive, newer := []byte("archive"), []byte("newer archive")
+
+	require.Equal(t, RestoredClusterID(seed, archive), RestoredClusterID(seed, archive))
+	require.NotEqual(t, RestoredClusterID(seed, archive), RestoredClusterID(other, archive))
+	require.NotEqual(t, RestoredClusterID(seed, archive), RestoredClusterID(seed, newer))
+	require.NotEqual(t, seed, RestoredClusterID(seed, archive))
+}
