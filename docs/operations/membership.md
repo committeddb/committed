@@ -282,8 +282,9 @@ standard structured JSON body (`{"code", "message"}`):
 
 | Status | When                                                                       |
 |--------|----------------------------------------------------------------------------|
-| `400`  | malformed request — zero/missing id, empty url on add, non-numeric id; or `promote` of a non-learner / unknown id |
+| `400`  | malformed request — zero/missing id, empty url on add, non-numeric id; `promote` of a non-learner / unknown id; adding a current voter as a learner (it would demote the voter); or adding an id that was removed from the cluster (a removed node rejoins under a new id) |
 | `409`  | removing the **last voter** — the anti-brick guard refuses (`would_remove_last_voter`); removing the sole remaining voter would make the cluster unrecoverable |
+| `409`  | another membership change is still taking effect (`membership_change_in_progress`) — retry once it completes |
 | `503` on a write | submitted but not confirmed before the deadline (this node likely cannot reach a quorum); may still take effect once quorum returns |
 | `503` on a `GET` | no known leader, or the leader's API address is unknown — retry or target the leader directly |
 | `500`  | unexpected internal error                                                  |

@@ -2354,7 +2354,10 @@ paths:
         The node named here must already be running in join mode
         (`COMMITTED_JOIN=true`) with a peer set that lets it reach the
         existing members. The call blocks until the change has taken effect,
-        then returns 204. See docs/operations/membership.md.
+        then returns 204. Refused with 400: a learner add naming a current
+        voter (it would demote the voter), and any add naming an id that was
+        removed from the cluster (a removed node rejoins under a new id). See
+        docs/operations/membership.md.
       operationId: addMember
       requestBody:
         required: true

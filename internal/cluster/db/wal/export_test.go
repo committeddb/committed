@@ -443,3 +443,9 @@ func SetSupersedeScrubCeilingForTest(d time.Duration) func() {
 	supersedeScrubCeiling = d
 	return func() { supersedeScrubCeiling = old }
 }
+
+// DropBucketForTest deletes a top-level bucket, standing in for a metadata db
+// written by a release that predates it.
+func (s *Storage) DropBucketForTest(name string) error {
+	return s.update(func(tx *bolt.Tx) error { return tx.DeleteBucket([]byte(name)) })
+}

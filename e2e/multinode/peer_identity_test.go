@@ -252,7 +252,39 @@ func TestPeers_MovedLearnerViaSetAddress(t *testing.T) {
 	writeAndCheck(t, withLearner, "after_learner_moved")
 }
 
+// The membership API refuses an add-learner naming a voter (it would demote
+// it) and the re-add of a removed id (a removed node rejoins under a new id).
+func TestPeers_RemovedIDAndVoterAsLearnerRefused(t *testing.T) {
+	buildBinary(t)
+	nodes := startCluster(t, 3)
+	learner := &clusterNode{id: 4, dataDir: t.TempDir(), apiPort: freePort(t), raftPort: freePort(t)}
+	withLearner := append(append([]*clusterNode(nil), nodes...), learner)
+	learner.env = nodeEnv(4, learner.dataDir, learner.apiPort, peersOf(withLearner), true)
+	learner.start(t)
+	t.Cleanup(func() { learner.kill(t) })
+	addLearner := fmt.Sprintf(`{"id":4,"url":"http://127.0.0.1:%d","learner":true}`, learner.raftPort)
+	postJSON(t, http.MethodPost, nodes[0].base()+"/v1/membership", addLearner)
+	writeAndCheck(t, withLearner, "learner_caught_up")
+
+	status, body := requestJSON(t, http.MethodPost, nodes[1].base()+"/v1/membership",
+		fmt.Sprintf(`{"id":2,"url":"http://127.0.0.1:%d","learner":true}`, nodes[1].raftPort))
+	require.Equal(t, http.StatusBadRequest, status, body)
+	require.Contains(t, body, "would demote it")
+
+	postJSON(t, http.MethodDelete, nodes[0].base()+"/v1/membership/4", "")
+	status, body = requestJSON(t, http.MethodPost, nodes[2].base()+"/v1/membership", addLearner)
+	require.Equal(t, http.StatusBadRequest, status, body)
+	require.Contains(t, body, "was removed from this cluster")
+	writeAndCheck(t, nodes, "after_refusals")
+}
+
 func postJSON(t *testing.T, method, url, body string) {
+	t.Helper()
+	status, out := requestJSON(t, method, url, body)
+	require.Lessf(t, status, 300, "%s %s: %d %s", method, url, status, out)
+}
+
+func requestJSON(t *testing.T, method, url, body string) (int, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -263,5 +295,5 @@ func postJSON(t *testing.T, method, url, body string) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
-	require.Lessf(t, resp.StatusCode, 300, "%s %s: %d %s", method, url, resp.StatusCode, out)
+	return resp.StatusCode, string(out)
 }

@@ -62,7 +62,25 @@ func loadPeers(id uint64) db.Peers {
 	if err != nil {
 		zap.L().Fatal("COMMITTED_PEERS", zap.Error(err))
 	}
+	if peerURL, set := os.LookupEnv("COMMITTED_PEER_URL"); set {
+		if own, differs := selfURLDisagrees(peers, id, peerURL); differs {
+			zap.L().Warn("COMMITTED_PEER_URL disagrees with this node's COMMITTED_PEERS entry; this node advertises the COMMITTED_PEERS entry",
+				zap.String("COMMITTED_PEER_URL", peerURL), zap.String("COMMITTED_PEERS entry", own))
+		}
+	}
 	return peers
+}
+
+// selfURLDisagrees reports whether COMMITTED_PEER_URL names a different
+// address from this node's COMMITTED_PEERS entry, which is the one it
+// advertises; it returns that entry.
+func selfURLDisagrees(peers db.Peers, id uint64, peerURL string) (string, bool) {
+	own := peers[id]
+	u, err := cluster.CanonicalPeerURL(peerURL)
+	if err != nil {
+		return own, true
+	}
+	return own, u != own
 }
 
 // parsePeers builds the static raft peer set for first-boot bootstrap
@@ -74,11 +92,11 @@ func loadPeers(id uint64) db.Peers {
 //	COMMITTED_PEERS="1=http://n1:9022,2=http://n2:9022,3=http://n3:9022"
 //
 // Every node receives the same COMMITTED_PEERS and the set must include
-// this node's own id. Membership is consumed only on first boot; on
-// restart it is restored from the WAL (raft.RestartNode), so editing
-// COMMITTED_PEERS after a node has state has no effect — use the
-// "committed member add/remove" commands (the /v1/membership API) for
-// live membership changes. A node joining an existing cluster sets
+// this node's own id. Its ids bootstrap membership on first boot only; on
+// restart membership is restored from the WAL (raft.RestartNode) and
+// changes through the /v1/membership API. Its addresses are read on every
+// boot: an entry changed since the last boot is used and recorded (see
+// db.choosePeerAddresses). A node joining an existing cluster sets
 // COMMITTED_JOIN=true so its COMMITTED_PEERS seeds the transport without
 // bootstrapping a competing configuration.
 //

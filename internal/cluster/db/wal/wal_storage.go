@@ -81,6 +81,13 @@ var (
 	// local id yet — a joiner — can check the one it adopted against it. See
 	// db/cluster_identity.go.
 	clusterIdentityBucket = []byte("clusterIdentity")
+	// removedMemberBucket maps a raft node id (8 big-endian bytes) to the log
+	// index of the conf change that first removed it, and membershipGuardBucket
+	// holds the index of the marker that switched on the apply-time membership
+	// guard. Both are written in the conf-change pass and ride snapshots. See
+	// membership_guard.go and db/membership_guard.go.
+	removedMemberBucket   = []byte("removedMembers")
+	membershipGuardBucket = []byte("membershipGuard")
 	// memberVersionBucket maps a raft node id (8 big-endian bytes, the key
 	// cluster.NodeVersionKey produces) to a marshaled cluster.NodeVersion — the
 	// node's self-announced cluster feature level. Entity-driven (written from
@@ -241,8 +248,20 @@ var buckets = func() [][]byte {
 		bs = append(bs, ie.bucket)
 	}
 	return append(bs, ingestSourceSeqBucket, ingestOrderBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
-		typeOnSupersedeBucket, scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
+		typeOnSupersedeBucket, scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket, removedMemberBucket, membershipGuardBucket)
 }()
+
+// createBuckets creates every bucket in buckets that tx's database lacks: at
+// Open, and after a snapshot install, whose database may come from a release
+// that predates some of them.
+func createBuckets(tx *bolt.Tx) error {
+	for _, bucket := range buckets {
+		if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+	}
+	return nil
+}
 
 type StateType int
 
@@ -894,16 +913,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		return nil, fmt.Errorf("sweep orphaned bbolt temp files: %w", err)
 	}
 
-	err = keyValueStorage.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range buckets {
-			_, err := tx.CreateBucketIfNotExists(bucket)
-			if err != nil {
-				return fmt.Errorf("create bucket: %s", err)
-			}
-		}
-
-		return nil
-	})
+	err = keyValueStorage.Update(createBuckets)
 	if err != nil {
 		return nil, err
 	}

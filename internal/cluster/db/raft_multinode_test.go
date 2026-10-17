@@ -264,7 +264,7 @@ func TestRaftPropose_LeaderKillReelectsAndAccepts(t *testing.T) {
 // — the receiving side ignores the partition and the test wouldn't
 // exercise the Pre/Vote increment-term path at all.
 func TestPreVote_PartitionedFollowerDoesNotDisruptLeader(t *testing.T) {
-	rafts := createRafts(3)
+	rafts, fc := createFaultyRafts(3)
 	defer rafts.Close()
 
 	originalLeader := rafts.WaitForLeader(t)
@@ -276,20 +276,15 @@ func TestPreVote_PartitionedFollowerDoesNotDisruptLeader(t *testing.T) {
 		t.Fatal("FollowerRaft returned nil after WaitForLeader")
 	}
 
-	// Partition the follower from the cluster at the transport layer.
-	// Both directions: drop the follower from every other node's peer
-	// set, and drop every other node from the follower's peer set.
+	// Partition the follower from the cluster at the transport layer,
+	// both directions.
+	var others []uint64
 	for _, r := range rafts {
-		if r.id == follower.id {
-			for _, peer := range follower.peers {
-				if peer.ID != follower.id {
-					follower.raft.PartitionPeerForTest(peer.ID)
-				}
-			}
-		} else {
-			r.raft.PartitionPeerForTest(follower.id)
+		if r.id != follower.id {
+			others = append(others, r.id)
 		}
 	}
+	fc.Partition([]uint64{follower.id}, others)
 
 	// Sit in the partition long enough for many election cycles to
 	// elapse. Election timeout is 10 ticks × multiNodeTickInterval
@@ -298,26 +293,7 @@ func TestPreVote_PartitionedFollowerDoesNotDisruptLeader(t *testing.T) {
 	// without PreVote it would advance ~10 times.
 	time.Sleep(1 * time.Second)
 
-	// Heal the partition by re-adding peers on both sides.
-	for _, r := range rafts {
-		if r.id == follower.id {
-			for _, peer := range follower.peers {
-				if peer.ID != follower.id {
-					if err := follower.raft.UnpartitionPeerForTest(peer); err != nil {
-						t.Fatalf("unpartition follower→%d: %v", peer.ID, err)
-					}
-				}
-			}
-		} else {
-			for _, peer := range r.peers {
-				if peer.ID == follower.id {
-					if err := r.raft.UnpartitionPeerForTest(peer); err != nil {
-						t.Fatalf("unpartition %d→follower: %v", r.id, err)
-					}
-				}
-			}
-		}
-	}
+	fc.Heal()
 
 	// Allow time for any in-flight RPCs from the rejoining follower to
 	// land at the leader. This is the window where, without PreVote, a

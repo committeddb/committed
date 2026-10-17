@@ -46,7 +46,9 @@ type Raft struct {
 	ident       identity
 	// selfURL is this node's advertised peer URL (its COMMITTED_PEERS entry),
 	// which the leader records cluster-wide (agreed_addresses.go).
-	selfURL      string
+	selfURL string
+	// guard is the apply-time membership guard's state (membership_guard.go).
+	guard        membershipGuard
 	raftErrorC   chan<- error
 	raftStopC    chan struct{}
 	id           uint64
@@ -358,6 +360,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		n.node = raft.StartNode(c, ps)
 	}
 	n.initClusterIdentity(hs.GetTerm() == 0 && !n.join, ps)
+	n.refreshRemoved()
 	for _, p := range ps {
 		if p.ID == id {
 			if u, err := cluster.CanonicalPeerURL(string(p.Context)); err == nil {
@@ -373,7 +376,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// that can never reach a peer.
 		panic("db: no transport factory configured — wire one with WithTransportFactory")
 	}
-	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger, identity: &n.ident, isMember: n.isMember}
+	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger, identity: &n.ident, isMember: n.isMember, isRemoved: n.isRemoved}
 	// The transport serves peers' catch-up fetches from this node's event
 	// log when the storage has one (wal.Storage); the in-memory doubles do
 	// not, and serve nothing.
@@ -427,7 +430,10 @@ func (n *Raft) reconcileTransportFromMembership() {
 // updates the peer transport so this node starts or stops exchanging raft
 // messages with the affected peer.
 //
-// ccCtx is the change's Context. For an add it carries the new peer's
+// index is the entry's log index. The membership guard checks the change
+// first (membership_guard.go), and removals are recorded here for it.
+//
+// The change's Context: for an add it carries the new peer's
 // advertised URL (db.AddMember stashes it there); the transport needs the
 // URL to dial the peer, and raft's ConfState replicates only node IDs, never
 // addresses — so the URL must ride along on the conf change itself. The
@@ -460,11 +466,45 @@ func (n *Raft) persistPeerURLOrFatal(peer uint64, rawURL []byte) {
 	}
 }
 
-func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
+// recordRemovedOrFatal and switchOnGuardOrFatal record the guard's
+// conf-change-pass state. Fatal for the reason persistPeerURLOrFatal is: the
+// applied index must not pass a lost write, and a lost removal or switch-on
+// would let this node's guard reach a different verdict from its peers'.
+func (n *Raft) recordRemovedOrFatal(id, index uint64) {
+	if err := n.storage.RecordRemovedMember(id, index); err != nil {
+		n.logger.Fatal("conf change: record removed member — refusing to advance the applied index past a lost write",
+			zap.Uint64("member", id), zap.Error(err))
+	}
+	n.refreshRemoved()
+}
+
+func (n *Raft) switchOnGuardOrFatal(index uint64) {
+	if err := n.storage.SetMembershipGuardIndex(index); err != nil {
+		n.logger.Fatal("conf change: switch on the membership guard — refusing to advance the applied index past a lost write",
+			zap.Error(err))
+	}
+	n.logger.Info("membership guard on: invalid membership changes are refused when applied", zap.Uint64("from index", index))
+}
+
+func (n *Raft) applyConfChange(entry raftpb.ConfChangeI, index uint64) {
+	// Both wire forms apply as v2, so the guard sees one shape; raft converts
+	// a v1 change the same way.
+	cc := n.guardConfChange(entry.AsV2(), index)
+	ccCtx := cc.Context
 	cs := n.node.ApplyConfChange(cc)
 	n.storage.ConfState(cs)
 
-	for _, ch := range cc.AsV2().Changes {
+	for _, ch := range cc.Changes {
+		if ch.GetNodeId() == 0 {
+			continue // refused by the guard
+		}
+		if ch.GetType() == raftpb.ConfChangeRemoveNode {
+			n.recordRemovedOrFatal(ch.GetNodeId(), index)
+		}
+		if ch.GetType() == raftpb.ConfChangeUpdateNode && string(ccCtx) == membershipGuardMarker {
+			n.switchOnGuardOrFatal(index)
+			continue
+		}
 		// A node needs no transport entry for itself: skip self so applying
 		// our own AddNode doesn't try to dial our own URL, and so a
 		// self-removal doesn't tear down a peer that was never added.
@@ -865,7 +905,7 @@ func (n *Raft) serveChannels() {
 						continue
 					}
 					n.lastMembershipIndex.Store(entry.GetIndex())
-					n.applyConfChange(&cc, cc.Context)
+					n.applyConfChange(&cc, entry.GetIndex())
 				case raftpb.EntryConfChange:
 					// Backward compatibility: a v1 ConfChange can only appear
 					// in a log written by a pre-joint-consensus binary, since
@@ -879,7 +919,7 @@ func (n *Raft) serveChannels() {
 						continue
 					}
 					n.lastMembershipIndex.Store(entry.GetIndex())
-					n.applyConfChange(&cc, cc.Context)
+					n.applyConfChange(&cc, entry.GetIndex())
 				}
 			}
 			if k := len(rd.CommittedEntries); k > 0 {
@@ -1482,6 +1522,7 @@ func (n *Raft) ApplyBacklog() uint64 {
 // also fatal; a half-applied snapshot leaves the node in a hybrid
 // state that is worse than crashing and letting an operator rebuild.
 func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
+	before := n.storage.MemberPeerURLs()
 	if err := n.storage.RestoreSnapshot(snap); err != nil {
 		n.logger.Fatal("restore snapshot failed",
 			zap.Uint64("snapIndex", snap.Metadata.GetIndex()),
@@ -1496,12 +1537,23 @@ func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
 	// every current member, including ones added while it was lagging (whose live
 	// AddPeer it never saw). Mirrors the restart-path reconcile.
 	n.reconcileTransportFromMembership()
+	// Members this node knew that the snapshot's configuration no longer has
+	// were removed while it lagged; stop dialing them.
+	cs := snap.GetMetadata().GetConfState()
+	for id := range before {
+		if id != n.id && !confStateHas(cs, id) {
+			n.transport.RemovePeer(id)
+		}
+	}
+	n.refreshRemoved()
 }
 
 type httpTransportRaft struct {
 	node raft.Node
-	// isMember answers the transport's MembershipView question.
-	isMember func(uint64) bool
+	// isMember answers the transport's MembershipView question; isRemoved
+	// its IsIDRemoved.
+	isMember  func(uint64) bool
+	isRemoved func(uint64) bool
 	// identity is the node's cluster identity, exposed to the transport
 	// (ClusterIdentifier).
 	*identity
@@ -1558,7 +1610,7 @@ func (n *httpTransportRaft) Process(ctx context.Context, m *raftpb.Message) erro
 	}
 	return n.node.Step(ctx, m)
 }
-func (n *httpTransportRaft) IsIDRemoved(id uint64) bool { return false }
+func (n *httpTransportRaft) IsIDRemoved(id uint64) bool { return n.isRemoved(id) }
 
 // IsMember implements MembershipView.
 func (n *httpTransportRaft) IsMember(id uint64) bool     { return n.isMember(id) }
@@ -1580,9 +1632,7 @@ func (n *Raft) applyAgreedAddress(cs *raftpb.ConfState, id uint64, ccCtx []byte)
 		n.logger.Error("ignoring an agreed peer address that does not parse", zap.Uint64("member", id), zap.Error(err))
 		return
 	}
-	if err := n.storage.PutMemberPeerURL(id, []byte(peerURL)); err != nil {
-		n.logger.Error("recording an agreed peer address", zap.Uint64("member", id), zap.Error(err))
-	}
+	n.persistPeerURLOrFatal(id, []byte(peerURL))
 	if id == n.id {
 		return
 	}

@@ -38,11 +38,11 @@ func TestMembershipWaitRequiresRaftAppliedConfiguration(t *testing.T) {
 			d := &DB{raft: r, ctx: context.Background(), appliedNotifyCh: make(chan struct{})}
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			require.ErrorIs(t, d.waitForMembership(ctx, 2, target), context.Canceled,
+			require.ErrorIs(t, d.waitForMembership(ctx, 2, target, 0), context.Canceled,
 				"the final role alone must not satisfy the immediate check")
 
 			node.status.Applied = 82
-			require.NoError(t, d.waitForMembership(context.Background(), 2, target),
+			require.NoError(t, d.waitForMembership(context.Background(), 2, target, 0),
 				"Advance must make the configuration eligible to satisfy the waiter")
 		})
 	}

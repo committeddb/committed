@@ -1332,6 +1332,9 @@ func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", cluster.ErrInvalidMember, err)
 	}
+	if err := db.removedMemberError(id); err != nil {
+		return err
+	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
 		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: &id}},
@@ -1361,6 +1364,15 @@ func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 	peerURL, err := cluster.CanonicalPeerURL(rawURL)
 	if err != nil {
 		return fmt.Errorf("%w: %w", cluster.ErrInvalidMember, err)
+	}
+	if err := db.removedMemberError(id); err != nil {
+		return err
+	}
+	// raft would demote a voter named in an add-learner; promote and demote
+	// are never spelled as an add.
+	voters, _, _ := db.raft.memberStatus()
+	if _, isVoter := voters[id]; isVoter {
+		return fmt.Errorf("%w: node %d is already a voter; adding it as a learner would demote it", cluster.ErrInvalidMember, id)
 	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
@@ -1460,6 +1472,7 @@ func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id
 	if _, _, joint := db.raft.memberStatus(); joint {
 		return cluster.ErrMembershipChangeInProgress
 	}
+	rejections := db.raft.rejectionsSoFar()
 	select {
 	case db.confChangeC <- cc:
 	case <-ctx.Done():
@@ -1467,7 +1480,7 @@ func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id
 	case <-db.ctx.Done():
 		return db.ctx.Err()
 	}
-	return db.waitForMembership(ctx, id, target)
+	return db.waitForMembership(ctx, id, target, rejections)
 }
 
 // membershipSettleTimeout bounds waitForMembership when the caller's ctx
@@ -1496,7 +1509,13 @@ var ErrMembershipUnsettled = errors.New("membership change not applied within th
 // the auto-leave entries apply, so each step wakes the waiter. Requiring
 // joint==false means a successful return reflects the final (non-joint)
 // configuration, not the transient joint state.
-func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershipTarget) error {
+//
+// rejections is the membership guard's verdict count before the change was
+// proposed: a later verdict refusing a change for id ends the wait with its
+// error once the configuration has settled (a refused change still passes
+// through a joint configuration, and the caller's next change must not meet
+// it), since the change will never take effect.
+func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershipTarget, rejections uint64) error {
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeoutCause(ctx, membershipSettleTimeout, ErrMembershipUnsettled)
@@ -1529,6 +1548,11 @@ func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershi
 		ch := db.appliedNotify()
 		if settled() {
 			return nil
+		}
+		if err := db.raft.rejectedSince(rejections, id); err != nil {
+			if _, _, joint := db.raft.memberStatus(); !joint && db.raft.membershipApplied() {
+				return err
+			}
 		}
 		select {
 		case <-ch:

@@ -106,7 +106,8 @@ func (db *DB) waitForRecordedAddress(ctx context.Context, id uint64, peerURL str
 
 // recordAgreedAddresses runs on every node; the leader records any member
 // address it has delivered to that differs from the recorded one, one change
-// per round (raft holds one pending conf change at a time).
+// per round (raft holds one pending conf change at a time). It also switches
+// the membership guard on (proposeMembershipGuard).
 func (db *DB) recordAgreedAddresses() {
 	ticker := time.NewTicker(agreedAddressInterval)
 	defer ticker.Stop()
@@ -119,13 +120,16 @@ func (db *DB) recordAgreedAddresses() {
 		if db.raft.Leader() != db.raft.id {
 			continue
 		}
+		ctx, cancel := context.WithTimeout(db.ctx, agreedAddressInterval)
+		db.proposeMembershipGuard(ctx)
+		cancel()
 		id, peerURL, ok := db.nextAgreedAddress()
 		if !ok {
 			continue
 		}
 		db.logger.Info("recording a member's peer address cluster-wide",
 			zap.Uint64("member", id), zap.String("address", peerURL))
-		ctx, cancel := context.WithTimeout(db.ctx, agreedAddressInterval)
+		ctx, cancel = context.WithTimeout(db.ctx, agreedAddressInterval)
 		if err := db.proposeUpdateNode(ctx, id, peerURL); err != nil && db.ctx.Err() == nil {
 			db.logger.Warn("proposing a member's peer address; will retry", zap.Uint64("member", id), zap.Error(err))
 		}

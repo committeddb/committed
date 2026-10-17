@@ -332,6 +332,15 @@ type MembershipStorage interface {
 	MemberZone(id uint64) (string, bool)
 	MemberZones() map[uint64]string
 	DeleteMemberZone(id uint64) error
+	// RecordRemovedMember / RemovedMembers persist every id removed from the
+	// configuration with the index of the conf change that first removed it;
+	// SetMembershipGuardIndex / MembershipGuardIndex the index of the marker
+	// that switched on the apply-time membership guard. Both are first-wins
+	// and written in the conf-change pass. See membership_guard.go.
+	RecordRemovedMember(id, index uint64) error
+	RemovedMembers() map[uint64]uint64
+	SetMembershipGuardIndex(index uint64) error
+	MembershipGuardIndex() (uint64, bool)
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

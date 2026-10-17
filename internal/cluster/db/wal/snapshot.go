@@ -295,6 +295,10 @@ func (s *Storage) swapBboltToSnapshotData(data []byte, reconciledIndex uint64) e
 	// kvMu.RLock and would deadlock under a caller holding kvMu.Lock — so a
 	// restart's loadAppliedIndex reads the reconciled value, not the embedded one.
 	if err := db.Update(func(tx *bolt.Tx) error {
+		// A snapshot from an older release lacks the buckets it predates.
+		if err := createBuckets(tx); err != nil {
+			return err
+		}
 		b := tx.Bucket(appliedIndexBucket)
 		if b == nil {
 			return ErrBucketMissing
