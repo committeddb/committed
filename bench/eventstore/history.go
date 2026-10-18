@@ -41,8 +41,10 @@ type historyReport struct {
 	SnapshotSeconds float64 `json:"snapshotSeconds"` // ingestable posted → every node applied the snapshot
 	LogEntries      uint64  `json:"logEntries"`      // applied index once the snapshot applied
 
-	SnapshotOnly bool    `json:"snapshotOnly,omitempty"` // -history-snapshot-only: no build
-	BuildSeconds float64 `json:"buildSeconds"`           // projection posted → every row present, lag 0
+	RestoredFrom string  `json:"restoredFrom,omitempty"`    // -history-from-log: the dataset the cluster was restored from
+	SavedEntries uint64  `json:"savedLogEntries,omitempty"` // the saved log's entries, which the restored log must reach
+	SnapshotOnly bool    `json:"snapshotOnly,omitempty"`    // -history-snapshot-only: no build
+	BuildSeconds float64 `json:"buildSeconds"`              // projection posted → every row present, lag 0
 	BuildRate    float64 `json:"buildEventsPerSec"`
 	BuildTimeout bool    `json:"buildTimeout,omitempty"`
 
@@ -62,10 +64,17 @@ func (r *historyReport) Summary() string {
 	fmt.Fprintf(&b, "EVENT-STORE HISTORY %s  %s\n", verdict, r.Label)
 	fmt.Fprintf(&b, "  %d nodes %s\n", r.Nodes, r.Hardware)
 	fmt.Fprintf(&b, "  history: %d events in %d streams; hot streams %v\n", r.Events, r.Streams, r.HotStreams)
-	fmt.Fprintf(&b, "  load into the source (COPY): %.1fs\n", r.LoadSeconds)
-	fmt.Fprintf(&b, "  snapshot into the log: %.1fs (%.0f events/sec), %d log entries\n",
-		r.SnapshotSeconds, float64(r.Events)/max(r.SnapshotSeconds, 1e-9), r.LogEntries)
+	if r.RestoredFrom != "" {
+		fmt.Fprintf(&b, "  restored log: %d entries (the saved log held %d), from %s\n", r.LogEntries, r.SavedEntries, r.RestoredFrom)
+	} else {
+		fmt.Fprintf(&b, "  load into the source (COPY): %.1fs\n", r.LoadSeconds)
+		fmt.Fprintf(&b, "  snapshot into the log: %.1fs (%.0f events/sec), %d log entries\n",
+			r.SnapshotSeconds, float64(r.Events)/max(r.SnapshotSeconds, 1e-9), r.LogEntries)
+	}
 	switch {
+	case r.SnapshotOnly && r.RestoredFrom != "":
+		fmt.Fprintf(&b, "  projection build: not run (-history-snapshot-only)\n")
+		return b.String()
 	case r.SnapshotOnly:
 		fmt.Fprintf(&b, "  projection build: not run (-history-snapshot-only); ingestable deleted, %d log entries\n", r.LogEntries)
 		return b.String()
@@ -108,6 +117,21 @@ type dataset struct {
 	LogEntries uint64    `json:"logEntries"`
 }
 
+func readDataset(path string) (dataset, error) {
+	var ds dataset
+	b, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the dataset
+	if err != nil {
+		return ds, err
+	}
+	if err := json.Unmarshal(b, &ds); err != nil {
+		return ds, fmt.Errorf("%s: %w", path, err)
+	}
+	if ds.Events <= 0 || ds.LogEntries == 0 {
+		return ds, fmt.Errorf("%s: no events or log entries recorded", path)
+	}
+	return ds, nil
+}
+
 func writeDataset(dir string, o options, rep *historyReport) error {
 	b, err := json.MarshalIndent(dataset{
 		Created: time.Now().UTC(), Label: o.label, Events: o.history, HotStreams: o.hotStreams,
@@ -127,6 +151,15 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 	if o.engine != "postgres" {
 		return nil, fmt.Errorf("-history needs -engine postgres (it bulk-loads with COPY)")
 	}
+	var ds dataset
+	if o.fromLog != "" {
+		var err error
+		if ds, err = readDataset(o.fromLog); err != nil {
+			return nil, err
+		}
+		o.history, o.hotStreams, o.hotEvents = ds.Events, ds.HotStreams, ds.HotEvents
+		rep.RestoredFrom, rep.SavedEntries = o.fromLog, ds.LogEntries
+	}
 	r, err := loadRecipe(o.recipe)
 	if err != nil {
 		return nil, err
@@ -139,12 +172,6 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 	if _, err := read.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS read"); err != nil {
 		return nil, fmt.Errorf("read model: %w", err)
 	}
-	src, err := openSource(o, r.eventsDDL)
-	if err != nil {
-		return nil, err
-	}
-	src.close()
-
 	// The history: one writer's streams (each stream's versions in order),
 	// with the live workload's shapes — short orders and hot streams.
 	w := &writer{
@@ -158,24 +185,19 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 	if len(w.hot) > 0 {
 		w.hotShare = min(1, float64(len(w.hot)*o.hotEvents)/float64(o.history))
 	}
-	conn, err := pgx.Connect(ctx, o.srcDSN)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = conn.Close(context.Background()) }()
 	start := time.Now()
-	for done := int64(0); done < o.history; {
-		n := min(historyCopyChunk, o.history-done)
-		rows := &historyRows{w: w, left: n}
-		if _, err := conn.CopyFrom(ctx, pgx.Identifier{"events"}, []string{"stream_id", "version", "type", "data"}, rows); err != nil {
-			return rep, fmt.Errorf("copy events: %w", err)
+	if o.fromLog != "" {
+		// The log already holds the history: only the expected rows are needed.
+		for range o.history {
+			s, e := w.nextEvent()
+			w.apply(s, e)
 		}
-		done += n
-		if done%(10*historyCopyChunk) == 0 || done == o.history {
-			logf("loaded %d/%d events (%.0f/s)", done, o.history, float64(done)/time.Since(start).Seconds())
-		}
+		logf("regenerated the %d-event history from %s in %.1fs", o.history, o.fromLog, time.Since(start).Seconds())
+	} else if err := copyHistory(ctx, o, r, w); err != nil {
+		return rep, err
+	} else {
+		rep.LoadSeconds = time.Since(start).Seconds()
 	}
-	rep.LoadSeconds = time.Since(start).Seconds()
 	rep.Events = o.history
 	rep.HotStreams = nil
 	for _, s := range w.hot {
@@ -189,11 +211,15 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 	}
 	rep.Streams = len(want)
 
-	// Snapshot the history into the log.
 	c := newCluster(o.nodes)
 	if err := c.waitReady(ctx, o.readyTimeout); err != nil {
 		return rep, err
 	}
+	if o.fromLog != "" {
+		return buildRestored(ctx, o, r, c, read, want, rep)
+	}
+
+	// Snapshot the history into the log.
 	ingestable, err := r.ingestableFor(o)
 	if err != nil {
 		return rep, err
@@ -239,10 +265,71 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 		return rep, writeDataset(o.results, o, rep)
 	}
 
-	// Build the projection over the history.
+	return rep, buildHistory(ctx, o, r, c, read, want, rep)
+}
+
+// copyHistory creates the source's events table and fills it with the
+// writer's history.
+func copyHistory(ctx context.Context, o options, r *recipe, w *writer) error {
+	src, err := openSource(o, r.eventsDDL)
+	if err != nil {
+		return err
+	}
+	src.close()
+	conn, err := pgx.Connect(ctx, o.srcDSN)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+	start := time.Now()
+	for done := int64(0); done < o.history; {
+		n := min(historyCopyChunk, o.history-done)
+		rows := &historyRows{w: w, left: n}
+		if _, err := conn.CopyFrom(ctx, pgx.Identifier{"events"}, []string{"stream_id", "version", "type", "data"}, rows); err != nil {
+			return fmt.Errorf("copy events: %w", err)
+		}
+		done += n
+		if done%(10*historyCopyChunk) == 0 || done == o.history {
+			logf("loaded %d/%d events (%.0f/s)", done, o.history, float64(done)/time.Since(start).Seconds())
+		}
+	}
+	return nil
+}
+
+// buildRestored checks that a cluster restored from a saved history's log
+// holds all of it, points the read-model database config at this run's
+// read model (the saved one names another machine), and builds.
+func buildRestored(ctx context.Context, o options, r *recipe, c *cluster, read *gosql.DB, want map[string]expected, rep *historyReport) (*historyReport, error) {
+	applied, err := c.waitApplySettled(ctx, o.rebuildLimit)
+	if err != nil {
+		return rep, err
+	}
+	rep.LogEntries = applied
+	if applied < rep.SavedEntries {
+		return rep, fmt.Errorf("the restored log holds %d entries; the saved one held %d", applied, rep.SavedEntries)
+	}
+	logf("restored log: %d entries on every node (the saved log held %d)", applied, rep.SavedEntries)
+	if o.snapshotOnly {
+		rep.SnapshotOnly = true
+		rep.Pass = true
+		return rep, nil
+	}
+	database, err := r.databaseFor(o)
+	if err != nil {
+		return rep, err
+	}
+	if err := c.postRetrying(ctx, "/v1/database/read", database, time.Minute); err != nil {
+		return rep, err
+	}
+	return rep, buildHistory(ctx, o, r, c, read, want, rep)
+}
+
+// buildHistory posts the projection and times it from posting to a
+// complete read model, then checks every row.
+func buildHistory(ctx context.Context, o options, r *recipe, c *cluster, read *gosql.DB, want map[string]expected, rep *historyReport) error {
 	buildStart := time.Now()
 	if err := c.postRetrying(ctx, "/v1/syncable/orders", r.orders, time.Minute); err != nil {
-		return rep, err
+		return err
 	}
 	logf("building orders over %d events", o.history)
 	done := false
@@ -260,7 +347,7 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 			lastLog = time.Now()
 		}
 		if err := sleep(ctx, 2*time.Second); err != nil {
-			return rep, err
+			return err
 		}
 	}
 	rep.BuildSeconds = time.Since(buildStart).Seconds()
@@ -272,12 +359,12 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 
 	got, err := readRows(ctx, read, "orders")
 	if err != nil {
-		return rep, err
+		return err
 	}
 	rep.Rows = len(got)
 	rep.Wrong, rep.Extra, rep.Examples = compare(want, got)
 	rep.Pass = done && rep.Wrong == 0 && rep.Extra == 0
-	return rep, nil
+	return nil
 }
 
 // historyRows feeds COPY the writer's next events, applying each to its

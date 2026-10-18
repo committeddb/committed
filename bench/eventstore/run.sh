@@ -7,12 +7,17 @@
 #
 #   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [--profile]
 #            [--pinned-labels a] [--profile-every SECONDS] [--save-log DEST]
-#            [-- eventstore-load flags]
+#            [--from-log SRC] [-- eventstore-load flags]
 #
 # --save-log DEST, after a run with -history N -history-snapshot-only, takes
 # a live backup of a follower and stores it with the history's dataset.json
 # under DEST/<label>/: an s3:// prefix (the node uploads it with its instance
 # role), or a local directory when the nodes are local.
+#
+# --from-log SRC restores every node from SRC/backup.tar (a prefix --save-log
+# wrote, label included) as one new cluster instead of starting empty, and
+# runs eventstore-load with -history-from-log SRC/dataset.json: it checks the
+# log came back whole and builds over it. The source database starts empty.
 #
 # A label in --pinned-labels runs with node i in zone zi and the projections
 # pinned to a follower's zone, so they sync off the leader. It names a build
@@ -38,6 +43,7 @@ labels=$(ls "$here/bin" | grep -v '^eventstore-load$' | paste -sd, -)
 engines=postgres
 pinned=
 save_dest=
+from_log=
 while [ $# -gt 0 ]; do
   case $1 in
   --labels) labels=$2; shift 2 ;;
@@ -46,6 +52,7 @@ while [ $# -gt 0 ]; do
   --profile-every) BENCH_PROFILE_EVERY=$2; shift 2 ;;
   --pinned-labels) pinned=$2; shift 2 ;;
   --save-log) save_dest=${2%/}; shift 2 ;;
+  --from-log) from_log=${2%/}; shift 2 ;;
   --) shift; break ;;
   *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -108,16 +115,59 @@ peers() {
   echo "$out"
 }
 
-# start_nodes [zoned]: with zoned set, node i starts in zone zi.
+# start_nodes [zoned]: with zoned set, node i starts in zone zi. Each node
+# starts empty, or on its restored data directory with --from-log.
 start_nodes() {
-  local zoned=${1:-} i p; p=$(peers)
+  local zoned=${1:-} i p fresh; p=$(peers)
   for i in $(seq 1 "$count"); do
     local dir; dir=$(node_dir "$i")
-    on_node "$i" "rm -rf '$dir/data' && mkdir -p '$dir/data' && cd '$dir' || exit 1; \
+    fresh="rm -rf '$dir/data' && mkdir -p '$dir/data' &&"
+    [ -z "$from_log" ] || fresh=
+    on_node "$i" "$fresh cd '$dir' || exit 1; \
       APP_DB_PASSWORD=$PW COMMITTED_NODE_ID=$i COMMITTED_API_ADDR=:$(api_port "$i") \
       COMMITTED_PEER_URL=http://${hosts[$((i - 1))]}:$(peer_port "$i") COMMITTED_PEERS=$p \
       COMMITTED_DATA_DIR='$dir/data' ${zoned:+COMMITTED_ZONE=z$i} ${BENCH_PROFILE:+COMMITTED_PPROF=true} nohup ./committed-bin node > node.log 2>&1 < /dev/null & echo \$! > '$dir/pid'"
   done
+}
+
+# fetch src name dest_dir [node]: copy src/name (an s3:// prefix or a local
+# directory) into dest_dir, on node i when given, else here.
+fetch() {
+  local src=$1 name=$2 dest=$3 node=${4:-} cmd
+  case $src in
+  s3://*) cmd="aws s3 cp --only-show-errors '$src/$name' '$dest/$name'" ;;
+  *) cmd="cp '$src/$name' '$dest/$name'" ;;
+  esac
+  if [ -n "$node" ]; then on_node "$node" "$cmd"; else sh -c "$cmd"; fi
+}
+
+# restore_nodes src out: every node restored from src's backup.tar as a
+# member of one new cluster — node 1 mints the seed, the rest join it, as
+# docs/operations/backup.md describes.
+restore_nodes() {
+  local src=$1 out=$2 i dir seed t0 pids=()
+  t0=$(date +%s)
+  for i in $(seq 1 "$count"); do
+    dir=$(node_dir "$i")
+    on_node "$i" "rm -rf '$dir/data' && mkdir -p '$dir'" || return 1
+    fetch "$src" backup.tar "$dir" "$i" &
+    pids+=($!)
+  done
+  for i in "${pids[@]}"; do wait "$i" || return 1; done
+  echo "downloaded: $(($(date +%s) - t0))s" | tee "$out/restore.txt"
+  t0=$(date +%s)
+  dir=$(node_dir 1)
+  seed=$(on_node 1 "cd '$dir' && ./committed-bin restore --from backup.tar --data '$dir/data' --node-id 1 --new-cluster && rm -f backup.tar" |
+    tee -a "$out/restore.txt" | sed -n 's/.*--cluster-id \([0-9a-f-]*\).*/\1/p')
+  [ -n "$seed" ] || { echo "run.sh: restore of node 1 printed no cluster seed" >&2; return 1; }
+  pids=()
+  for i in $(seq 2 "$count"); do
+    dir=$(node_dir "$i")
+    on_node "$i" "cd '$dir' && ./committed-bin restore --from backup.tar --data '$dir/data' --node-id $i --cluster-id $seed && rm -f backup.tar" >>"$out/restore.txt" &
+    pids+=($!)
+  done
+  for i in ${pids[@]+"${pids[@]}"}; do wait "$i" || return 1; done
+  echo "restored: $(($(date +%s) - t0))s" | tee -a "$out/restore.txt"
 }
 
 stop_nodes() {
@@ -265,6 +315,12 @@ for label in "${label_list[@]}"; do
     start_dbs "$engine"
     pin=()
     case ",$pinned," in *",$label,"*) pin=(-pin-follower) ;; esac
+    restored=()
+    if [ -n "$from_log" ]; then
+      restore_nodes "$from_log" "$out" || { status=1; continue; }
+      fetch "$from_log" dataset.json "$out" || { status=1; continue; }
+      restored=(-history-from-log "$out/dataset.json")
+    fi
     start_nodes ${pin[@]+zoned}
     profiler=
     if [ -n "${BENCH_PROFILE:-}" ]; then
@@ -275,7 +331,7 @@ for label in "${label_list[@]}"; do
     "$here/bin/eventstore-load" -nodes "$nodes_flag" -engine "$engine" -label "$label" \
       -recipe "$here/recipe/event-store-read-models.md" -results "$out" \
       -src-dsn "$src_dsn" -src-url "$src_url" -read-dsn "$read_dsn" -read-url "$read_url" \
-      ${pin[@]+"${pin[@]}"} ${load_args[@]+"${load_args[@]}"} 2>&1 | tee "$out/load.log"
+      ${pin[@]+"${pin[@]}"} ${restored[@]+"${restored[@]}"} ${load_args[@]+"${load_args[@]}"} 2>&1 | tee "$out/load.log"
     rc=${PIPESTATUS[0]}
     set -e
     [ "$rc" -eq 0 ] || status=$rc

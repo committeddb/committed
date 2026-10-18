@@ -60,6 +60,7 @@ type options struct {
 	pinFollower   bool
 	history       int64
 	snapshotOnly  bool
+	fromLog       string
 }
 
 func main() {
@@ -92,6 +93,7 @@ func main() {
 	flag.StringVar(&o.sqlserverPoll, "sqlserver-poll-interval", "", "set [sql.options] pollInterval on a SQL Server ingestable (default: the recipe's, i.e. none)")
 	flag.Int64Var(&o.history, "history", 0, "instead of the live workload, bulk-load this many events into the source, snapshot them into the log, and time building the projection over them (postgres only; set -rebuild-limit for large histories)")
 	flag.BoolVar(&o.snapshotOnly, "history-snapshot-only", false, "with -history: stop once the history is in the log — delete the ingestable (so a restore of the log needs no source) and write dataset.json, which describes the history so a later run can check a build over it — instead of building the projection")
+	flag.StringVar(&o.fromLog, "history-from-log", "", "the dataset.json of a saved history: the cluster was restored from its log, so regenerate the history from it instead of loading the source, check the log came back whole, and build over it (with -history-snapshot-only, stop after the check)")
 	flag.BoolVar(&o.pinFollower, "pin-follower", false, "pin the projections to a follower's zone (run.sh starts node i in zone zi), so they sync off the leader")
 	flag.Parse()
 
@@ -110,7 +112,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if o.history > 0 {
+	if o.history > 0 || o.fromLog != "" {
 		hrep, err := runHistory(ctx, o)
 		if hrep != nil {
 			if werr := writeHistoryReport(o.results, hrep); werr != nil {
@@ -155,8 +157,10 @@ func validate(o options) error {
 		return fmt.Errorf("-rate, -writers and -duration must be positive")
 	case o.sampleEvery <= 0:
 		return fmt.Errorf("-sample-every must be positive")
-	case o.snapshotOnly && o.history <= 0:
-		return fmt.Errorf("-history-snapshot-only needs -history")
+	case o.snapshotOnly && o.history <= 0 && o.fromLog == "":
+		return fmt.Errorf("-history-snapshot-only needs -history or -history-from-log")
+	case o.fromLog != "" && o.history > 0:
+		return fmt.Errorf("give -history or -history-from-log, not both: the dataset sets the history's size")
 	}
 	return nil
 }
