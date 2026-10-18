@@ -6,7 +6,13 @@
 # eventstore-load, collects the results, and tears it all down.
 #
 #   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [--profile]
-#            [--pinned-labels a] [--profile-every SECONDS] [-- eventstore-load flags]
+#            [--pinned-labels a] [--profile-every SECONDS] [--save-log DEST]
+#            [-- eventstore-load flags]
+#
+# --save-log DEST, after a run with -history N -history-snapshot-only, takes
+# a live backup of a follower and stores it with the history's dataset.json
+# under DEST/<label>/: an s3:// prefix (the node uploads it with its instance
+# role), or a local directory when the nodes are local.
 #
 # A label in --pinned-labels runs with node i in zone zi and the projections
 # pinned to a follower's zone, so they sync off the leader. It names a build
@@ -31,6 +37,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 labels=$(ls "$here/bin" | grep -v '^eventstore-load$' | paste -sd, -)
 engines=postgres
 pinned=
+save_dest=
 while [ $# -gt 0 ]; do
   case $1 in
   --labels) labels=$2; shift 2 ;;
@@ -38,6 +45,7 @@ while [ $# -gt 0 ]; do
   --profile) BENCH_PROFILE=1; shift ;;
   --profile-every) BENCH_PROFILE_EVERY=$2; shift 2 ;;
   --pinned-labels) pinned=$2; shift 2 ;;
+  --save-log) save_dest=${2%/}; shift 2 ;;
   --) shift; break ;;
   *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -206,6 +214,33 @@ profile_nodes() {
   done
 }
 
+# save_log dest out: a live backup of a follower (the backup docs' advice),
+# and the history's dataset.json from out, into dest.
+save_log() {
+  local dest=$1 out=$2 leader i src=1 dir
+  leader=$(curl -s -m 10 "http://${hosts[0]}:$(api_port 1)/v1/node/status" | sed -n 's/.*"leader":\([0-9]*\).*/\1/p')
+  for i in $(seq 1 "$count"); do
+    if [ "$i" != "$leader" ]; then src=$i; break; fi
+  done
+  dir=$(node_dir "$src")
+  echo "backing up node $src (leader ${leader:-unknown}) to $dest"
+  local t0; t0=$(date +%s)
+  on_node "$src" "cd '$dir' && ./committed-bin backup --live --target http://127.0.0.1:$(api_port "$src") --to '$dir/backup.tar'" || return 1
+  on_node "$src" "ls -l '$dir/backup.tar'" | awk '{print "archive bytes:", $5}' | tee "$out/save.txt"
+  echo "backup: $(($(date +%s) - t0))s" | tee -a "$out/save.txt"
+  case $dest in
+  s3://*)
+    on_node "$src" "aws s3 cp --only-show-errors '$dir/backup.tar' '$dest/backup.tar' && rm -f '$dir/backup.tar'" || return 1
+    aws s3 cp --only-show-errors "$out/dataset.json" "$dest/dataset.json" || return 1
+    ;;
+  *)
+    [ "$NODES" = local ] || { echo "run.sh: --save-log needs an s3:// prefix for remote nodes" >&2; return 1; }
+    mkdir -p "$dest" && mv "$dir/backup.tar" "$dest/backup.tar" && cp "$out/dataset.json" "$dest/dataset.json" || return 1
+    ;;
+  esac
+  echo "saved: $(($(date +%s) - t0))s, $dest/backup.tar and dataset.json" | tee -a "$out/save.txt"
+}
+
 cleanup() { stop_nodes; stop_dbs; }
 trap cleanup EXIT
 
@@ -244,6 +279,9 @@ for label in "${label_list[@]}"; do
     rc=${PIPESTATUS[0]}
     set -e
     [ "$rc" -eq 0 ] || status=$rc
+    if [ -n "$save_dest" ] && [ "$rc" -eq 0 ]; then
+      save_log "$save_dest/$label" "$out" || status=1
+    fi
     if [ -n "$profiler" ]; then kill "$profiler" 2>/dev/null; wait "$profiler" 2>/dev/null || true; fi
     stop_nodes
     collect_nodes "$out"

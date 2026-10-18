@@ -20,7 +20,11 @@ import (
 // log (one row per proposal, as onboarding a real events table does), and
 // only then is the projection posted. It reports the snapshot time, the
 // projection's build time from posting to a complete, correct read model,
-// and checks every row.
+// and checks every row. With -history-snapshot-only it stops once the
+// history is in the log, deletes the ingestable so a backup of the log
+// restores without the source, and writes dataset.json: the history is a
+// pure function of the parameters it records (seeded event shapes and stream
+// ids), so a later run over a restored log can regenerate the expected rows.
 
 // historyReport is report.json for a history run.
 type historyReport struct {
@@ -37,7 +41,8 @@ type historyReport struct {
 	SnapshotSeconds float64 `json:"snapshotSeconds"` // ingestable posted → every node applied the snapshot
 	LogEntries      uint64  `json:"logEntries"`      // applied index once the snapshot applied
 
-	BuildSeconds float64 `json:"buildSeconds"` // projection posted → every row present, lag 0
+	SnapshotOnly bool    `json:"snapshotOnly,omitempty"` // -history-snapshot-only: no build
+	BuildSeconds float64 `json:"buildSeconds"`           // projection posted → every row present, lag 0
 	BuildRate    float64 `json:"buildEventsPerSec"`
 	BuildTimeout bool    `json:"buildTimeout,omitempty"`
 
@@ -60,9 +65,13 @@ func (r *historyReport) Summary() string {
 	fmt.Fprintf(&b, "  load into the source (COPY): %.1fs\n", r.LoadSeconds)
 	fmt.Fprintf(&b, "  snapshot into the log: %.1fs (%.0f events/sec), %d log entries\n",
 		r.SnapshotSeconds, float64(r.Events)/max(r.SnapshotSeconds, 1e-9), r.LogEntries)
-	if r.BuildTimeout {
+	switch {
+	case r.SnapshotOnly:
+		fmt.Fprintf(&b, "  projection build: not run (-history-snapshot-only); ingestable deleted, %d log entries\n", r.LogEntries)
+		return b.String()
+	case r.BuildTimeout:
 		fmt.Fprintf(&b, "  projection build: did not finish within the limit (%.1fs)\n", r.BuildSeconds)
-	} else {
+	default:
 		fmt.Fprintf(&b, "  projection build: %.1fs (%.0f events/sec)\n", r.BuildSeconds, r.BuildRate)
 	}
 	fmt.Fprintf(&b, "  rows %d, wrong %d, extra %d\n", r.Rows, r.Wrong, r.Extra)
@@ -84,6 +93,30 @@ func writeHistoryReport(dir string, rep *historyReport) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "summary.txt"), []byte(rep.Summary()), 0o600)
+}
+
+// dataset describes a history in a log, for a later run over a restore of
+// it: the parameters that regenerate the history exactly, and what the log
+// held once it was in.
+type dataset struct {
+	Created    time.Time `json:"created"`
+	Label      string    `json:"label,omitempty"`
+	Events     int64     `json:"events"`
+	HotStreams int       `json:"hotStreams"`
+	HotEvents  int       `json:"hotEvents"`
+	Streams    int       `json:"streams"`
+	LogEntries uint64    `json:"logEntries"`
+}
+
+func writeDataset(dir string, o options, rep *historyReport) error {
+	b, err := json.MarshalIndent(dataset{
+		Created: time.Now().UTC(), Label: o.label, Events: o.history, HotStreams: o.hotStreams,
+		HotEvents: o.hotEvents, Streams: rep.Streams, LogEntries: rep.LogEntries,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "dataset.json"), b, 0o600)
 }
 
 // historyCopyChunk is how many rows each COPY carries.
@@ -114,9 +147,13 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 
 	// The history: one writer's streams (each stream's versions in order),
 	// with the live workload's shapes — short orders and hot streams.
-	w := &writer{rnd: mrand.New(mrand.NewPCG(1, 0x5eed)), hotTarget: o.hotEvents} //nolint:gosec // G404: workload shape, not security
+	w := &writer{
+		rnd:       mrand.New(mrand.NewPCG(1, 0x5eed)), //nolint:gosec // G404: workload shape, not security
+		ids:       mrand.New(mrand.NewPCG(2, 0x5eed)), //nolint:gosec // G404: reproducible ids, not security
+		hotTarget: o.hotEvents,
+	}
 	for range o.hotStreams {
-		w.hot = append(w.hot, &stream{id: newUUID(), hot: true})
+		w.hot = append(w.hot, &stream{id: w.newID(), hot: true})
 	}
 	if len(w.hot) > 0 {
 		w.hotShare = min(1, float64(len(w.hot)*o.hotEvents)/float64(o.history))
@@ -186,6 +223,21 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 	rep.SnapshotSeconds = time.Since(snapStart).Seconds()
 	rep.LogEntries = applied
 	logf("snapshot applied on every node: %.1fs, %d log entries", rep.SnapshotSeconds, applied)
+
+	if o.snapshotOnly {
+		if err := c.delete(ctx, "/v1/ingestable/order-events"); err != nil {
+			return rep, err
+		}
+		applied, err := c.waitApplySettled(ctx, o.rebuildLimit)
+		if err != nil {
+			return rep, err
+		}
+		rep.LogEntries = applied
+		rep.SnapshotOnly = true
+		rep.Pass = true
+		logf("ingestable deleted; %d log entries", applied)
+		return rep, writeDataset(o.results, o, rep)
+	}
 
 	// Build the projection over the history.
 	buildStart := time.Now()

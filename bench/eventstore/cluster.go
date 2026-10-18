@@ -52,6 +52,19 @@ func (c *cluster) post(ctx context.Context, path, body string) error {
 	return last
 }
 
+// delete deletes a config through the first node that takes it.
+func (c *cluster) delete(ctx context.Context, path string) error {
+	var last error
+	for _, n := range c.nodes {
+		code, b, err := c.do(ctx, http.MethodDelete, n+path, "")
+		if err == nil && code/100 == 2 {
+			return nil
+		}
+		last = fmt.Errorf("DELETE %s%s: %d %s %v", n, path, code, strings.TrimSpace(string(b)), err)
+	}
+	return last
+}
+
 // waitReady waits until every node answers /ready and they agree on a leader.
 func (c *cluster) waitReady(ctx context.Context, limit time.Duration) error {
 	deadline := time.Now().Add(limit)

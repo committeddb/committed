@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	mrand "math/rand/v2"
 	"sync"
@@ -52,6 +53,7 @@ var (
 // are appended in order by one connection.
 type writer struct {
 	rnd       *mrand.Rand
+	ids       *mrand.Rand // stream ids from this seed instead of crypto/rand, when set
 	open      []*stream
 	hot       []*stream
 	hotTarget int
@@ -66,6 +68,20 @@ const openShortStreams = 8
 func newUUID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// newID is a new stream id: random, or from w.ids so a history can be
+// regenerated exactly.
+func (w *writer) newID() string {
+	if w.ids == nil {
+		return newUUID()
+	}
+	var b [16]byte
+	binary.LittleEndian.PutUint64(b[:8], w.ids.Uint64())
+	binary.LittleEndian.PutUint64(b[8:], w.ids.Uint64())
 	b[6] = b[6]&0x0f | 0x40
 	b[8] = b[8]&0x3f | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
@@ -87,7 +103,7 @@ func (w *writer) nextEvent() (*stream, event) {
 		w.hotCredit = 0
 	}
 	if len(w.open) < openShortStreams {
-		s := &stream{id: newUUID(), items: 1 + w.rnd.IntN(8)}
+		s := &stream{id: w.newID(), items: 1 + w.rnd.IntN(8)}
 		switch r := w.rnd.IntN(100); {
 		case r < 70:
 			s.end = "order_shipped"
