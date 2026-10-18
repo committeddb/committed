@@ -58,9 +58,7 @@ func TestPerf_Transport(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		leader.proposeC <- []byte(fmt.Sprintf("warm-%d", i))
 	}
-	for li(follower) < 100 {
-		time.Sleep(time.Millisecond)
-	}
+	waitForIndex(t, nodes, follower, leaderID, 100, time.Millisecond)
 
 	// --- Steady-state throughput: fire N proposes, time until the FOLLOWER has
 	// them all (i.e. they were transported leader→follower). ---
@@ -72,9 +70,7 @@ func TestPerf_Transport(t *testing.T) {
 			leader.proposeC <- []byte(fmt.Sprintf("thr-%d", i))
 		}
 	}()
-	for li(follower) < base+N {
-		time.Sleep(200 * time.Microsecond)
-	}
+	waitForIndex(t, nodes, follower, leaderID, base+N, 200*time.Microsecond)
 	thrElapsed := time.Since(start)
 
 	// --- Commit latency: M synchronous propose→follower-has-it, finely polled.
@@ -85,9 +81,7 @@ func TestPerf_Transport(t *testing.T) {
 		want := li(follower) + 1
 		t0 := time.Now()
 		leader.proposeC <- []byte(fmt.Sprintf("lat-%d", i))
-		for li(follower) < want {
-			time.Sleep(25 * time.Microsecond)
-		}
+		waitForIndex(t, nodes, follower, leaderID, want, 25*time.Microsecond)
 		lats = append(lats, time.Since(t0))
 	}
 	sort.Slice(lats, func(a, b int) bool { return lats[a] < lats[b] })
@@ -147,8 +141,10 @@ func newPerfCluster(t *testing.T, n int) []*perfNode {
 		confChangeC := make(chan *raftpb.ConfChangeV2)
 		s := dbtesting.NewMemoryStorage()
 
+		// Production tick timing: a faster tick shrinks the election window
+		// enough that a loaded CI runner's scheduling stalls move leadership
+		// mid-run.
 		_, r := db.NewRaft(p.ID, peers, s, proposeC, confChangeC,
-			db.WithTickInterval(10*time.Millisecond),
 			db.WithTransportFactory(httptransport.Factory()))
 
 		nodes = append(nodes, &perfNode{id: p.ID, raft: r, storage: s, proposeC: proposeC})
@@ -170,15 +166,39 @@ func closePerfCluster(nodes []*perfNode) {
 func waitForLeader(t *testing.T, nodes []*perfNode) uint64 {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if time.Now().After(deadline) {
-			t.Fatal("waitForLeader: no stable leader within 5s")
+			t.Fatal("waitForLeader: no stable leader within 10s")
 		}
 		if id, ok := stableLeader(nodes); ok {
 			return id
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// waitForIndex polls n until its last index reaches want. A leader change
+// drops the proposals in flight, so want is never reached and the numbers
+// would be meaningless anyway: the test skips rather than spin until the
+// package timeout. A stall with leadership unchanged is the transport's fault
+// and fails. Leadership is checked at most every 100ms because Status() goes
+// through the raft loop and would perturb the latencies being measured.
+func waitForIndex(t *testing.T, nodes []*perfNode, n *perfNode, leaderID, want uint64, poll time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	nextCheck := time.Now().Add(100 * time.Millisecond)
+	for n.lastIndex(t) < want {
+		if now := time.Now(); now.After(nextCheck) {
+			if id, ok := stableLeader(nodes); !ok || id != leaderID {
+				t.Skipf("leadership moved off node %d mid-measurement; proposals in flight were dropped", leaderID)
+			}
+			if now.After(deadline) {
+				t.Fatalf("node %d stuck at index %d, want %d, with node %d still leading", n.id, n.lastIndex(t), want, leaderID)
+			}
+			nextCheck = now.Add(100 * time.Millisecond)
+		}
+		time.Sleep(poll)
 	}
 }
 
