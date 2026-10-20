@@ -23,12 +23,17 @@ func newCluster(nodes []string) *cluster {
 }
 
 func (c *cluster) do(ctx context.Context, method, url, body string) (int, []byte, error) {
+	return c.doAs(ctx, method, url, "text/toml", body)
+}
+
+// doAs is do with the body's content type.
+func (c *cluster) doAs(ctx context.Context, method, url, contentType, body string) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(body))
 	if err != nil {
 		return 0, nil, err
 	}
 	if body != "" {
-		req.Header.Set("Content-Type", "text/toml")
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -50,6 +55,33 @@ func (c *cluster) post(ctx context.Context, path, body string) error {
 		last = fmt.Errorf("POST %s%s: %d %s %v", n, path, code, strings.TrimSpace(string(b)), err)
 	}
 	return last
+}
+
+// propose appends a JSON proposal through the first node that takes it.
+func (c *cluster) propose(ctx context.Context, body string) error {
+	var last error
+	for _, n := range c.nodes {
+		code, b, err := c.doAs(ctx, http.MethodPost, n+"/v1/proposal", "application/json", body)
+		if err == nil && code/100 == 2 {
+			return nil
+		}
+		last = fmt.Errorf("POST %s/v1/proposal: %d %s %v", n, code, strings.TrimSpace(string(b)), err)
+	}
+	return last
+}
+
+// scrubStatus is a node's scrub progress from /v1/node/status.
+type scrubStatus struct {
+	PendingBound   uint64 `json:"pendingBound"`
+	CompletedBound uint64 `json:"completedBound"`
+}
+
+func (c *cluster) scrubStatus(ctx context.Context, node string) (scrubStatus, error) {
+	var st struct {
+		Scrub scrubStatus `json:"scrub"`
+	}
+	err := c.getJSON(ctx, node+"/v1/node/status", &st)
+	return st.Scrub, err
 }
 
 // delete deletes a config through the first node that takes it.

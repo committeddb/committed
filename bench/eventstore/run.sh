@@ -18,6 +18,9 @@
 # wrote, label included) as one new cluster instead of starting empty, and
 # runs eventstore-load with -history-from-log SRC/dataset.json: it checks the
 # log came back whole and builds over it. The source database starts empty.
+# Pass -history-scrub N to eventstore-load (after --) to erase N subjects and
+# time the scrub instead of building; restore.txt records each node's event
+# log before it and nodes/<node>.du after.
 #
 # A label in --pinned-labels runs with node i in zone zi and the projections
 # pinned to a follower's zone, so they sync off the leader. It names a build
@@ -250,6 +253,11 @@ restore_nodes() {
     for i in "${pids[@]}"; do wait "$i" || return 1; done
     echo "converted: $(($(date +%s) - t0))s" | tee -a "$out/restore.txt"
   fi
+  # The event log as restored, before the run changes it (collect_nodes
+  # records it again at the end, after a -history-scrub run's rewrite).
+  for i in $(seq 1 "$count"); do
+    echo "node$i event log: $(on_node "$i" "d='$(node_dir "$i")/data/events'; du -sb \"\$d\" 2>/dev/null || du -sk \"\$d\" | awk '{print \$1 * 1024}'" | cut -f1) bytes" | tee -a "$out/restore.txt"
+  done
 }
 
 stop_nodes() {

@@ -25,6 +25,11 @@ import (
 // restores without the source, and writes dataset.json: the history is a
 // pure function of the parameters it records (seeded event shapes and stream
 // ids), so a later run over a restored log can regenerate the expected rows.
+// With -history-scrub N, a run over a restored log builds nothing: it erases
+// N subjects with right-to-be-forgotten deletes and times the scrub. Each
+// event is its own entity, keyed by its seq_id, which COPY assigned in
+// history order (1..N), so the regenerated history names every event of a
+// chosen stream without the source.
 
 // historyReport is report.json for a history run.
 type historyReport struct {
@@ -41,12 +46,17 @@ type historyReport struct {
 	SnapshotSeconds float64 `json:"snapshotSeconds"` // ingestable posted → every node applied the snapshot
 	LogEntries      uint64  `json:"logEntries"`      // applied index once the snapshot applied
 
-	RestoredFrom string  `json:"restoredFrom,omitempty"`    // -history-from-log: the dataset the cluster was restored from
-	SavedEntries uint64  `json:"savedLogEntries,omitempty"` // the saved log's entries, which the restored log must reach
-	SnapshotOnly bool    `json:"snapshotOnly,omitempty"`    // -history-snapshot-only: no build
-	BuildSeconds float64 `json:"buildSeconds"`              // projection posted → every row present, lag 0
-	BuildRate    float64 `json:"buildEventsPerSec"`
-	BuildTimeout bool    `json:"buildTimeout,omitempty"`
+	RestoredFrom  string    `json:"restoredFrom,omitempty"`    // -history-from-log: the dataset the cluster was restored from
+	SavedEntries  uint64    `json:"savedLogEntries,omitempty"` // the saved log's entries, which the restored log must reach
+	SnapshotOnly  bool      `json:"snapshotOnly,omitempty"`    // -history-snapshot-only: no build
+	ScrubSubjects int       `json:"scrubSubjects,omitempty"`   // -history-scrub: streams erased
+	ScrubDeletes  int       `json:"scrubDeletes,omitempty"`    // their events, one delete each
+	DeleteSeconds float64   `json:"deleteSeconds,omitempty"`   // deletes proposed → applied on every node
+	ScrubSeconds  []float64 `json:"scrubSeconds,omitempty"`    // scrub requested → each node (in -nodes order) completed it
+	ScrubTimeout  bool      `json:"scrubTimeout,omitempty"`    // a node did not complete within -rebuild-limit
+	BuildSeconds  float64   `json:"buildSeconds"`              // projection posted → every row present, lag 0
+	BuildRate     float64   `json:"buildEventsPerSec"`
+	BuildTimeout  bool      `json:"buildTimeout,omitempty"`
 
 	Rows     int      `json:"rows"`
 	Wrong    int      `json:"wrong"`
@@ -70,6 +80,15 @@ func (r *historyReport) Summary() string {
 		fmt.Fprintf(&b, "  load into the source (COPY): %.1fs\n", r.LoadSeconds)
 		fmt.Fprintf(&b, "  snapshot into the log: %.1fs (%.0f events/sec), %d log entries\n",
 			r.SnapshotSeconds, float64(r.Events)/max(r.SnapshotSeconds, 1e-9), r.LogEntries)
+	}
+	if r.ScrubSubjects > 0 {
+		fmt.Fprintf(&b, "  erased %d subjects: %d deletes applied on every node in %.1fs\n", r.ScrubSubjects, r.ScrubDeletes, r.DeleteSeconds)
+		if r.ScrubTimeout {
+			fmt.Fprintf(&b, "  scrub: not completed on every node within the limit; per node %v s\n", r.ScrubSeconds)
+		} else {
+			fmt.Fprintf(&b, "  scrub: completed on every node; per node %v s\n", r.ScrubSeconds)
+		}
+		return b.String()
 	}
 	switch {
 	case r.SnapshotOnly && r.RestoredFrom != "":
@@ -186,12 +205,30 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 		w.hotShare = min(1, float64(len(w.hot)*o.hotEvents)/float64(o.history))
 	}
 	start := time.Now()
+	var erase []int64
 	if o.fromLog != "" {
-		// The log already holds the history: only the expected rows are needed.
-		for range o.history {
+		// The log already holds the history: only the expected rows are needed,
+		// and with -history-scrub the seq_ids of the chosen streams' events.
+		chosen := map[*stream]bool{}
+		stride := max(1, ds.Streams/max(o.scrubSubjects, 1))
+		started := 0
+		for seq := int64(1); seq <= o.history; seq++ {
 			s, e := w.nextEvent()
 			w.apply(s, e)
+			if o.scrubSubjects == 0 || s.hot {
+				continue
+			}
+			if e.version == 1 {
+				if started%stride == 0 && len(chosen) < o.scrubSubjects {
+					chosen[s] = true
+				}
+				started++
+			}
+			if chosen[s] {
+				erase = append(erase, seq)
+			}
 		}
+		rep.ScrubSubjects = len(chosen)
 		logf("regenerated the %d-event history from %s in %.1fs", o.history, o.fromLog, time.Since(start).Seconds())
 	} else if err := copyHistory(ctx, o, r, w); err != nil {
 		return rep, err
@@ -216,7 +253,7 @@ func runHistory(ctx context.Context, o options) (*historyReport, error) {
 		return rep, err
 	}
 	if o.fromLog != "" {
-		return buildRestored(ctx, o, r, c, read, want, rep)
+		return buildRestored(ctx, o, r, c, read, want, erase, rep)
 	}
 
 	// Snapshot the history into the log.
@@ -299,7 +336,7 @@ func copyHistory(ctx context.Context, o options, r *recipe, w *writer) error {
 // buildRestored checks that a cluster restored from a saved history's log
 // holds all of it, points the read-model database config at this run's
 // read model (the saved one names another machine), and builds.
-func buildRestored(ctx context.Context, o options, r *recipe, c *cluster, read *gosql.DB, want map[string]expected, rep *historyReport) (*historyReport, error) {
+func buildRestored(ctx context.Context, o options, r *recipe, c *cluster, read *gosql.DB, want map[string]expected, erase []int64, rep *historyReport) (*historyReport, error) {
 	applied, err := c.waitApplySettled(ctx, o.rebuildLimit)
 	if err != nil {
 		return rep, err
@@ -314,6 +351,9 @@ func buildRestored(ctx context.Context, o options, r *recipe, c *cluster, read *
 		rep.Pass = true
 		return rep, nil
 	}
+	if o.scrubSubjects > 0 {
+		return rep, scrubHistory(ctx, o, c, erase, rep)
+	}
 	database, err := r.databaseFor(o)
 	if err != nil {
 		return rep, err
@@ -322,6 +362,77 @@ func buildRestored(ctx context.Context, o options, r *recipe, c *cluster, read *
 		return rep, err
 	}
 	return rep, buildHistory(ctx, o, r, c, read, want, rep)
+}
+
+// scrubDeleteBatch is how many deletes each proposal carries.
+const scrubDeleteBatch = 500
+
+// scrubHistory proposes a right-to-be-forgotten delete for every event in
+// erase, waits for every node to apply them, requests a scrub, and times
+// each node until its status shows the scrub completed.
+func scrubHistory(ctx context.Context, o options, c *cluster, erase []int64, rep *historyReport) error {
+	rep.ScrubDeletes = len(erase)
+	logf("erasing %d subjects: %d events", rep.ScrubSubjects, len(erase))
+	start := time.Now()
+	for i := 0; i < len(erase); i += scrubDeleteBatch {
+		var b strings.Builder
+		b.WriteString(`{"entities":[`)
+		for j, seq := range erase[i:min(i+scrubDeleteBatch, len(erase))] {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"typeId":"order-events","key":"%d","delete":true}`, seq)
+		}
+		b.WriteString(`]}`)
+		if err := c.propose(ctx, b.String()); err != nil {
+			return err
+		}
+	}
+	if _, err := c.waitApplySettled(ctx, o.rebuildLimit); err != nil {
+		return err
+	}
+	rep.DeleteSeconds = time.Since(start).Seconds()
+	logf("deletes applied on every node: %.1fs", rep.DeleteSeconds)
+
+	before := make([]uint64, len(c.nodes))
+	for i, n := range c.nodes {
+		st, err := c.scrubStatus(ctx, n)
+		if err != nil {
+			return err
+		}
+		before[i] = st.CompletedBound
+	}
+	start = time.Now()
+	if err := c.post(ctx, "/v1/scrub", ""); err != nil {
+		return err
+	}
+	logf("scrub requested")
+	rep.ScrubSeconds = make([]float64, len(c.nodes))
+	left := len(c.nodes)
+	lastLog := time.Now()
+	for deadline := start.Add(o.rebuildLimit); left > 0 && time.Now().Before(deadline); {
+		for i, n := range c.nodes {
+			if rep.ScrubSeconds[i] > 0 {
+				continue
+			}
+			st, err := c.scrubStatus(ctx, n)
+			if err == nil && st.CompletedBound > before[i] && st.CompletedBound >= st.PendingBound {
+				rep.ScrubSeconds[i] = time.Since(start).Seconds()
+				left--
+				logf("  scrub completed on %s: %.1fs (bound %d)", n, rep.ScrubSeconds[i], st.CompletedBound)
+			}
+		}
+		if time.Since(lastLog) >= 30*time.Second {
+			logf("  scrub %.0fs: %d of %d nodes done", time.Since(start).Seconds(), len(c.nodes)-left, len(c.nodes))
+			lastLog = time.Now()
+		}
+		if err := sleep(ctx, time.Second); err != nil {
+			return err
+		}
+	}
+	rep.ScrubTimeout = left > 0
+	rep.Pass = !rep.ScrubTimeout
+	return nil
 }
 
 // buildHistory posts the projection and times it from posting to a
