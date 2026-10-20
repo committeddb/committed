@@ -148,4 +148,18 @@ func TestConvertEventLog_RerunsAfterAnInterruption(t *testing.T) {
 		require.NoError(t, err)
 		requireConvertedNode(t, dir)
 	})
+	t.Run("retire", func(t *testing.T) {
+		// The converted log is in place; the original was not yet removed.
+		dir := scrubbedTidwallNode(t)
+		events := datadir.EventsDir(dir)
+		original := filepath.Join(t.TempDir(), "events")
+		require.NoError(t, os.CopyFS(original, os.DirFS(events)))
+		_, err := wal.ConvertEventLog(dir)
+		require.NoError(t, err)
+		require.NoError(t, os.Rename(original, datadir.RetiredDir(events)))
+		res, err := wal.ConvertEventLog(dir)
+		require.NoError(t, err)
+		require.True(t, res.AlreadySegmented)
+		requireConvertedNode(t, dir)
+	})
 }
