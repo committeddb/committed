@@ -12,10 +12,31 @@ same, and its on-disk state is reused in place.
 
 ## Upgrading from 0.8.2 to 0.8.3
 
-Follow the rolling binary-upgrade procedure below; no configuration changes.
-0.8.3 raises the cluster feature level to 4 for two changes, which activate
-once every node runs 0.8.3; the changes after them need no feature level and
-take effect on each node as it upgrades:
+**This upgrade needs the cluster down.** 0.8.3 runs only the segmented event
+log. Every earlier release wrote the tidwall event log, which a 0.8.3 node
+refuses to start on, and a cluster cannot mix the two. Instead of the rolling
+procedure below:
+
+1. Take a backup of each node (see [backup.md](backup.md)): it is the only way
+   back to 0.8.2 once a node is converted.
+2. Stop every node.
+3. On each node, with the 0.8.3 binary, run
+   `committed wal convert --data <datadir>`. It writes the same records at the
+   same raft indexes into the new format beside the old log, checks them record
+   by record, then replaces the old log, so the data directory needs free space
+   for a second copy of `events/` while it runs. An interrupted run leaves the
+   old log in place; run it again. Single-node clusters convert the same way.
+4. Start every node on 0.8.3.
+
+No configuration changes are needed. `COMMITTED_EVENT_LOG_BACKEND` and
+`COMMITTED_EVENT_CACHE_SEGMENTS` are no longer read; the event log's caches are
+set by `COMMITTED_EVENT_CACHE_RECENT_BYTES` and
+`COMMITTED_EVENT_CACHE_HISTORICAL_BYTES` (see [memory.md](memory.md)). A backup
+archive taken before 0.8.3 restores as before, and is converted the same way
+before its node first starts.
+
+0.8.3 raises the cluster feature level to 4 for two changes; the changes after
+them need no feature level:
 
 - **PostgreSQL snapshot text:** the snapshot renders `boolean`, `char(n)`,
   and `inet` values (and domains over them) as the change stream does: `t`
@@ -23,7 +44,7 @@ take effect on each node as it upgrades:
   a snapshotted row whose key had such a column was keyed differently from
   its later updates and deletes, so the destination kept stale or duplicate
   rows. A PostgreSQL ingestable with a `char(n)` or `inet` column, or a
-  `boolean` in `primaryKey`, re-snapshots once after the roll, which re-keys
+  `boolean` in `primaryKey`, re-snapshots once after the upgrade, which re-keys
   keyed destinations and removes the stale rows; keyless destinations keep
   both spellings until rebuilt. Other PostgreSQL ingestables are unaffected.
 - **MySQL `BINARY(n)` values:** the change stream pads a `BINARY(n)` value
@@ -31,7 +52,7 @@ take effect on each node as it upgrades:
   trailing zero bytes, so a value ending in them was keyed and rendered
   differently by the stream than by the snapshot, and the destination kept
   stale or duplicate rows. A MySQL ingestable whose tables have a `BINARY`
-  column re-snapshots once after the roll, which re-keys keyed destinations
+  column re-snapshots once after the upgrade, which re-keys keyed destinations
   and removes the stale rows; keyless destinations keep both spellings until
   rebuilt. Other MySQL ingestables are unaffected.
 - **Backups:** an archive taken on 0.8.3 records feature level 4, which a
@@ -40,8 +61,7 @@ take effect on each node as it upgrades:
   primary key is a single binary column (`BINARY`, `VARBINARY`, a UUID
   stored as `BINARY(16)`) holding bytes that are not valid UTF-8 failed its
   snapshot and retried forever. It now snapshots, including through
-  parallel snapshot readers. A rolled-back node cannot read such a
-  table's mid-snapshot checkpoint and retries until it is upgraded again.
+  parallel snapshot readers.
 - **Ingest lag metrics by unit.** `committed.ingest.lag` carried every
   ingestable's lag as bytes, though MySQL with GTIDs and SQL Server measure
   theirs in source transactions. Those now report on
@@ -131,7 +151,7 @@ The two optional features require separate configuration decisions:
   Existing directories must retain their original backend; changing this
   setting does not migrate them. Segmented directories cannot be opened by
   0.8.0, and `wal decompress` does not convert them to tidwall. See
-  [storage configuration](memory.md#segmented-event-log-caches).
+  [storage configuration](memory.md#event-log-caches).
 
 ## Why this works
 

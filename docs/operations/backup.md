@@ -240,12 +240,13 @@ unreadable by an older build for a reason no per-entry check would find: from
 0.8.0 sealed **event-log** segments are compressed at rest, and a pre-0.8.0
 binary does not fail on them — it silently opens a **partial log**.
 
-> **Moving 0.8.0 data onto a pre-0.8.0 binary.** Restore the archive with a
-> 0.8.0 build, stop it, run `committed wal decompress --data <datadir>`, then
-> start the older binary on that directory. Check the rest of the one-way
-> transitions in [api-compatibility.md](../architecture/api-compatibility.md#one-way-transitions-no-rollback-past-these)
-> first — a log carrying a committed restatement, for example, cannot go back
-> at all.
+> **Archives from before 0.8.3.** They hold the tidwall event log, which
+> 0.8.3 refuses to start on. Restore as usual, then run
+> `committed wal convert --data <datadir>` before the node's first start (see
+> [upgrade.md](upgrade.md#upgrading-from-082-to-083)). Data that has run on
+> 0.8.3 cannot move onto an older binary: its event log is segmented, which no
+> earlier release opens. Check the rest of the one-way transitions in
+> [api-compatibility.md](../architecture/api-compatibility.md#one-way-transitions-no-rollback-past-these).
 
 Within a single release series, back up and restore with the same binary
 version where you can; a cross-version restore that the gate allows is still

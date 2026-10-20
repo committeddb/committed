@@ -72,9 +72,9 @@ func WithMetrics(m *metrics.Metrics) Option {
 // set is min(this, the number of concurrent readers spread across distinct
 // segments). Syncables replaying history are concurrent readers, one segment
 // each; a cache smaller than the reader count thrashes (every read by one
-// evicts another's segment, forcing a ~20MB re-parse). Wired from
-// COMMITTED_EVENT_CACHE_SEGMENTS by cmd/node; <= 0 (the default) resolves to
-// DefaultEventCacheSegments. Sizing rule of thumb: at least concurrent
+// evicts another's segment, forcing a ~20MB re-parse). Applies to the native
+// tidwall event log only, which the node no longer runs (offline tools and
+// tests); <= 0 (the default) resolves to DefaultEventCacheSegments. Sizing rule of thumb: at least concurrent
 // syncables + 2. The raft entry log deliberately keeps the library default —
 // its reader is the single sequential Ready loop, which cannot thrash.
 func WithEventCacheSegments(n int) Option {

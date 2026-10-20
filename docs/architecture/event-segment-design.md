@@ -1,10 +1,10 @@
 # Experimental event storage: current implementation
 
-The repository contains an experimental segmented event log and a shared storage
-interface with two implementations. Production `wal.Storage` still uses the
-legacy tidwall layout. Tests create the experimental backends explicitly in
-isolated directories; there is no production backend setting or automatic format
-activation.
+The repository contains the segmented event log and a shared storage interface
+with two implementations. From 0.8.3 a node runs only the segmented engine and
+refuses a tidwall event log; `committed wal convert` rewrites a stopped node's
+tidwall log as a segmented one. The tidwall backend remains for that converter
+and offline tools.
 
 ## Packages and responsibilities
 

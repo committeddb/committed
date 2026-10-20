@@ -442,11 +442,11 @@ interpret protobuf to translate a tidwall sequence. See [its format](tidwall/REA
 
 ## Integration status
 
-The node selects native tidwall by default or with
-`COMMITTED_EVENT_LOG_BACKEND=tidwall`. Setting it to `segmented` selects the
-segmented engine through `wal.WithSegmentedEventLog`. Unknown names fail startup.
-The supported setup uses one backend per cluster, and existing data is reopened with that same
-backend. Their on-disk formats are not interchangeable. Raft's own logs are outside
+The node runs only the segmented engine (`wal.WithSegmentedEventLog`); its
+opener refuses a non-empty directory holding no segmented files and names
+`committed wal convert` (`wal.ConvertEventLog`), which rewrites a stopped
+node's native tidwall log as a segmented one. Offline tools (`openStopped`)
+still open whichever engine wrote a directory. Raft's own logs are outside
 this contract.
 
 Production `wal.Storage` uses `eventLogBinding` for append/replay, application
@@ -460,7 +460,7 @@ The node configures segmented storage with zstd compression and separate recent
 and historical cache budgets, each defaulting to 160 MiB. Configure them with
 `COMMITTED_EVENT_CACHE_RECENT_BYTES` and
 `COMMITTED_EVENT_CACHE_HISTORICAL_BYTES`; zero disables the corresponding budget.
-Native tidwall uses `COMMITTED_EVENT_CACHE_SEGMENTS`. These are cache budgets,
+These are cache budgets,
 not total process-memory limits. The database's background sealer drives closed
 segment compression; physical compression preserves the logical scrub generation.
 

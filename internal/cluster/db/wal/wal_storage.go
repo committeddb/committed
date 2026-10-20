@@ -708,9 +708,7 @@ type Storage struct {
 
 // DefaultEventCacheSegments is the default number of event-log segments held
 // parsed in memory (see WithEventCacheSegments). 16 ≈ up to ~340MB fully
-// resident — sized so the default is comfortable on a small (2GB) box, while
-// production deployments with many concurrent syncable readers raise it via
-// COMMITTED_EVENT_CACHE_SEGMENTS to fit their RAM.
+// resident — sized so the default is comfortable on a small (2GB) box.
 const DefaultEventCacheSegments = 16
 
 // openLog opens one of a node's Raft logs, turning tidwall's opaque

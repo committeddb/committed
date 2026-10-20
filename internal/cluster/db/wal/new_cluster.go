@@ -212,7 +212,7 @@ func openStopped(dir string) (*Storage, error) {
 		return nil, fmt.Errorf("inspect %s: %w", datadir.EventsDir(dir), err)
 	}
 	if segmented {
-		opts = append(opts, WithSegmentedEventLog(segmentlog.LogOptions{Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}}))
+		opts = append(opts, WithSegmentedEventLog(segmentedLogOptions()))
 	}
 	s, err := Open(dir, nil, nil, nil, opts...)
 	if err != nil {

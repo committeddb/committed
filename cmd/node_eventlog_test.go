@@ -10,37 +10,37 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func TestEventLogEnvironmentSelectsStorage(t *testing.T) {
-	for _, backend := range []string{"", "tidwall", " segmented "} {
-		t.Run("backend="+backend, func(t *testing.T) {
-			t.Setenv("COMMITTED_EVENT_LOG_BACKEND", backend)
-			t.Setenv("COMMITTED_EVENT_CACHE_SEGMENTS", "16")
-			t.Setenv("COMMITTED_EVENT_CACHE_RECENT_BYTES", "0")
-			t.Setenv("COMMITTED_EVENT_CACHE_HISTORICAL_BYTES", "1024")
-			options, err := loadEventLogOptions()
-			require.NoError(t, err)
-			base := t.TempDir()
-			for range 2 {
-				storage, err := wal.Open(base, nil, nil, nil, options...)
-				require.NoError(t, err)
-				require.NoError(t, storage.Close())
-				selected, err := segmentlog.RecognizeDirectory(datadir.EventsDir(base))
-				require.NoError(t, err)
-				require.Equal(t, backend == " segmented ", selected)
-			}
-		})
+// A new data directory gets the segmented event log; a tidwall one is refused
+// with the conversion named, and nothing in it changes.
+func TestNodeRunsTheSegmentedEventLog(t *testing.T) {
+	t.Setenv("COMMITTED_EVENT_CACHE_RECENT_BYTES", "0")
+	t.Setenv("COMMITTED_EVENT_CACHE_HISTORICAL_BYTES", "1024")
+	options, err := loadEventLogOptions()
+	require.NoError(t, err)
+
+	base := t.TempDir()
+	for range 2 {
+		storage, err := wal.Open(base, nil, nil, nil, options...)
+		require.NoError(t, err)
+		require.NoError(t, storage.Close())
+		segmented, err := segmentlog.RecognizeDirectory(datadir.EventsDir(base))
+		require.NoError(t, err)
+		require.True(t, segmented)
 	}
+
+	legacy := t.TempDir()
+	storage, err := wal.Open(legacy, nil, nil, nil) // wal's own default: tidwall
+	require.NoError(t, err)
+	require.NoError(t, storage.Close())
+	_, err = wal.Open(legacy, nil, nil, nil, options...)
+	require.ErrorIs(t, err, wal.ErrTidwallEventLog)
+	require.ErrorContains(t, err, "committed wal convert --data "+legacy)
+	segmented, err := segmentlog.RecognizeDirectory(datadir.EventsDir(legacy))
+	require.NoError(t, err)
+	require.False(t, segmented)
 }
 
-func TestEventLogEnvironmentValidation(t *testing.T) {
-	t.Setenv("COMMITTED_EVENT_CACHE_RECENT_BYTES", "")
-	t.Setenv("COMMITTED_EVENT_CACHE_HISTORICAL_BYTES", "")
-	for _, backend := range []string{"segmeted", "rocksdb", "SEGMENTED"} {
-		t.Setenv("COMMITTED_EVENT_LOG_BACKEND", backend)
-		_, err := loadEventLogOptions()
-		require.ErrorContains(t, err, "COMMITTED_EVENT_LOG_BACKEND")
-	}
-	t.Setenv("COMMITTED_EVENT_LOG_BACKEND", "segmented")
+func TestEventCacheBudgetValidation(t *testing.T) {
 	for _, name := range []string{"COMMITTED_EVENT_CACHE_RECENT_BYTES", "COMMITTED_EVENT_CACHE_HISTORICAL_BYTES"} {
 		t.Run(name, func(t *testing.T) {
 			for _, invalid := range []string{"-1", "1.5", "160MiB", "18446744073709551616"} {

@@ -7,6 +7,7 @@
 // synthesizing "old" bytes with the current clusterpb package can never
 // reproduce a removed field or a legacy encoding). The CURRENT binary must:
 //
+//  0. convert its tidwall event log (`wal convert`, the 0.8.3 upgrade step);
 //  1. boot over it and serve /ready (open the old WAL, bbolt, raft state);
 //  2. replay the WHOLE old log through a syncable (a webhook sink receives
 //     every seeded entity — decode of every era's bytes, upserts and the
@@ -97,6 +98,9 @@ func runOldDataDirEra(t *testing.T, bin string, era fixtureEra) {
 	port := freePort(t)
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
+	// 0. The upgrade step: every era wrote a tidwall event log.
+	runOrFail(t, bin, "wal", "convert", "--data", dataDir)
+
 	// 1. The current binary boots over the old-binary-written dir.
 	node := startNode(t, bin, dataDir, port)
 	t.Cleanup(func() { node.stopGraceful(t, base) })
@@ -150,8 +154,8 @@ func runOldDataDirEra(t *testing.T, bin string, era fixtureEra) {
 
 // A data dir written by an old release restores, through this build's
 // backup and restore, into a new cluster that boots and replays the whole old
-// log. (Restore rewrites the directory with this build's storage engine, so
-// every era's bytes must open under it.)
+// log once its event log is converted. (Restore rewrites the directory with
+// this build's storage engine, so every era's bytes must open under it.)
 func TestOldDataDir_RestoresIntoANewCluster(t *testing.T) {
 	bin := buildBinary(t)
 	for _, era := range fixtureEras {
@@ -167,6 +171,7 @@ func TestOldDataDir_RestoresIntoANewCluster(t *testing.T) {
 			runOrFail(t, bin, "backup", "--data", dataDir, "--to", archive, "--node-id", "1")
 			restored := filepath.Join(t.TempDir(), "restored")
 			runOrFail(t, bin, "restore", "--from", archive, "--data", restored, "--node-id", "1", "--new-cluster")
+			runOrFail(t, bin, "wal", "convert", "--data", restored)
 
 			port := freePort(t)
 			base := fmt.Sprintf("http://127.0.0.1:%d", port)

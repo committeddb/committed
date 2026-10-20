@@ -195,7 +195,47 @@ cannot make that format readable by pre-0.8.0 binaries.`,
 	},
 }
 
+var walConvertData string
+
+var walConvertCmd = &cobra.Command{
+	Use:   "convert",
+	Short: "Convert a stopped node's tidwall event log to the segmented engine",
+	Long: `Rewrite a stopped node's event log from the tidwall engine, which releases
+before 0.8.3 wrote, to the segmented engine, which this release runs. A node
+refuses to start on a tidwall event log.
+
+Upgrading to this release needs the cluster down: stop every node, run this
+command on each node's data directory with the new binary, then start them
+all. The node must be STOPPED (enforced via its lock).
+
+The new log holds the same records at the same raft indexes, with the same
+scrub progress. It is built beside the old one, so the data directory needs
+free space for a second copy of the event log while this runs, and it is
+checked record by record before it replaces the old log, which is then
+removed. An interrupted run leaves the old log in place; run it again.
+Running it on a node that is already converted changes nothing.`,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if walConvertData == "" {
+			return fmt.Errorf("--data is required (the stopped node's data directory)")
+		}
+		res, err := wal.ConvertEventLog(walConvertData)
+		if err != nil {
+			return err
+		}
+		if res.AlreadySegmented {
+			_, _ = fmt.Fprintln(os.Stdout, "the event log is already segmented; nothing to do")
+			return nil
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "converted %d records through raft index %d (scrub generation %d); the node can be started\n",
+			res.Records, res.LastIndex, res.Generation)
+		return nil
+	},
+}
+
 func init() {
+	walConvertCmd.Flags().StringVar(&walConvertData, "data", "", "the stopped node's data directory; required")
+	walCmd.AddCommand(walConvertCmd)
 	walRepairCmd.Flags().StringVar(&walRepairData, "data", "", "the stopped node's data directory; required")
 	walRepairCmd.Flags().BoolVar(&walRepairCommit, "commit", false, "apply the repair (default: dry run, report only)")
 	walRepairCmd.Flags().StringVar(&walRepairFrom, "from", "", "a backup (.tar or .tar.gz) of this node to splice mid-log corruption from")

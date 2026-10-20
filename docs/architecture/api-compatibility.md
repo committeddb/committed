@@ -423,6 +423,11 @@ the old binary cannot read:
   know the magic byte — can't read it. Upgrading *to* a checksum-aware
   release is therefore one-way; rolling a node back to a pre-checksum
   binary means a [rebuild](../operations/rebuild.md), not a binary swap.
+- **Converting to the segmented event log (0.8.3).** `committed wal
+  convert` rewrites a node's tidwall event log in the segmented format,
+  which no earlier binary opens, and 0.8.3 runs nothing else. Going back
+  means restoring a backup taken before the conversion (see
+  [upgrade.md](../operations/upgrade.md#upgrading-from-082-to-083)).
 - **A frame-version or snapshot-format bump**, when one ships, is called
   out as one-way in that release's notes.
 - **Restoring a backup archive onto an older binary.** The manifest records
@@ -431,9 +436,9 @@ the old binary cannot read:
   across releases, never back. The gate is coarse on purpose: an archive
   can carry both entries an older build cannot apply and an on-disk layout
   it cannot read (from 0.8.0, compressed event-log segments, which a
-  pre-0.8.0 binary opens as a partial log rather than failing). The
-  downgrade door is a restore on the newer binary followed by `committed
-  wal decompress`, not an archive an older binary accepts — see
+  pre-0.8.0 binary opens as a partial log rather than failing; from 0.8.3,
+  the segmented event log, which no earlier binary opens). There is no
+  downgrade door from 0.8.3 — see
   [backup.md](../operations/backup.md#version-compatibility).
 - **Rolling back below a feature whose entries are already on your log.**
   The cluster feature level keeps a feature dormant until every member can

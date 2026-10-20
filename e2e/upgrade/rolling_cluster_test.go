@@ -71,12 +71,40 @@ func clusterIDOf(t *testing.T, n *rollingNode) string {
 	return strings.TrimSpace(string(raw))
 }
 
-// A 3-node 0.8.2 cluster upgraded one node at a time to this build: every
-// step commits (the new identity headers never split a mixed cluster), and
-// once every member runs this build the leader mints one cluster id that
-// every node takes. A full restart afterwards still forms (the nodes are now
-// strict about ids).
-func TestRollingUpgrade_ClusterGainsAnID(t *testing.T) {
+// refusesToStart runs this build's node over n's unconverted data directory
+// and returns what it printed: it must exit, not serve.
+func (n *rollingNode) refusesToStart(t *testing.T, bin, peers string) string {
+	t.Helper()
+	cmd := exec.Command(bin, "node") //nolint:gosec // G204: the test's own binary
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("COMMITTED_NODE_ID=%d", n.id),
+		fmt.Sprintf("COMMITTED_API_ADDR=127.0.0.1:%d", n.apiPort),
+		"COMMITTED_DATA_DIR="+n.dataDir,
+		"COMMITTED_PEERS="+peers,
+	)
+	done := make(chan []byte, 1)
+	go func() {
+		out, _ := cmd.CombinedOutput()
+		done <- out
+	}()
+	select {
+	case out := <-done:
+		require.False(t, cmd.ProcessState.Success(), "the node exits with an error")
+		return string(out)
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("node%d kept running over an unconverted event log", n.id)
+		return ""
+	}
+}
+
+// A 3-node 0.8.2 cluster upgrades to this build the way 0.8.3 requires: stop
+// every node, convert each node's tidwall event log, start them all. A node
+// started before its conversion refuses and names the command. Once every
+// member runs this build the leader mints one cluster id that every node
+// takes, and a full restart afterwards still forms (the nodes are now strict
+// about ids).
+func TestUpgrade_StoppedClusterConvertsAndGainsAnID(t *testing.T) {
 	oldBin := buildTagBinary(t, "v0.8.2")
 	newBin := buildBinary(t)
 
@@ -95,19 +123,26 @@ func TestRollingUpgrade_ClusterGainsAnID(t *testing.T) {
 		waitReady(t, n.base())
 	}
 	postType(t, nodes[0].base(), "on_v082")
-
-	for i, n := range nodes {
+	for _, n := range nodes {
 		n.stop(t)
+	}
+
+	out := nodes[0].refusesToStart(t, newBin, peers)
+	require.Contains(t, out, "committed wal convert --data "+nodes[0].dataDir)
+
+	for _, n := range nodes {
+		runOrFail(t, newBin, "wal", "convert", "--data", n.dataDir)
+	}
+	for _, n := range nodes {
 		n.start(t, newBin, peers)
+	}
+	for _, n := range nodes {
 		waitReady(t, n.base())
-		typ := fmt.Sprintf("after_upgrading_%d", i+1)
-		postType(t, nodes[(i+1)%3].base(), typ)
-		for _, m := range nodes {
-			requireTypeListed(t, m.base(), typ)
-		}
-		if i < 2 {
-			require.Empty(t, clusterIDOf(t, n), "no id is minted while a 0.8.2 member remains")
-		}
+		requireTypeListed(t, n.base(), "on_v082")
+	}
+	postType(t, nodes[1].base(), "after_upgrade")
+	for _, n := range nodes {
+		requireTypeListed(t, n.base(), "after_upgrade")
 	}
 
 	var id string

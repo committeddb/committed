@@ -19,33 +19,22 @@ Request-size caps and HTTP timeouts live in
 disk) is covered in
 [event-log-architecture.md](../architecture/event-log-architecture.md).
 
-## Event-log compression (0.8.0+)
+## Event-log compression
 
-Sealed event-log segments compress at rest with zstd, automatically: the
-active tail segment stays plain (the write path never compresses), and a
-background sealer compresses each segment shortly after the log cycles past
-it. On the first start after an upgrade the sealer sweeps the whole existing
-backlog, oldest first — expect the events/ directory to shrink roughly
-7–9x on JSON-payload topics (measured 8.8x on a 37 GB field log → 4.2 GB)
-over the first minutes. Replay and rebuild reads are unaffected or faster
-(zstd decodes at GB/s, and the disk reads are ~9x smaller); reads decompress
-transparently, and memory sizing is unchanged (see operations/memory.md).
+Sealed event-log segments are compressed at rest with zstd, block by block,
+automatically; reads decompress transparently, one block at a time (see
+[memory.md](memory.md) for the caches). Expect JSON-payload topics to take
+several times less disk than their raw bytes.
 
-**Downgrade is a one-way door with a key**: binaries older than 0.8.0 do not
-recognize compressed (`.zst`) segments. Before starting an old binary
-against a data dir that ran 0.8.0+, stop the node and run
-`committed wal decompress --data <datadir>` — it rewrites every compressed
-tidwall segment back to the plain format. Upgrades need nothing.
+**No downgrade below 0.8.3**: 0.8.3 runs the segmented event log, which no
+earlier binary opens. The way back is a backup taken before the node was
+converted (see [upgrade.md](upgrade.md#upgrading-from-082-to-083)).
+`committed wal decompress` applies only to the tidwall event log of
+0.8.0–0.8.2 data directories, and refuses a segmented one.
 
-This downgrade command applies to tidwall storage. It refuses segmented storage
-before rewriting any log: decompressing its contents would not make its on-disk
-format readable by pre-0.8.0 binaries.
-
-`committed wal repair` understands both plain and compressed tidwall segments. A checksum failure inside a
-compressed segment is data corruption (rebuild from a healthy replica),
-never a torn tail — torn tails only occur in the plain active tail, exactly
-as before. Backups copy segment files as-is, so backups of a compressed log
-are proportionally smaller.
+A checksum failure inside a sealed segment is data corruption (rebuild from a
+healthy replica), never a torn tail. Backups copy segment files as-is, so
+backups of a compressed log are proportionally smaller.
 
 ## The per-node watcher
 
