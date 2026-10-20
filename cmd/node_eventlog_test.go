@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -68,4 +69,23 @@ func TestEventCacheByteBudgets(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tc.want, got)
 	}
+}
+
+// A proposal cap above what the event log stores is refused at startup; the
+// largest storable cap is accepted.
+func TestMaxProposalBytesIsBoundedByTheEventLog(t *testing.T) {
+	t.Setenv("COMMITTED_MAX_PROPOSAL_BYTES", strconv.FormatUint(wal.MaxProposalBytes, 10))
+	n, ok, err := loadMaxProposalBytes()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, wal.MaxProposalBytes, n)
+
+	t.Setenv("COMMITTED_MAX_PROPOSAL_BYTES", strconv.FormatUint(wal.MaxProposalBytes+1, 10))
+	_, _, err = loadMaxProposalBytes()
+	require.ErrorContains(t, err, "the largest proposal the event log stores")
+
+	t.Setenv("COMMITTED_MAX_PROPOSAL_BYTES", "")
+	_, ok, err = loadMaxProposalBytes()
+	require.NoError(t, err)
+	require.False(t, ok, "unset keeps the default")
 }

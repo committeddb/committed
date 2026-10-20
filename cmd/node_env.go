@@ -15,6 +15,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/auth"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // getenvDefault returns the value of env var name, or def when it is
@@ -154,6 +155,21 @@ func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
 // when the var is unset or unparseable, with a logged warning for
 // the unparseable case — a typo in an HTTP-limit env var should be
 // visible, not silently reverted to the default.
+// loadMaxProposalBytes reads COMMITTED_MAX_PROPOSAL_BYTES. A cap above what the
+// event log can store (wal.MaxProposalBytes) is refused: it would admit
+// proposals that every node fails to apply.
+func loadMaxProposalBytes() (uint64, bool, error) {
+	n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES")
+	if !ok {
+		return 0, false, nil
+	}
+	bytes := uint64(n) //nolint:gosec // G115: parseInt64Env returns only positive values
+	if bytes > wal.MaxProposalBytes {
+		return 0, false, fmt.Errorf("COMMITTED_MAX_PROPOSAL_BYTES=%d is over %d, the largest proposal the event log stores", n, wal.MaxProposalBytes)
+	}
+	return bytes, true, nil
+}
+
 func parseInt64Env(name string) (int64, bool) {
 	raw := os.Getenv(name)
 	if raw == "" {

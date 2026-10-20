@@ -1181,8 +1181,9 @@ position. Each freeze also logs a warning with the proposal's `sourceSeq`
 To recover:
 
 1. Raise `COMMITTED_MAX_PROPOSAL_BYTES` past the row/transaction size (it caps
-   the marshaled proposal, so allow headroom over the raw row bytes), or reduce
-   the source write so it fits.
+   the marshaled proposal, so allow headroom over the raw row bytes; it can go
+   up to just under 64 MiB, see [http-limits.md](operations/http-limits.md)),
+   or reduce the source write so it fits.
 2. Apply the fix — which action depends on the worker's state:
    - **Restart the node** to pick up a raised `COMMITTED_MAX_PROPOSAL_BYTES` (an
      env var, read only at startup). A worker still in the freeze→retry loop

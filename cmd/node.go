@@ -330,8 +330,12 @@ docs/operations/ it points to.`,
 			dbOpts = append(dbOpts, db.WithTLSInfo(peerTLS))
 		}
 
-		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
-			dbOpts = append(dbOpts, db.WithMaxProposalBytes(uint64(n)))
+		maxProposalBytes, maxProposalSet, err := loadMaxProposalBytes()
+		if err != nil {
+			zap.L().Fatal("proposal cap", zap.Error(err))
+		}
+		if maxProposalSet {
+			dbOpts = append(dbOpts, db.WithMaxProposalBytes(maxProposalBytes))
 		}
 
 		// COMMITTED_SCRUB_INTERVAL sets the automatic right-to-be-forgotten
@@ -448,11 +452,11 @@ docs/operations/ it points to.`,
 		if boolEnvOrExit("COMMITTED_PPROF") {
 			httpOpts = append(httpOpts, http.WithPprof())
 		}
-		if n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES"); ok {
+		if maxProposalSet {
 			// Keep the request-body cap above the (raised) proposal cap so a large
 			// but valid proposal isn't false-rejected at the HTTP body read; the
 			// body is JSON/TOML and larger than the marshaled proposal it produces.
-			httpOpts = append(httpOpts, http.WithMaxBodyBytes(n*2))
+			httpOpts = append(httpOpts, http.WithMaxBodyBytes(int64(maxProposalBytes)*2)) //nolint:gosec // G115: bounded by wal.MaxProposalBytes
 		}
 
 		corsOrigins, err := loadCORSOrigins()

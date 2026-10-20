@@ -18,9 +18,11 @@ const (
 	FooterSize     = 32
 	IndexEntrySize = 48
 	FrameOverhead  = 16
-	MaxPayload     = 16 << 20
-	MaxBlock       = MaxPayload + FrameOverhead
-	MaxBlocks      = 1 << 16
+	// MaxPayload is a product ceiling, not a format one: every on-disk size is
+	// 32-bit, so raising it changes only this check.
+	MaxPayload = 64 << 20
+	MaxBlock   = MaxPayload + FrameOverhead
+	MaxBlocks  = 1 << 16
 )
 
 var (

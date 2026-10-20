@@ -18,6 +18,11 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
+// ErrEntryTooLarge refuses a conversion over a tidwall entry larger than one
+// segmented record holds; a release before 0.8.3 could commit one only with a
+// raised proposal cap.
+var ErrEntryTooLarge = errors.New("an event-log entry is too large to convert")
+
 // convertBatchBytes bounds the payload bytes one Append writes (and syncs).
 const convertBatchBytes = 4 << 20
 
@@ -226,6 +231,10 @@ func copyToSegmented(src *tidwallEventReader, tmp string, generation uint64) (*C
 		}
 	}
 	err = src.each(func(r eventlog.Record) error {
+		if len(r.Payload) > segmentlog.MaxRecordBytes {
+			return fmt.Errorf("raft index %d holds a %d-byte entry, over the %d bytes this release stores in one event-log record: %w",
+				r.ID, len(r.Payload), segmentlog.MaxRecordBytes, ErrEntryTooLarge)
+		}
 		batch = append(batch, r)
 		size += len(r.Payload)
 		res.Records++

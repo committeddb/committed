@@ -14,6 +14,9 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog/internal/format"
 )
 
+// MaxRecordBytes is the largest payload one record may hold.
+const MaxRecordBytes = format.MaxPayload
+
 var (
 	ErrLocked      = durablefs.ErrLocked
 	ErrLogPoisoned = errors.New("segmentlog: log requires recovery after I/O failure")
@@ -71,7 +74,7 @@ type Log struct {
 }
 
 func checkLogEncoding(target uint64, encoding Options) error {
-	if target < format.FrameOverhead || target > maxGroupBytes {
+	if target < format.FrameOverhead || target > maxSegmentBytes {
 		return ErrInvalid
 	}
 	blockSize := encoding.BlockSize
