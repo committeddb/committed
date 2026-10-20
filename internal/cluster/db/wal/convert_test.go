@@ -1,8 +1,10 @@
 package wal_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -82,6 +84,47 @@ func TestConvertEventLog_CarriesTheLogToTheSegmentedEngine(t *testing.T) {
 	res, err = wal.ConvertEventLog(dir)
 	require.NoError(t, err)
 	require.True(t, res.AlreadySegmented, "a rerun changes nothing")
+}
+
+// A log spanning many segments converts to compressed segments as it is
+// copied, leaving only the active tail uncompressed, and reads back whole.
+func TestConvertEventLog_CompressesEverySealedSegment(t *testing.T) {
+	s := NewStorage(t, nil)
+	s.RegisterType(t, "u", 1, 1)
+	data := fmt.Sprintf(`{"pad":%q}`, strings.Repeat("x", 1000))
+	for i := uint64(2); i <= 41; i++ {
+		saveEntity(t, userUpsert("u", fmt.Sprintf("k%d", i), data), s, 1, i)
+	}
+	require.NoError(t, s.Close())
+	t.Cleanup(func() { _ = os.RemoveAll(s.path) })
+
+	t.Cleanup(wal.SetConvertSegmentBytesForTest(4 << 10))
+	res, err := wal.ConvertEventLog(s.path)
+	require.NoError(t, err)
+	require.Equal(t, wal.Converted{Records: 41, LastIndex: 41}, *res, "the type at 1 and the 40 entities")
+
+	entries, err := os.ReadDir(datadir.EventsDir(s.path))
+	require.NoError(t, err)
+	segments, tails := 0, 0
+	for _, e := range entries {
+		switch {
+		case strings.HasPrefix(e.Name(), "segment-"):
+			segments++
+		case strings.HasPrefix(e.Name(), "tail-"):
+			tails++
+		}
+	}
+	require.GreaterOrEqual(t, segments, 5, "the copy spans many sealed segments")
+	require.Equal(t, 1, tails, "only the active tail is left uncompressed")
+
+	ws, err := wal.Open(s.path, nil, nil, nil, segmentedOptions()...)
+	require.NoError(t, err)
+	defer func() { _ = ws.Close() }()
+	for i := uint64(2); i <= 41; i++ {
+		a, err := ws.ActualAt(i)
+		require.NoError(t, err)
+		require.Equal(t, []byte(fmt.Sprintf("k%d", i)), a.Entities[0].Key)
+	}
 }
 
 // An interrupted run leaves either log whole and the command reruns: a half

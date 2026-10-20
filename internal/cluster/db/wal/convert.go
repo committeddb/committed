@@ -18,6 +18,10 @@ import (
 // convertBatchBytes bounds the payload bytes one Append writes (and syncs).
 const convertBatchBytes = 4 << 20
 
+// convertSegmentBytes is the converted log's segment size; zero is the
+// engine's default, the size a node creates. Tests shrink it to cross segments.
+var convertSegmentBytes int
+
 // Converted reports a tidwall-to-segmented event-log conversion.
 type Converted struct {
 	// AlreadySegmented means the event log was segmented already and nothing
@@ -105,7 +109,9 @@ func (s *Storage) copyToSegmented(tmp string) (*Converted, error) {
 		res.LastIndex = last
 	}
 
-	dst, err := segmented.Create(tmp, 1, segmentedLogOptions())
+	opts := segmentedLogOptions()
+	opts.SegmentBytes = convertSegmentBytes
+	dst, err := segmented.Create(tmp, 1, opts)
 	if err != nil {
 		return nil, fmt.Errorf("create the segmented event log: %w", err)
 	}
@@ -128,7 +134,17 @@ func (s *Storage) copyToSegmented(tmp string) (*Converted, error) {
 			return fmt.Errorf("append raft indexes %d-%d: %w", batch[0].ID, batch[len(batch)-1].ID, err)
 		}
 		batch, size = batch[:0], 0
-		return nil
+		// Compress each segment as it seals, as a running node's sealer would,
+		// so the copy never holds more than one uncompressed segment.
+		for {
+			did, err := dst.CompressNextSealed()
+			if err != nil {
+				return fmt.Errorf("compress the segmented event log: %w", err)
+			}
+			if !did {
+				return nil
+			}
+		}
 	}
 	err = s.eachEventRecord(func(r eventlog.Record) error {
 		batch = append(batch, r)
@@ -176,7 +192,8 @@ func (s *Storage) eachEventRecord(visit func(eventlog.Record) error) error {
 }
 
 // verifyConverted reopens the segmented log at tmp and checks it holds exactly
-// s's records, generation and append progress.
+// s's records, generation and append progress. One sequential scan of each
+// log: a per-record seek into the new log would reread its segment each time.
 func (s *Storage) verifyConverted(tmp string, want *Converted) error {
 	dst, err := segmented.Open(tmp, segmentedLogOptions().Encoding)
 	if err != nil {
@@ -193,13 +210,18 @@ func (s *Storage) verifyConverted(tmp string, want *Converted) error {
 	if hasHistory != (want.Records > 0) || (hasHistory && last != want.LastIndex) {
 		return fmt.Errorf("last index %d, want %d", last, want.LastIndex)
 	}
-	cur := dst.NewCursor()
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	cur := s.eventLog.records()
 	defer func() { _ = cur.Close() }()
 	var n, next uint64
-	err = s.eachEventRecord(func(r eventlog.Record) error {
-		got, err := cur.Seek(next)
+	err = dst.Scan(context.Background(), eventlog.Coverage{Start: 0, End: ^uint64(0)}, func(got eventlog.Record) error {
+		r, err := cur.Seek(next)
+		if errors.Is(err, eventlog.ErrNotFound) {
+			return fmt.Errorf("an extra record at raft index %d", got.ID)
+		}
 		if err != nil {
-			return fmt.Errorf("raft index %d: %w", r.ID, err)
+			return fmt.Errorf("read the event log at raft index %d: %w", next, err)
 		}
 		if got.ID != r.ID || !bytes.Equal(got.Payload, r.Payload) {
 			return fmt.Errorf("record %d differs (found raft index %d)", r.ID, got.ID)
@@ -211,8 +233,8 @@ func (s *Storage) verifyConverted(tmp string, want *Converted) error {
 	if err != nil {
 		return err
 	}
-	if extra, err := cur.Seek(next); !errors.Is(err, eventlog.ErrNotFound) {
-		return fmt.Errorf("an extra record at raft index %d (%v)", extra.ID, err)
+	if r, err := cur.Seek(next); !errors.Is(err, eventlog.ErrNotFound) {
+		return fmt.Errorf("raft index %d is missing (%v)", r.ID, err)
 	}
 	if n != want.Records {
 		return fmt.Errorf("%d records, want %d", n, want.Records)

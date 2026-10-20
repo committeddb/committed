@@ -419,7 +419,7 @@ for label in "${label_list[@]}"; do
     case ",$pinned," in *",$label,"*) pin=(-pin-follower) ;; esac
     backend= # read by start_nodes
     case ",$segmented," in *",$label,"*) backend=segmented ;; esac
-    echo "event log: ${backend:-tidwall (default)}" >>"$out/version.txt"
+    echo "event log: ${backend:-default (segmented from 0.8.3, tidwall before)}" >>"$out/version.txt"
     restored=()
     if [ -n "$from_log" ]; then
       restore_nodes "$from_log" "$out" || { status=1; continue; }

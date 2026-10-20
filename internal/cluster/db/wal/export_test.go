@@ -449,3 +449,11 @@ func SetSupersedeScrubCeilingForTest(d time.Duration) func() {
 func (s *Storage) DropBucketForTest(name string) error {
 	return s.update(func(tx *bolt.Tx) error { return tx.DeleteBucket([]byte(name)) })
 }
+
+// SetConvertSegmentBytesForTest shrinks the segments ConvertEventLog writes so
+// a small log spans many; the returned func restores the default.
+func SetConvertSegmentBytesForTest(n int) func() {
+	prev := convertSegmentBytes
+	convertSegmentBytes = n
+	return func() { convertSegmentBytes = prev }
+}
