@@ -32,6 +32,29 @@ func (l observedEventPublication) RewriteWithPublicationLock(ctx context.Context
 	return l.EventLog.RewriteWithPublicationLock(ctx, generation, transform, eventPublicationLock{lock, l.entered})
 }
 
+// observedSealedPublication keeps a backend's sealed rewrite, which a shared
+// scrub prefers, observable too.
+type observedSealedPublication struct {
+	observedEventPublication
+	sealed eventlog.SealedRewriter
+}
+
+func (l observedSealedPublication) Seal() (uint64, error) { return l.sealed.Seal() }
+
+func (l observedSealedPublication) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+	return l.sealed.RewriteSealedWithPublicationLock(ctx, generation, transform, eventPublicationLock{lock, l.observedEventPublication.entered})
+}
+
+// observePublication closes entered when a rewrite of log asks for its
+// publication lock, keeping the backend's capabilities.
+func observePublication(log eventlog.EventLog, entered chan struct{}) eventlog.EventLog {
+	observed := observedEventPublication{log, entered}
+	if sealed, ok := log.(eventlog.SealedRewriter); ok {
+		return observedSealedPublication{observed, sealed}
+	}
+	return observed
+}
+
 func TestEventLogActualReadDuringRewritePreparation(t *testing.T) {
 	for _, cached := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cached=%t", cached), func(t *testing.T) {

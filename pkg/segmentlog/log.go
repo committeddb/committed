@@ -330,6 +330,32 @@ func (l *Log) Append(records []Record) error {
 	return nil
 }
 
+// Seal closes the active tail as a sealed range and starts an empty one, so
+// every record appended before it returns lies below the returned exclusive
+// end. A tail with no append history is left as it is. Seal is a rollover: it
+// waits for an in-flight append and may run during a sealed-only rewrite, whose
+// scope it does not join. On I/O failure the handle is poisoned.
+func (l *Log) Seal() (uint64, error) {
+	l.mutationMu.RLock()
+	defer l.mutationMu.RUnlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.usable(); err != nil {
+		return 0, err
+	}
+	state, err := l.tail.State()
+	if err != nil {
+		return 0, l.fail(err)
+	}
+	if !state.HasRecords {
+		return state.Start, nil
+	}
+	if err := l.rotate(nil, 0); err != nil {
+		return 0, l.fail(err)
+	}
+	return state.Last + 1, nil
+}
+
 var errStopScan = errors.New("segmentlog: stop internal scan")
 
 func tailRecords(file io.ReaderAt, end int64) iter.Seq2[Record, error] {
@@ -349,7 +375,8 @@ func tailRecords(file io.ReaderAt, end int64) iter.Seq2[Record, error] {
 }
 
 // rotate runs under the log mutex. It keeps the old catalog/tail authoritative
-// until the new tail's first group is durably installed and metadata is committed.
+// until the new tail's first group (none for Seal) is durably installed and
+// metadata is committed.
 func (l *Log) rotate(records []Record, framed uint64) error {
 	state, digest, err := l.tail.rolloverState()
 	if err != nil {

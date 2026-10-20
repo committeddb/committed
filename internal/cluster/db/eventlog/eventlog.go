@@ -75,6 +75,18 @@ type SealedCompressor interface {
 	CompressNextSealed() (bool, error)
 }
 
+// SealedRewriter is an optional capability that lets a rewrite proceed while
+// appends continue. Seal closes the active append range, so every record
+// appended before it returns lies below the returned exclusive end; a range
+// with no append history is left in place. RewriteSealedWithPublicationLock is
+// RewriteWithPublicationLock limited to the ranges sealed when it starts:
+// later appends and the active range are left untouched, and holders of the
+// caller's read lock may append during preparation.
+type SealedRewriter interface {
+	Seal() (uint64, error)
+	RewriteSealedWithPublicationLock(context.Context, uint64, Transform, sync.Locker) (RewriteResult, error)
+}
+
 // EventLog owns one permanent event-log directory. Methods are concurrency-safe.
 // The caller must not mutate its files or use another writer outside this owner.
 // Backends use different physical layouts; callers cannot infer coverage from

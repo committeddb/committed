@@ -168,6 +168,8 @@ func (s *Storage) putScrubCompleted(bound uint64) error {
 // their cursors by raft index, as across a scrub swap. Refused while a layout
 // freeze stands.
 func (s *Storage) ResetEventLog() error {
+	s.eventRewriteMu.Lock()
+	defer s.eventRewriteMu.Unlock()
 	s.eventAppendMu.Lock()
 	defer s.eventAppendMu.Unlock()
 	release, ok := s.eventLayout.move()
@@ -448,6 +450,8 @@ type fetchedRecord struct {
 // logical records to shared backends. Overlap and ordering follow the existing
 // fetch behavior; generation selection remains the catch-up coordinator's job.
 func (s *Storage) appendPeerRecords(received []fetchedRecord) error {
+	s.eventRewriteMu.Lock()
+	defer s.eventRewriteMu.Unlock()
 	s.eventAppendMu.Lock()
 	defer s.eventAppendMu.Unlock()
 	s.eventMu.RLock()

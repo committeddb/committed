@@ -12,8 +12,12 @@ import (
 // reopen after a backend failure before retrying. The managed-backend scrub
 // worker calls this step and excludes Close/replacement for its lifetime.
 //
-// Appends wait for the rewrite. Existing protected readers or layout freezes
-// defer it; registration of new protected readers waits until this step returns.
+// A backend that can seal its active range has it sealed under append
+// exclusion, which then ends: applied events append while the sealed history
+// at or below the bound is rewritten, and wait only for publication. Other
+// backends rewrite the whole log and appends wait for it. Existing protected
+// readers or layout freezes defer the rewrite; registration of new protected
+// readers waits until this step returns.
 func (s *Storage) rewriteSharedPlan(ctx context.Context, generation uint64, plan *scrubPlan) (eventlog.RewriteResult, error) {
 	if ctx == nil || plan == nil {
 		return eventlog.RewriteResult{}, eventlog.ErrInvalid
@@ -21,8 +25,15 @@ func (s *Storage) rewriteSharedPlan(ctx context.Context, generation uint64, plan
 	if err := ctx.Err(); err != nil {
 		return eventlog.RewriteResult{}, err
 	}
+	s.eventRewriteMu.Lock()
+	defer s.eventRewriteMu.Unlock()
 	s.eventAppendMu.Lock()
-	defer s.eventAppendMu.Unlock()
+	appending := false
+	defer func() {
+		if !appending {
+			s.eventAppendMu.Unlock()
+		}
+	}()
 	// A catch-up may begin after the worker prepared its plan. Check again
 	// under append exclusion before publishing over an incoming history.
 	if s.catchingUp.Load() {
@@ -48,7 +59,25 @@ func (s *Storage) rewriteSharedPlan(ctx context.Context, generation uint64, plan
 	if plan.bound > applied || applied > frontier {
 		return eventlog.RewriteResult{}, eventlog.ErrInvalid
 	}
-	result, err := log.RewriteWithPublicationLock(ctx, generation, checkedEntryTransform(plan.transform), storageEntryPublicationLock{s})
+	transform := checkedEntryTransform(plan.transform)
+	var result eventlog.RewriteResult
+	var err error
+	if sealed, ok := log.(eventlog.SealedRewriter); ok {
+		// Every record through the frontier, and so through the bound, is
+		// sealed before appends resume; later ones lie outside the scope.
+		var end uint64
+		end, err = sealed.Seal()
+		if err == nil && end <= plan.bound {
+			err = eventlog.ErrInvalid
+		}
+		if err == nil {
+			s.eventAppendMu.Unlock()
+			appending = true
+			result, err = sealed.RewriteSealedWithPublicationLock(ctx, generation, transform, storageEntryPublicationLock{s})
+		}
+	} else {
+		result, err = log.RewriteWithPublicationLock(ctx, generation, transform, storageEntryPublicationLock{s})
+	}
 	if err != nil {
 		// Preparation can poison storage before it ever acquires publication.
 		// Drop pending decoded entries so readers consult that storage state.

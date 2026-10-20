@@ -10,9 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/clusterpb"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
+	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 func TestStorageSharedRewritePublication(t *testing.T) {
@@ -23,7 +27,7 @@ func TestStorageSharedRewritePublication(t *testing.T) {
 			defer func() { _ = log.Close() }()
 			publishing := make(chan struct{})
 			s := &Storage{
-				eventLog:    bindEventLog(observedEventPublication{log, publishing}),
+				eventLog:    bindEventLog(observePublication(log, publishing)),
 				eventLayout: layoutLock{logger: zap.NewNop()},
 			}
 			require.NoError(t, log.Append([]eventlog.Record{
@@ -165,4 +169,113 @@ func TestStorageSharedRewriteFailureInvalidatesDecodedEntry(t *testing.T) {
 			require.Zero(t, s.lastScrubbedBound.Load())
 		})
 	}
+}
+
+func experimentPBEntry(t *testing.T, index uint64, entities ...*clusterpb.LogEntity) *pb.Entry {
+	t.Helper()
+	var entry pb.Entry
+	require.NoError(t, proto.Unmarshal(experimentEntry(t, index, pb.EntryNormal, entities...), &entry))
+	return &entry
+}
+
+// gatedRewriteLog pauses a rewrite at its first examined record, whichever
+// rewrite the scrub chooses.
+type gatedRewriteLog struct {
+	*segmented.Log
+	entered, release chan struct{}
+}
+
+func (l gatedRewriteLog) gate(transform eventlog.Transform) eventlog.Transform {
+	first := true
+	return func(r eventlog.Record) ([]byte, bool, error) {
+		if first {
+			first = false
+			close(l.entered)
+			<-l.release
+		}
+		return transform(r)
+	}
+}
+
+func (l gatedRewriteLog) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+	return l.Log.RewriteWithPublicationLock(ctx, generation, l.gate(transform), lock)
+}
+
+func (l gatedRewriteLog) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+	return l.Log.RewriteSealedWithPublicationLock(ctx, generation, l.gate(transform), lock)
+}
+
+// A scrub's rewrite runs off the apply path: an event entry applied while the
+// rewrite prepares is appended before it publishes, and survives it. Records
+// at or below the bound that were still in the active tail are erased too.
+func TestStorageSharedRewriteAllowsAppends(t *testing.T) {
+	dir := t.TempDir()
+	opts := segmentlog.LogOptions{SegmentBytes: 1 << 20, Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}}
+	log, err := segmented.Create(dir, 1, opts)
+	require.NoError(t, err)
+	defer func() { _ = log.Close() }()
+	gated := gatedRewriteLog{Log: log, entered: make(chan struct{}), release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(gated.release) })
+	defer release()
+	s := &Storage{
+		eventLog:    bindEventLog(gated),
+		eventLayout: layoutLock{logger: zap.NewNop()},
+	}
+	require.NoError(t, s.appendEvents([]*pb.Entry{
+		experimentPBEntry(t, 10, experimentRow("removed", "old")),
+		experimentPBEntry(t, 20, experimentRow("kept", "current")),
+	}))
+	s.appliedIndex.Store(20)
+	ref := cluster.TypeRef{ID: "items", Version: 1}
+	typ, err := eventTestType(ref)
+	require.NoError(t, err)
+	s.typeCache.Store(ref, typeCacheEntry{t: typ})
+	plan := &scrubPlan{bound: 20, selections: map[string]uint64{string(tombstoneKey("items", []byte("removed"))): 20}}
+
+	done := make(chan error, 1)
+	go func() {
+		result, err := s.rewriteSharedPlan(t.Context(), 20, plan)
+		if err == nil && !result.Published {
+			err = eventlog.ErrCorrupt
+		}
+		done <- err
+	}()
+	select {
+	case <-gated.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rewrite did not start preparing")
+	}
+	appended := make(chan error, 1)
+	go func() {
+		appended <- s.appendEvents([]*pb.Entry{experimentPBEntry(t, 30, experimentRow("removed", "new"))})
+	}()
+	select {
+	case err := <-appended:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		release()
+		<-done
+		t.Fatal("an applied event waited for the scrub's rewrite")
+	}
+	release()
+	require.NoError(t, <-done)
+	require.Equal(t, uint64(30), s.EventIndex())
+
+	ids := func() []uint64 {
+		var ids []uint64
+		require.NoError(t, log.Scan(t.Context(), eventlog.Coverage{End: ^uint64(0)}, func(r eventlog.Record) error {
+			ids = append(ids, r.ID)
+			return nil
+		}))
+		return ids
+	}
+	require.Equal(t, []uint64{20, 30}, ids(), "the tail's erased record is gone; the later write survives")
+	generation, err := log.Generation()
+	require.NoError(t, err)
+	require.Equal(t, uint64(20), generation)
+	require.NoError(t, log.Close())
+	log, err = segmented.Open(dir, opts.Encoding)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{20, 30}, ids())
+	require.NoError(t, log.Append([]eventlog.Record{{ID: 40, Payload: experimentEntry(t, 40, pb.EntryNormal, experimentRow("later", "x"))}}))
 }

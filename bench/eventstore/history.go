@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	mrand "math/rand/v2"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,15 +48,17 @@ type historyReport struct {
 	SnapshotSeconds float64 `json:"snapshotSeconds"` // ingestable posted → every node applied the snapshot
 	LogEntries      uint64  `json:"logEntries"`      // applied index once the snapshot applied
 
-	RestoredFrom  string    `json:"restoredFrom,omitempty"`    // -history-from-log: the dataset the cluster was restored from
-	SavedEntries  uint64    `json:"savedLogEntries,omitempty"` // the saved log's entries, which the restored log must reach
-	SnapshotOnly  bool      `json:"snapshotOnly,omitempty"`    // -history-snapshot-only: no build
-	ScrubSubjects int       `json:"scrubSubjects,omitempty"`   // -history-scrub: streams erased
-	ScrubDeletes  int       `json:"scrubDeletes,omitempty"`    // their events, one delete each
-	DeleteSeconds float64   `json:"deleteSeconds,omitempty"`   // deletes proposed → applied on every node
-	ScrubSeconds  []float64 `json:"scrubSeconds,omitempty"`    // scrub requested → each node (in -nodes order) completed it
-	ScrubTimeout  bool      `json:"scrubTimeout,omitempty"`    // a node did not complete within -rebuild-limit
-	BuildSeconds  float64   `json:"buildSeconds"`              // projection posted → every row present, lag 0
+	RestoredFrom  string    `json:"restoredFrom,omitempty"`     // -history-from-log: the dataset the cluster was restored from
+	SavedEntries  uint64    `json:"savedLogEntries,omitempty"`  // the saved log's entries, which the restored log must reach
+	SnapshotOnly  bool      `json:"snapshotOnly,omitempty"`     // -history-snapshot-only: no build
+	ScrubSubjects int       `json:"scrubSubjects,omitempty"`    // -history-scrub: streams erased
+	ScrubDeletes  int       `json:"scrubDeletes,omitempty"`     // their events, one delete each
+	DeleteSeconds float64   `json:"deleteSeconds,omitempty"`    // deletes proposed → applied on every node
+	ScrubSeconds  []float64 `json:"scrubSeconds,omitempty"`     // scrub requested → each node (in -nodes order) completed it
+	ScrubTimeout  bool      `json:"scrubTimeout,omitempty"`     // a node did not complete within -rebuild-limit
+	ScrubWrites   *latency  `json:"scrubWrites,omitempty"`      // probe writes to the first node until every node scrubbed, proposed → applied there
+	ScrubWriteErr int       `json:"scrubWriteErrors,omitempty"` // probe writes that failed or timed out (10s)
+	BuildSeconds  float64   `json:"buildSeconds"`               // projection posted → every row present, lag 0
 	BuildRate     float64   `json:"buildEventsPerSec"`
 	BuildTimeout  bool      `json:"buildTimeout,omitempty"`
 
@@ -87,6 +91,10 @@ func (r *historyReport) Summary() string {
 			fmt.Fprintf(&b, "  scrub: not completed on every node within the limit; per node %v s\n", r.ScrubSeconds)
 		} else {
 			fmt.Fprintf(&b, "  scrub: completed on every node; per node %v s\n", r.ScrubSeconds)
+		}
+		if w := r.ScrubWrites; w != nil {
+			fmt.Fprintf(&b, "  writes to the first node during the scrub: %d applied (p50 %s  p99 %s  max %s), %d failed\n",
+				w.Samples, w.P50, w.P99, w.Max, r.ScrubWriteErr)
 		}
 		return b.String()
 	}
@@ -402,10 +410,17 @@ func scrubHistory(ctx context.Context, o options, c *cluster, erase []int64, rep
 		}
 		before[i] = st.CompletedBound
 	}
+	if err := c.postRetrying(ctx, "/v1/type/"+scrubProbeType, fmt.Sprintf("[type]\nname = %q\n", scrubProbeType), time.Minute); err != nil {
+		return err
+	}
+	probeCtx, stopProbe := context.WithCancel(ctx)
+	defer stopProbe()
+	probed := make(chan []time.Duration, 1)
 	start = time.Now()
 	if err := c.post(ctx, "/v1/scrub", ""); err != nil {
 		return err
 	}
+	go func() { probed <- probeWrites(probeCtx, c, &rep.ScrubWriteErr) }()
 	logf("scrub requested")
 	rep.ScrubSeconds = make([]float64, len(c.nodes))
 	left := len(c.nodes)
@@ -430,9 +445,40 @@ func scrubHistory(ctx context.Context, o options, c *cluster, erase []int64, rep
 			return err
 		}
 	}
+	stopProbe()
+	writes := <-probed
+	slices.Sort(writes)
+	w := summarize(writes)
+	rep.ScrubWrites = &w
+	logf("writes during the scrub: %d applied (p50 %s  p99 %s  max %s), %d failed", w.Samples, w.P50, w.P99, w.Max, rep.ScrubWriteErr)
 	rep.ScrubTimeout = left > 0
-	rep.Pass = !rep.ScrubTimeout
+	rep.Pass = !rep.ScrubTimeout && rep.ScrubWriteErr == 0
 	return nil
+}
+
+// scrubProbeType holds the probe writes, apart from the projection's input.
+const scrubProbeType = "scrub-probe"
+
+// probeWrites proposes one small write to the first node every 100ms until
+// ctx ends, and returns how long each took to apply there. The first node is
+// written directly, not through propose's fallback, so a node whose apply
+// stalls shows as failures rather than being routed around. errs counts them.
+func probeWrites(ctx context.Context, c *cluster, errs *int) []time.Duration {
+	var took []time.Duration
+	for n := 0; ctx.Err() == nil; n++ {
+		begun := time.Now()
+		body := fmt.Sprintf(`{"entities":[{"typeId":%q,"key":"%d","data":{"n":%d}}]}`, scrubProbeType, n, n)
+		code, _, err := c.doAs(ctx, http.MethodPost, c.nodes[0]+"/v1/proposal", "application/json", body)
+		switch {
+		case ctx.Err() != nil:
+		case err != nil || code/100 != 2:
+			*errs++
+		default:
+			took = append(took, time.Since(begun))
+		}
+		_ = sleep(ctx, 100*time.Millisecond)
+	}
+	return took
 }
 
 // buildHistory posts the projection and times it from posting to a

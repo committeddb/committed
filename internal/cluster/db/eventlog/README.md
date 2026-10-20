@@ -206,7 +206,13 @@ This is a reclamation step; the production scrub worker still uses native execut
 
 For Storage opened with a managed backend, `runPendingScrub`
 dispatches to the shared lifecycle in `wal/shared_scrub.go`. It assigns each
-rewrite the authorized scrub upper bound as its generation. After publication,
+rewrite the authorized scrub upper bound as its generation. A backend
+implementing `eventlog.SealedRewriter` (segmented) seals its active range under
+`eventAppendMu`, so every record through the bound is sealed, then releases it:
+applied events keep appending while the sealed history is rewritten, waiting
+only for publication. Catch-up's reset, generation adoption, fetched appends and
+reclamation wait on `eventRewriteMu` instead. Other backends rewrite the whole
+log with appends excluded. After publication,
 it refreshes event bounds, reclaims retired managed files, reconciles the
 delete-key cadence index from surviving records, and runs the existing scrub
 completion/tombstone-compaction path. Reconciliation reads actual survivors at

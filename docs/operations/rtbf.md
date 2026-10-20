@@ -62,9 +62,10 @@ don't, if you have RTBF obligations). For SLA-expedited erasure, trigger one now
 curl -X POST http://localhost:8080/v1/scrub
 ```
 
-A scrub is an `O(log-size)` rewrite per node, run off the consensus path —
-safe to trigger, but not free; expedite when an obligation clock is running,
-and let the cadence handle routine housekeeping.
+A scrub is an `O(log-size)` rewrite per node, run off the consensus path:
+the node keeps applying writes while it runs. It is safe to trigger, but not
+free; expedite when an obligation clock is running, and let the cadence handle
+routine housekeeping.
 
 ## 3. Verify: the erasure end condition
 

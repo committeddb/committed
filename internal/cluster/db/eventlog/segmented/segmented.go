@@ -76,17 +76,31 @@ func (l *Log) Scan(ctx context.Context, b eventlog.Coverage, visit func(eventlog
 }
 
 func (l *Log) Rewrite(ctx context.Context, generation uint64, transform eventlog.Transform) (result eventlog.RewriteResult, err error) {
-	return l.rewrite(ctx, generation, transform, nil)
+	return l.rewrite(ctx, generation, transform, nil, false)
 }
 
 func (l *Log) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, publication sync.Locker) (eventlog.RewriteResult, error) {
 	if publication == nil {
 		return eventlog.RewriteResult{}, eventlog.ErrInvalid
 	}
-	return l.rewrite(ctx, generation, transform, publication)
+	return l.rewrite(ctx, generation, transform, publication, false)
 }
 
-func (l *Log) rewrite(ctx context.Context, generation uint64, transform eventlog.Transform, publication sync.Locker) (result eventlog.RewriteResult, err error) {
+func (l *Log) Seal() (uint64, error) {
+	end, err := l.log.Seal()
+	return end, translate(err)
+}
+
+func (l *Log) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, publication sync.Locker) (eventlog.RewriteResult, error) {
+	if publication == nil {
+		return eventlog.RewriteResult{}, eventlog.ErrInvalid
+	}
+	return l.rewrite(ctx, generation, transform, publication, true)
+}
+
+var _ eventlog.SealedRewriter = (*Log)(nil)
+
+func (l *Log) rewrite(ctx context.Context, generation uint64, transform eventlog.Transform, publication sync.Locker, sealed bool) (result eventlog.RewriteResult, err error) {
 	if transform == nil {
 		return result, eventlog.ErrInvalid
 	}
@@ -98,12 +112,19 @@ func (l *Log) rewrite(ctx context.Context, generation uint64, transform eventlog
 		}
 		return payload, keep, e
 	}
-	var r segmentlog.RewriteResult
+	var r segmentlog.SealedRewriteResult
 	var e error
-	if publication == nil {
-		r, e = l.log.Rewrite(ctx, generation, adapt)
-	} else {
-		r, e = l.log.RewriteWithPublicationLock(ctx, generation, adapt, publication)
+	switch {
+	case sealed:
+		r, e = l.log.RewriteSealedWithPublicationLock(ctx, generation, adapt, publication)
+	case publication == nil:
+		var all segmentlog.RewriteResult
+		all, e = l.log.Rewrite(ctx, generation, adapt)
+		r = all.SealedRewriteResult
+	default:
+		var all segmentlog.RewriteResult
+		all, e = l.log.RewriteWithPublicationLock(ctx, generation, adapt, publication)
+		r = all.SealedRewriteResult
 	}
 	result.Published = r.Published
 	return result, translate(e)

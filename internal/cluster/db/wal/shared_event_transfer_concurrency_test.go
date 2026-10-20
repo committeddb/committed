@@ -101,7 +101,7 @@ func TestLogicalTransferExcludesRewritePublication(t *testing.T) {
 			release()
 			s.appliedIndex.Store(20)
 			publishing := make(chan struct{})
-			s.eventLog.managed = observedEventPublication{EventLog: s.eventLog.managed, entered: publishing}
+			s.eventLog.managed = observePublication(s.eventLog.managed, publishing)
 			entered, resume := pauseTransferBatch(s)
 			defer resume()
 			type outcome struct {

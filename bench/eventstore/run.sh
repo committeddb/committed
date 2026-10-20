@@ -19,8 +19,9 @@
 # runs eventstore-load with -history-from-log SRC/dataset.json: it checks the
 # log came back whole and builds over it. The source database starts empty.
 # Pass -history-scrub N to eventstore-load (after --) to erase N subjects and
-# time the scrub instead of building; restore.txt records each node's event
-# log before it and nodes/<node>.du after.
+# time the scrub instead of building, with a probe write to the first node
+# every 100ms timed for as long as the scrub runs; restore.txt records each
+# node's event log before it and nodes/<node>.du after.
 #
 # A label in --pinned-labels runs with node i in zone zi and the projections
 # pinned to a follower's zone, so they sync off the leader. It names a build

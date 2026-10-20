@@ -315,6 +315,11 @@ type Storage struct {
 	// Production append composition. eventAppendMu serializes a complete batch
 	// and precedes eventMu; the latter excludes native scrub/fetch handle swaps.
 	eventAppendMu sync.Mutex
+	// eventRewriteMu precedes eventAppendMu. A shared scrub holds it across
+	// its rewrite after releasing eventAppendMu, so applied events keep
+	// flowing; catch-up's reset, generation adoption, fetched appends and
+	// generation reclamation take it to wait for that rewrite instead.
+	eventRewriteMu sync.Mutex
 	// eventLogDir is the on-disk directory for eventLog (<datadir>/events).
 	// The scrubber rewrites the event log by building a sibling directory and
 	// renaming it over this one, so it needs the path (tidwall/wal doesn't

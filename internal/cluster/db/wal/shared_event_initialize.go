@@ -25,6 +25,8 @@ func (s *Storage) initializeFetchedGenerationWith(ctx context.Context, generatio
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	s.eventRewriteMu.Lock()
+	defer s.eventRewriteMu.Unlock()
 	s.eventAppendMu.Lock()
 	defer s.eventAppendMu.Unlock()
 	if !s.catchingUp.Load() {
