@@ -46,7 +46,7 @@ archive:
 > starting node acquires it as its FIRST act — before any of its WAL-recovery
 > steps touch the directory — so a node racing to start while the backup runs
 > fails immediately, having mutated nothing. The same stopped-node lock gates
-> `committed wal repair` and `committed wal decompress` (exclusively — a
+> `committed wal repair` and `committed wal convert` (exclusively — a
 > rewrite must not run under a concurrent backup either). For belt-and-braces
 > atomicity, snapshot the filesystem (LVM/ZFS/reflink) and back up the
 > snapshot. Simplest of all: keep the node stopped for the backup, as intended.

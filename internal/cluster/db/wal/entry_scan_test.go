@@ -5,29 +5,13 @@ import (
 	"reflect"
 	"testing"
 
-	native "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 func TestEntryPrefixScanBackends(t *testing.T) {
-	backends := map[string]func(*testing.T) entryCursor{
-		"production-tidwall": func(t *testing.T) entryCursor {
-			log, err := native.Open(t.TempDir(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = log.Close() })
-			for i, id := range []uint64{10, 30, 90} {
-				if err := log.Write(uint64(i+1), frame(experimentEntry(t, id, pb.EntryNormal))); err != nil {
-					t.Fatal(err)
-				}
-			}
-			return bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil).entries.NewEntryCursor(0)
-		},
-	}
+	backends := map[string]func(*testing.T) entryCursor{}
 	for name, open := range eventLogTestBackends() {
 		backends[name] = func(t *testing.T) entryCursor {
 			log, err := open(t.TempDir())
@@ -84,24 +68,13 @@ func TestEntryPrefixScanBackends(t *testing.T) {
 }
 
 func TestEntryPrefixScanSurfacesCorruption(t *testing.T) {
-	log, err := native.Open(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = log.Close() }()
-	if err := log.Write(1, frame(experimentEntry(t, 10, pb.EntryNormal))); err != nil {
-		t.Fatal(err)
-	}
 	// The first position is valid; the next sequential read must fail loudly.
-	if err := log.Write(2, frame([]byte{0xff})); err != nil {
-		t.Fatal(err)
-	}
-	if err := log.Write(3, frame(experimentEntry(t, 90, pb.EntryNormal))); err != nil {
-		t.Fatal(err)
-	}
-	s := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)}
+	s := &Storage{eventLog: productionBindingOf(t,
+		eventlog.Record{ID: 10, Payload: experimentEntry(t, 10, pb.EntryNormal)},
+		eventlog.Record{ID: 20, Payload: []byte{0xff}},
+		eventlog.Record{ID: 90, Payload: experimentEntry(t, 90, pb.EntryNormal)})}
 	var got []uint64
-	err = s.scanEventEntries(90, func(e *pb.Entry) error {
+	err := s.scanEventEntries(90, func(e *pb.Entry) error {
 		got = append(got, e.GetIndex())
 		return nil
 	})

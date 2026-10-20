@@ -235,13 +235,14 @@ func TestRestoreAs_ReplaysTheTailWithTheGuard(t *testing.T) {
 func tidwallSingleNode(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := wal.Open(dir, nil, nil, nil, wal.WithoutFsync(), wal.WithTidwallEventLogForTest())
+	s, err := wal.Open(dir, nil, nil, nil, wal.WithoutFsync())
 	require.NoError(t, err)
 	s.ConfState(&pb.ConfState{Voters: []uint64{1}})
 	entries := []*pb.Entry{addNode(t, 1, 1, "http://old-1:7000"), apiURLEntry(t, 2, 1, "http://old-1:8080")}
 	require.NoError(t, s.Save(&pb.HardState{Term: proto.Uint64(1), Commit: proto.Uint64(2)}, entries, &pb.Snapshot{}))
 	require.NoError(t, s.ApplyCommittedBatch(entries))
 	require.NoError(t, s.Close())
+	require.NoError(t, wal.RewriteEventLogAsTidwallForTest(dir, 1<<20))
 	return dir
 }
 

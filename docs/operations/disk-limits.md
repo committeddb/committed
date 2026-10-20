@@ -29,8 +29,6 @@ several times less disk than their raw bytes.
 **No downgrade below 0.8.3**: 0.8.3 runs the segmented event log, which no
 earlier binary opens. The way back is a backup taken before the node was
 converted (see [upgrade.md](upgrade.md#upgrading-from-082-to-083)).
-`committed wal decompress` applies only to the tidwall event log of
-0.8.0–0.8.2 data directories, and refuses a segmented one.
 
 A checksum failure inside a sealed segment is data corruption (rebuild from a
 healthy replica), never a torn tail. Backups copy segment files as-is, so

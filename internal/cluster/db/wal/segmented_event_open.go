@@ -8,21 +8,9 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
-
-func rejectSegmentedEventDirectory(dir string) error {
-	recognized, err := segmentlog.RecognizeDirectory(dir)
-	if err != nil {
-		return err
-	}
-	if recognized {
-		return fmt.Errorf("event log at %q contains segmented storage; select the segmented backend to open it", dir)
-	}
-	return nil
-}
 
 // ErrTidwallEventLog refuses a tidwall event log where the segmented engine
 // is selected: the node no longer runs tidwall, and `committed wal convert`
@@ -42,7 +30,7 @@ func refuseTidwallEventDirectory(dir string) error {
 }
 
 func segmentedEventLogOpener(opts segmentlog.LogOptions) eventLogOpener {
-	return func(dir string, m *metrics.Metrics, _ tidwall.LegacyOptions) (*eventLogBinding, error) {
+	return func(dir string, m *metrics.Metrics) (*eventLogBinding, error) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return nil, err

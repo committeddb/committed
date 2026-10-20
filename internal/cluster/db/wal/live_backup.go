@@ -209,7 +209,7 @@ func raced(err error) error {
 	return err
 }
 
-// A backend capture can race external native truncation or replacement. Keep
+// A backend capture can race truncation or replacement. Keep
 // the archive retry behavior independent of the backend's file enumeration.
 func backupEventError(err error) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, wal.ErrClosed) {

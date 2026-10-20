@@ -3,10 +3,7 @@ package wal
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"time"
-
-	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
@@ -14,7 +11,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/db/datadir"
 )
 
 // This file implements the RTBF scrubber: physical removal of already-delete-
@@ -155,55 +151,7 @@ func (s *Storage) scrubWorker() {
 // completed, looping so a bound raised during a rewrite is picked up
 // immediately.
 func (s *Storage) runPendingScrub() error {
-	s.eventMu.RLock()
-	shared := s.eventLog.managed != nil
-	s.eventMu.RUnlock()
-	if shared {
-		return s.runPendingSharedScrub()
-	}
-	for {
-		bound, hash, cmdIndex, err := s.loadPendingScrub()
-		if err != nil {
-			return err
-		}
-		if bound == 0 || bound <= s.lastScrubbedBound.Load() {
-			return nil
-		}
-		// Not over a log that is being filled from a peer (BeginCatchUp), nor
-		// over an empty one — a rewrite of nothing would fatal on the
-		// invariant that the tail survives, and a rewrite of a partial log
-		// would stamp a generation its content does not have. The release
-		// after the install re-signals.
-		if s.catchingUp.Load() {
-			s.logger.Info("pending scrub deferred: the event log is being filled from a peer", zap.Uint64("pendingBound", bound))
-			return nil
-		}
-		if last, err := s.lastEventSeq(); err != nil {
-			return err
-		} else if last == 0 {
-			s.logger.Info("pending scrub deferred: the event log is empty", zap.Uint64("pendingBound", bound))
-			return nil
-		}
-		erase, err := s.runScrub(bound, hash, cmdIndex)
-		if err != nil {
-			return err
-		}
-		// Reconcile the erasure-cadence bucket to the rewrite's surviving raw
-		// deletes BEFORE advancing the completed bound, so "completed" implies
-		// "reconciled" (idempotent: a crash here re-runs the rewrite and this
-		// reconcile on retry).
-		if erase != nil {
-			if err := s.reconcileUnhashedDeletes(bound, erase.eligibleMax, erase.raws, erase.msel); err != nil {
-				return err
-			}
-		}
-		// markScrubComplete prunes the now-dead tombstones and compacts bbolt in one
-		// kvMu.Lock critical section, so no snapshot can copy a freed-but-uncompacted
-		// erased key.
-		if err := s.markScrubComplete(bound); err != nil {
-			return err
-		}
-	}
+	return s.runPendingSharedScrub()
 }
 
 // eraseOutcome carries one authorized rewrite's delete-key erasure results to
@@ -212,67 +160,6 @@ type eraseOutcome struct {
 	eligibleMax uint64
 	raws        []rawDelete
 	msel        map[string]uint64
-}
-
-// runScrub prepares application policy and executes the native rewrite. Physical
-// execution must finish before the caller marks completion or reconciles erasure.
-func (s *Storage) runScrub(bound uint64, hash bool, cmdIndex uint64) (*eraseOutcome, error) {
-	plan, err := s.prepareScrubPlan(bound, hash, cmdIndex)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.rewriteLegacyEvents(plan); err != nil {
-		return nil, err
-	}
-	return plan.erase, nil
-}
-
-// reopenEventLogAfterSwapOrFatal reopens the permanent event log at
-// s.eventLogDir and reassigns s.eventLog, or FATALS if the reopen fails — the
-// event-log analogue of reopenKVAfterSwapOrFatal. A returned error would leave
-// s.eventLog closed for the next appendEvent to hit as ErrClosed: a delayed
-// crash mis-attributed to the append path, since runScrub's caller only logs and
-// continues. The caller MUST ensure s.eventLogDir holds the intended (non-empty)
-// log before calling — reopening a missing dir would create an empty log (silent
-// event loss). Caller holds eventMu.Lock.
-// closeEventLogBeforeSwapOrFatal closes the live event-log handle ahead of the
-// scrub rename, or FATALS if the close fails — the pre-swap analogue of the
-// reopen/recompute ...OrFatal helpers. A returned error would drop into the
-// survive-and-continue scrub worker (runPendingScrub only logs and continues),
-// leaving the dead handle for the next appendEvent to hit as an ErrClosed crash
-// mis-attributed to append. Fataling attributes it at the true site;
-// s.eventLogDir is still the original intact log (no rename yet), so a restart
-// recovers. Caller holds eventMu.Lock.
-func (s *Storage) closeEventLogBeforeSwapOrFatal(what string) {
-	if err := s.eventLog.Close(); err != nil {
-		s.logger.Fatal("close event log before scrub swap failed; the node cannot continue (restart to recover from the on-disk log)",
-			zap.String("op", what), zap.String("path", s.eventLogDir), zap.Error(err))
-	}
-}
-
-func (s *Storage) reopenEventLogAfterSwapOrFatal(what string) {
-	reopened, err := tidwallbackend.OpenLegacy(s.eventLogDir, s.eventOpenOptions)
-	if err != nil {
-		s.logger.Fatal("event-log swap could not reopen storage; the node cannot continue (restart to recover via recoverScrubDirs)",
-			zap.String("op", what), zap.Error(err))
-	}
-	s.eventLog = bindLegacyEventLog(reopened, s.metrics)
-}
-
-// recomputeEventBoundsAfterSwapOrFatal recomputes the in-memory event bounds
-// after a committed event-log swap, or FATALS if the recompute fails — the
-// post-swap analogue of reopenEventLogAfterSwapOrFatal. Once the swap has
-// committed, the on-disk log is the new (re-densified) one; a returned error
-// would drop into the survive-and-continue scrub worker, which keeps serving
-// with stale eventIndex/firstEventIndex and an un-bumped scrubGen — so in-flight
-// Readers never re-derive their walSeq cursor and silently read wrong offsets.
-// A restart recomputes the bounds cleanly (Open does). Caller holds eventMu.Lock
-// and has already reopened s.eventLog at the swapped-in dir.
-func (s *Storage) recomputeEventBoundsAfterSwapOrFatal(what string) {
-	if err := s.recomputeEventBoundsLocked(); err != nil {
-		s.logger.Fatal("event-log swap committed but in-memory bounds could not be recomputed; the node cannot continue with stale bounds (restart to recover)",
-			zap.String("op", what), zap.Error(err))
-	}
 }
 
 // scrubFilterEntry decides the fate of one event-log record (raw = unframed
@@ -392,28 +279,6 @@ func (s *Storage) selectSupersessions(bound uint64, scrubTypes map[string]bool) 
 		return nil, err
 	}
 	return selection.latest, nil
-}
-
-// recomputeEventBoundsLocked refreshes firstEventIndex/eventIndex from the
-// rewritten log. Caller must hold eventMu.Lock. EventIndex (P_local) must never
-// regress — the tail is never removed — so this asserts the recomputed value
-// equals the existing one and refuses to lower it (a lower value would trip the
-// Ready loop's P==R invariant check and fatal-exit the node).
-func (s *Storage) recomputeEventBoundsLocked() error {
-	first, last, err := s.eventBoundsLocked()
-	if err != nil {
-		return err
-	}
-	if last == 0 {
-		return fmt.Errorf("scrub emptied the event log: the tail must always survive")
-	}
-	prev := s.eventIndex.Load()
-	if last != prev {
-		return fmt.Errorf("scrub changed EventIndex from %d to %d; the tail must be preserved", prev, last)
-	}
-	s.firstEventIndex.Store(first)
-	s.eventIndex.Store(last)
-	return nil
 }
 
 // loadPendingScrubBound reads the highest requested scrub bound (0 if none).
@@ -608,20 +473,6 @@ var metadataBacklogThreshold int64 = 128
 // counted supersession's key+data size when estimating reclaimable bytes.
 const metadataEntryOverhead = 64
 
-// scrubConvergeRounds bounds the unlocked catch-up passes (phase A' in runScrub)
-// that chase the delta appended while the rewrite runs, before it takes
-// eventMu.Lock for the final swap. Each pass shrinks the delta (a NoSync copy
-// outruns fsync'd appends); the cap guarantees termination against a writer we
-// cannot outrun — the locked phase then just copies whatever remains. A latency
-// heuristic, not a correctness boundary — phase B catches up to the true tail
-// regardless.
-const scrubConvergeRounds = 8
-
-// scrubConvergeResidue is the delta (in entries) small enough to copy under the
-// lock, so a convergence pass stops chasing once within it. A var (not const) so
-// a test can shrink it to force the convergence path on a small delta.
-var scrubConvergeResidue uint64 = 4096
-
 // Volume gate for the metadata-only scrub. The rewrite's COST is O(total log
 // size) — read the whole log twice, rewrite every survivor — while its BENEFIT
 // is only the superseded metadata it drops. The count threshold alone let a
@@ -696,16 +547,4 @@ func (s *Storage) hasRTBFBacklog() bool {
 		return false
 	}
 	return found
-}
-
-// Scrub working-directory names, all siblings of events/ so a rename is an
-// atomic same-filesystem operation. The names, and the Open-time recovery that
-// reaps them (datadir.RecoverScrubDirs), live in the datadir package so they
-// cannot drift from the backup tool's read-only view of the same residue.
-func (s *Storage) scrubTmpDir(bound uint64) string {
-	return datadir.ScrubDir(s.eventLogDir, bound)
-}
-
-func (s *Storage) eventRetiredDir() string {
-	return datadir.RetiredDir(s.eventLogDir)
 }

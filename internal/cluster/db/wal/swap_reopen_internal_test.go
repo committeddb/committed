@@ -1,7 +1,6 @@
 package wal
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -19,7 +18,7 @@ func fatalPanicStorage(t *testing.T) *Storage {
 	t.Helper()
 	core, _ := observer.New(zap.DebugLevel)
 	logger := zap.New(core, zap.WithFatalHook(zapcore.WriteThenPanic))
-	s, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithLogger(logger))
+	s, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync(), WithLogger(logger))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	// Quiesce every Open-started worker that touches the event-log handle
@@ -66,38 +65,4 @@ func TestReopenKVAfterSwap_FatalsWhenReopenFails(t *testing.T) {
 	require.Panics(t, func() {
 		s.reopenKVAfterSwapOrFatal(badPath, &bolt.Options{Timeout: time.Second}, "test")
 	})
-}
-
-// The event-log analogue: after a swap closes the live event log,
-// reopenEventLogAfterSwapOrFatal reopens it so appendEvent never sees ErrClosed.
-func TestReopenEventLogAfterSwap_ReopensClosedHandle(t *testing.T) {
-	s, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-
-	// Quiesce the Open-started scrub worker before the bare handle swap, as in
-	// TestReopenKVAfterSwap_ReopensClosedHandle.
-	s.stopScrubWorker()
-	s.stopSealer()
-
-	require.NoError(t, s.eventLog.Close()) // the post-close point in the swap
-
-	s.reopenEventLogAfterSwapOrFatal("test")
-
-	_, err = s.nativeEventTransferLocked().LastSequence()
-	require.NoError(t, err, "event log must be live after the swap, not ErrClosed")
-}
-
-// When reopening the event log fails, the helper fatals at the swap site rather
-// than reopening a missing dir (which would silently create an empty log).
-func TestReopenEventLogAfterSwap_FatalsWhenReopenFails(t *testing.T) {
-	s := fatalPanicStorage(t)
-	// Point eventLogDir at a path whose parent is a regular file, so wal.Open's
-	// MkdirAll fails (ENOTDIR) instead of silently creating an empty log.
-	blocker := filepath.Join(t.TempDir(), "not-a-dir")
-	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
-	orig := s.eventLogDir
-	s.eventLogDir = filepath.Join(blocker, "events")
-	require.Panics(t, func() { s.reopenEventLogAfterSwapOrFatal("test") })
-	s.eventLogDir = orig // restore so t.Cleanup's Close is well-defined
 }

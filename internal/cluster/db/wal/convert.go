@@ -3,14 +3,17 @@ package wal
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 	"os"
+
+	bolt "go.etcd.io/bbolt"
 
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
@@ -63,24 +66,44 @@ func segmentedLogOptions() segmentlog.LogOptions {
 
 // ConvertEventLog rewrites a stopped node's tidwall event log as a segmented
 // one: the same records at the same raft indexes (holes a scrub left
-// included), the same scrub generation and append progress. The copy is built
-// in a scrub temp directory and checked record by record against the original
-// before it replaces events/ the way a scrub swap does, so a crash at any point
-// leaves either log whole (Open's recovery rolls an interrupted swap back or
-// reaps the temp copy) and the command can be rerun. The original is removed
-// once the new log is in place.
+// included), and the same scrub generation. The copy is built in a scrub temp
+// directory and checked record by record against the original before it
+// replaces events/ the way a scrub swap did, so a crash at any point leaves
+// either log whole (an interrupted swap is rolled back first) and the command
+// can be rerun. The original is removed once the new log is in place. It holds
+// the stopped-node lock throughout and opens only the event log and bbolt,
+// read-only: this release runs nothing else over a tidwall log.
 func ConvertEventLog(dir string) (*Converted, error) {
-	s, err := openStopped(dir)
+	lock, err := datadir.LockStoppedNodeExclusive(dir)
 	if err != nil {
 		return nil, err
 	}
-	if s.eventLog.managed != nil {
-		return &Converted{AlreadySegmented: true}, s.Close()
+	if lock == nil {
+		return nil, fmt.Errorf("%s holds no metadata database: not a node's data directory", dir)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := datadir.RecoverScrubDirs(dir); err != nil {
+		return nil, fmt.Errorf("recover an interrupted swap: %w", err)
+	}
+	tidwall, err := isTidwallEventLog(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !tidwall {
+		return &Converted{AlreadySegmented: true}, nil
+	}
+	generation, err := completedScrubBound(lock)
+	if err != nil {
+		return nil, err
 	}
 	events := datadir.EventsDir(dir)
-	tmp := datadir.ScrubDir(events, s.EventLogGeneration())
-	res, err := s.copyToSegmented(tmp)
-	if cerr := s.Close(); err == nil {
+	src, err := openTidwallEventReader(events)
+	if err != nil {
+		return nil, err
+	}
+	tmp := datadir.ScrubDir(events, generation)
+	res, err := copyToSegmented(src, tmp, generation)
+	if cerr := src.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
@@ -88,14 +111,6 @@ func ConvertEventLog(dir string) (*Converted, error) {
 		return nil, err
 	}
 
-	// The storage lock went with Close; hold the stopped-node lock across the
-	// swap so a node cannot start on a half-swapped directory.
-	lock, err := datadir.LockStoppedNodeExclusive(dir)
-	if err != nil {
-		_ = os.RemoveAll(tmp)
-		return nil, err
-	}
-	defer func() { _ = lock.Close() }()
 	retired := datadir.RetiredDir(events)
 	if err := os.RemoveAll(retired); err != nil {
 		return nil, err
@@ -103,7 +118,7 @@ func ConvertEventLog(dir string) (*Converted, error) {
 	if err := fsutil.SyncDir(tmp); err != nil {
 		return nil, err
 	}
-	if err := tidwallbackend.SwapLegacyDirectories(events, tmp, retired); err != nil {
+	if err := swapEventDirectories(events, tmp, retired); err != nil {
 		return nil, fmt.Errorf("swap the converted event log into place: %w", err)
 	}
 	if err := fsutil.SyncDir(dir); err != nil {
@@ -130,33 +145,58 @@ func convertTidwallEventLog(dir string) (*Converted, error) {
 	return converted, nil
 }
 
-// copyToSegmented writes s's event log into a new segmented log at tmp and
-// verifies it there.
-func (s *Storage) copyToSegmented(tmp string) (*Converted, error) {
+// swapEventDirectories moves live aside to retired and replacement into its
+// place, putting live back if the second rename fails. A crash between the two
+// renames leaves retired alone, which datadir.RecoverScrubDirs restores.
+func swapEventDirectories(live, replacement, retired string) error {
+	if err := os.Rename(live, retired); err != nil {
+		return fmt.Errorf("move the event log aside: %w", err)
+	}
+	if err := os.Rename(replacement, live); err != nil {
+		if rerr := os.Rename(retired, live); rerr != nil {
+			return fmt.Errorf("rename the converted log into place: %w (putting the original back failed: %v)", err, rerr)
+		}
+		return fmt.Errorf("rename the converted log into place: %w", err)
+	}
+	return nil
+}
+
+// completedScrubBound is the scrub generation a tidwall log's bytes reflect,
+// which that engine kept only in bbolt.
+func completedScrubBound(db *bolt.DB) (uint64, error) {
+	var bound uint64
+	err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(pendingScrubBucket)
+		if b == nil {
+			return ErrBucketMissing
+		}
+		if v := b.Get(scrubCompletedKey); len(v) == 8 {
+			bound = binary.BigEndian.Uint64(v)
+		}
+		return nil
+	})
+	return bound, err
+}
+
+// copyToSegmented writes src's records into a new segmented log at tmp with
+// the given generation and verifies it there.
+func copyToSegmented(src *tidwallEventReader, tmp string, generation uint64) (*Converted, error) {
 	if err := os.RemoveAll(tmp); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(tmp, 0o750); err != nil {
 		return nil, err
 	}
-	res := &Converted{Generation: s.EventLogGeneration()}
-	last, hasHistory, err := s.eventLog.entries.LastAppended()
-	if err != nil {
-		return nil, fmt.Errorf("read the event log's last index: %w", err)
-	}
-	if hasHistory {
-		res.LastIndex = last
-	}
-
+	res := &Converted{Generation: generation}
 	opts := segmentedLogOptions()
 	opts.SegmentBytes = convertSegmentBytes
 	dst, err := segmented.Create(tmp, 1, opts)
 	if err != nil {
 		return nil, fmt.Errorf("create the segmented event log: %w", err)
 	}
-	if res.Generation > 0 {
+	if generation > 0 {
 		// An empty rewrite publishes only the generation; any record aborts it.
-		if _, err := dst.Rewrite(context.Background(), res.Generation, func(eventlog.Record) ([]byte, bool, error) {
+		if _, err := dst.Rewrite(context.Background(), generation, func(eventlog.Record) ([]byte, bool, error) {
 			return nil, false, eventlog.ErrInvalid
 		}); err != nil {
 			_ = dst.Close()
@@ -185,10 +225,11 @@ func (s *Storage) copyToSegmented(tmp string) (*Converted, error) {
 			}
 		}
 	}
-	err = s.eachEventRecord(func(r eventlog.Record) error {
+	err = src.each(func(r eventlog.Record) error {
 		batch = append(batch, r)
 		size += len(r.Payload)
 		res.Records++
+		res.LastIndex = r.ID
 		if size >= convertBatchBytes {
 			return flush()
 		}
@@ -203,37 +244,15 @@ func (s *Storage) copyToSegmented(tmp string) (*Converted, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.verifyConverted(tmp, res); err != nil {
+	if err := verifyConverted(src, tmp, res); err != nil {
 		return nil, fmt.Errorf("the converted event log does not match the original (nothing was replaced): %w", err)
 	}
 	return res, nil
 }
 
-// eachEventRecord visits every record of s's event log in raft-index order.
-func (s *Storage) eachEventRecord(visit func(eventlog.Record) error) error {
-	s.eventMu.RLock()
-	defer s.eventMu.RUnlock()
-	cur := s.eventLog.records()
-	defer func() { _ = cur.Close() }()
-	for next := uint64(0); ; {
-		r, err := cur.Seek(next)
-		if errors.Is(err, eventlog.ErrNotFound) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read the event log at raft index %d: %w", next, err)
-		}
-		if err := visit(r); err != nil {
-			return err
-		}
-		next = r.ID + 1
-	}
-}
-
 // verifyConverted reopens the segmented log at tmp and checks it holds exactly
-// s's records, generation and append progress. One sequential scan of each
-// log: a per-record seek into the new log would reread its segment each time.
-func (s *Storage) verifyConverted(tmp string, want *Converted) error {
+// src's records, generation and append progress, walking both in step.
+func verifyConverted(src *tidwallEventReader, tmp string, want *Converted) error {
 	dst, err := segmented.Open(tmp, segmentedLogOptions().Encoding)
 	if err != nil {
 		return err
@@ -249,30 +268,27 @@ func (s *Storage) verifyConverted(tmp string, want *Converted) error {
 	if hasHistory != (want.Records > 0) || (hasHistory && last != want.LastIndex) {
 		return fmt.Errorf("last index %d, want %d", last, want.LastIndex)
 	}
-	s.eventMu.RLock()
-	defer s.eventMu.RUnlock()
-	cur := s.eventLog.records()
-	defer func() { _ = cur.Close() }()
-	var n, next uint64
+	next, stop := iter.Pull2(src.records())
+	defer stop()
+	var n uint64
 	err = dst.Scan(context.Background(), eventlog.Coverage{Start: 0, End: ^uint64(0)}, func(got eventlog.Record) error {
-		r, err := cur.Seek(next)
-		if errors.Is(err, eventlog.ErrNotFound) {
+		r, err, ok := next()
+		if !ok {
 			return fmt.Errorf("an extra record at raft index %d", got.ID)
 		}
 		if err != nil {
-			return fmt.Errorf("read the event log at raft index %d: %w", next, err)
+			return err
 		}
 		if got.ID != r.ID || !bytes.Equal(got.Payload, r.Payload) {
 			return fmt.Errorf("record %d differs (found raft index %d)", r.ID, got.ID)
 		}
 		n++
-		next = r.ID + 1
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	if r, err := cur.Seek(next); !errors.Is(err, eventlog.ErrNotFound) {
+	if r, err, ok := next(); ok {
 		return fmt.Errorf("raft index %d is missing (%v)", r.ID, err)
 	}
 	if n != want.Records {

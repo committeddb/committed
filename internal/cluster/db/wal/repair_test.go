@@ -9,8 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	twal "github.com/tidwall/wal"
-
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 // encodeRecord returns the exact on-disk shape of one committed WAL record:
@@ -195,19 +193,15 @@ func TestDiagnoseLog_Clean(t *testing.T) {
 // accepted.
 func TestOfflineMaintenance_RefusesRunningNode(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog())
+	s, err := Open(dir, nil, nil, nil, WithoutFsync())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 
 	_, err = RepairNode(dir, false)
 	require.ErrorContains(t, err, "in use by a running node", "repair must refuse a live node")
-	_, err = DecompressNode(dir)
-	require.ErrorContains(t, err, "in use by a running node", "decompress must refuse a live node")
 
 	require.NoError(t, s.Close())
 	_, err = RepairNode(dir, false)
-	require.NoError(t, err, "a stopped node's dir must be accepted")
-	_, err = DecompressNode(dir)
 	require.NoError(t, err, "a stopped node's dir must be accepted")
 }
 
@@ -230,7 +224,7 @@ func TestOpenLog_WrapsTornTailWithActionableError(t *testing.T) {
 
 	for name, open := range map[string]func() error{
 		"raft":  func() error { _, err := openLog(dir, "entry_log", nil, nil); return err },
-		"event": func() error { _, err := openEventLog(dir, nil, tidwall.LegacyOptions{}); return err },
+		"event": func() error { _, err := openTidwallEventReader(dir); return err },
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := open()

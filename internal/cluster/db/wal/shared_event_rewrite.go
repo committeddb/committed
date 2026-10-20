@@ -12,10 +12,9 @@ import (
 // reopen after a backend failure before retrying. The managed-backend scrub
 // worker calls this step and excludes Close/replacement for its lifetime.
 //
-// A backend that can seal its active range has it sealed under append
-// exclusion, which then ends: applied events append while the sealed history
-// at or below the bound is rewritten, and wait only for publication. Other
-// backends rewrite the whole log and appends wait for it. Existing protected
+// The active range is sealed under append exclusion, which then ends: applied
+// events append while the sealed history at or below the bound is rewritten,
+// and wait only for publication. Existing protected
 // readers or layout freezes defer the rewrite; registration of new protected
 // readers waits until this step returns.
 func (s *Storage) rewriteSharedPlan(ctx context.Context, generation uint64, plan *scrubPlan) (eventlog.RewriteResult, error) {
@@ -61,22 +60,16 @@ func (s *Storage) rewriteSharedPlan(ctx context.Context, generation uint64, plan
 	}
 	transform := checkedEntryTransform(plan.transform)
 	var result eventlog.RewriteResult
-	var err error
-	if sealed, ok := log.(eventlog.SealedRewriter); ok {
-		// Every record through the frontier, and so through the bound, is
-		// sealed before appends resume; later ones lie outside the scope.
-		var end uint64
-		end, err = sealed.Seal()
-		if err == nil && end <= plan.bound {
-			err = eventlog.ErrInvalid
-		}
-		if err == nil {
-			s.eventAppendMu.Unlock()
-			appending = true
-			result, err = sealed.RewriteSealedWithPublicationLock(ctx, generation, transform, storageEntryPublicationLock{s})
-		}
-	} else {
-		result, err = log.RewriteWithPublicationLock(ctx, generation, transform, storageEntryPublicationLock{s})
+	// Every record through the frontier, and so through the bound, is sealed
+	// before appends resume; later ones lie outside the scope.
+	end, err := log.Seal()
+	if err == nil && end <= plan.bound {
+		err = eventlog.ErrInvalid
+	}
+	if err == nil {
+		s.eventAppendMu.Unlock()
+		appending = true
+		result, err = log.RewriteSealedWithPublicationLock(ctx, generation, transform, storageEntryPublicationLock{s})
 	}
 	if err != nil {
 		// Preparation can poison storage before it ever acquires publication.

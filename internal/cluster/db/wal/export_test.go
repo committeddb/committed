@@ -81,59 +81,34 @@ func (s *Storage) PutRawSyncableIndexForTest(id string, raw []byte) error {
 	})
 }
 
-// EventLogLastSeq exposes the event log's wal sequence for test
-// assertions. External callers should use EventIndex() (raft index) —
-// this accessor is only here because a couple of Phase 1 tests assert
-// on the wal-seq count to prove the log is being appended to.
+// EventLogLastSeq is how many records the event log holds, for test
+// assertions: the n-th surviving record is its sequence n. External callers
+// should use EventIndex() (raft index).
 func (s *Storage) EventLogLastSeq() (uint64, error) {
-	if payloads, managed, err := s.managedEventPayloads(); managed {
-		return uint64(len(payloads)), err
-	}
-	return s.lastEventSeq()
+	payloads, err := s.eventPayloads()
+	return uint64(len(payloads)), err
 }
 
-// managedEventPayloads lists a segmented log's surviving records in order:
-// what tidwall's dense wal sequences numbered from 1. managed is false for a
-// tidwall log, whose sequence reads the callers use directly.
-func (s *Storage) managedEventPayloads() (payloads [][]byte, managed bool, err error) {
+// eventPayloads lists the event log's surviving records in order.
+func (s *Storage) eventPayloads() (payloads [][]byte, err error) {
 	s.eventMu.RLock()
 	log := s.eventLog.managed
 	s.eventMu.RUnlock()
-	if log == nil {
-		return nil, false, nil
-	}
 	err = log.Scan(context.Background(), eventlog.Coverage{End: ^uint64(0)}, func(r eventlog.Record) error {
 		payloads = append(payloads, r.Payload)
 		return nil
 	})
-	return payloads, true, err
+	return payloads, err
 }
 
-// eventPayloadsForTest is every surviving record in log order, with the
-// sequence a tidwall log gave it.
+// eventPayloadsForTest is every surviving record in log order, with its
+// sequence: its position, from 1.
 func (s *Storage) eventPayloadsForTest() (seqs []uint64, payloads [][]byte, err error) {
-	if payloads, managed, err := s.managedEventPayloads(); managed {
-		for i := range payloads {
-			seqs = append(seqs, uint64(i+1))
-		}
-		return seqs, payloads, err
+	payloads, err = s.eventPayloads()
+	for i := range payloads {
+		seqs = append(seqs, uint64(i+1))
 	}
-	first, err := s.firstEventSeq()
-	if err != nil {
-		return nil, nil, err
-	}
-	last, err := s.lastEventSeq()
-	if err != nil || first == 0 || last == 0 {
-		return nil, nil, err
-	}
-	for seq := first; seq <= last; seq++ {
-		raw, err := s.readEventAt(seq)
-		if err != nil {
-			return nil, nil, err
-		}
-		seqs, payloads = append(seqs, seq), append(payloads, raw)
-	}
-	return seqs, payloads, nil
+	return seqs, payloads, err
 }
 
 // SimulateCrashedSnapshotInstallForTest reproduces the durable state left by a
@@ -149,16 +124,14 @@ func (s *Storage) SimulateCrashedSnapshotInstallForTest(snap *pb.Snapshot) error
 // ReadEventAt exposes event-log entries by wal seq for test assertions.
 // Production callers go through Reader.
 func (s *Storage) ReadEventAt(seq uint64) ([]byte, error) {
-	if payloads, managed, err := s.managedEventPayloads(); managed {
-		if err != nil {
-			return nil, err
-		}
-		if seq == 0 || seq > uint64(len(payloads)) {
-			return nil, eventlog.ErrNotFound
-		}
-		return payloads[seq-1], nil
+	payloads, err := s.eventPayloads()
+	if err != nil {
+		return nil, err
 	}
-	return s.readEventAt(seq)
+	if seq == 0 || seq > uint64(len(payloads)) {
+		return nil, eventlog.ErrNotFound
+	}
+	return payloads[seq-1], nil
 }
 
 // Unframe strips and verifies the per-entry checksum frame from a raw log
@@ -183,13 +156,7 @@ func (s *Storage) TombstoneSelections(bound uint64) (map[string]uint64, error) {
 // worker); they call this directly instead. The delete-key erasure pass is
 // disabled; RunScrubWithEraseForTest authorizes it.
 func (s *Storage) RunScrubForTest(bound uint64) error {
-	if s.eventLog.managed != nil {
-		return s.runSharedScrubForTest(bound, false, 0)
-	}
-	if _, err := s.runScrub(bound, false, 0); err != nil {
-		return err
-	}
-	return s.markScrubComplete(bound)
+	return s.runSharedScrubForTest(bound, false, 0)
 }
 
 // runSharedScrubForTest is the segmented worker's sequence for one bound,
@@ -216,19 +183,7 @@ func (s *Storage) runSharedScrubForTest(bound uint64, hash bool, cmdIndex uint64
 // bound, completion reconciles the cadence bucket — the exact sequence the
 // worker performs for a hash-authorized pending record.
 func (s *Storage) RunScrubWithEraseForTest(bound, cmdIndex uint64) error {
-	if s.eventLog.managed != nil {
-		return s.runSharedScrubForTest(bound, true, cmdIndex)
-	}
-	erase, err := s.runScrub(bound, true, cmdIndex)
-	if err != nil {
-		return err
-	}
-	if erase != nil {
-		if err := s.reconcileUnhashedDeletes(bound, erase.eligibleMax, erase.raws, erase.msel); err != nil {
-			return err
-		}
-	}
-	return s.markScrubComplete(bound)
+	return s.runSharedScrubForTest(bound, true, cmdIndex)
 }
 
 // MarkScrubCompleteForTest exposes markScrubComplete (prune + compact, fused) so a
@@ -248,21 +203,6 @@ func (s *Storage) SetFailCompactionForTest(fn func() error) { s.failCompactionFo
 // temp create/write at a path it controls (e.g. a pre-planted directory) and
 // assert the error branch removes the stray. Pass nil to restore the default.
 func (s *Storage) SetBoltTmpPathForTest(fn func(prefix string) string) { s.boltTmpPathForTest = fn }
-
-// SetScrubPostBulkHookForTest installs a callback fired inside runScrub after the
-// phase-A bulk copy and before the convergence/locked catch-up, so a test can
-// append late commits in that window and assert the swap still folds them in. Pass
-// nil to restore.
-func (s *Storage) SetScrubPostBulkHookForTest(fn func()) { s.scrubPostBulkHookForTest = fn }
-
-// SetScrubConvergeResidueForTest shrinks the convergence residue so a small
-// injected delta forces the unlocked convergence path (phase A') instead of the
-// locked catch-up. Returns a restore func.
-func SetScrubConvergeResidueForTest(n uint64) func() {
-	old := scrubConvergeResidue
-	scrubConvergeResidue = n
-	return func() { scrubConvergeResidue = old }
-}
 
 // IsCompactOwedForTest reports whether the durable compaction-owed marker is set
 // (a scrub pruned tombstones but hasn't finished compacting bbolt).
@@ -519,7 +459,3 @@ func SetConvertSegmentBytesForTest(n int) func() {
 	convertSegmentBytes = n
 	return func() { convertSegmentBytes = prev }
 }
-
-// WithTidwallEventLogForTest opens a tidwall event log, so a test can write the
-// directory a pre-0.8.3 node left for the converter.
-func WithTidwallEventLogForTest() Option { return withTidwallEventLog() }

@@ -27,7 +27,7 @@ func TestStorageSharedRewritePublication(t *testing.T) {
 			defer func() { _ = log.Close() }()
 			publishing := make(chan struct{})
 			s := &Storage{
-				eventLog:    bindEventLog(observePublication(log, publishing)),
+				eventLog:    bindEventLog(observedEventPublication{log, publishing}),
 				eventLayout: layoutLock{logger: zap.NewNop()},
 			}
 			require.NoError(t, log.Append([]eventlog.Record{
@@ -115,7 +115,7 @@ type failedPublicationLog struct {
 	publication bool
 }
 
-func (l *failedPublicationLog) RewriteWithPublicationLock(_ context.Context, _ uint64, _ eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+func (l *failedPublicationLog) RewriteSealedWithPublicationLock(_ context.Context, _ uint64, _ eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
 	if l.publication {
 		lock.Lock()
 		defer lock.Unlock()
@@ -178,8 +178,7 @@ func experimentPBEntry(t *testing.T, index uint64, entities ...*clusterpb.LogEnt
 	return &entry
 }
 
-// gatedRewriteLog pauses a rewrite at its first examined record, whichever
-// rewrite the scrub chooses.
+// gatedRewriteLog pauses a scrub's rewrite at its first examined record.
 type gatedRewriteLog struct {
 	*segmented.Log
 	entered, release chan struct{}
@@ -195,10 +194,6 @@ func (l gatedRewriteLog) gate(transform eventlog.Transform) eventlog.Transform {
 		}
 		return transform(r)
 	}
-}
-
-func (l gatedRewriteLog) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
-	return l.Log.RewriteWithPublicationLock(ctx, generation, l.gate(transform), lock)
 }
 
 func (l gatedRewriteLog) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {

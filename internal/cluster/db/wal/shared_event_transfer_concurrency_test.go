@@ -90,7 +90,7 @@ func TestLogicalTransferCapturesAppendFrontier(t *testing.T) {
 }
 
 func TestLogicalTransferExcludesRewritePublication(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		t.Run(name, func(t *testing.T) {
 			s, err := openStorage(t.TempDir(), nil, nil, nil, storageTestOpeners()[name], WithSafeMode())
 			require.NoError(t, err)
@@ -101,7 +101,7 @@ func TestLogicalTransferExcludesRewritePublication(t *testing.T) {
 			release()
 			s.appliedIndex.Store(20)
 			publishing := make(chan struct{})
-			s.eventLog.managed = observePublication(s.eventLog.managed, publishing)
+			s.eventLog.managed = observedEventPublication{EventLog: s.eventLog.managed, entered: publishing}
 			entered, resume := pauseTransferBatch(s)
 			defer resume()
 			type outcome struct {

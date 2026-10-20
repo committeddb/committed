@@ -12,9 +12,9 @@ import (
 )
 
 // Exercise the storage lifecycle used by snapshot catch-up with a real scrub
-// command across native and shared sources and receivers.
+// command across backend configurations of source and receiver.
 func TestScrubbedPeerSnapshotBackends(t *testing.T) {
-	for _, sourceName := range []string{"production-tidwall", "tidwall", "segmented", "segmented-cached"} {
+	for _, sourceName := range []string{"segmented", "segmented-cached"} {
 		t.Run(sourceName, func(t *testing.T) {
 			source, err := openStorage(t.TempDir(), nil, nil, nil, storageTestOpeners()[sourceName], WithSafeMode())
 			require.NoError(t, err)

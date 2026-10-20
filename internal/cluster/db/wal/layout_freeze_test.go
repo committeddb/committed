@@ -17,9 +17,7 @@ import (
 // and they release when the last freeze on that log lifts.
 func TestFreezeLayout_EachLogHoldsItsOwnMovers(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, withTidwallEventLog(), WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
-	require.NoError(t, err)
-	defer func() { _ = s.Close() }()
+	s := openSmallSegments(t, dir, 25*time.Millisecond)
 	eventsDir := filepath.Join(dir, "events")
 
 	for i := uint64(1); i <= 5; i++ {
@@ -31,7 +29,7 @@ func TestFreezeLayout_EachLogHoldsItsOwnMovers(t *testing.T) {
 	// raft-log compaction is untouched.
 	releaseEvents := s.FreezeEventLayout()
 	seedEventLog(t, s, 1, 200)
-	require.Never(t, func() bool { return countZst(t, eventsDir) > 0 },
+	require.Never(t, func() bool { return countCompressedSegments(t, eventsDir) > 0 },
 		400*time.Millisecond, 25*time.Millisecond, "the sealer compressed under an event-log freeze")
 	waited := make(chan error, 1)
 	go func() {
@@ -56,7 +54,7 @@ func TestFreezeLayout_EachLogHoldsItsOwnMovers(t *testing.T) {
 	require.False(t, ok)
 	releaseEvents2()
 	require.NoError(t, <-waited, "the swap wait returns once the last freeze lifts")
-	require.Eventually(t, func() bool { return countZst(t, eventsDir) > 0 },
+	require.Eventually(t, func() bool { return countCompressedSegments(t, eventsDir) > 0 },
 		20*time.Second, 25*time.Millisecond, "the sealer never resumed after the freeze lifted")
 
 	// The raft log's freeze: compaction defers, and nothing else.

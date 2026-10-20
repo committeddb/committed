@@ -59,7 +59,7 @@ func TestResetAndRefetchBackends(t *testing.T) {
 }
 
 func TestRefetchReclaimsInterruptedReset(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented"} {
+	for _, name := range []string{"segmented"} {
 		t.Run(name, func(t *testing.T) {
 			path := t.TempDir()
 			opener := storageTestOpeners()[name]

@@ -17,7 +17,7 @@ func TestCompressedScrubbedPeerSnapshotBackends(t *testing.T) {
 	const records, deleted = 256, 4
 	entries, typ, _ := workloadEntries(t, records)
 	expected := streamingExpectedRows(t, entries)
-	for _, backend := range []string{"tidwall", "segmented"} {
+	for _, backend := range []string{"segmented"} {
 		t.Run(backend, func(t *testing.T) {
 			options := compressedStorageOptions(backend)
 			source, err := Open(t.TempDir(), nil, nil, nil, options...)

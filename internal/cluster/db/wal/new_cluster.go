@@ -222,17 +222,10 @@ func Recover(dir string, nodeID uint64) (*Recovered, error) {
 
 // openStopped opens a stopped node's directory for offline maintenance: the
 // exclusive lock refuses a running node, safe mode holds the background
-// workers, persisted configs aren't built, and the event log opens with
-// whichever engine wrote it.
+// workers, and persisted configs aren't built. Its event log must be
+// segmented; callers convert a tidwall one first.
 func openStopped(dir string) (*Storage, error) {
 	opts := []Option{WithSafeMode(), WithLogger(zap.NewNop()), func(o *options) { o.offline = true }}
-	tidwall, err := isTidwallEventLog(dir)
-	if err != nil {
-		return nil, err
-	}
-	if tidwall {
-		opts = append(opts, withTidwallEventLog())
-	}
 	s, err := Open(dir, nil, nil, nil, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("open %s (is the node stopped?): %w", dir, err)

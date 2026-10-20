@@ -21,7 +21,6 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
@@ -321,13 +320,8 @@ type Storage struct {
 	// generation reclamation take it to wait for that rewrite instead.
 	eventRewriteMu sync.Mutex
 	// eventLogDir is the on-disk directory for eventLog (<datadir>/events).
-	// The scrubber rewrites the event log by building a sibling directory and
-	// renaming it over this one, so it needs the path (tidwall/wal doesn't
-	// expose it). Set once in Open and never changed.
+	// Set once in Open and never changed.
 	eventLogDir string
-	// eventOpenOptions preserves backend configuration across startup, scrub,
-	// reset, and peer adoption. Set once in Open.
-	eventOpenOptions tidwall.LegacyOptions
 	// eventMu guards the s.eventLog handle pointer and the on-disk events/
 	// directory identity against the scrubber's swap (close → rename → reopen),
 	// exactly mirroring how kvMu guards the bbolt handle against RestoreSnapshot.
@@ -400,11 +394,6 @@ type Storage struct {
 	// temp create/write to fail and assert the error branch removes the stray. Nil
 	// in production, where newBoltTmpPath returns a unique nanosecond-suffixed path.
 	boltTmpPathForTest func(prefix string) string
-	// scrubPostBulkHookForTest, when non-nil, is called in runScrub after the
-	// phase-A bulk copy and before the convergence/locked catch-up — the window a
-	// test uses to append late commits and prove the swap still folds them in. Nil
-	// in production.
-	scrubPostBulkHookForTest func()
 	// closeOnce makes Close idempotent: the owner (cmd/node) closes the Storage
 	// after db.Close returns, and some callers (and tests) may close it more than
 	// once, so a second Close must be a no-op rather than double-closing the
@@ -711,11 +700,6 @@ type Storage struct {
 	lostCallback func([]uint64)
 }
 
-// DefaultEventCacheSegments is the default number of event-log segments held
-// parsed in memory (see WithEventCacheSegments). 16 ≈ up to ~340MB fully
-// resident — sized so the default is comfortable on a small (2GB) box.
-const DefaultEventCacheSegments = 16
-
 // openLog opens one of a node's Raft logs, turning tidwall's opaque
 // ErrCorrupt ("log corrupt") into an actionable ErrCorruptEntry: it records the
 // corruption metric and points the operator at the offline repair CLI and the
@@ -725,17 +709,6 @@ const DefaultEventCacheSegments = 16
 func openLog(dir, logName string, m *metrics.Metrics, walOpts *wal.Options) (*wal.Log, error) {
 	lg, err := wal.Open(dir, walOpts)
 	return lg, logOpenError(dir, logName, m, err)
-}
-
-func openEventLog(dir string, m *metrics.Metrics, opts tidwall.LegacyOptions) (*eventLogBinding, error) {
-	if err := rejectSegmentedEventDirectory(dir); err != nil {
-		return nil, err
-	}
-	lg, err := tidwall.OpenLegacy(dir, opts)
-	if err != nil {
-		return nil, logOpenError(dir, "event_log", m, err)
-	}
-	return bindLegacyEventLog(lg, m), nil
 }
 
 // logOpenError keeps operator diagnostics and metrics above the backend.
@@ -761,7 +734,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 // openStorage shares the node startup path with backend integration tests.
 // An explicit factory is used by backend integration tests. Public Open selects
-// the configured factory, defaulting to native tidwall.
+// the configured factory, defaulting to the segmented engine.
 func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, openEvents eventLogOpener, opts ...Option) (*Storage, error) {
 	var cfg options
 	for _, opt := range opts {
@@ -782,7 +755,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 	// Take the node's exclusive bbolt lock FIRST, before any recovery
 	// mutation below (the scrub-dir rollback, the discard sweep, the log
 	// opens' own healing of .SEAL/compression leftovers). Offline
-	// maintenance — backup, wal repair, wal decompress — holds this same
+	// maintenance — backup, wal repair, wal convert — holds this same
 	// lock via datadir.LockStoppedNode*, so acquiring it before touching
 	// anything means a node racing a held maintenance lock fails HERE,
 	// loudly, having mutated nothing: without this ordering the node would
@@ -871,26 +844,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		}
 	}()
 
-	// The event log gets a configurable segment cache (its readers — syncables
-	// replaying history — are concurrent, one resident segment each; see
-	// WithEventCacheSegments). The entry/state logs keep the library default:
-	// their reader is the single sequential Ready loop.
-	cacheSegments := cfg.eventCacheSegments
-	if cacheSegments <= 0 {
-		cacheSegments = DefaultEventCacheSegments
-	}
-	// Sealed segments compress at rest (zstd L3, ~7-9x on JSON event
-	// payloads); the active tail stays plain and the write path never
-	// compresses — the background sealer (sealer.go) does, off the Ready
-	// loop. Reads decompress inside the segment-load path, so the cache
-	// still holds decompressed tables and its RAM sizing is unchanged.
-	// Downgrade door: `committed wal decompress` (offline) rewrites the
-	// plain format for pre-0.8.0 binaries.
-	eventOpenOptions := tidwall.LegacyOptions{
-		SegmentCacheSize: cacheSegments,
-		SegmentSize:      cfg.eventSegmentSize,
-	}
-	eventLog, err := openEvents(eventLogDir, cfg.metrics, eventOpenOptions)
+	eventLog, err := openEvents(eventLogDir, cfg.metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -928,33 +882,32 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 
 	dbs := make(map[string]cluster.Database)
 	ws = &Storage{
-		rootDir:          dir,
-		eventLayout:      layoutLock{name: "event log", logger: logger},
-		raftLayout:       layoutLock{name: "raft entry log", logger: logger},
-		raftLogDir:       entryLogDir,
-		EntryLog:         entryLog,
-		eventLog:         eventLog,
-		eventLogDir:      eventLogDir,
-		eventOpenOptions: eventOpenOptions,
-		StateLog:         stateLog,
-		keyValueStorage:  keyValueStorage,
-		databases:        dbs,
-		parser:           p,
-		sync:             sync,
-		ingest:           ingest,
-		logger:           logger,
-		fsyncDisabled:    cfg.fsyncDisabled,
-		safeMode:         cfg.safeMode,
-		configErrors:     make(map[string]configErr),
-		metrics:          cfg.metrics,
-		lostCallback:     cfg.lostCallback,
-		scrubSignal:      make(chan struct{}, 1),
-		scrubStop:        make(chan struct{}),
-		scrubDone:        make(chan struct{}),
-		sealerStop:       make(chan struct{}),
-		sealerDone:       make(chan struct{}),
-		sealerIdle:       cfg.sealerIdleInterval,
-		closeC:           make(chan struct{}),
+		rootDir:         dir,
+		eventLayout:     layoutLock{name: "event log", logger: logger},
+		raftLayout:      layoutLock{name: "raft entry log", logger: logger},
+		raftLogDir:      entryLogDir,
+		EntryLog:        entryLog,
+		eventLog:        eventLog,
+		eventLogDir:     eventLogDir,
+		StateLog:        stateLog,
+		keyValueStorage: keyValueStorage,
+		databases:       dbs,
+		parser:          p,
+		sync:            sync,
+		ingest:          ingest,
+		logger:          logger,
+		fsyncDisabled:   cfg.fsyncDisabled,
+		safeMode:        cfg.safeMode,
+		configErrors:    make(map[string]configErr),
+		metrics:         cfg.metrics,
+		lostCallback:    cfg.lostCallback,
+		scrubSignal:     make(chan struct{}, 1),
+		scrubStop:       make(chan struct{}),
+		scrubDone:       make(chan struct{}),
+		sealerStop:      make(chan struct{}),
+		sealerDone:      make(chan struct{}),
+		sealerIdle:      cfg.sealerIdleInterval,
+		closeC:          make(chan struct{}),
 	}
 	if ws.sealerIdle <= 0 {
 		ws.sealerIdle = sealerIdleInterval

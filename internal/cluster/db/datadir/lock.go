@@ -11,7 +11,7 @@ import (
 )
 
 // The stopped-node lock, shared by every offline maintenance tool that
-// touches a data directory (backup, wal repair, wal decompress). A running
+// touches a data directory (backup, wal repair, wal convert). A running
 // node holds BoltDB's exclusive file lock on its metadata database for its
 // whole lifetime (wal.Open takes it), so locking that same database is the
 // one liveness signal that cannot drift from the node's own behavior.
@@ -27,7 +27,7 @@ import (
 //   - LockStoppedNode (shared): for readers like backup. Concurrent readers
 //     coexist; only a running node (or an exclusive-mode tool) conflicts.
 //   - LockStoppedNodeExclusive: for rewriters like `wal repair --commit` and
-//     `wal decompress`. A rewrite must also exclude concurrent readers (a
+//     `wal convert`. A rewrite must also exclude concurrent readers (a
 //     backup archived mid-rewrite is silently inconsistent) and other
 //     rewriters, not just the node.
 

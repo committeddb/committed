@@ -57,19 +57,16 @@ func BenchmarkBackupWorkload(b *testing.B) {
 	const deleted = 128
 	entries, typ, inputBytes := workloadEntries(b, records)
 	for _, pattern := range []string{"localized", "distributed"} {
-		for _, backend := range []string{"tidwall", "segmented"} {
+		for _, backend := range []string{"segmented"} {
 			b.Run(pattern+"/"+backend, func(b *testing.B) {
 				totals := map[string]float64{}
 				b.ReportAllocs()
 				for range b.N {
 					b.StopTimer()
-					options := []Option{WithSafeMode()}
-					if backend == "segmented" {
-						options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
-							Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault},
-							Cache:    segmentlog.CacheOptions{RecentBytes: 160 << 20, HistoricalBytes: 160 << 20},
-						}))
-					}
+					options := []Option{WithSafeMode(), WithSegmentedEventLog(segmentlog.LogOptions{
+						Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault},
+						Cache:    segmentlog.CacheOptions{RecentBytes: 160 << 20, HistoricalBytes: 160 << 20},
+					})}
 					s, err := Open(b.TempDir(), nil, nil, nil, options...)
 					require.NoError(b, err)
 					b.Cleanup(func() { _ = s.Close() })

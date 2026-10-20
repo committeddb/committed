@@ -151,7 +151,7 @@ The two optional features require separate configuration decisions:
   when provisioning a new cluster, using the same backend on every node.
   Existing directories must retain their original backend; changing this
   setting does not migrate them. Segmented directories cannot be opened by
-  0.8.0, and `wal decompress` does not convert them to tidwall. See
+  0.8.0. See
   [storage configuration](memory.md#event-log-caches).
 
 ## Why this works
@@ -332,7 +332,8 @@ After the last node:
 > it does not fail, it **silently opens a partial log** whose history
 > appears to begin at the first uncompressed segment (the oldest segments
 > compress first, so that is most of it). Stop each node and run
-> `committed wal decompress --data <datadir>` before starting the older
+> `committed wal decompress --data <datadir>` with a 0.8.0–0.8.2 binary
+> (0.8.3 dropped the command) before starting the older
 > binary; the runbook is the only guard, since the old binary cannot be
 > taught to refuse. Rollbacks within 0.8.x need nothing. A node rolled back
 > below 0.8.0 also loses the automatic catch-up: a member that falls behind

@@ -9,15 +9,10 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 func productionEntryTestBackends() map[string]func(string) (*eventLogBinding, error) {
-	backends := map[string]func(string) (*eventLogBinding, error){
-		"production-tidwall": func(path string) (*eventLogBinding, error) {
-			return openEventLog(path, nil, tidwall.LegacyOptions{})
-		},
-	}
+	backends := map[string]func(string) (*eventLogBinding, error){}
 	for name, open := range eventLogTestBackends() {
 		backends[name] = func(path string) (*eventLogBinding, error) {
 			log, err := open(path)

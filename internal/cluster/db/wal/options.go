@@ -16,12 +16,10 @@ type Option func(*options)
 
 type options struct {
 	eventLogOpener     eventLogOpener
-	eventSegmentSize   int
 	fsyncDisabled      bool
 	logger             *zap.Logger
 	metrics            *metrics.Metrics
 	lostCallback       func([]uint64)
-	eventCacheSegments int
 	safeMode           bool
 	sealerIdleInterval time.Duration
 	// offline opens a stopped node's directory for maintenance (restore,
@@ -65,30 +63,6 @@ func WithMetrics(m *metrics.Metrics) Option {
 	return func(o *options) { o.metrics = m }
 }
 
-// WithEventCacheSegments sets how many EVENT-LOG segments may be held parsed
-// in memory at once (the tidwall segment cache). Each resident segment costs
-// ~21MB (a ~20MB entry buffer plus its position table), and capacity is not
-// preallocation — an unused slot costs nothing — so the steady-state working
-// set is min(this, the number of concurrent readers spread across distinct
-// segments). Syncables replaying history are concurrent readers, one segment
-// each; a cache smaller than the reader count thrashes (every read by one
-// evicts another's segment, forcing a ~20MB re-parse). Applies to the native
-// tidwall event log only, which the node no longer runs (offline tools and
-// tests); <= 0 (the default) resolves to DefaultEventCacheSegments. Sizing rule of thumb: at least concurrent
-// syncables + 2. The raft entry log deliberately keeps the library default —
-// its reader is the single sequential Ready loop, which cannot thrash.
-func WithEventCacheSegments(n int) Option {
-	return func(o *options) { o.eventCacheSegments = n }
-}
-
-// WithEventSegmentSize overrides the event log's segment size in bytes
-// (default: the library's 20 MB). A test knob: compression and cache tests
-// need logs that cycle after a few entries; production keeps the default,
-// which the memory-sizing and compression docs assume.
-func WithEventSegmentSize(bytes int) Option {
-	return func(o *options) { o.eventSegmentSize = bytes }
-}
-
 // WithSealerIdleInterval overrides how often the background sealer re-checks
 // for newly sealed segments once everything is compressed (default:
 // sealerIdleInterval, 30s). A test knob, like WithEventSegmentSize: the
@@ -120,9 +94,4 @@ func WithSafeMode() Option {
 // also apply on reopen.
 func WithSegmentedEventLog(opts segmentlog.LogOptions) Option {
 	return func(o *options) { o.eventLogOpener = segmentedEventLogOpener(opts) }
-}
-
-// withTidwallEventLog opens a tidwall event log, for the converter to read.
-func withTidwallEventLog() Option {
-	return func(o *options) { o.eventLogOpener = openEventLog }
 }

@@ -22,7 +22,7 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 	const records, deleted = 256, 4
 	entries, typ, _ := workloadEntries(t, records)
 	expected := streamingExpectedRows(t, entries)
-	for _, backend := range []string{"tidwall", "segmented"} {
+	for _, backend := range []string{"segmented"} {
 		for _, mode := range []string{"live", "offline"} {
 			for _, scrubbed := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/scrubbed=%t", backend, mode, scrubbed), func(t *testing.T) {
@@ -144,10 +144,7 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 
 func compressedStorageOptions(backend string) []Option {
 	const segmentBytes = 64 << 10
-	options := []Option{WithSafeMode(), WithEventSegmentSize(segmentBytes)}
-	if backend == "tidwall" {
-		options = append(options, withTidwallEventLog())
-	}
+	options := []Option{WithSafeMode()}
 	if backend == "segmented" {
 		options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
 			SegmentBytes: segmentBytes,

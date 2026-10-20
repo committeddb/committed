@@ -1,10 +1,11 @@
 # Experimental event storage: current implementation
 
-The repository contains the segmented event log and a shared storage interface
-with two implementations. From 0.8.3 a node runs only the segmented engine and
-refuses a tidwall event log; `committed wal convert` rewrites a stopped node's
-tidwall log as a segmented one. The tidwall backend remains for that converter
-and offline tools.
+The repository contains the segmented event log behind a shared storage
+interface. From 0.8.3 a node runs only the segmented engine and refuses a
+tidwall event log; `committed wal convert` rewrites a stopped node's tidwall log
+as a segmented one, reading it with a small read-only reader
+(`internal/cluster/db/wal/tidwall_event_reader.go`), and `committed restore` and
+`committed recover` run that conversion first when they find one.
 
 ## Packages and responsibilities
 
@@ -12,7 +13,6 @@ and offline tools.
 | --- | --- |
 | Shared contract | `internal/cluster/db/eventlog/eventlog.go`: `EventLog`, opaque records, sparse IDs, common errors and operation results |
 | Segmented backend | `internal/cluster/db/eventlog/segmented`: delegates to `pkg/segmentlog` |
-| Tidwall backend | `internal/cluster/db/eventlog/tidwall`: experimental generation container over the tidwall fork |
 | Application adapter | `internal/cluster/db/wal/eventlog_*.go`: protobuf identity checks, Actual readers, applied visibility, committed replay, metadata selection and protected readers |
 | Generic engine | `pkg/segmentlog`: immutable segments, active tail, catalogs, synchronous managed operations and reclamation |
 | Filesystem primitives | `internal/durablefs`: directory ownership, durable immutable installation and atomic pointer replacement |
@@ -23,11 +23,8 @@ The application adapter uses the embedded Raft index as the record ID and
 validates the outer/inner identity.
 It preserves original protobuf bytes, including unknown fields.
 
-The experimental tidwall backend stores dense physical sequences internally and
-translates stable IDs through its own record envelope. Its CURRENT/generation
-container differs from production `events/`; it does not open or convert that
-layout automatically. The [shared contract documentation](../../internal/cluster/db/eventlog/README.md)
-describes both backends and their conformance tests.
+The [shared contract documentation](../../internal/cluster/db/eventlog/README.md)
+describes the backend and its conformance tests.
 
 ## Segmented storage behavior
 
@@ -73,8 +70,7 @@ The implemented binary layouts and limits are documented in:
 
 ## Publication, recovery, and current limits
 
-The segmented engine uses bbolt transactions to select its layout. The tidwall
-adapter uses CURRENT to select a generation. Replacement files are synced and
+The segmented engine uses bbolt transactions to select its layout. Replacement files are synced and
 durably installed before selection changes. Unreferenced newer files do not
 select themselves. Segmented recovery checks metadata boundaries and the active
 tail; historical files are checked on access or by explicit `Log.Verify`.

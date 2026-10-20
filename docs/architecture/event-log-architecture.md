@@ -719,8 +719,8 @@ The sub-cases all converge on the right answer:
 
 ### Determinism of the scrub
 
-The rewrite must produce byte-identical files on every node or a peer
-catch-up could not extend one node's log with another's segment files. The survivor set is a pure function of three frozen,
+The rewrite must produce identical records on every node or a peer
+catch-up could not extend one node's log with another's. The survivor set is a pure function of three frozen,
 replicated inputs: the event-log bytes, the tombstone set **filtered to
 delete index `<= B`**, and `B` itself (carried in the committed command).
 
@@ -883,10 +883,10 @@ raft entry, every node must produce identical state transitions and
 identical permanent log writes. This is **load-bearing**, not
 nice-to-have, because:
 
-- **Byte-identical files across nodes make one node's log extend
-  another's.** A peer catch-up ships whole segment files and appends
-  them to the receiver's log; that is only sound because the receiver's
-  own prefix is, byte for byte, what the peer holds.
+- **Identical records across nodes make one node's log extend
+  another's.** A peer catch-up streams records and appends them to the
+  receiver's log; that is only sound because the receiver's own prefix
+  holds, record for record, what the peer holds.
 - **Hash comparison across nodes is a free correctness check.** A
   divergence indicates a determinism bug — exactly the kind of bug that
   is otherwise nearly impossible to find in distributed systems.

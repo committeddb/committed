@@ -5,28 +5,20 @@ import (
 	"io"
 	"testing"
 
-	native "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 func TestProductionCursorRebindsAndCloses(t *testing.T) {
 	open := func(ids ...uint64) *eventLogBinding {
 		t.Helper()
-		log, err := native.Open(t.TempDir(), nil)
-		if err != nil {
-			t.Fatal(err)
+		raws := make([][]byte, 0, len(ids))
+		for _, id := range ids {
+			raws = append(raws, experimentEntry(t, id, pb.EntryNormal, experimentRow("key", "value")))
 		}
-		t.Cleanup(func() { _ = log.Close() })
-		for i, id := range ids {
-			if err := log.Write(uint64(i+1), frame(experimentEntry(t, id, pb.EntryNormal, experimentRow("key", "value")))); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)
+		return productionBinding(t, raws...)
 	}
 	s := &Storage{eventLog: open(10, 30)}
 	ref := cluster.TypeRef{ID: "items", Version: 1}

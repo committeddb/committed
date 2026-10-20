@@ -36,7 +36,7 @@ func (c *observedDeleteCursor) SeekGE(index uint64) error {
 }
 
 func TestSharedScrubDeleteCandidates(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		for _, corrupt := range []bool{false, true} {
 			label := name + "/survivors"
 			if corrupt {

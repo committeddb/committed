@@ -98,8 +98,6 @@ func (l *Log) RewriteSealedWithPublicationLock(ctx context.Context, generation u
 	return l.rewrite(ctx, generation, transform, publication, true)
 }
 
-var _ eventlog.SealedRewriter = (*Log)(nil)
-
 func (l *Log) rewrite(ctx context.Context, generation uint64, transform eventlog.Transform, publication sync.Locker, sealed bool) (result eventlog.RewriteResult, err error) {
 	if transform == nil {
 		return result, eventlog.ErrInvalid
