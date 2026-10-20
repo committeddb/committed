@@ -91,15 +91,12 @@ func runRestore() error {
 	}
 
 	var id cluster.ClusterID
-	var members string
+	var restored *wal.Restored
 	m, err := backup.RestoreWith(r, restoreData, time.Now(), func(staging string, m *backup.Manifest) error {
 		id = cluster.RestoredClusterID(seed, m.Fingerprint())
-		lm, err := wal.RestoreAs(staging, id, restoreNodeID)
-		if err != nil {
-			return err
-		}
-		members = wal.MembersString(lm.ConfState)
-		return nil
+		var err error
+		restored, err = wal.RestoreAs(staging, id, restoreNodeID)
+		return err
 	})
 	if err != nil {
 		return err
@@ -110,7 +107,10 @@ func runRestore() error {
 		_, _ = fmt.Fprintf(os.Stdout, ", from node %d", m.NodeID)
 	}
 	_, _ = fmt.Fprintln(os.Stdout, ")")
-	_, _ = fmt.Fprintf(os.Stdout, "node %d of a new cluster %s (members: %s)\n", restoreNodeID, id, members)
+	if c := restored.Converted; c != nil {
+		_, _ = fmt.Fprintf(os.Stdout, "converted its tidwall event log to the segmented engine: %d records through raft index %d\n", c.Records, c.LastIndex)
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "node %d of a new cluster %s (members: %s)\n", restoreNodeID, id, wal.MembersString(restored.Membership.ConfState))
 	if restoreNewCluster {
 		_, _ = fmt.Fprintf(os.Stdout, "restore the other members from this same archive with --cluster-id %s\n", seed)
 	}

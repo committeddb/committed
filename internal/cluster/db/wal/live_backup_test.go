@@ -72,7 +72,7 @@ func TestLiveBackup_CapturesARestorableNodeWhileItRuns(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "restored")
 	_, err = backup.Restore(&buf, target, time.Now())
 	require.NoError(t, err)
-	restored, err := Open(target, nil, nil, nil, WithoutFsync(), WithSealerIdleInterval(time.Hour))
+	restored, err := Open(target, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithSealerIdleInterval(time.Hour))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = restored.Close() })
 

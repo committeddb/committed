@@ -61,6 +61,9 @@ func runRecover() error {
 	if err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
+	if c := r.Converted; c != nil {
+		_, _ = fmt.Fprintf(os.Stdout, "converted its tidwall event log to the segmented engine: %d records through raft index %d\n", c.Records, c.LastIndex)
+	}
 	removed := "none"
 	if len(r.Removed) > 0 {
 		ids := make([]string, len(r.Removed))

@@ -32,8 +32,9 @@ No configuration changes are needed. `COMMITTED_EVENT_LOG_BACKEND` and
 `COMMITTED_EVENT_CACHE_SEGMENTS` are no longer read; the event log's caches are
 set by `COMMITTED_EVENT_CACHE_RECENT_BYTES` and
 `COMMITTED_EVENT_CACHE_HISTORICAL_BYTES` (see [memory.md](memory.md)). A backup
-archive taken before 0.8.3 restores as before, and is converted the same way
-before its node first starts.
+archive taken before 0.8.3 restores as before: `committed restore` converts its
+event log as it restores, and so does `committed recover` on a directory a
+0.8.2 node left.
 
 0.8.3 raises the cluster feature level to 4 for two changes; the changes after
 them need no feature level:

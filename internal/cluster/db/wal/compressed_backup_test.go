@@ -145,6 +145,9 @@ func TestCompressedBackupRestoreBackends(t *testing.T) {
 func compressedStorageOptions(backend string) []Option {
 	const segmentBytes = 64 << 10
 	options := []Option{WithSafeMode(), WithEventSegmentSize(segmentBytes)}
+	if backend == "tidwall" {
+		options = append(options, withTidwallEventLog())
+	}
 	if backend == "segmented" {
 		options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
 			SegmentBytes: segmentBytes,

@@ -14,7 +14,7 @@ import (
 
 func openFetchPeer(t *testing.T, dir string, sealer time.Duration) *Storage {
 	t.Helper()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(sealer))
+	s, err := Open(dir, nil, nil, nil, withTidwallEventLog(), WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(sealer))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
@@ -148,7 +148,7 @@ func TestEventFetch_StaleReceiverAlignedAndMisaligned(t *testing.T) {
 	// A receiver whose own segments cycle at different points has a
 	// partially filled tail at the boundary; it stays, becomes a sealed
 	// segment of its own size, and the adopted files follow it.
-	partial, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync(), WithEventSegmentSize(4096), WithSealerIdleInterval(time.Hour))
+	partial, err := Open(t.TempDir(), nil, nil, nil, withTidwallEventLog(), WithoutFsync(), WithEventSegmentSize(4096), WithSealerIdleInterval(time.Hour))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = partial.Close() })
 	seedEventLog(t, partial, 1, boundary)

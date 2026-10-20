@@ -17,7 +17,7 @@ import (
 // and they release when the last freeze on that log lifts.
 func TestFreezeLayout_EachLogHoldsItsOwnMovers(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
+	s, err := Open(dir, nil, nil, nil, withTidwallEventLog(), WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 	defer func() { _ = s.Close() }()
 	eventsDir := filepath.Join(dir, "events")

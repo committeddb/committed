@@ -62,7 +62,7 @@ func TestOpenRefusesIncompatibleEventFormat(t *testing.T) {
 		t.Run(existing, func(t *testing.T) {
 			path := t.TempDir()
 			segmented := WithSegmentedEventLog(segmentlog.LogOptions{})
-			options := []Option{WithSafeMode()}
+			options := []Option{WithSafeMode(), withTidwallEventLog()}
 			if existing != "native" {
 				options = append(options, segmented)
 			}
@@ -74,7 +74,7 @@ func TestOpenRefusesIncompatibleEventFormat(t *testing.T) {
 				require.NoError(t, os.Remove(filepath.Join(datadir.EventsDir(path), "metadata.db")))
 			}
 			before := eventDirectoryBytes(t, path)
-			wrongOptions := []Option{WithSafeMode()}
+			wrongOptions := []Option{WithSafeMode(), withTidwallEventLog()}
 			if existing == "native" {
 				wrongOptions = append(wrongOptions, segmented)
 			}

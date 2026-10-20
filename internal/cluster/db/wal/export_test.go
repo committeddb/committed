@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 )
 
 // RecordEventTombstoneForTest exposes recordEventTombstone so a test can drive
@@ -84,7 +86,54 @@ func (s *Storage) PutRawSyncableIndexForTest(id string, raw []byte) error {
 // this accessor is only here because a couple of Phase 1 tests assert
 // on the wal-seq count to prove the log is being appended to.
 func (s *Storage) EventLogLastSeq() (uint64, error) {
+	if payloads, managed, err := s.managedEventPayloads(); managed {
+		return uint64(len(payloads)), err
+	}
 	return s.lastEventSeq()
+}
+
+// managedEventPayloads lists a segmented log's surviving records in order:
+// what tidwall's dense wal sequences numbered from 1. managed is false for a
+// tidwall log, whose sequence reads the callers use directly.
+func (s *Storage) managedEventPayloads() (payloads [][]byte, managed bool, err error) {
+	s.eventMu.RLock()
+	log := s.eventLog.managed
+	s.eventMu.RUnlock()
+	if log == nil {
+		return nil, false, nil
+	}
+	err = log.Scan(context.Background(), eventlog.Coverage{End: ^uint64(0)}, func(r eventlog.Record) error {
+		payloads = append(payloads, r.Payload)
+		return nil
+	})
+	return payloads, true, err
+}
+
+// eventPayloadsForTest is every surviving record in log order, with the
+// sequence a tidwall log gave it.
+func (s *Storage) eventPayloadsForTest() (seqs []uint64, payloads [][]byte, err error) {
+	if payloads, managed, err := s.managedEventPayloads(); managed {
+		for i := range payloads {
+			seqs = append(seqs, uint64(i+1))
+		}
+		return seqs, payloads, err
+	}
+	first, err := s.firstEventSeq()
+	if err != nil {
+		return nil, nil, err
+	}
+	last, err := s.lastEventSeq()
+	if err != nil || first == 0 || last == 0 {
+		return nil, nil, err
+	}
+	for seq := first; seq <= last; seq++ {
+		raw, err := s.readEventAt(seq)
+		if err != nil {
+			return nil, nil, err
+		}
+		seqs, payloads = append(seqs, seq), append(payloads, raw)
+	}
+	return seqs, payloads, nil
 }
 
 // SimulateCrashedSnapshotInstallForTest reproduces the durable state left by a
@@ -100,6 +149,15 @@ func (s *Storage) SimulateCrashedSnapshotInstallForTest(snap *pb.Snapshot) error
 // ReadEventAt exposes event-log entries by wal seq for test assertions.
 // Production callers go through Reader.
 func (s *Storage) ReadEventAt(seq uint64) ([]byte, error) {
+	if payloads, managed, err := s.managedEventPayloads(); managed {
+		if err != nil {
+			return nil, err
+		}
+		if seq == 0 || seq > uint64(len(payloads)) {
+			return nil, eventlog.ErrNotFound
+		}
+		return payloads[seq-1], nil
+	}
 	return s.readEventAt(seq)
 }
 
@@ -125,10 +183,32 @@ func (s *Storage) TombstoneSelections(bound uint64) (map[string]uint64, error) {
 // worker); they call this directly instead. The delete-key erasure pass is
 // disabled; RunScrubWithEraseForTest authorizes it.
 func (s *Storage) RunScrubForTest(bound uint64) error {
+	if s.eventLog.managed != nil {
+		return s.runSharedScrubForTest(bound, false, 0)
+	}
 	if _, err := s.runScrub(bound, false, 0); err != nil {
 		return err
 	}
 	return s.markScrubComplete(bound)
+}
+
+// runSharedScrubForTest is the segmented worker's sequence for one bound,
+// without its authorization check: prepare the plan, rewrite at generation
+// bound, then finish (reclaim, reconcile, complete). A bound already completed
+// is a no-op, as the worker skips it.
+func (s *Storage) runSharedScrubForTest(bound uint64, hash bool, cmdIndex uint64) error {
+	if bound <= s.lastScrubbedBound.Load() {
+		return nil
+	}
+	ctx := context.Background()
+	plan, err := s.prepareScrubPlan(bound, hash, cmdIndex)
+	if err != nil {
+		return err
+	}
+	if _, err := s.rewriteSharedPlan(ctx, bound, plan); err != nil {
+		return err
+	}
+	return s.finishSharedScrub(ctx, bound)
 }
 
 // RunScrubWithEraseForTest runs one authorized rewrite (Scrub.HashDeleteKeys)
@@ -136,6 +216,9 @@ func (s *Storage) RunScrubForTest(bound uint64) error {
 // bound, completion reconciles the cadence bucket — the exact sequence the
 // worker performs for a hash-authorized pending record.
 func (s *Storage) RunScrubWithEraseForTest(bound, cmdIndex uint64) error {
+	if s.eventLog.managed != nil {
+		return s.runSharedScrubForTest(bound, true, cmdIndex)
+	}
 	erase, err := s.runScrub(bound, true, cmdIndex)
 	if err != nil {
 		return err
@@ -223,23 +306,13 @@ func (s *Storage) ScrubCompletedBound() uint64 {
 // raft index, entry type, and a content hash — for byte-identical cross-node
 // comparison after a scrub. Mirrors BucketSnapshot's role for the event log.
 func (s *Storage) EventLogSnapshot() ([]string, error) {
-	first, err := s.firstEventSeq()
-	if err != nil {
-		return nil, err
-	}
-	last, err := s.lastEventSeq()
+	seqs, payloads, err := s.eventPayloadsForTest()
 	if err != nil {
 		return nil, err
 	}
 	var lines []string
-	if first == 0 || last == 0 {
-		return lines, nil
-	}
-	for seq := first; seq <= last; seq++ {
-		raw, err := s.readEventAt(seq)
-		if err != nil {
-			return nil, err
-		}
+	for i, raw := range payloads {
+		seq := seqs[i]
 		e := &pb.Entry{}
 		if err := proto.Unmarshal(raw, e); err != nil {
 			return nil, err
@@ -260,23 +333,12 @@ func TombstoneKey(typeID string, key []byte) string {
 // so scrub tests can assert exactly which entries survived without hydrating
 // entities through a resolver.
 func (s *Storage) EventIndices() ([]uint64, error) {
-	first, err := s.firstEventSeq()
-	if err != nil {
-		return nil, err
-	}
-	last, err := s.lastEventSeq()
+	_, payloads, err := s.eventPayloadsForTest()
 	if err != nil {
 		return nil, err
 	}
 	var out []uint64
-	if first == 0 || last == 0 {
-		return out, nil
-	}
-	for seq := first; seq <= last; seq++ {
-		raw, err := s.readEventAt(seq)
-		if err != nil {
-			return nil, err
-		}
+	for _, raw := range payloads {
 		e := &pb.Entry{}
 		if err := proto.Unmarshal(raw, e); err != nil {
 			return nil, err
@@ -457,3 +519,7 @@ func SetConvertSegmentBytesForTest(n int) func() {
 	convertSegmentBytes = n
 	return func() { convertSegmentBytes = prev }
 }
+
+// WithTidwallEventLogForTest opens a tidwall event log, so a test can write the
+// directory a pre-0.8.3 node left for the converter.
+func WithTidwallEventLogForTest() Option { return withTidwallEventLog() }

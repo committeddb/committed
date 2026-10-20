@@ -112,11 +112,17 @@ func WithSafeMode() Option {
 	return func(o *options) { o.safeMode = true }
 }
 
-// WithSegmentedEventLog selects the segmented permanent event log. Raft logs
+// WithSegmentedEventLog configures the segmented permanent event log, the
+// default without it being zstd-compressed with no segment cache. Raft logs
 // remain tidwall-backed. An empty events directory is initialized; an existing
-// directory must already contain this format. This does not convert storage.
-// SegmentBytes applies at creation; Encoding and Cache also apply on reopen.
-// These options replace the tidwall event segment/cache settings for this backend.
+// directory must already contain this format, and a tidwall one is refused
+// naming `wal convert`. SegmentBytes applies at creation; Encoding and Cache
+// also apply on reopen.
 func WithSegmentedEventLog(opts segmentlog.LogOptions) Option {
 	return func(o *options) { o.eventLogOpener = segmentedEventLogOpener(opts) }
+}
+
+// withTidwallEventLog opens a tidwall event log, for the converter to read.
+func withTidwallEventLog() Option {
+	return func(o *options) { o.eventLogOpener = openEventLog }
 }

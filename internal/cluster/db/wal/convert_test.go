@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 	"github.com/committeddb/committed/pkg/segmentlog"
@@ -20,11 +22,30 @@ func segmentedOptions() []wal.Option {
 	})}, testOpenOptions...)
 }
 
+// newTidwallStorage opens a fresh node whose event log the tidwall engine
+// writes, as a pre-0.8.3 node's was.
+func newTidwallStorage(t *testing.T) *StorageWrapper {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "wal-convert-test-")
+	require.NoError(t, err)
+	ws, err := wal.Open(dir, nil, nil, nil, append(testOpenOptions, wal.WithTidwallEventLogForTest())...)
+	require.NoError(t, err)
+	return &StorageWrapper{ws, dir, nil, &sync.Once{}}
+}
+
+// openTidwallStorage reopens a node whose event log the tidwall engine wrote.
+func openTidwallStorage(t *testing.T, dir string, p db.Parser) *StorageWrapper {
+	t.Helper()
+	ws, err := wal.Open(dir, p, nil, nil, append(testOpenOptions, wal.WithTidwallEventLogForTest())...)
+	require.NoError(t, err)
+	return &StorageWrapper{ws, dir, p, &sync.Once{}}
+}
+
 // scrubbedTidwallNode builds a stopped tidwall node whose log has a hole: the
 // scrub at 4 erased alice's original at 2. Returns its directory.
 func scrubbedTidwallNode(t *testing.T) string {
 	t.Helper()
-	s := NewStorage(t, nil)
+	s := newTidwallStorage(t)
 	s.RegisterType(t, "u", 1, 1)
 	saveEntity(t, userUpsert("u", "alice", `{"pii":true}`), s, 1, 2)
 	saveEntity(t, userUpsert("u", "bob", `{"ok":1}`), s, 1, 3)
@@ -89,7 +110,7 @@ func TestConvertEventLog_CarriesTheLogToTheSegmentedEngine(t *testing.T) {
 // A log spanning many segments converts to compressed segments as it is
 // copied, leaving only the active tail uncompressed, and reads back whole.
 func TestConvertEventLog_CompressesEverySealedSegment(t *testing.T) {
-	s := NewStorage(t, nil)
+	s := newTidwallStorage(t)
 	s.RegisterType(t, "u", 1, 1)
 	data := fmt.Sprintf(`{"pad":%q}`, strings.Repeat("x", 1000))
 	for i := uint64(2); i <= 41; i++ {

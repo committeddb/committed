@@ -19,7 +19,7 @@ func fatalPanicStorage(t *testing.T) *Storage {
 	t.Helper()
 	core, _ := observer.New(zap.DebugLevel)
 	logger := zap.New(core, zap.WithFatalHook(zapcore.WriteThenPanic))
-	s, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync(), WithLogger(logger))
+	s, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithLogger(logger))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	// Quiesce every Open-started worker that touches the event-log handle

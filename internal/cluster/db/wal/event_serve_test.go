@@ -115,7 +115,7 @@ func TestServeEvents_FillsAnEmptyAndAStaleReceiverByteForByte(t *testing.T) {
 	requireSameEventBytes(t, peer, stale)
 
 	// A receiver whose own segments cycle elsewhere still aligns by sequence.
-	odd, err := Open(t.TempDir(), nil, nil, nil, WithoutFsync(), WithEventSegmentSize(4096), WithSealerIdleInterval(time.Hour))
+	odd, err := Open(t.TempDir(), nil, nil, nil, withTidwallEventLog(), WithoutFsync(), WithEventSegmentSize(4096), WithSealerIdleInterval(time.Hour))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = odd.Close() })
 	seedEventLog(t, odd, 1, 150)
@@ -169,7 +169,7 @@ func TestEventLogGeneration_PersistsAndResetStartsOver(t *testing.T) {
 	require.Equal(t, uint64(7), s.EventLogGeneration())
 	require.NoError(t, s.Close())
 
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithSealerIdleInterval(time.Hour))
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithSealerIdleInterval(time.Hour))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	require.Equal(t, uint64(7), s.EventLogGeneration(), "the generation is durable")

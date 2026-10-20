@@ -58,7 +58,7 @@ func countZst(t *testing.T, dir string) int {
 // log.
 func TestEventLogCompression_SealerAndReadBack(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 
 	const n = 200
@@ -86,7 +86,7 @@ func TestEventLogCompression_SealerAndReadBack(t *testing.T) {
 
 	// Restart over the mixed log (some segments compressed, tail plain):
 	// everything reads, and the sealer keeps working.
-	s2, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
+	s2, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s2.Close() }) // safety net; Close is closeOnce-guarded
 	verify(s2)
@@ -108,7 +108,7 @@ func TestEventLogCompression_SealerAndReadBack(t *testing.T) {
 // compressed data dir rewrites to the plain format and reads identically.
 func TestEventLogCompression_DecompressNodeRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 
 	const n = 150
@@ -125,7 +125,7 @@ func TestEventLogCompression_DecompressNodeRoundTrip(t *testing.T) {
 	require.Zero(t, countZst(t, eventsDir), "no .zst may remain")
 
 	// The plain log reads identically (a pre-compression binary's view).
-	s2, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
+	s2, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 	defer func() { _ = s2.Close() }()
 	for i := 1; i <= n; i++ {
@@ -140,7 +140,7 @@ func TestEventLogCompression_DecompressNodeRoundTrip(t *testing.T) {
 // it as corruption (rebuild), never a torn tail.
 func TestEventLogCompression_CorruptCompressedSegmentIsLoud(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 	seedEventLog(t, s, 1, 150)
 	eventsDir := filepath.Join(dir, "events")
@@ -175,7 +175,7 @@ func TestEventLogCompression_CorruptCompressedSegmentIsLoud(t *testing.T) {
 // compression and disaster recovery.
 func TestEventLogCompression_BackupRestoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithEventSegmentSize(2048), WithSealerIdleInterval(25*time.Millisecond))
 	require.NoError(t, err)
 	const n = 200
 	seedEventLog(t, s, 1, n)
@@ -200,7 +200,7 @@ func TestEventLogCompression_BackupRestoreRoundTrip(t *testing.T) {
 	require.Equal(t, LogClean, d.Status, d.Detail)
 	require.Equal(t, n, d.Records)
 
-	s2, err := Open(target, nil, nil, nil, WithoutFsync(), WithEventSegmentSize(2048), WithSealerIdleInterval(time.Hour))
+	s2, err := Open(target, nil, nil, nil, WithoutFsync(), withTidwallEventLog(), WithEventSegmentSize(2048), WithSealerIdleInterval(time.Hour))
 	require.NoError(t, err)
 	defer func() { _ = s2.Close() }()
 	for i := 1; i <= n; i++ {

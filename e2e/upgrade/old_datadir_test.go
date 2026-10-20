@@ -135,8 +135,9 @@ func runOldDataDirEra(t *testing.T, bin string, era fixtureEra) {
 
 // A data dir written by an old release restores, through this build's
 // backup and restore, into a new cluster that boots and replays the whole old
-// log once its event log is converted. (Restore rewrites the directory with
-// this build's storage engine, so every era's bytes must open under it.)
+// log, converting its event log as it restores. (Restore rewrites the
+// directory with this build's storage engine, so every era's bytes must open
+// under it.)
 func TestOldDataDir_RestoresIntoANewCluster(t *testing.T) {
 	bin := buildBinary(t)
 	for _, era := range fixtureEras {
@@ -151,8 +152,10 @@ func TestOldDataDir_RestoresIntoANewCluster(t *testing.T) {
 			archive := filepath.Join(t.TempDir(), "old.tar.gz")
 			runOrFail(t, bin, "backup", "--data", dataDir, "--to", archive, "--node-id", "1")
 			restored := filepath.Join(t.TempDir(), "restored")
-			runOrFail(t, bin, "restore", "--from", archive, "--data", restored, "--node-id", "1", "--new-cluster")
-			runOrFail(t, bin, "wal", "convert", "--data", restored)
+			out := runOrFail(t, bin, "restore", "--from", archive, "--data", restored, "--node-id", "1", "--new-cluster")
+			if !strings.Contains(out, "converted its tidwall event log") {
+				t.Fatalf("restore did not convert the old event log itself:\n%s", out)
+			}
 
 			port := freePort(t)
 			base := fmt.Sprintf("http://127.0.0.1:%d", port)

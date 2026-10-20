@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	twal "github.com/tidwall/wal"
 
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
@@ -28,10 +29,12 @@ func TestNodeRunsTheSegmentedEventLog(t *testing.T) {
 		require.True(t, segmented)
 	}
 
+	// A tidwall event log, as a node before 0.8.3 left it.
 	legacy := t.TempDir()
-	storage, err := wal.Open(legacy, nil, nil, nil) // wal's own default: tidwall
+	events, err := twal.Open(datadir.EventsDir(legacy), nil)
 	require.NoError(t, err)
-	require.NoError(t, storage.Close())
+	require.NoError(t, events.Write(1, []byte("event")))
+	require.NoError(t, events.Close())
 	_, err = wal.Open(legacy, nil, nil, nil, options...)
 	require.ErrorIs(t, err, wal.ErrTidwallEventLog)
 	require.ErrorContains(t, err, "committed wal convert --data "+legacy)

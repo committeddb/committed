@@ -195,7 +195,7 @@ func TestDiagnoseLog_Clean(t *testing.T) {
 // accepted.
 func TestOfflineMaintenance_RefusesRunningNode(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, nil, nil, nil, WithoutFsync())
+	s, err := Open(dir, nil, nil, nil, WithoutFsync(), withTidwallEventLog())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 

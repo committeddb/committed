@@ -26,7 +26,7 @@ func scrubHistory(t *testing.T, s *StorageWrapper) uint64 {
 // and returns its content snapshot, for comparison against recovered results.
 func referenceScrubSnapshot(t *testing.T, bound uint64) []string {
 	t.Helper()
-	ref := NewStorage(t, nil)
+	ref := newTidwallStorage(t)
 	defer ref.Cleanup()
 	scrubHistory(t, ref)
 	require.Nil(t, ref.RunScrubForTest(bound))
@@ -49,7 +49,7 @@ func waitScrubbed(t *testing.T, s *StorageWrapper, bound uint64) {
 func TestScrubRecovery_MidRewrite(t *testing.T) {
 	want := referenceScrubSnapshot(t, 3)
 
-	s := NewStorage(t, nil)
+	s := newTidwallStorage(t)
 	defer s.Cleanup()
 	bound := scrubHistory(t, s)
 	require.Nil(t, s.SetPendingScrubBoundForTest(bound))
@@ -59,7 +59,7 @@ func TestScrubRecovery_MidRewrite(t *testing.T) {
 	staleTmp := filepath.Join(s.path, fmt.Sprintf("events.scrub.%d", bound))
 	require.Nil(t, os.MkdirAll(filepath.Join(staleTmp, "garbage"), 0o700))
 
-	s = OpenStorage(t, s.path, s.parser, nil, nil)
+	s = openTidwallStorage(t, s.path, s.parser)
 	defer s.Cleanup()
 	waitScrubbed(t, s, bound)
 
@@ -78,7 +78,7 @@ func TestScrubRecovery_MidRewrite(t *testing.T) {
 func TestScrubRecovery_MidSwap(t *testing.T) {
 	want := referenceScrubSnapshot(t, 3)
 
-	s := NewStorage(t, nil)
+	s := newTidwallStorage(t)
 	defer s.Cleanup()
 	bound := scrubHistory(t, s)
 	require.Nil(t, s.SetPendingScrubBoundForTest(bound))
@@ -93,7 +93,7 @@ func TestScrubRecovery_MidSwap(t *testing.T) {
 	require.NoDirExists(t, eventsDir)
 	require.Nil(t, os.MkdirAll(filepath.Join(path, fmt.Sprintf("events.scrub.%d", bound)), 0o700))
 
-	s = OpenStorage(t, path, s.parser, nil, nil)
+	s = openTidwallStorage(t, path, s.parser)
 	defer s.Cleanup()
 	waitScrubbed(t, s, bound)
 

@@ -771,7 +771,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 	if openEvents == nil {
 		openEvents = cfg.eventLogOpener
 		if openEvents == nil {
-			openEvents = openEventLog
+			openEvents = segmentedEventLogOpener(segmentedLogOptions())
 		}
 	}
 	entryLogDir := datadir.EntryLogDir(dir)

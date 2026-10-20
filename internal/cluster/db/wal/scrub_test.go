@@ -346,7 +346,7 @@ func TestScrub_CatchesUpTailAppendedDuringRewrite(t *testing.T) {
 				defer wal.SetScrubConvergeResidueForTest(1)()
 			}
 
-			s := NewStorage(t, nil)
+			s := newTidwallStorage(t)
 			defer s.Cleanup()
 
 			s.RegisterType(t, "u", 1, 1) // idx 1: type

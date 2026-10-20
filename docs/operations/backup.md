@@ -241,8 +241,8 @@ unreadable by an older build for a reason no per-entry check would find: from
 binary does not fail on them — it silently opens a **partial log**.
 
 > **Archives from before 0.8.3.** They hold the tidwall event log, which
-> 0.8.3 refuses to start on. Restore as usual, then run
-> `committed wal convert --data <datadir>` before the node's first start (see
+> 0.8.3 refuses to start on. Restore as usual: `committed restore` converts
+> the event log to the segmented engine as it restores, and says so (see
 > [upgrade.md](upgrade.md#upgrading-from-082-to-083)). Data that has run on
 > 0.8.3 cannot move onto an older binary: its event log is segmented, which no
 > earlier release opens. Check the rest of the one-way transitions in

@@ -32,6 +32,30 @@ type Converted struct {
 	Records, LastIndex, Generation uint64
 }
 
+// isTidwallEventLog reports whether a stopped node's event log was written by
+// the tidwall engine: present, non-empty, and holding none of the segmented
+// engine's files. A swap interrupted after renaming events/ aside leaves the
+// log at events.retired/, which Open rolls back, so that is inspected instead.
+func isTidwallEventLog(dir string) (bool, error) {
+	events := datadir.EventsDir(dir)
+	entries, err := os.ReadDir(events)
+	if errors.Is(err, os.ErrNotExist) {
+		events = datadir.RetiredDir(events)
+		entries, err = os.ReadDir(events)
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil || len(entries) == 0 {
+		return false, err
+	}
+	segmented, err := segmentlog.RecognizeDirectory(events)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", events, err)
+	}
+	return !segmented, nil
+}
+
 // segmentedLogOptions is the segmented log a node creates.
 func segmentedLogOptions() segmentlog.LogOptions {
 	return segmentlog.LogOptions{Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault}}
@@ -89,6 +113,21 @@ func ConvertEventLog(dir string) (*Converted, error) {
 		return nil, fmt.Errorf("the converted event log is in place; remove %s: %w", retired, err)
 	}
 	return res, nil
+}
+
+// convertTidwallEventLog converts a stopped node's tidwall event log before an
+// offline command rewrites the directory, so the command, and the node it
+// prepares, run the segmented engine. Nil when there was nothing to convert.
+func convertTidwallEventLog(dir string) (*Converted, error) {
+	tidwall, err := isTidwallEventLog(dir)
+	if err != nil || !tidwall {
+		return nil, err
+	}
+	converted, err := ConvertEventLog(dir)
+	if err != nil {
+		return nil, fmt.Errorf("convert the tidwall event log: %w", err)
+	}
+	return converted, nil
 }
 
 // copyToSegmented writes s's event log into a new segmented log at tmp and

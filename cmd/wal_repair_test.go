@@ -141,13 +141,15 @@ func TestWalDecompress_RequiresDataAndIsANoOpOnPlainLogs(t *testing.T) {
 	walDecompressData = ""
 	require.ErrorContains(t, walDecompressCmd.RunE(walDecompressCmd, nil), "--data is required")
 
+	// Plain raft logs and no event log: segmented storage is refused.
 	dataDir := t.TempDir()
 	seedRaftLog(t, dataDir, 3)
-	before, err := os.ReadDir(datadir.EventsDir(dataDir))
+	require.NoError(t, os.RemoveAll(datadir.EventsDir(dataDir)))
+	before, err := os.ReadDir(datadir.EntryLogDir(dataDir))
 	require.NoError(t, err)
 	walDecompressData = dataDir
 	require.NoError(t, walDecompressCmd.RunE(walDecompressCmd, nil))
-	after, err := os.ReadDir(datadir.EventsDir(dataDir))
+	after, err := os.ReadDir(datadir.EntryLogDir(dataDir))
 	require.NoError(t, err)
 	require.Equal(t, len(before), len(after), "nothing to rewrite, nothing rewritten")
 }

@@ -122,7 +122,7 @@ func TestInitializeFetchedGenerationUncertainPublication(t *testing.T) {
 }
 
 func TestInitializeFetchedGenerationRejectsNativeFormat(t *testing.T) {
-	s, err := Open(t.TempDir(), nil, nil, nil, WithSafeMode())
+	s, err := Open(t.TempDir(), nil, nil, nil, WithSafeMode(), withTidwallEventLog())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	release := s.BeginCatchUp()

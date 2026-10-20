@@ -16,7 +16,7 @@ import (
 // reverted the cache to the library default until the next restart.
 func TestEventCacheSegments(t *testing.T) {
 	// Default when unconfigured.
-	s, err := Open(t.TempDir(), nil, nil, nil)
+	s, err := Open(t.TempDir(), nil, nil, nil, withTidwallEventLog())
 	require.NoError(t, err)
 	s.stopScrubWorker()
 	s.stopSealer()
@@ -26,7 +26,7 @@ func TestEventCacheSegments(t *testing.T) {
 	require.NoError(t, s.Close())
 
 	// Configured value reaches the handle…
-	s2, err := Open(t.TempDir(), nil, nil, nil, WithEventCacheSegments(5))
+	s2, err := Open(t.TempDir(), nil, nil, nil, withTidwallEventLog(), WithEventCacheSegments(5))
 	require.NoError(t, err)
 	s2.stopScrubWorker()
 	s2.stopSealer()

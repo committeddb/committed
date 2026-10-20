@@ -19,9 +19,7 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
-	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/durablefs"
-	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 // A restored or recovered data directory becomes a member of a new cluster:
@@ -88,10 +86,24 @@ func (s *Storage) RecordedNodeID() (uint64, bool, error) {
 	return id, true, nil
 }
 
+// Restored is what RestoreAs did.
+type Restored struct {
+	// Membership is the configuration the log holds through its last index.
+	Membership *db.LogMembership
+	// Converted reports the conversion of a tidwall event log (a backup taken
+	// before 0.8.3); nil when the log was segmented already.
+	Converted *Converted
+}
+
 // RestoreAs prepares the restored data directory dir, not yet started, to run
 // as node nodeID of cluster id. nodeID must be a member of the configuration
-// the directory's log holds through its last index. Returns that membership.
-func RestoreAs(dir string, id cluster.ClusterID, nodeID uint64) (*db.LogMembership, error) {
+// the directory's log holds through its last index. A tidwall event log is
+// converted first.
+func RestoreAs(dir string, id cluster.ClusterID, nodeID uint64) (*Restored, error) {
+	converted, err := convertTidwallEventLog(dir)
+	if err != nil {
+		return nil, err
+	}
 	s, err := openStopped(dir)
 	if err != nil {
 		return nil, err
@@ -107,11 +119,14 @@ func RestoreAs(dir string, id cluster.ClusterID, nodeID uint64) (*db.LogMembersh
 	if err := s.becomeNewCluster(id, nodeID, m.LastIndex); err != nil {
 		return nil, err
 	}
-	return m, nil
+	return &Restored{Membership: m, Converted: converted}, nil
 }
 
 // Recovered is what Recover did.
 type Recovered struct {
+	// Converted reports the conversion of a tidwall event log (a node last run
+	// before 0.8.3); nil when the log was segmented already.
+	Converted *Converted
 	ClusterID cluster.ClusterID
 	// LastIndex is the log's last index after the removals; everything up to
 	// it is committed on this node.
@@ -126,8 +141,12 @@ type Recovered struct {
 // configuration first, then removes every other member, one change per entry,
 // commits the whole log (the uncommitted tail included), and mints a new
 // cluster id. The old majority must never run again: it would elect its own
-// leader and diverge.
+// leader and diverge. A tidwall event log is converted first.
 func Recover(dir string, nodeID uint64) (*Recovered, error) {
+	converted, err := convertTidwallEventLog(dir)
+	if err != nil {
+		return nil, err
+	}
 	s, err := openStopped(dir)
 	if err != nil {
 		return nil, err
@@ -198,7 +217,7 @@ func Recover(dir string, nodeID uint64) (*Recovered, error) {
 	if err := s.becomeNewCluster(id, nodeID, index); err != nil {
 		return nil, err
 	}
-	return &Recovered{ClusterID: id, LastIndex: index, Removed: removed}, nil
+	return &Recovered{Converted: converted, ClusterID: id, LastIndex: index, Removed: removed}, nil
 }
 
 // openStopped opens a stopped node's directory for offline maintenance: the
@@ -207,12 +226,12 @@ func Recover(dir string, nodeID uint64) (*Recovered, error) {
 // whichever engine wrote it.
 func openStopped(dir string) (*Storage, error) {
 	opts := []Option{WithSafeMode(), WithLogger(zap.NewNop()), func(o *options) { o.offline = true }}
-	segmented, err := segmentlog.RecognizeDirectory(datadir.EventsDir(dir))
+	tidwall, err := isTidwallEventLog(dir)
 	if err != nil {
-		return nil, fmt.Errorf("inspect %s: %w", datadir.EventsDir(dir), err)
+		return nil, err
 	}
-	if segmented {
-		opts = append(opts, WithSegmentedEventLog(segmentedLogOptions()))
+	if tidwall {
+		opts = append(opts, withTidwallEventLog())
 	}
 	s, err := Open(dir, nil, nil, nil, opts...)
 	if err != nil {
