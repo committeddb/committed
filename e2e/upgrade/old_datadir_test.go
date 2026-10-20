@@ -124,26 +124,7 @@ func runOldDataDirEra(t *testing.T, bin string, era fixtureEra) {
 	// scrubber (physical removal of the deleted subject's upsert).
 	postScrub(t, base)
 
-	// The scrub is proven by a FRESH syncable's replay of the rewritten log:
-	// the erased subject's upsert is gone while every survivor still decodes
-	// and arrives. Poll by re-POSTing under new ids — the scrub completes in
-	// the background, so an early replay may still see the upsert.
-	deadline := time.Now().Add(60 * time.Second)
-	for attempt := 0; ; attempt++ {
-		verify := newWebhookSink()
-		id := fmt.Sprintf("era-verify-%d", attempt)
-		postWebhookSyncable(t, base, id, "movie", verify.srv.URL)
-		verify.awaitKeys(t, "upsert", "mv1", "mv2", "mv3", "mv4")
-		if !verify.sawUpsert("subject-erased") {
-			verify.srv.Close()
-			break
-		}
-		verify.srv.Close()
-		if time.Now().After(deadline) {
-			t.Fatal("the scrub never removed the erased subject's upsert from the old-era log")
-		}
-		time.Sleep(2 * time.Second)
-	}
+	awaitErased(t, base, "era-verify", "mv1", "mv2", "mv3", "mv4")
 
 	// 4. Restart over the rewritten dir: the post-scrub log reopens cleanly.
 	node.stopGraceful(t, base)
@@ -187,12 +168,36 @@ func TestOldDataDir_RestoresIntoANewCluster(t *testing.T) {
 	}
 }
 
-func runOrFail(t *testing.T, bin string, args ...string) {
+// awaitErased proves a scrub by a FRESH syncable's replay of the rewritten
+// log: the erased subject's upsert is gone while every survivor still decodes
+// and arrives. It polls by re-POSTing under new ids (idPrefix-N): the scrub
+// completes in the background, so an early replay may still see the upsert.
+func awaitErased(t *testing.T, base, idPrefix string, survivors ...string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for attempt := 0; ; attempt++ {
+		verify := newWebhookSink()
+		postWebhookSyncable(t, base, fmt.Sprintf("%s-%d", idPrefix, attempt), "movie", verify.srv.URL)
+		verify.awaitKeys(t, "upsert", survivors...)
+		erased := !verify.sawUpsert("subject-erased")
+		verify.srv.Close()
+		if erased {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the scrub never removed the erased subject's upsert from the log")
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func runOrFail(t *testing.T, bin string, args ...string) string {
 	t.Helper()
 	out, err := exec.Command(bin, args...).CombinedOutput() //nolint:gosec // G204: the test's own binary
 	if err != nil {
 		t.Fatalf("committed %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+	return string(out)
 }
 
 // --- webhook sink ---
