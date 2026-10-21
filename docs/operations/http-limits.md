@@ -64,7 +64,11 @@ raise it if you legitimately post larger configs and start seeing
 on its way in (the request body, the proposal, the raft entry, each
 follower's replication message, the apply batch), so budget about five
 times the cap per proposal in flight, and a large entry delays the entries
-queued behind it while it replicates.
+queued behind it while it replicates. Heartbeats travel separately from
+entries, so a slow transfer does not start an election, but each follower
+must still persist one entry within the election timeout (about a second):
+size a raise so the largest proposal writes and syncs well inside that on
+the slowest node's disk.
 
 ## HTTP server timeouts
 

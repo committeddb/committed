@@ -79,7 +79,8 @@ const (
 	// requestTimeout is the outer bound on a single peer POST. The faster
 	// dial/response-header timeouts below are what actually detect a dead peer;
 	// this just caps a live peer's whole round trip (snapshots flow inline but
-	// are bounded metadata, so they finish well within it).
+	// are bounded metadata, so they finish well within it). A large message
+	// adds its transfer time on top (sendTimeout).
 	requestTimeout = 5 * time.Second
 
 	// peerDialTimeout / peerResponseTimeout detect a dead or restarted peer
@@ -93,7 +94,7 @@ const (
 	peerDialTimeout     = 2 * time.Second
 	peerResponseTimeout = 2 * time.Second
 
-	// peerQueueDepth is how many messages may queue per peer before Send drops.
+	// peerQueueDepth is how many messages may queue per peer lane before Send drops.
 	// Small enough to bound memory, large enough to absorb a Ready burst.
 	peerQueueDepth = 64
 
@@ -142,8 +143,11 @@ type HttpTransport struct {
 	peers map[uint64]*peer
 }
 
-// peer is a single remote node: a bounded queue of messages to send it, drained
-// by one worker goroutine that POSTs them in order.
+// peer is a single remote node, with two lanes of messages to send it, each a
+// bounded queue drained in order by its own worker goroutine. The control lane
+// carries the small messages whose delay costs liveness (see control); the
+// bulk lane carries appends, forwarded proposals and snapshots, so one large
+// message delays only its own lane.
 type peer struct {
 	id uint64
 	// addr is the peer's current base URL (canonical scheme://host:port). It
@@ -152,9 +156,26 @@ type peer struct {
 	addr atomic.Pointer[string]
 	// health tracks deliveries to the current address (peer_health.go).
 	health peerHealth
-	msgc   chan *raftpb.Message
+	msgc   chan *raftpb.Message // bulk lane
+	ctlc   chan *raftpb.Message // control lane
 	stopc  chan struct{}
-	done   chan struct{}
+}
+
+// control reports whether m goes on a peer's control lane: heartbeats keep
+// followers from starting elections, votes decide them, append responses
+// tell the leader a follower is live, and read-index and timeout-now are as
+// small and as time-sensitive. A heartbeat queued behind a large append that
+// takes longer than the election timeout to deliver starts an election.
+// Raft tolerates reordering between messages of different types, as it does
+// on any network.
+func control(m *raftpb.Message) bool {
+	switch m.GetType() {
+	case raftpb.MsgHeartbeat, raftpb.MsgHeartbeatResp,
+		raftpb.MsgVote, raftpb.MsgVoteResp, raftpb.MsgPreVote, raftpb.MsgPreVoteResp,
+		raftpb.MsgAppResp, raftpb.MsgReadIndex, raftpb.MsgReadIndexResp, raftpb.MsgTimeoutNow:
+		return true
+	}
+	return false
 }
 
 // baseURL is the peer's current address.
@@ -427,13 +448,14 @@ func (t *HttpTransport) startPeerLocked(id uint64, addr, source string) {
 	pr := &peer{
 		id:    id,
 		msgc:  make(chan *raftpb.Message, peerQueueDepth),
+		ctlc:  make(chan *raftpb.Message, peerQueueDepth),
 		stopc: make(chan struct{}),
-		done:  make(chan struct{}),
 	}
 	pr.addr.Store(&addr)
 	pr.health.changed(source)
 	t.peers[id] = pr
-	go t.runPeer(pr)
+	go t.runLane(pr, pr.msgc)
+	go t.runLane(pr, pr.ctlc)
 }
 
 // RemovePeer stops a peer's worker and drops it from the registry. It does not
@@ -469,8 +491,12 @@ func (t *HttpTransport) Send(msgs []*raftpb.Message) {
 			}
 			continue
 		}
+		lane := pr.msgc
+		if control(m) {
+			lane = pr.ctlc
+		}
 		select {
-		case pr.msgc <- m:
+		case lane <- m:
 		default:
 			// A dropped snapshot must release raft's pending-snapshot state.
 			// Queue pressure alone does not establish that the peer is unreachable.
@@ -495,14 +521,14 @@ func (t *HttpTransport) Stop() {
 	t.cancel()
 }
 
-// runPeer drains a peer's queue, delivering messages in order until stopped.
-func (t *HttpTransport) runPeer(pr *peer) {
-	defer close(pr.done)
+// runLane drains one of a peer's lanes, delivering its messages in order
+// until stopped.
+func (t *HttpTransport) runLane(pr *peer, lane <-chan *raftpb.Message) {
 	for {
 		select {
 		case <-pr.stopc:
 			return
-		case m := <-pr.msgc:
+		case m := <-lane:
 			t.deliver(pr, m)
 		}
 	}
@@ -533,7 +559,7 @@ func (t *HttpTransport) post(pr *peer, m *raftpb.Message) error {
 		return fmt.Errorf("marshal message: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(t.baseCtx, requestTimeout)
+	ctx, cancel := context.WithTimeout(t.baseCtx, sendTimeout(len(data)))
 	defer cancel()
 
 	target, err := pr.endpoint(raftMessagePath)
@@ -558,6 +584,15 @@ func (t *HttpTransport) post(pr *peer, m *raftpb.Message) error {
 		return fmt.Errorf("peer %d returned %s", m.GetTo(), resp.Status)
 	}
 	return nil
+}
+
+// minPeerBytesPerSecond is the slowest peer link a message's deadline allows
+// for: a large append gets requestTimeout plus its transfer time at this rate,
+// so a maximum-size proposal is not cut off on every retry over a slow link.
+const minPeerBytesPerSecond = 10 << 20
+
+func sendTimeout(size int) time.Duration {
+	return requestTimeout + time.Duration(size)*time.Second/minPeerBytesPerSecond
 }
 
 // marshalMessage / unmarshalMessage isolate the raftpb wire calls. raft 3.7
