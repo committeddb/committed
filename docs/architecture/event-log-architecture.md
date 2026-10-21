@@ -330,18 +330,18 @@ of durable state.*
 
 ### Face 1 — the storage highwatermark: `P_local == R_local`
 
-**After any Ready loop iteration, `P_local == R_local`** where:
+**After any applied batch, `P_local == R_local`** where:
 
 - `P_local` = local permanent event log highwatermark (the highest raft
   index applied to events)
 - `R_local` = local raft applied index (the highest raft index
   acknowledged to raft)
 
-The two advance together within each Ready iteration: the batch apply
+The two advance together within each applied batch: the batch apply
 appends every committed entry's event-log record in one batched write,
 applies the entities, then persists the applied index once — so `P > R`
 transiently inside a batch (and across a crash, which restart replay
-closes) and the invariant is checked only at iteration end.
+closes) and the invariant is checked only at batch end.
 
 The node **fatal-exits when `P_local < R_local`** — raft has acknowledged an
 index the permanent log doesn't have (the dangerous direction; e.g. an
@@ -907,7 +907,7 @@ The apply-path determinism audit is **complete**. Findings:
   index is the only ordering authority. No wall-clock is read at apply.
 - **Map iteration, random IDs, UUIDs, node-id fields, float math,
   goroutine ordering, OS-dependent calls** — none found in the apply
-  path. `applyEntity` runs single-threaded inside the raft Ready loop,
+  path. `applyEntity` runs single-threaded on raft's apply goroutine,
   every per-handler bbolt write is a marshaled protobuf with scalar/bytes
   fields only, and channel notifies in `saveSyncable`/`saveIngestable`
   happen *after* the bucket write so they don't race the state.

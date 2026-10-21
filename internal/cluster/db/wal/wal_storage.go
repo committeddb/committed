@@ -287,10 +287,13 @@ type Storage struct {
 	// (an in-place snapshot install) replaces the whole log with a fresh one.
 	// entry() — the read chokepoint raft's node.run goroutine hits via
 	// Entries/Term — takes it for read; the swap takes it for write. Writers
-	// (appendEntries, Compact) run on the same serveChannels goroutine as the
-	// swap, so they cannot race it and stay lock-free.
+	// (appendEntries, Compact) run on the same goroutine as the swap (raft's
+	// append goroutine), so they cannot race it and stay lock-free.
 	entryMu  sync.RWMutex
 	EntryLog *wal.Log
+	// entryCache serves raft's reads of the log's newest entries from memory
+	// (see entryCache).
+	entryCache entryCache
 	// entryLogEpoch counts the times the entry log's files changed under a
 	// reader in a way it cannot see: replaced whole (a snapshot install's
 	// cut-over) or truncated from the back (a follower's log conflict). A
@@ -475,9 +478,9 @@ type Storage struct {
 	// reads until the reopen finishes. Without this an HTTP query that
 	// happened to run mid-restore would hit a closed-file error.
 	kvMu sync.RWMutex
-	// snapMu guards snapshot and hardState. Both are written from the
-	// raft serveChannels goroutine (Save, ConfState, CreateSnapshot,
-	// RestoreSnapshot) and read from the etcd raft node.run goroutine
+	// snapMu guards snapshot and hardState. Both are written from raft's
+	// append goroutine (Save, RestoreSnapshot) and apply goroutine
+	// (ConfState, CreateSnapshot) and read from the etcd raft node.run goroutine
 	// (Snapshot, called via raftLog.snapshot → maybeSendAppend whenever
 	// the leader needs to ship a snapshot to a lagging follower).
 	// Without serialization, the race detector flags the cross-
@@ -485,7 +488,7 @@ type Storage struct {
 	snapMu    sync.RWMutex
 	snapshot  *pb.Snapshot
 	hardState *pb.HardState
-	// firstIndex and lastIndex are mutated only from the raft serveChannels
+	// firstIndex and lastIndex are mutated only from raft's append
 	// goroutine (via appendEntries and Compact) but read from many other
 	// goroutines: sync workers (Reader.Read), ingest workers, HTTP handlers
 	// (db.ents()), and tests. Atomics make those reads race-free without
@@ -507,8 +510,8 @@ type Storage struct {
 	// away on this node's raft log (conceptually the "dummy" entry at
 	// the current wal first-seq — readable via Term for the match
 	// check, not via Entries). Zero means no compaction has happened
-	// on this storage. Mutated only from the raft serveChannels
-	// goroutine (via Compact) so single-writer atomic semantics apply.
+	// on this storage. Mutated only from raft's append goroutine (via
+	// Compact) so single-writer atomic semantics apply.
 	//
 	// Why separate from firstIndex: before this split, firstIndex was
 	// overloaded to mean BOTH the seq-mapping offset AND the compaction
@@ -532,7 +535,7 @@ type Storage struct {
 	// (getLastStates) only ever needs those two records, so appendState
 	// truncates the log to the older of the two after each write — the state
 	// log stays a handful of records instead of growing forever. Mutated only
-	// from the raft serveChannels goroutine (via Save) and Open, like
+	// from raft's append goroutine (via Save and Compact) and Open, like
 	// stateIndex.
 	lastSnapSeq      uint64
 	lastHardStateSeq uint64
@@ -608,7 +611,8 @@ type Storage struct {
 	// Ready, staged by ConfState() and flushed to confStateBucket ATOMICALLY
 	// with appliedIndex by saveAppliedIndex — so membership durability can
 	// never lag the applied index (confstate-lost-in-crash-window). Guarded by
-	// snapMu (ConfState already holds it); accessed only on the Ready loop.
+	// snapMu (ConfState already holds it); accessed only on the apply
+	// goroutine.
 	pendingConfState *pb.ConfState
 	// appliedConfState is the membership as of the latest applied conf
 	// change — what the NEXT CreateSnapshot stamps. It is kept apart from
@@ -634,7 +638,7 @@ type Storage struct {
 	// behind. firstEventIndex is maintained for Open recovery and diagnostics
 	// — stamped on the first append, and recomputed from the first surviving
 	// entry after a scrub rewrite (which can raise it past 1). Mutated only
-	// from the serveChannels goroutine (first write) and the scrub worker
+	// from raft's apply goroutine (first write) and the scrub worker
 	// (under eventMu.Lock), so the atomic is for race-free reads, not CAS.
 	firstEventIndex atomic.Uint64
 	// dataEventIndex is the highest raft index of a user-topic-DATA entry
@@ -650,7 +654,7 @@ type Storage struct {
 	//
 	// Bumped in ApplyCommitted with the same IsInternal filter the reader
 	// uses, so the two agree by construction. Monotonic (entries apply in
-	// index order). Mutated only from the serveChannels goroutine
+	// index order). Mutated only from raft's apply goroutine
 	// (ApplyCommitted) and Open; the atomic is for race-free reads from the
 	// HTTP status path on other goroutines, not CAS.
 	dataEventIndex atomic.Uint64
@@ -694,7 +698,7 @@ type Storage struct {
 	// wires db.notifyLost here (via SetLostNotifier) so blocking
 	// db.Propose waiters get the definitive ErrProposalLost. nil disables
 	// detection. Single-writer: set once at Open (WithLostCallback) or by
-	// SetLostNotifier before the raft serveChannels goroutine — the sole
+	// SetLostNotifier before raft's append goroutine — the sole
 	// appendEntries caller — starts, so reads in appendEntries need no
 	// lock. See SetLostNotifier.
 	lostCallback func([]uint64)
@@ -1225,8 +1229,8 @@ func (s *Storage) Close() error {
 // it (with this ConfState) to the state log via appendState, so
 // InitialState returns the correct voter set on restart.
 //
-// Called by the raft Ready loop from raft.go after each EntryConfChange
-// apply. This is the write half of the "conf state must survive across
+// Called by the apply goroutine (raft.go) for each EntryConfChange it
+// applies. This is the write half of the "conf state must survive across
 // restart" invariant; the read half is wal.Open reloading the last
 // snapshot out of stateLog.
 func (s *Storage) ConfState(c *pb.ConfState) {
@@ -1376,6 +1380,9 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 	if entryReadRaceTestHook != nil {
 		entryReadRaceTestHook()
 	}
+	if es, ok := s.entryCache.slice(lo, hi, maxSize); ok {
+		return es, nil
+	}
 
 	var es []*pb.Entry
 	logIndex := lo - firstIndex
@@ -1406,9 +1413,10 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 		}
 
 		totalSize += size
-		if len(es) == 0 || totalSize <= maxSize {
-			es = append(es, e)
+		if len(es) > 0 && totalSize > maxSize {
+			break
 		}
+		es = append(es, e)
 	}
 
 	return es, nil
@@ -1535,6 +1543,9 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 	if entryReadRaceTestHook != nil {
 		entryReadRaceTestHook()
 	}
+	if t, ok := s.entryCache.term(i); ok {
+		return t, nil
+	}
 
 	logIndex := i - firstIndex + 1
 	e, _, err := s.entry(logIndex)
@@ -1579,7 +1590,7 @@ func (s *Storage) Snapshot() (*pb.Snapshot, error) {
 		return &pb.Snapshot{}, nil
 	}
 	// Clone under the read lock: this runs on raft's node goroutine,
-	// concurrent with the serve loop's ConfState()/Save() writers that
+	// concurrent with the ConfState()/Save() writers that
 	// mutate or replace s.snapshot. Returning the live pointer would race.
 	return proto.Clone(s.snapshot).(*pb.Snapshot), nil
 }
@@ -1602,7 +1613,7 @@ func (s *Storage) Snapshot() (*pb.Snapshot, error) {
 // Store order: compactedUpTo is advanced BEFORE TruncateFront fires.
 // Reads from etcd raft's internal node goroutine (storage.Term during
 // leader AppendEntries construction, e.g. maybeSendAppend) race
-// against the serveChannels Compact call; if we truncated the wal
+// against the append goroutine's Compact call; if we truncated the wal
 // first, a racing Term read of an about-to-be-compacted index would
 // pass the boundary check against the stale compactedUpTo value,
 // fall through to EntryLog.Read on a seq that no longer exists, and
@@ -1646,6 +1657,7 @@ func (s *Storage) Compact(compactIndex uint64) error {
 	if err := s.EntryLog.TruncateFront(i); err != nil {
 		return err
 	}
+	s.entryCache.compactThrough(compactIndex)
 
 	return nil
 }

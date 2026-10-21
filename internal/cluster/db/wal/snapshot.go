@@ -103,7 +103,7 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (*pb.Sna
 // follower needing the gap is shipped that stale snapshot and loops until the
 // leader's next compaction refreshes it. No-op when no snapshot is pending (a direct
 // Compact with no preceding CreateSnapshot). Mirrors the persist half of Save and,
-// like Save, runs on the raft serve goroutine, so it shares Save's snapMu discipline
+// like Save, runs on raft's append goroutine, so it shares Save's snapMu discipline
 // (copy under the lock, append without it).
 func (s *Storage) persistPendingSnapshot() error {
 	s.snapMu.Lock()
@@ -182,9 +182,9 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	// snapshot is a compacted metadata baseline, so a pre-restore count no longer
 	// maps onto the state — reset it, exactly as a restart does (Open starts it at
 	// zero and re-accumulates from post-restart applies). Done here, synchronously
-	// on the Ready-loop goroutine, rather than in the async refreshAfterRestore: a
-	// later ApplyCommitted (same goroutine) may bump it, and an async reset would
-	// race and clobber that legitimate post-restore increment.
+	// while apply is held off for the install, rather than in the async
+	// refreshAfterRestore: a later ApplyCommitted may bump it, and an async reset
+	// would race and clobber that legitimate post-restore increment.
 	s.metadataBacklog.Store(0)
 	s.metadataBacklogBytes.Store(0)
 

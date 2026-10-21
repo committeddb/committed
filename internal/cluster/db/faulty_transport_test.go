@@ -53,8 +53,8 @@ type FaultyTransport struct {
 
 	// sendMu guards the Send-path fault maps. Updated by
 	// FaultyCluster.DirectionalDrop / AddLatency / DropRate (called from
-	// test goroutines); read on every Send call (called from the raft
-	// Ready loop goroutine). A single mutex across all three maps keeps
+	// test goroutines); read on every Send call (from the raft Ready loop
+	// and the append and apply goroutines). A single mutex across all three maps keeps
 	// Send's fault-lookup path a single lock cycle.
 	sendMu      sync.Mutex
 	partitioned map[uint64]bool
@@ -144,8 +144,9 @@ func (t *FaultyTransport) Send(msgs []*raftpb.Message) {
 	// Snapshot the per-destination state under sendMu, then release before
 	// doing any actual work. Holding sendMu across inner.Send or across a
 	// channel enqueue risks contention with DirectionalDrop/AddLatency calls
-	// from test goroutines; since Send is called from one Ready loop
-	// goroutine, the snapshot is race-free for the duration of this call.
+	// from test goroutines. Send is called from the Ready loop and from the
+	// append and apply goroutines (their responses); each call works on its
+	// own snapshot.
 	var direct []*raftpb.Message
 	var queued []pendingQueue
 

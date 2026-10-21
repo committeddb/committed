@@ -65,10 +65,10 @@ on its way in (the request body, the proposal, the raft entry, each
 follower's replication message, the apply batch), so budget about five
 times the cap per proposal in flight, and a large entry delays the entries
 queued behind it while it replicates. Heartbeats travel separately from
-entries, so a slow transfer does not start an election, but each follower
-must still persist one entry within the election timeout (about a second):
-size a raise so the largest proposal writes and syncs well inside that on
-the slowest node's disk.
+entries and from each node's disk writes, so neither a slow transfer nor
+a slow disk starts an election. A large proposal is confirmed once a
+majority of nodes have received it and written it to disk, so its
+response takes that long.
 
 ## HTTP server timeouts
 

@@ -6,6 +6,13 @@ import (
 	raftpb "go.etcd.io/raft/v3/raftpb"
 )
 
+// committedBatch is committed entries to apply and the responses raft asked
+// to have delivered once they are applied (its MsgStorageApplyResp).
+type committedBatch struct {
+	entries   []*raftpb.Entry
+	responses []*raftpb.Message
+}
+
 // applyQueue hands committed entries from the Ready loop to the apply
 // goroutine, in order. The Ready loop never blocks on it: a slow apply must
 // not stop raft's clock (ticks, elections, leases) or its replication. The
@@ -14,9 +21,9 @@ import (
 type applyQueue struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
-	batches [][]*raftpb.Entry
-	// busy is true while the apply goroutine is applying a popped batch, so
-	// drain waits for it too.
+	batches []committedBatch
+	// busy is true while the apply goroutine applies a popped batch, or
+	// while exclusive runs its function.
 	busy    bool
 	stopped bool
 }
@@ -27,10 +34,11 @@ func newApplyQueue() *applyQueue {
 	return q
 }
 
-// push queues a Ready's committed entries.
-func (q *applyQueue) push(entries []*raftpb.Entry) {
+// push queues committed entries and the responses to deliver once they are
+// applied.
+func (q *applyQueue) push(entries []*raftpb.Entry, responses []*raftpb.Message) {
 	q.mu.Lock()
-	q.batches = append(q.batches, entries)
+	q.batches = append(q.batches, committedBatch{entries: entries, responses: responses})
 	q.mu.Unlock()
 	q.cond.Broadcast()
 }
@@ -43,22 +51,25 @@ const maxApplyMerge = 10000
 // applying them together shares one event-log append, one data-run commit and
 // one applied-index save. When apply falls behind, Readies queue up one or a
 // few entries each; applied one by one, each would pay those fsyncs again.
-// pop marks the queue busy until done. It returns false once stopped.
-func (q *applyQueue) pop() ([]*raftpb.Entry, bool) {
+// The merged batch's responses keep their order. pop marks the queue busy
+// until done. It returns false once stopped.
+func (q *applyQueue) pop() (committedBatch, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for len(q.batches) == 0 && !q.stopped {
+	for (len(q.batches) == 0 || q.busy) && !q.stopped {
 		q.cond.Wait()
 	}
 	if q.stopped {
-		return nil, false
+		return committedBatch{}, false
 	}
 	b := q.batches[0]
 	n := 1
 	if len(q.batches) > 1 {
-		b = append([]*raftpb.Entry(nil), b...)
-		for ; n < len(q.batches) && len(b)+len(q.batches[n]) <= maxApplyMerge; n++ {
-			b = append(b, q.batches[n]...)
+		b.entries = append([]*raftpb.Entry(nil), b.entries...)
+		b.responses = append([]*raftpb.Message(nil), b.responses...)
+		for ; n < len(q.batches) && len(b.entries)+len(q.batches[n].entries) <= maxApplyMerge; n++ {
+			b.entries = append(b.entries, q.batches[n].entries...)
+			b.responses = append(b.responses, q.batches[n].responses...)
 		}
 	}
 	clear(q.batches[:n])
@@ -75,15 +86,24 @@ func (q *applyQueue) done() {
 	q.cond.Broadcast()
 }
 
-// drain waits until every queued batch has been applied. It returns false if
-// the queue stopped first.
-func (q *applyQueue) drain() bool {
+// exclusive waits until every queued batch has been applied, then runs fn
+// with apply held off. It returns false, without running fn, if the queue
+// stopped first. A snapshot install uses it: it replaces the state apply
+// writes to.
+func (q *applyQueue) exclusive(fn func()) bool {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	for (len(q.batches) > 0 || q.busy) && !q.stopped {
 		q.cond.Wait()
 	}
-	return !q.stopped
+	if q.stopped {
+		q.mu.Unlock()
+		return false
+	}
+	q.busy = true
+	q.mu.Unlock()
+	defer q.done()
+	fn()
+	return true
 }
 
 // ifIdle runs fn, and returns true, only if nothing is queued or being
