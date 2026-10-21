@@ -445,6 +445,7 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		// and steady-state restarts stay proposal-free.
 		go db.announceZone()
 		go db.announceClusterIdentity()
+		go db.announceIncarnation()
 		go db.recordAgreedAddresses()
 	}
 

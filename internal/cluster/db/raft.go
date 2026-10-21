@@ -388,6 +388,7 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		n.node = raft.StartNode(c, ps)
 	}
 	n.initClusterIdentity(hs.GetTerm() == 0 && !n.join, ps)
+	n.initIncarnation()
 	n.refreshRemoved()
 	if s, ok := n.storage.(interface{ SnapshotLacksMember() bool }); ok && s.SnapshotLacksMember() {
 		n.snapshotLacksMember.Store(true)

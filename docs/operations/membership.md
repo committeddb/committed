@@ -292,6 +292,19 @@ cluster (`412`) or addressed to another node (`421`) and logs both sides, so
 a stale address that now reaches some other cluster or node is refused
 instead of obeyed. A restored cluster gets a new id ([backup.md](backup.md)).
 
+**A node id belongs to one data directory.** Two processes running as the
+same `COMMITTED_NODE_ID` with different data directories — two machines
+restored from one archive with the same `--node-id`, say — could each vote
+in the same election and give the cluster two leaders. Every data directory
+has its own random incarnation, sent on every peer request, and the cluster
+records the first one it sees for each node id. A node refuses messages
+from a second incarnation (`409`), and a process refused that way stops,
+logging `another process is running as this node id`. If both start before
+the cluster has recorded either, both are refused: stop the wrong one and
+restart the right one. A rebuilt node joins under a new id
+([rebuild.md](rebuild.md)). A copy of a data directory carries its
+incarnation, so never copy a directory to make another node.
+
 > **Kubernetes.** Prefer stable DNS names (a StatefulSet's
 > `pod-0.service.namespace` names) in `COMMITTED_PEERS`. Pod-IP addresses
 > work for voters — a rescheduled voter heals as above — but a rescheduled

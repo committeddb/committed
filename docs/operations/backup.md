@@ -161,7 +161,9 @@ COMMITTED_DATA_DIR=/var/lib/committed committed node
 - **`--node-id`** must be a member of the backed-up cluster (restore lists
   the members, and refuses an id that isn't one). Give every machine a
   different one. The restored directory remembers it: a node started on it
-  under another `COMMITTED_NODE_ID` refuses to start.
+  under another `COMMITTED_NODE_ID` refuses to start. Two machines restored
+  under the same id are refused by the cluster, and stop
+  ([membership.md](membership.md#peer-addresses-and-cluster-identity)).
 - **A single-node cluster** is the same with one machine: `--node-id 1
   --new-cluster`.
 - **Addresses come from `COMMITTED_PEERS`.** Restore drops the old cluster's

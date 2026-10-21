@@ -38,7 +38,11 @@ import (
 //     index behind a fresh snapshot, so a joiner gets the rewritten metadata
 //     instead of replaying the original bootstrap;
 //   - the node id it was prepared for is recorded, and the node refuses to
-//     start under another.
+//     start under another;
+//   - recorded member incarnations are dropped and so is this directory's
+//     own, so it mints a new one at its first boot (restoring one archive
+//     onto two machines under one node id leaves two incarnations, which
+//     the cluster refuses).
 
 // nodeIDFile records the node id restore or recover prepared the directory
 // for.
@@ -250,7 +254,7 @@ func (s *Storage) becomeNewCluster(id cluster.ClusterID, nodeID, addressesThroug
 		if err := b.Put(addressesThroughKey, through); err != nil {
 			return err
 		}
-		for _, name := range [][]byte{memberPeerURLBucket, memberAPIURLBucket} {
+		for _, name := range [][]byte{memberPeerURLBucket, memberAPIURLBucket, memberIncarnationBucket} {
 			if err := tx.DeleteBucket(name); err != nil && !errors.Is(err, bolterrors.ErrBucketNotFound) {
 				return err
 			}
@@ -275,9 +279,12 @@ func (s *Storage) becomeNewCluster(id cluster.ClusterID, nodeID, addressesThroug
 			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}
-	// The previous machines' COMMITTED_PEERS mean nothing here.
-	if _, err := d.Remove(peersAtLastBootFile); err != nil {
-		return fmt.Errorf("remove %s: %w", peersAtLastBootFile, err)
+	// The previous machines' COMMITTED_PEERS mean nothing here, and the
+	// archive's incarnation is the source directory's, not this one's.
+	for _, name := range []string{peersAtLastBootFile, incarnationFile} {
+		if _, err := d.Remove(name); err != nil {
+			return fmt.Errorf("remove %s: %w", name, err)
+		}
 	}
 
 	// Replace the saved snapshot, which holds the old metadata, and drop the

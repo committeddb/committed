@@ -236,6 +236,7 @@ var internalEntities = []internalEntity{
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},
 	{cluster.IsNodeZone, "handleNodeZone", memberZoneBucket, (*Storage).handleNodeZone},
 	{cluster.IsClusterIdentity, "handleClusterIdentity", clusterIdentityBucket, (*Storage).handleClusterIdentity},
+	{cluster.IsNodeIncarnation, "handleNodeIncarnation", memberIncarnationBucket, (*Storage).handleNodeIncarnation},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type

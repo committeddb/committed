@@ -22,18 +22,58 @@ import (
 //   - targetNodeHeader: the node id the request is for, checked before the
 //     token and before the body is read, so a request that reached the wrong
 //     node (a reused address) is refused at once — a misaddressed snapshot is
-//     never read.
+//     never read;
+//   - incarnationHeader: the sender's incarnation (see db/incarnation.go),
+//     checked against its node id on raft messages.
 const (
 	clusterUUIDHeader = "X-Committed-Cluster-Uuid"
 	targetNodeHeader  = "X-Committed-Target-Node"
 	// senderURLHeader is the sender's advertised peer URL (self-report).
-	senderURLHeader = "X-Committed-Sender-Url"
+	senderURLHeader   = "X-Committed-Sender-Url"
+	incarnationHeader = "X-Committed-Incarnation"
+	// refusalHeader names why a peer refused a request, where the status
+	// alone is ambiguous; duplicateNodeRefusal is a 409 for a sender running
+	// as a node id another process holds.
+	refusalHeader        = "X-Committed-Refusal"
+	duplicateNodeRefusal = "duplicate-node"
 )
 
 // identity is the node's cluster identity, nil when the node runs without one.
 func (t *HttpTransport) identity() db.ClusterIdentifier {
 	ci, _ := t.raft.(db.ClusterIdentifier)
 	return ci
+}
+
+// incarnations is the node's incarnation checks, nil when the node runs
+// without them.
+func (t *HttpTransport) incarnations() db.IncarnationChecker {
+	ic, _ := t.raft.(db.IncarnationChecker)
+	return ic
+}
+
+// admitIncarnation refuses a raft message from a sender running as a node id
+// another process holds (409, duplicateNodeRefusal). A sender that sends no
+// incarnation (an older release) is admitted.
+func (t *HttpTransport) admitIncarnation(w http.ResponseWriter, r *http.Request, from uint64) bool {
+	sent := r.Header.Get(incarnationHeader)
+	ic := t.incarnations()
+	if sent == "" || ic == nil {
+		return true
+	}
+	inc, err := cluster.ParseIncarnation(sent)
+	if err != nil {
+		http.Error(w, "malformed incarnation", http.StatusBadRequest)
+		return false
+	}
+	if err := ic.AdmitIncarnation(from, inc); err != nil {
+		t.logger.Warn("refused a raft message: another process is running as its sender's node id",
+			zap.Uint64("from", from), zap.Error(err))
+		why, _ := cluster.RedactedMessage(err)
+		w.Header().Set(refusalHeader, duplicateNodeRefusal)
+		http.Error(w, why, http.StatusConflict)
+		return false
+	}
+	return true
 }
 
 // setPeerHeaders stamps a peer request with protocol and identity headers.
@@ -48,6 +88,11 @@ func (t *HttpTransport) setPeerHeaders(h http.Header, to uint64) {
 	}
 	if to != 0 {
 		h.Set(targetNodeHeader, strconv.FormatUint(to, 10))
+	}
+	if ic := t.incarnations(); ic != nil {
+		if inc, ok := ic.Incarnation(); ok {
+			h.Set(incarnationHeader, inc.String())
+		}
 	}
 	if t.selfURL != "" && !wildcardHost(t.selfURL) {
 		h.Set(senderURLHeader, t.selfURL)

@@ -72,6 +72,7 @@ type identity struct {
 	join      bool
 	applied   func() uint64
 	logger    *zap.Logger
+	inc       incarnations
 }
 
 // initClusterIdentity sets up this node's id at startup. fresh is true when
@@ -247,5 +248,8 @@ func (n *Raft) adoptSnapshotIdentity() {
 	if local != rep {
 		n.logger.Fatal("snapshot from another cluster",
 			zap.String("this node", local.String()), zap.String("snapshot", rep.String()))
+	}
+	if err := n.ident.checkOwnIncarnation(); err != nil {
+		n.logger.Fatal("incarnation after snapshot install", zap.Error(err))
 	}
 }

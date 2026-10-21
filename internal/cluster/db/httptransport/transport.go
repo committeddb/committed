@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -389,6 +390,9 @@ func (t *HttpTransport) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sender removed from cluster", http.StatusForbidden)
 		return
 	}
+	if !t.admitIncarnation(w, r, m.GetFrom()) {
+		return
+	}
 	if reported := r.Header.Get(senderURLHeader); reported != "" && r.Header.Get(clusterUUIDHeader) != "" {
 		t.observeSelfReport(m.GetFrom(), reported)
 	}
@@ -578,6 +582,12 @@ func (t *HttpTransport) post(pr *peer, m *raftpb.Message) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusConflict && resp.Header.Get(refusalHeader) == duplicateNodeRefusal {
+		why, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if ic := t.incarnations(); ic != nil {
+			ic.RefusedAsDuplicate(m.GetTo(), strings.TrimSpace(string(why)))
+		}
+	}
 	_, _ = io.Copy(io.Discard, resp.Body) // drain so the keep-alive conn is reusable
 
 	if resp.StatusCode != http.StatusNoContent {
