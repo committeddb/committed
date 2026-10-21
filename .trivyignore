@@ -1,0 +1,6 @@
+# DSA-6572-1 (2026-10-20): Debian removed two CA roots from ca-certificates
+# after an eMudhra intermediate compromise. The distroless base image has not
+# shipped the fixed package (20250419+deb13u1) yet. This entry expires so the
+# scan fails again if distroless still lags; do not extend it without
+# replacing the image's CA bundle instead.
+DSA-6572-1 exp:2026-10-25
