@@ -3,7 +3,6 @@ package stages
 import (
 	"fmt"
 	"math/rand"
-	"os"
 	"testing"
 
 	"github.com/committeddb/committed/internal/cluster"
@@ -148,7 +147,7 @@ func BenchmarkAggregateLiveBatches(b *testing.B) {
 	b.StopTimer()
 	events := float64(b.N * batch)
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/events, "ns/event")
-	if fi, err := os.Stat(stagestore.FilePath(dir, "p")); err == nil {
-		b.ReportMetric(float64(fi.Size())/events, "store-bytes/event")
+	if size, err := store.DiskUsage(); err == nil {
+		b.ReportMetric(float64(size)/events, "store-bytes/event")
 	}
 }

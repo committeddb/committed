@@ -1043,9 +1043,9 @@ set = [ { column = "total", from = "$.total" },
   tenant or a whole topic, and give the stage a `when` that drops inputs
   no emit reads: a rejected input is not retained, so it costs neither
   refold time nor disk.
-- Stage state lives in one bbolt file per syncable under
-  `<dataDir>/projections/` — derived, node-local, rebuildable from the
-  log. It retains every input of every key, so it grows with the topics
+- Stage state lives in one database per node under
+  `<dataDir>/projections/`, each syncable's state in its own key range —
+  derived, node-local, rebuildable from the log. It retains every input of every key, so it grows with the topics
   it reads, in proportion to the number and size of inputs and the
   number of stages that keep them: one aggregate stage over 1,000,000
   events of about 260 bytes held 841 MB. **Editing stage definitions

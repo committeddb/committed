@@ -25,7 +25,7 @@ func loadEventLogOptions() ([]wal.Option, error) {
 		return nil, err
 	}
 	return []wal.Option{wal.WithSegmentedEventLog(segmentlog.LogOptions{
-		Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault},
+		Encoding: wal.EventLogEncoding(),
 		Cache:    segmentlog.CacheOptions{RecentBytes: recent, HistoricalBytes: historical},
 	})}, nil
 }

@@ -6,7 +6,6 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -330,7 +329,7 @@ func (p *Projection) Teardown(keep bool) (bool, error) {
 			p.stageStore = nil
 		}
 		if p.storeDir != "" {
-			if err := os.Remove(stagestore.FilePath(p.storeDir, p.name)); err != nil && !os.IsNotExist(err) {
+			if err := stagestore.Remove(p.storeDir, p.name); err != nil {
 				return false, fmt.Errorf("teardown stage store: %w", err)
 			}
 		}

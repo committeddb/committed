@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
 // planned and unplanned count the graphs this package's tests built
@@ -41,7 +43,19 @@ func TestMain(m *testing.M) {
 		planned.Add(1)
 		return lowered
 	}
+	dir, err := os.MkdirTemp("", "stages-test-store-*")
+	if err != nil {
+		panic(err)
+	}
+	testStoreDir = dir
+	// Held for the whole run, so the shared database opens once.
+	keep, _, err := stagestore.Open(dir, "keep", "")
+	if err != nil {
+		panic(err)
+	}
 	code := m.Run()
+	_ = keep.Close()
+	_ = os.RemoveAll(dir)
 	fmt.Fprintf(os.Stderr, "graphs built through their plan: %d, as handed: %d\n", planned.Load(), unplanned.Load())
 	os.Exit(code)
 }

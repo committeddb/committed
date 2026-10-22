@@ -91,9 +91,7 @@ func runIncrementalCorpus(t *testing.T, sts []Stage) {
 	g := BuildGraph(sts)
 	st := g.byName["g"].def
 	require.True(t, st.incrementalAggregate())
-	store, _, err := stagestore.Open(t.TempDir(), "inc", Fingerprint(sts))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
+	store := openTestStore(t, Fingerprint(sts))
 
 	rng := rand.New(rand.NewSource(7))
 	epoch := uint64(1)
@@ -161,9 +159,7 @@ func TestIncrementalAggregateRecipeShape(t *testing.T) {
 	require.NoError(t, ValidateShapes(sts))
 	g := BuildGraph(sts)
 	st := g.byName["order"].def
-	store, _, err := stagestore.Open(t.TempDir(), "inc", Fingerprint(sts))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
+	store := openTestStore(t, Fingerprint(sts))
 
 	const streams, events = 4, 300
 	for v := 1; v <= events; v++ {
@@ -209,9 +205,7 @@ func TestIncrementalAggregateStateMatchesRebuild(t *testing.T) {
 	require.NoError(t, ValidateShapes(sts))
 	g := BuildGraph(sts)
 	st := g.byName["g"].def
-	store, _, err := stagestore.Open(t.TempDir(), "inc", Fingerprint(sts))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
+	store := openTestStore(t, Fingerprint(sts))
 
 	rng := rand.New(rand.NewSource(11))
 	for range 400 {
@@ -259,9 +253,7 @@ func TestIncrementalAggregateFallbacks(t *testing.T) {
 	}}
 	require.NoError(t, ValidateShapes(sts))
 	g := BuildGraph(sts)
-	store, _, err := stagestore.Open(t.TempDir(), "inc", Fingerprint(sts))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
+	store := openTestStore(t, Fingerprint(sts))
 	fold := func(row, payload string) {
 		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
 			dirty := Dirty{}

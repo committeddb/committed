@@ -14,7 +14,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
-	bolt "go.etcd.io/bbolt"
 
 	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
@@ -80,7 +79,7 @@ func TestStoreFormatReference(t *testing.T) {
 	require.NoError(t, store.Update(func(tx *stagestore.Tx) error { return tx.SetFrontier(14) }))
 	require.NoError(t, store.Close())
 
-	dump, format := dumpStore(t, stagestore.FilePath(dir, "fixture"))
+	dump, format := dumpStore(t, dir, "fixture")
 	referencePath := filepath.Join("testdata", fmt.Sprintf("store_format_%d.reference", format))
 	if os.Getenv("UPDATE_STORE_REFERENCE") == "1" {
 		require.NoError(t, os.WriteFile(referencePath, []byte(dump), 0o644))
@@ -383,26 +382,19 @@ func TestStoreReferenceFixtureCoversTheVocabulary(t *testing.T) {
 // namespace bytes), values raw when printable and quoted otherwise — so the
 // reference is plain text and a diff names the entry that moved. It also
 // returns the format number the store recorded in its meta bucket.
-func dumpStore(t *testing.T, path string) (string, uint64) {
+func dumpStore(t *testing.T, dir, name string) (string, uint64) {
 	t.Helper()
-	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true})
-	require.NoError(t, err)
-	defer db.Close()
 	var sb strings.Builder
 	var format uint64
-	require.NoError(t, db.View(func(tx *bolt.Tx) error {
-		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
-			return b.ForEach(func(k, v []byte) error {
-				if string(name) == "meta" && string(k) == "format" {
-					format = binary.BigEndian.Uint64(v)
-				}
-				if strings.HasSuffix(string(name), ":acc") {
-					v = renderAggState(t, v)
-				}
-				fmt.Fprintf(&sb, "%s\t%s\t%s\n", strconv.Quote(string(name)), strconv.Quote(string(k)), renderValue(v))
-				return nil
-			})
-		})
+	require.NoError(t, stagestore.Inspect(dir, name, func(bucket, k, v []byte) error {
+		if string(bucket) == "meta" && string(k) == "format" {
+			format = binary.BigEndian.Uint64(v)
+		}
+		if strings.HasSuffix(string(bucket), ":acc") {
+			v = renderAggState(t, v)
+		}
+		fmt.Fprintf(&sb, "%s\t%s\t%s\n", strconv.Quote(string(bucket)), strconv.Quote(string(k)), renderValue(v))
+		return nil
 	}))
 	return sb.String(), format
 }

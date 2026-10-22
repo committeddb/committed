@@ -171,10 +171,11 @@ nothing changed. Committed prevents this with a **label** on each piece of
 derived state saying which version wrote it, so a binary never writes by
 one rule into state produced by another.
 
-**Projection stage stores** (`<dataDir>/projections/`, one file per
-projection, node-local, rebuilt from the log) carry two labels: the
-**config fingerprint** (what your stages compute — change that and the
-store rebuilds; a change of spelling alone does not) and the store **format version** (the engine's own
+**Projection stage stores** (`<dataDir>/projections/`, one database per
+node with each projection's state in its own key range, node-local,
+rebuilt from the log) carry two labels: the **config fingerprint** (what
+your stages compute — change that and the store rebuilds; a change of
+spelling alone does not) and the store **format version** (the engine's own
 choices: key framing, fan-element identity, retained-input shape, synthetic
 stage names, key-part rendering, the order `collect`, `min`, and `max`
 impose). A release that changes any of those bumps the format version, and

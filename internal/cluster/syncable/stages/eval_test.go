@@ -1,6 +1,8 @@
 package stages
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -102,7 +104,23 @@ func TestStageFingerprint(t *testing.T) {
 
 func stageStoreForTest(t *testing.T) *stagestore.Store {
 	t.Helper()
-	s, _, err := stagestore.Open(t.TempDir(), "p", "fp")
+	return openTestStore(t, "fp")
+}
+
+// testStoreDir is the store dir this package's tests share: one database,
+// held open for the whole run (opening a fresh one costs tens of
+// milliseconds of fsyncs), each test store under its own name.
+var (
+	testStoreDir   string
+	testStoreNames atomic.Int64
+)
+
+// openTestStore opens a fresh store in the shared dir, closed when the
+// test ends.
+func openTestStore(t testing.TB, fingerprint string) *stagestore.Store {
+	t.Helper()
+	name := fmt.Sprintf("t%d", testStoreNames.Add(1))
+	s, _, err := stagestore.Open(testStoreDir, name, fingerprint)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s

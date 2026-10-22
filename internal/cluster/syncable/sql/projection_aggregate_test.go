@@ -5,7 +5,6 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -951,8 +950,9 @@ func TestProjectionTeardownResetsStageStore(t *testing.T) {
 	mock.ExpectExec(dialect.DestinationDeleteSQL()).WithArgs(ddlConfig.Table).WillReturnResult(driver.ResultNoRows)
 	_, err = p.Teardown(false)
 	require.NoError(t, err)
-	_, statErr := os.Stat(stagestore.FilePath(storeDir, "job_totals"))
-	require.True(t, os.IsNotExist(statErr), "teardown must remove the stage store")
+	has, err := stagestore.HasState(storeDir, "job_totals")
+	require.NoError(t, err)
+	require.False(t, has, "teardown must remove the stage store")
 	require.NoError(t, p.Close())
 
 	// A fresh boot replays the SAME event: with the store reset it folds
