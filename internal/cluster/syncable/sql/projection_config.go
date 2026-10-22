@@ -892,7 +892,15 @@ func validateProjectionConfig(c *ProjectionConfig) error {
 			return fmt.Errorf("row-writing sources disagree on key normalize (%s renders %q, %s renders %q) — they share this table's row key space, so a disagreement keys their rows under DIFFERENT bytes, silently; declare the same normalize on both sides", rowNormalizeFrom, *rowNormalize, from, norm)
 		}
 	}
-	return validateProjectionJSONPaths(c)
+	if err := validateProjectionJSONPaths(c); err != nil {
+		return err
+	}
+	// An admitted config compiles to its plan; a failure here is a compiler
+	// fault, caught before the config is admitted rather than after.
+	if _, err := c.compilePlan(); err != nil {
+		return fmt.Errorf("internal: the projection does not compile to its plan (%w) — please report this config", err)
+	}
+	return nil
 }
 
 // validateJSONPath compiles a configured jsonpath so a syntactically-invalid one
@@ -1163,7 +1171,11 @@ func validateProjectionStages(c *ProjectionConfig) error {
 	if len(c.Stages) == 0 {
 		return nil
 	}
-	return stages.ValidateShapes(c.Stages)
+	if err := stages.ValidateShapes(c.Stages); err != nil {
+		return err
+	}
+	_, err := plannedStages(c)
+	return err
 }
 
 // validateLookup checks one lookup (dimension) source: at least one stored

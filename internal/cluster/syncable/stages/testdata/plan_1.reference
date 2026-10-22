@@ -1,0 +1,695 @@
+{
+  "version": 1,
+  "blocks": [
+    {
+      "name": "props",
+      "from": [
+        "proposals"
+      ],
+      "where": [
+        {
+          "op": "expr",
+          "expr": "(coalesce($.amount, 0) > 0)"
+        }
+      ],
+      "key": {
+        "parts": [
+          "$.id"
+        ],
+        "types": [
+          "number"
+        ]
+      },
+      "reduce": {
+        "kind": "reshape"
+      },
+      "columns": [
+        {
+          "name": "pid",
+          "from": "$.projectId"
+        },
+        {
+          "name": "amount",
+          "expr": "($.amount + 1)"
+        }
+      ]
+    },
+    {
+      "name": "els",
+      "from": [
+        "txn-events"
+      ],
+      "fan": [
+        {
+          "path": "$.elements[*]",
+          "where": [
+            {
+              "op": "equals",
+              "path": "$.type",
+              "value": {
+                "type": "string",
+                "text": "created"
+              }
+            }
+          ]
+        },
+        {
+          "path": "$.added[*]",
+          "where": [
+            {
+              "op": "equals",
+              "path": "$.type",
+              "value": {
+                "type": "string",
+                "text": "elements-added"
+              }
+            }
+          ]
+        }
+      ],
+      "elementKey": "$.id",
+      "key": {
+        "parts": [
+          "$.wa"
+        ],
+        "types": [
+          "text"
+        ],
+        "normalize": "lower"
+      },
+      "reduce": {
+        "kind": "aggregate"
+      },
+      "columns": [
+        {
+          "name": "total",
+          "fold": "sum",
+          "arg": "$.amount"
+        },
+        {
+          "name": "big",
+          "fold": "count",
+          "where": [
+            {
+              "op": "expr",
+              "expr": "($.amount > 5)"
+            }
+          ]
+        },
+        {
+          "name": "small",
+          "fold": "count",
+          "where": [
+            {
+              "op": "lessThan",
+              "path": "$.amount",
+              "value": {
+                "type": "int",
+                "text": "6"
+              }
+            }
+          ]
+        },
+        {
+          "name": "vals",
+          "fold": "collect",
+          "arg": "$.v",
+          "distinct": true
+        },
+        {
+          "name": "first",
+          "fold": "min",
+          "arg": "$.tag"
+        },
+        {
+          "name": "last",
+          "fold": "max",
+          "arg": "$.tag"
+        }
+      ]
+    },
+    {
+      "name": "latest-status",
+      "from": [
+        "status-events"
+      ],
+      "key": {
+        "parts": [
+          "$.job"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "latest",
+        "orderPath": "$.ts",
+        "orderType": "number",
+        "tiePath": "$.seq",
+        "tieType": "number"
+      },
+      "columns": [
+        {
+          "name": "status",
+          "from": "$.status"
+        }
+      ]
+    },
+    {
+      "name": "props[$.pid]",
+      "synthetic": "rekey",
+      "from": [
+        "props"
+      ],
+      "key": {
+        "parts": [
+          "$.pid"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "reshape"
+      }
+    },
+    {
+      "name": "cand",
+      "from": [
+        "projects"
+      ],
+      "joins": [
+        {
+          "block": "props[$.pid]",
+          "on": [
+            "$.id"
+          ],
+          "onTypes": [
+            "text"
+          ],
+          "optional": true,
+          "as": "lp"
+        },
+        {
+          "topic": "owners",
+          "on": [
+            "$.ownerId"
+          ],
+          "onTypes": [
+            "text"
+          ],
+          "normalize": "lower",
+          "optional": true,
+          "as": "own",
+          "where": [
+            {
+              "op": "notNull",
+              "path": "$.name"
+            }
+          ]
+        },
+        {
+          "topic": "blocks",
+          "on": [
+            "$.id"
+          ],
+          "onTypes": [
+            "text"
+          ],
+          "normalize": "lower",
+          "absent": true
+        }
+      ],
+      "where": [
+        {
+          "op": "notEquals",
+          "path": "$.status",
+          "value": {
+            "type": "string",
+            "text": "archived"
+          }
+        }
+      ],
+      "key": {
+        "parts": [
+          "$.id"
+        ],
+        "types": [
+          "text"
+        ],
+        "normalize": "lower"
+      },
+      "reduce": {
+        "kind": "reshape"
+      },
+      "columns": [
+        {
+          "name": "amount",
+          "expr": "coalesce($.lp.amount, 0)"
+        },
+        {
+          "name": "owner",
+          "from": "$.own.name"
+        }
+      ]
+    },
+    {
+      "name": "lines",
+      "from": [
+        "orders"
+      ],
+      "fan": [
+        {
+          "path": "$.lines[*]"
+        }
+      ],
+      "elementKey": "$.sku",
+      "where": [
+        {
+          "op": "greaterThan",
+          "path": "$.qty",
+          "value": {
+            "type": "int",
+            "text": "0"
+          }
+        },
+        {
+          "op": "null",
+          "path": "$.note"
+        }
+      ],
+      "key": {
+        "parts": [
+          "$.order"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "aggregate"
+      },
+      "columns": [
+        {
+          "name": "qty",
+          "fold": "sum",
+          "arg": "$.qty"
+        }
+      ]
+    },
+    {
+      "name": "txn-live",
+      "from": [
+        "txn-events"
+      ],
+      "key": {
+        "parts": [
+          "$.txn"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "liveSet",
+        "deleteWhen": [
+          {
+            "op": "equals",
+            "path": "$.type",
+            "value": {
+              "type": "string",
+              "text": "deleted"
+            }
+          }
+        ]
+      },
+      "columns": [
+        {
+          "name": "kind",
+          "from": "$.type"
+        }
+      ]
+    },
+    {
+      "name": "work-areas[$.Id]",
+      "synthetic": "lift",
+      "from": [
+        "work-areas"
+      ],
+      "key": {
+        "parts": [
+          "$.Id"
+        ],
+        "types": [
+          "text"
+        ],
+        "normalize": "lower"
+      },
+      "reduce": {
+        "kind": "reshape"
+      }
+    },
+    {
+      "name": "job",
+      "merge": [
+        {
+          "block": "cand",
+          "as": "c"
+        },
+        {
+          "block": "work-areas[$.Id]",
+          "as": "wa"
+        }
+      ],
+      "reduce": {
+        "kind": "reshape"
+      },
+      "columns": [
+        {
+          "name": "amount",
+          "from": "$.c.amount"
+        },
+        {
+          "name": "area",
+          "from": "$.wa.name"
+        }
+      ]
+    },
+    {
+      "name": "monthly",
+      "from": [
+        "payments"
+      ],
+      "key": {
+        "parts": [
+          "date_trunc('month', cast($.at as timestamptz))"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "aggregate"
+      },
+      "columns": [
+        {
+          "name": "avg",
+          "expr": "round(avg($.amount), 2)"
+        },
+        {
+          "name": "big",
+          "expr": "count(*) filter (where ($.amount > 5))"
+        },
+        {
+          "name": "payers",
+          "expr": "count(distinct lower($.payer))"
+        },
+        {
+          "name": "source",
+          "expr": "'ledger'"
+        }
+      ],
+      "having": "(sum($.amount) > 0)"
+    },
+    {
+      "name": "payer-list",
+      "from": [
+        "payments"
+      ],
+      "key": {
+        "parts": [
+          "'all'"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "aggregate"
+      },
+      "columns": [
+        {
+          "name": "by_amount",
+          "expr": "array_agg(lower($.payer) order by $.amount desc)"
+        },
+        {
+          "name": "names",
+          "expr": "string_agg(distinct $.payer, ', ' order by $.payer)"
+        },
+        {
+          "name": "notes",
+          "expr": "array_agg($.note)"
+        }
+      ]
+    },
+    {
+      "name": "ledger-rows",
+      "from": [
+        "ledger"
+      ],
+      "reduce": {
+        "kind": "window",
+        "orderBy": [
+          {
+            "expr": "cast($.at as timestamptz)",
+            "desc": true,
+            "nullsFirst": true
+          }
+        ],
+        "tieBy": [
+          {
+            "expr": "$.seq"
+          }
+        ],
+        "partitionBy": [
+          "lower($.acct)"
+        ]
+      },
+      "columns": [
+        {
+          "name": "n",
+          "expr": "row_number()"
+        },
+        {
+          "name": "bal",
+          "expr": "sum($.amount)"
+        },
+        {
+          "name": "prev",
+          "expr": "lag($.amount, 1, 0)"
+        },
+        {
+          "name": "first",
+          "expr": "first_value($.seq)"
+        },
+        {
+          "name": "seq",
+          "from": "$.seq"
+        }
+      ]
+    },
+    {
+      "name": "ledger-frames",
+      "from": [
+        "ledger"
+      ],
+      "reduce": {
+        "kind": "window",
+        "orderBy": [
+          {
+            "expr": "cast($.at as timestamptz)"
+          }
+        ],
+        "tieBy": [
+          {
+            "expr": "$.seq"
+          }
+        ],
+        "partitionBy": [
+          "lower($.acct)"
+        ]
+      },
+      "columns": [
+        {
+          "name": "ma2",
+          "expr": "sum($.amount) over (rows between 1 preceding and current row)"
+        },
+        {
+          "name": "day_n",
+          "expr": "count(*) over (range between interval '1 day' preceding and current row)"
+        },
+        {
+          "name": "final",
+          "expr": "last_value($.seq) over (rows between unbounded preceding and unbounded following)"
+        }
+      ]
+    },
+    {
+      "name": "activity",
+      "from": [
+        "refunds",
+        "props"
+      ],
+      "where": [
+        {
+          "op": "expr",
+          "expr": "((source() = 'props') or ($.amount > 0))"
+        }
+      ],
+      "key": {
+        "parts": [
+          "coalesce($.acct, $.pid)"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "aggregate"
+      },
+      "columns": [
+        {
+          "name": "n",
+          "expr": "count(*)"
+        },
+        {
+          "name": "refunded",
+          "expr": "sum($.amount) filter (where (source() = 'refunds'))"
+        },
+        {
+          "name": "srcs",
+          "expr": "string_agg(distinct source(), ',' order by source())"
+        }
+      ]
+    },
+    {
+      "name": "first-activity",
+      "from": [
+        "refunds",
+        "refund-notes"
+      ],
+      "key": {
+        "parts": [
+          "lower($.acct)"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "latest",
+        "orderBy": [
+          {
+            "expr": "cast($.at as date)",
+            "desc": true,
+            "nullsFirst": true
+          }
+        ],
+        "tieBy": [
+          {
+            "expr": "source()"
+          }
+        ]
+      },
+      "columns": [
+        {
+          "name": "kind",
+          "expr": "source()"
+        },
+        {
+          "name": "at",
+          "from": "$.at"
+        }
+      ]
+    },
+    {
+      "name": "member-props",
+      "from": [
+        "proj-members"
+      ],
+      "joins": [
+        {
+          "block": "props",
+          "on": [
+            "$.project"
+          ],
+          "onTypes": [
+            "text"
+          ],
+          "field": "$.pid",
+          "optional": true,
+          "fan": true,
+          "as": "pp"
+        }
+      ],
+      "key": {
+        "parts": [
+          "$.user",
+          "coalesce($.pp.amount, 0)"
+        ],
+        "types": [
+          "text",
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "reshape"
+      },
+      "columns": [
+        {
+          "name": "amount",
+          "from": "$.pp.amount"
+        }
+      ]
+    },
+    {
+      "name": "fx-usd",
+      "from": [
+        "fx-payments"
+      ],
+      "joins": [
+        {
+          "topic": "fx-rates",
+          "on": [
+            "$.ccy"
+          ],
+          "onTypes": [
+            "text"
+          ],
+          "normalize": "lower",
+          "field": "$.ccy",
+          "optional": true,
+          "as": "fx",
+          "orderBy": [
+            {
+              "expr": "cast($.day as date)"
+            }
+          ],
+          "tieBy": [
+            {
+              "expr": "$.seq"
+            }
+          ],
+          "asOf": "cast($.paid as date)"
+        }
+      ],
+      "key": {
+        "parts": [
+          "$.id"
+        ],
+        "types": [
+          "text"
+        ]
+      },
+      "reduce": {
+        "kind": "reshape"
+      },
+      "columns": [
+        {
+          "name": "usd",
+          "expr": "round(($.amount * $.fx.rate), 2)"
+        }
+      ]
+    }
+  ]
+}

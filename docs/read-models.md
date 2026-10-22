@@ -1011,14 +1011,18 @@ set = [ { column = "total", from = "$.total" },
   types also render `?probeKey` parts, removing the canonical-digits
   probe obligation. Source digit strings are always preserved in
   VALUES; keys are identity.
-- **Upgrades never reset unchanged configs**: the store fingerprint
-  covers DECLARED content only, so new vocabulary in a new binary
-  leaves untouched configs' stores intact (pinned by a reference contract
-  test). When a store genuinely resets (a stage edit, an ownership
-  move), the worker re-derives before consuming and the status endpoint
-  says so: `workerState: "re-deriving"` with `stageRecovery {folded,
-  target}` progress on the default call — lag climbs by design until
-  the fold-only pass reaches the checkpoint.
+- **A store resets when what the stages compute changes, not their
+  spelling**: the store fingerprint is the fingerprint of the stages'
+  compiled plan, so an edit that computes the same thing (a default
+  written out, such as `keyType = ["text"]`; an expression's case,
+  spacing, or redundant parentheses; `when` clauses reordered) changes
+  nothing, and new vocabulary in a new binary leaves untouched configs'
+  stores intact (pinned by reference contract tests). When a store
+  genuinely resets (a stage edit, an ownership move, a store format
+  change on upgrade), the worker re-derives before consuming and the
+  status endpoint says so: `workerState: "re-deriving"` with
+  `stageRecovery {folded, target}` progress on the default call — lag
+  climbs by design until the fold-only pass reaches the checkpoint.
 - **An aggregate's cost per input does not depend on its group's size,
   for most arms.** In an aggregate stage without joins, an input updates
   its key's fold state: `count`, `sum` and `avg` adjust a running total,

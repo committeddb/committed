@@ -157,9 +157,17 @@ type Graph struct {
 	OnDelta func(stage string, outKey []byte, obj any, live bool) error
 }
 
+// throughPlan, when set, replaces the stages BuildGraph is handed. This
+// package's tests set it to route every graph through its plan (compile,
+// then lower), so the whole suite runs on lowered stages.
+var throughPlan func([]Stage) []Stage
+
 // BuildGraph compiles the validated stage list into its runtime
 // topology.
 func BuildGraph(stages []Stage) *Graph {
+	if throughPlan != nil {
+		stages = throughPlan(stages)
+	}
 	stages = expandSynthetic(stages)
 	g := &Graph{byName: map[string]*graphNode{}, byTopic: map[string][]*graphNode{}, dims: map[string][]dimRef{}, mdims: map[string][]dimRef{}, odims: map[string][]dimRef{}}
 	nodes := make([]*graphNode, len(stages))
@@ -292,12 +300,12 @@ func expandSynthetic(sts []Stage) []Stage {
 				if !seen[name] {
 					seen[name] = true
 					pre = append(pre, Stage{
-						Name:         name,
-						From:         jn.From,
-						KeyPath:      []string{jn.Field},
-						KeyType:      jn.OnType,
-						Normalize:    jn.Normalize,
-						identityEmit: true,
+						Name:      name,
+						From:      jn.From,
+						KeyPath:   []string{jn.Field},
+						KeyType:   jn.OnType,
+						Normalize: jn.Normalize,
+						synthetic: SyntheticRekey,
 					})
 				}
 				jn.From = name
@@ -319,12 +327,12 @@ func expandSynthetic(sts []Stage) []Stage {
 				if !seen[name] {
 					seen[name] = true
 					pre = append(pre, Stage{
-						Name:         name,
-						From:         me.Topic,
-						KeyPath:      me.KeyPath,
-						KeyType:      me.KeyType,
-						Normalize:    me.Normalize,
-						identityEmit: true,
+						Name:      name,
+						From:      me.Topic,
+						KeyPath:   me.KeyPath,
+						KeyType:   me.KeyType,
+						Normalize: me.Normalize,
+						synthetic: SyntheticLift,
 					})
 				}
 				if me.As == "" {
@@ -1540,7 +1548,7 @@ func (g *Graph) emitReshape(tx *stagestore.Tx, st *Stage, obj, parent any, src s
 	if err != nil {
 		return nil, false, err
 	}
-	if st.identityEmit {
+	if st.synthetic != "" {
 		// A synthesized identity stage re-emits its input verbatim
 		// (re-marshaled, so keys sort canonically like every output).
 		bs, err := marshalStageObject(obj)

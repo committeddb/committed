@@ -1,4 +1,4 @@
-"meta"	"fingerprint"	66b2a26de9e652bdb2807a7a290a9d20280299960316fdea8d72b88c79be7e54
+"meta"	"fingerprint"	4eeb3045c2d81dc49e7aa3f02fc77b25a9790fc19483db582d86dd924087d27e
 "meta"	"format"	"\x00\x00\x00\x00\x00\x00\x00\x03"
 "meta"	"frontier"	"\x00\x00\x00\x00\x00\x00\x00\x0e"
 "stage:activity:acc"	"J1"	{"c":2,"a":[{"n":2},{"n":1,"s":"5"},{"i":[{"k":"WyJwcm9wcyIsIjUiXQ==","v":{"s":"props"},"o":[{"s":"props"}]},{"k":"WyJyZWZ1bmRzIiwicjQiXQ==","v":{"s":"refunds"},"o":[{"s":"refunds"}]}]}],"e":[{},{},{}]}

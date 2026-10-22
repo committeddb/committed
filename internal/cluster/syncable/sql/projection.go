@@ -444,7 +444,9 @@ func (p *Projection) Init() error {
 			return err
 		}
 		p.stageStore = store
-		p.stages = stages.BuildGraph(p.config.Stages)
+		if p.stages, err = stageGraph(p.config); err != nil {
+			return err
+		}
 		if reset {
 			zap.L().Warn("stage store reset — stage state re-derives as the log replays; pair stage-definition changes with a rebuild so replay starts from index 0",
 				zap.String("syncable", p.name), zap.String("path", store.Path()))

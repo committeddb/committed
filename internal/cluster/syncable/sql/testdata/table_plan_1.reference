@@ -1,0 +1,322 @@
+# card
+{
+  "stages": {
+    "version": 1,
+    "blocks": []
+  },
+  "table": {
+    "version": 1,
+    "name": "card",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": [
+      {
+        "name": "id",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "title",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "flag",
+        "type": "BOOLEAN"
+      },
+      {
+        "name": "note",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "kind",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "cust",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "cust_name",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "items",
+        "type": "JSONB"
+      },
+      {
+        "name": "n",
+        "type": "BIGINT"
+      },
+      {
+        "name": "top",
+        "type": "VARCHAR(64)"
+      }
+    ],
+    "sources": [
+      {
+        "topic": "movies",
+        "where": [
+          {
+            "op": "equals",
+            "path": "$.kind",
+            "value": {
+              "type": "string",
+              "text": "movie"
+            }
+          },
+          {
+            "op": "greaterThan",
+            "path": "$.year",
+            "value": {
+              "type": "int",
+              "text": "1900"
+            }
+          }
+        ],
+        "key": [
+          "$.id"
+        ],
+        "normalize": "lower",
+        "onDelete": "delete-row",
+        "rules": [
+          {
+            "where": [
+              {
+                "op": "notNull",
+                "path": "$.title"
+              }
+            ],
+            "set": [
+              {
+                "column": "title",
+                "from": "$.title"
+              },
+              {
+                "column": "flag",
+                "value": {
+                  "type": "bool",
+                  "text": "true"
+                }
+              },
+              {
+                "column": "note",
+                "null": true
+              },
+              {
+                "column": "kind",
+                "expr": "upper($.k)"
+              },
+              {
+                "column": "cust",
+                "from": "$.cust"
+              },
+              {
+                "column": "cust_name",
+                "lookup": "dim",
+                "on": "cust",
+                "select": "name"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "topic": "dims",
+        "key": [
+          "$.id"
+        ],
+        "lookup": {
+          "name": "dim",
+          "fields": [
+            {
+              "field": "name",
+              "from": "$.name"
+            }
+          ]
+        }
+      },
+      {
+        "topic": "lines",
+        "key": [
+          "$.movie"
+        ],
+        "onDelete": "remove-from-aggregate",
+        "aggregate": {
+          "column": "items",
+          "elementKey": "$.n",
+          "elementKeyType": "number",
+          "element": [
+            {
+              "field": "sku",
+              "from": "$.sku"
+            },
+            {
+              "field": "sku_name",
+              "lookup": "dim",
+              "on": "sku",
+              "select": "name"
+            }
+          ],
+          "scalars": [
+            {
+              "column": "n",
+              "fn": "count",
+              "where": [
+                {
+                  "field": "sku",
+                  "equals": {
+                    "type": "string",
+                    "text": "x"
+                  }
+                },
+                {
+                  "field": "sku",
+                  "null": true
+                }
+              ]
+            },
+            {
+              "column": "top",
+              "fn": "max",
+              "of": "sku",
+              "ofType": "number"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+# fanned
+{
+  "stages": {
+    "version": 1,
+    "blocks": []
+  },
+  "table": {
+    "version": 1,
+    "name": "lines",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": [
+      {
+        "name": "id",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "order_id",
+        "type": "VARCHAR(64)"
+      }
+    ],
+    "sources": [
+      {
+        "topic": "orders",
+        "fan": "$.lines[*]",
+        "key": [
+          "$.id"
+        ],
+        "onDelete": "delete-rows",
+        "rules": [
+          {
+            "set": [
+              {
+                "column": "order_id",
+                "from": "$parent.id"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+# owned
+{
+  "stages": {
+    "version": 1,
+    "blocks": [
+      {
+        "name": "st",
+        "from": [
+          "tp"
+        ],
+        "key": {
+          "parts": [
+            "$.id"
+          ],
+          "types": [
+            "text"
+          ]
+        },
+        "reduce": {
+          "kind": "reshape"
+        },
+        "columns": [
+          {
+            "name": "v",
+            "from": "$.v"
+          }
+        ]
+      }
+    ]
+  },
+  "table": {
+    "version": 1,
+    "name": "t",
+    "primaryKey": [
+      "id"
+    ],
+    "columns": [
+      {
+        "name": "id",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "w",
+        "type": "VARCHAR(64)"
+      },
+      {
+        "name": "v",
+        "type": "VARCHAR(64)"
+      }
+    ],
+    "sources": [
+      {
+        "topic": "x",
+        "key": [
+          "$.id"
+        ],
+        "onDelete": "delete-row",
+        "rowOwner": true,
+        "rules": [
+          {
+            "set": [
+              {
+                "column": "w",
+                "from": "$.w"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "block": "st",
+        "key": [
+          "$.id"
+        ],
+        "onDelete": "clear",
+        "rules": [
+          {
+            "set": [
+              {
+                "column": "v",
+                "from": "$.v"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -173,8 +173,8 @@ one rule into state produced by another.
 
 **Projection stage stores** (`<dataDir>/projections/`, one file per
 projection, node-local, rebuilt from the log) carry two labels: the
-**config fingerprint** (what you declared — change the config and the
-store rebuilds) and the store **format version** (the engine's own
+**config fingerprint** (what your stages compute — change that and the
+store rebuilds; a change of spelling alone does not) and the store **format version** (the engine's own
 choices: key framing, fan-element identity, retained-input shape, synthetic
 stage names, key-part rendering, the order `collect`, `min`, and `max`
 impose). A release that changes any of those bumps the format version, and
