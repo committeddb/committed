@@ -134,7 +134,7 @@ func snapshotMsg(index uint64) *raftpb.Message {
 // TestAppendQueue_TakesTheQueueUpToASnapshot: pop takes every queued message
 // as one write, takes a snapshot message alone, and ends a run before one.
 func TestAppendQueue_TakesTheQueueUpToASnapshot(t *testing.T) {
-	q := newAppendQueue()
+	q := newAppendQueue(1)
 	q.push(appendMsg(0, entries(1, 1)...))
 	q.push(appendMsg(0, entries(2, 2)...))
 	q.push(snapshotMsg(10))
@@ -156,7 +156,7 @@ func TestAppendQueue_TakesTheQueueUpToASnapshot(t *testing.T) {
 // TestAppendQueue_NudgeAndStop: a nudge wakes pop with nothing to write, and
 // stop ends it.
 func TestAppendQueue_NudgeAndStop(t *testing.T) {
-	q := newAppendQueue()
+	q := newAppendQueue(1)
 	q.nudge()
 	msgs, ok := q.pop()
 	require.True(t, ok)
@@ -165,6 +165,32 @@ func TestAppendQueue_NudgeAndStop(t *testing.T) {
 	q.stop()
 	_, ok = q.pop()
 	require.False(t, ok)
+}
+
+// TestAppendQueue_OnlyOwnVoteHoldsTheElectionClock: a write carrying this
+// node's vote (or pre-vote) for itself holds the election clock until it is
+// finished; ordinary writes — a follower's entries and acknowledgements, a
+// vote granted to another node — do not.
+func TestAppendQueue_OnlyOwnVoteHoldsTheElectionClock(t *testing.T) {
+	withResponse := func(typ raftpb.MessageType, to uint64) *raftpb.Message {
+		m := appendMsg(0, entries(1, 1)...)
+		m.Responses = []*raftpb.Message{{Type: typ.Enum(), To: proto.Uint64(to)}}
+		return m
+	}
+	q := newAppendQueue(1)
+	q.push(withResponse(raftpb.MessageType_MsgAppResp, 2))
+	q.push(withResponse(raftpb.MessageType_MsgVoteResp, 3))
+	require.False(t, q.ownVotePending(), "entries and a vote for another node hold nothing")
+
+	for _, typ := range []raftpb.MessageType{raftpb.MessageType_MsgVoteResp, raftpb.MessageType_MsgPreVoteResp} {
+		q.push(withResponse(typ, 1))
+		require.True(t, q.ownVotePending(), typ.String())
+		msgs, ok := q.pop()
+		require.True(t, ok)
+		require.True(t, q.ownVotePending(), "taken but not yet written")
+		q.finished(msgs)
+		require.False(t, q.ownVotePending(), typ.String())
+	}
 }
 
 // TestMergeAppends_KeepsTheLatestHardStateAndRaftsLog: merged appends carry

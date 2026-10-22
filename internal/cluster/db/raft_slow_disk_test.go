@@ -176,3 +176,32 @@ func TestApplyNeverPassesTheDurableCommit(t *testing.T) {
 		}
 	}
 }
+
+// slowStorage takes d over every Save.
+type slowStorage struct {
+	db.Storage
+	d time.Duration
+}
+
+func (s *slowStorage) Save(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) error {
+	time.Sleep(s.d)
+	return s.Storage.Save(st, ents, snap)
+}
+
+// TestSlowDiskStillElects: a single node whose every disk write takes longer
+// than its election timeout (10-20 ticks of 1ms) still elects itself. Its vote
+// counts only once written, so an election timer that ran during the write
+// restarted every election before the vote landed, forever.
+func TestSlowDiskStillElects(t *testing.T) {
+	rafts, _ := createFaultyRaftsWithStorageWrapper(1, func(_ uint64, s db.Storage) db.Storage {
+		return &slowStorage{Storage: s, d: 30 * time.Millisecond}
+	})
+	defer rafts.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for rafts.LeaderRaft() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("a single node with a slow disk never elected itself")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

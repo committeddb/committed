@@ -18,10 +18,14 @@ type appendQueue struct {
 	msgs    []*raftpb.Message
 	nudged  bool
 	stopped bool
+	// self is this node's id; ownVotes counts pushed messages carrying this
+	// node's vote for itself whose write and delivery are not done yet.
+	self     uint64
+	ownVotes int
 }
 
-func newAppendQueue() *appendQueue {
-	q := &appendQueue{}
+func newAppendQueue(self uint64) *appendQueue {
+	q := &appendQueue{self: self}
 	q.cond = sync.NewCond(&q.mu)
 	return q
 }
@@ -29,8 +33,44 @@ func newAppendQueue() *appendQueue {
 func (q *appendQueue) push(m *raftpb.Message) {
 	q.mu.Lock()
 	q.msgs = append(q.msgs, m)
+	if carriesOwnVote(m, q.self) {
+		q.ownVotes++
+	}
 	q.mu.Unlock()
 	q.cond.Broadcast()
+}
+
+// finished records that msgs, taken by pop, are written and their responses
+// delivered.
+func (q *appendQueue) finished(msgs []*raftpb.Message) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, m := range msgs {
+		if carriesOwnVote(m, q.self) {
+			q.ownVotes--
+		}
+	}
+}
+
+// ownVotePending reports whether this node's vote for itself is not yet
+// written and delivered: raft counts a candidate's own vote, or pre-vote,
+// only once the write it rides on is done.
+func (q *appendQueue) ownVotePending() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.ownVotes > 0
+}
+
+func carriesOwnVote(m *raftpb.Message, self uint64) bool {
+	for _, r := range m.GetResponses() {
+		switch r.GetType() {
+		case raftpb.MessageType_MsgVoteResp, raftpb.MessageType_MsgPreVoteResp:
+			if r.GetTo() == self {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // nudge wakes the append goroutine with nothing to append, so it runs its

@@ -32,6 +32,7 @@ func (n *Raft) runAppend() {
 			for _, m := range msgs {
 				n.deliver(m.GetResponses())
 			}
+			n.appendQ.finished(msgs)
 		}
 		n.finishCompaction()
 	}

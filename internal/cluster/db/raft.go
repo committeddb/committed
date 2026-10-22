@@ -220,7 +220,7 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-cha
 		compactMaxAge:        cfg.compactMaxAge,
 		applyQ:               newApplyQueue(),
 		applyDoneC:           make(chan struct{}),
-		appendQ:              newAppendQueue(),
+		appendQ:              newAppendQueue(id),
 		appendDoneC:          make(chan struct{}),
 		durable:              newDurableCommit(0),
 		storageFailedC:       make(chan struct{}),
@@ -804,7 +804,15 @@ func (n *Raft) serveChannels() {
 	for {
 		select {
 		case <-ticker.C:
-			n.node.Tick()
+			// A candidate's election clock waits while its own vote is on
+			// its way to disk: raft counts that vote only once written, so
+			// a disk slower than the election timeout would restart every
+			// election before the vote counted, and a single node would
+			// never elect itself. Only a (pre-)candidate has its own vote
+			// pending; every other tick runs.
+			if !n.appendQ.ownVotePending() {
+				n.node.Tick()
+			}
 			// An idle node applies no batches, so the apply goroutine never
 			// gets to prepare a compaction; do it here while apply is idle
 			// (the age limb must fire on an idle cluster too: a member added
@@ -844,8 +852,7 @@ func (n *Raft) serveChannels() {
 			// acknowledgements raft waits for). Everything else goes out at
 			// once: a leader's appends and heartbeats leave before its own
 			// disk write finishes, and a follower's heartbeat responses
-			// before its write does, so no disk write holds up an election
-			// timer anywhere.
+			// before its write does, so no disk write holds up a heartbeat.
 			var out []*raftpb.Message
 			for _, m := range rd.Messages {
 				switch m.GetTo() {
