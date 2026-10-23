@@ -2,6 +2,7 @@ package stages
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -185,7 +186,9 @@ func TestWinnerStateAppendsReadNoInputs(t *testing.T) {
 }
 
 // The refolds as written before winner states (eval.go at the parent
-// commit), kept verbatim as the corpus's oracle.
+// commit), kept as the corpus's oracle — verbatim but for reading each
+// retained input through loadInput (a copy or a pointer) and leaving out
+// the inputs a scrub erased.
 
 func (g *Graph) oracleReshape(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
 	// Reshape: one output object per key — deterministically the emitted
@@ -198,11 +201,14 @@ func (g *Graph) oracleReshape(tx *stagestore.Tx, st *Stage, outKey []byte) ([]by
 	}
 	var winner *scoped
 	scanErr := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
-		_, payload := decodeRetained(val)
-		data, parent, err := unpackStageInput(st, payload)
+		in, err := g.loadInput(st, inKey, val)
+		if errors.Is(err, errInputAbsent) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
+		data, parent := in.data, in.parent
 		if ok, err := g.inputQualifies(tx, st, data, parent); err != nil || !ok {
 			return err
 		}
@@ -226,11 +232,14 @@ func (g *Graph) oracleLiveSet(tx *stagestore.Tx, st *Stage, outKey []byte) ([]by
 		if dead {
 			return nil
 		}
-		_, payload := decodeRetained(val)
-		data, parent, err := unpackStageInput(st, payload)
+		in, err := g.loadInput(st, inKey, val)
+		if errors.Is(err, errInputAbsent) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
+		data, parent := in.data, in.parent
 		src := st.inputSource(inKey)
 		if Match(st.DeleteWhen, withSource(data, src)) {
 			dead = true
@@ -259,11 +268,14 @@ func (g *Graph) oracleLatest(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byt
 	}
 	var winner *ranked
 	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
-		_, payload := decodeRetained(val)
-		obj, parent, err := unpackStageInput(st, payload)
+		in, err := g.loadInput(st, inKey, val)
+		if errors.Is(err, errInputAbsent) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
+		obj, parent := in.data, in.parent
 		if ok, err := g.inputQualifies(tx, st, obj, parent); err != nil || !ok {
 			return err
 		}

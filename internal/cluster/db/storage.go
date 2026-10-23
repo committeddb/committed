@@ -1,6 +1,8 @@
 package db
 
 import (
+	"errors"
+
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 
@@ -128,6 +130,11 @@ type EventLogStorage interface {
 	// single dead-lettered Actual without disturbing any reader cursor.
 	ActualAt(index uint64) (*cluster.Actual, error)
 }
+
+// ErrActualNotFound is returned by ActualAt when no committed Actual exists
+// at the requested raft index (it was never committed, has been scrubbed, or
+// the entry there carries no proposal data).
+var ErrActualNotFound = errors.New("wal: no committed entry at raft index")
 
 // ConfigStorage reads the applied configuration documents — databases,
 // syncables, ingestables, types — with their version history, plus the

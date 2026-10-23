@@ -72,11 +72,14 @@ func (g *Graph) scanWinner(tx *stagestore.Tx, st *Stage, outKey []byte) (*winner
 	ws := &winnerScan{}
 	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
 		ws.state.inputs++
-		_, payload := decodeRetained(val)
-		obj, parent, err := unpackStageInput(st, payload)
+		in, err := g.loadInput(st, inKey, val)
+		if errors.Is(err, errInputAbsent) {
+			return nil // scrubbed: absent until its retraction folds
+		}
 		if err != nil {
 			return err
 		}
+		obj, parent := in.data, in.parent
 		rank, eligible, err := g.winnerCandidate(tx, st, inKey, obj, parent)
 		if err != nil {
 			return err
@@ -302,7 +305,7 @@ func (g *Graph) tryWinner(tx *stagestore.Tx, st *Stage, outKey []byte, delta *ag
 		if ch.old != nil {
 			s.inputs--
 			if st.Reduce == "liveSet" {
-				old, err := decodeInput(st, ch.old)
+				old, err := g.loadInput(st, inKey, ch.old)
 				if err != nil {
 					return nil, false, errWinnerFallback
 				}
@@ -321,7 +324,7 @@ func (g *Graph) tryWinner(tx *stagestore.Tx, st *Stage, outKey []byte, delta *ag
 		s.inputs++
 		cur := ch.curIn
 		if cur == nil {
-			if cur, err = decodeInput(st, ch.cur); err != nil {
+			if cur, err = g.loadInput(st, inKey, ch.cur); err != nil {
 				return nil, false, errWinnerFallback
 			}
 		}
@@ -373,7 +376,7 @@ func (g *Graph) tryWinner(tx *stagestore.Tx, st *Stage, outKey []byte, delta *ag
 		if raw == nil {
 			return nil, false, errWinnerFallback
 		}
-		if win, err = decodeInput(st, raw); err != nil {
+		if win, err = g.loadInput(st, s.inKey, raw); err != nil {
 			return nil, false, errWinnerFallback
 		}
 	}
@@ -382,16 +385,6 @@ func (g *Graph) tryWinner(tx *stagestore.Tx, st *Stage, outKey []byte, delta *ag
 		return nil, false, errWinnerFallback // the full refold raises it
 	}
 	return out, live, nil
-}
-
-// decodeInput decodes a retained input.
-func decodeInput(st *Stage, retained []byte) (*decodedInput, error) {
-	_, payload := decodeRetained(retained)
-	data, parent, err := unpackStageInput(st, payload)
-	if err != nil {
-		return nil, err
-	}
-	return &decodedInput{data: data, parent: parent}, nil
 }
 
 // The stored winner state: a version byte (distinct from an aggregate

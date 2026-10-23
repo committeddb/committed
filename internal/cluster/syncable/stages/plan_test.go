@@ -43,8 +43,13 @@ func TestMain(m *testing.M) {
 		planned.Add(1)
 		return lowered
 	}
+	testInputLog = suiteInputLog
 	checkFoldState = func(g *Graph, tx *stagestore.Tx, st *Stage, outKey, out []byte, live bool) {
+		scrubbed := g.byName[st.Name].scrubbedInputs.Load()
 		want, wantLive, err := g.refoldOutputBytes(tx, st, outKey)
+		if g.byName[st.Name].scrubbedInputs.Load() != scrubbed {
+			return // a scrubbed input: the fold state holds it until its delete folds (pointer.go)
+		}
 		if err != nil {
 			panic(fmt.Sprintf("stage %q key %q: the full refold failed where the fold state did not: %v", st.Name, outKey, err))
 		}

@@ -394,6 +394,9 @@ func dumpStore(t *testing.T, dir, name string) (string, uint64) {
 		if strings.HasSuffix(string(bucket), ":acc") {
 			v = renderAggState(t, v)
 		}
+		if strings.HasSuffix(string(bucket), ":in") {
+			v = renderRetained(v)
+		}
 		fmt.Fprintf(&sb, "%s\t%s\t%s\n", strconv.Quote(string(bucket)), strconv.Quote(string(k)), renderValue(v))
 		return nil
 	}))

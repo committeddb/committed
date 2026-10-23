@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -65,6 +66,11 @@ type graphNode struct {
 	// captured but could not key" in one StageStats read. Same
 	// atomicity contract as inputs/fanned.
 	unkeyedDeletes atomic.Int64
+	// scrubbedInputs counts reads of retained inputs whose entity a scrub
+	// had erased from the log (pointer.go) — inputs this stage holds until
+	// it folds the later entry that deleted or superseded them. Same
+	// atomicity contract as inputs/fanned.
+	scrubbedInputs atomic.Int64
 	// unkeyedDeleteWarned one-shots the warn log (worker goroutine only).
 	unkeyedDeleteWarned bool
 	// havingRejected counts refolds whose having held the key's output
@@ -156,6 +162,14 @@ type Graph struct {
 	// chaining terminal's feed (table sources consuming a stage). live=false
 	// is a retraction. Set per Sync call by the single worker goroutine.
 	OnDelta func(stage string, outKey []byte, obj any, live bool) error
+	// refolding is the input changes of the key being refolded, so reading
+	// one of them back takes the batch's decoded input instead of the log
+	// (worker goroutine only).
+	refolding *aggDelta
+	// Log, when set, reads committed entities back from the event log:
+	// stages then keep their topic inputs as pointers into it rather than
+	// copies (pointer.go). Set once, before the first fold.
+	Log cluster.EntityReader
 }
 
 // throughPlan, when set, replaces the stages BuildGraph is handed. This
@@ -494,6 +508,14 @@ func (d Dirty) MarkFull(n *graphNode, outKey []byte) {
 	dn.full[string(outKey)] = true
 }
 
+// changes is a key's recorded input changes, marked full or not.
+func (d Dirty) changes(n *graphNode, outKey []byte) *aggDelta {
+	if dn := d[n]; dn != nil {
+		return dn.deltas[string(outKey)]
+	}
+	return nil
+}
+
 // delta is a key's recorded input changes (nil: none recorded, or the key
 // is marked full).
 func (d Dirty) delta(n *graphNode, outKey []byte) *aggDelta {
@@ -556,8 +578,18 @@ func (g *Graph) FoldTopicDeleteNow(tx *stagestore.Tx, topic string, inKey []byte
 // FoldTopicUpsert routes one topic entity's upsert through every stage
 // consuming that topic (and their downstream chains).
 func (g *Graph) FoldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, payload any, gen uint64, dirty Dirty) error {
+	var o *inputOrigin
+	if testInputLog != nil {
+		o = testInputLog(g, topic, inKey, payload)
+	}
+	return g.foldTopicUpsert(tx, topic, inKey, payload, gen, o, dirty)
+}
+
+// foldTopicUpsert is FoldTopicUpsert for an entity at origin o in the log
+// (nil: its stages keep a copy).
+func (g *Graph) foldTopicUpsert(tx *stagestore.Tx, topic string, inKey []byte, payload any, gen uint64, o *inputOrigin, dirty Dirty) error {
 	for _, n := range g.byTopic[topic] {
-		if err := g.foldUpsert(tx, n, topic, inKey, payload, gen, dirty); err != nil {
+		if err := g.foldUpsertFrom(tx, n, topic, inKey, payload, gen, o, dirty); err != nil {
 			return err
 		}
 	}
@@ -640,6 +672,12 @@ func (g *Graph) markDimDependents(tx *stagestore.Tx, d dimRef, dimKey []byte, di
 // affected key(s), cascade the delta. An input that stops matching the
 // stage's when RETRACTS (filtering is refold, not skip).
 func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, src string, inKey []byte, payload any, gen uint64, dirty Dirty) error {
+	return g.foldUpsertFrom(tx, n, src, inKey, payload, gen, nil, dirty)
+}
+
+// foldUpsertFrom is foldUpsert for an input at origin o in the log (nil: not
+// a topic entity's, or kept as a copy).
+func (g *Graph) foldUpsertFrom(tx *stagestore.Tx, n *graphNode, src string, inKey []byte, payload any, gen uint64, o *inputOrigin, dirty Dirty) error {
 	n.inputs.Add(1)
 	if c := n.bySource[src]; c != nil {
 		c.Add(1)
@@ -651,7 +689,7 @@ func (g *Graph) foldUpsert(tx *stagestore.Tx, n *graphNode, src string, inKey []
 	if n.fanJoin >= 0 {
 		return g.foldJoinFan(tx, n, src, inKey, payload, gen, dirty)
 	}
-	return g.foldOneInput(tx, n, src, inKey, payload, nil, gen, dirty)
+	return g.foldOneInput(tx, n, src, inKey, payload, nil, gen, o, dirty)
 }
 
 // FoldActual folds one committed Actual's entities into the graph —
@@ -703,7 +741,7 @@ func (g *Graph) foldEntities(tx *stagestore.Tx, a *cluster.Actual, dirty Dirty) 
 			if err != nil {
 				return cluster.Permanent(fmt.Errorf("[projection.stage] unmarshal entity data: %w", err))
 			}
-			if err := g.FoldTopicUpsert(tx, e.Type.ID, e.Key, obj, e.Generation, dirty); err != nil {
+			if err := g.foldTopicUpsert(tx, e.Type.ID, e.Key, obj, e.Generation, g.originOf(a, e, obj), dirty); err != nil {
 				return err
 			}
 		case cluster.EntityVariantRefresh:
@@ -775,7 +813,7 @@ func FanMiss(path string, payload any, elems *[]any) string {
 func (g *Graph) FlowCounts() map[string]FlowCount {
 	out := make(map[string]FlowCount, len(g.order))
 	for _, n := range g.order {
-		fc := FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load(), HavingRejected: n.havingRejected.Load()}
+		fc := FlowCount{Inputs: n.inputs.Load(), Fanned: n.fanned.Load(), UnkeyedDeletes: n.unkeyedDeletes.Load(), ScrubbedInputs: n.scrubbedInputs.Load(), HavingRejected: n.havingRejected.Load()}
 		if n.bySource != nil {
 			fc.InputsBySource = make(map[string]int64, len(n.bySource))
 			for src, c := range n.bySource {
@@ -808,6 +846,9 @@ type FlowCount struct {
 	Fanned         int64
 	// UnkeyedDeletes counts lost retractions — see graphNode.
 	UnkeyedDeletes int64
+	// ScrubbedInputs counts reads of inputs a scrub had erased — see
+	// graphNode.
+	ScrubbedInputs int64
 	// HavingRejected counts refolds a having held back — see graphNode.
 	HavingRejected int64
 	// WindowRowsRecomputed counts a window stage's row recomputes, and
@@ -937,7 +978,7 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, src string, parentKey [
 				continue
 			}
 			current[string(elemIn)] = true
-			if err := g.foldOneInput(tx, n, src, elemIn, el, payload, gen, dirty); err != nil {
+			if err := g.foldOneInput(tx, n, src, elemIn, el, payload, gen, nil, dirty); err != nil {
 				return err
 			}
 			if err := tx.PutRev(st.Name, fanJoinName, parentKey, elemIn); err != nil {
@@ -961,7 +1002,7 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, src string, parentKey [
 
 // foldOneInput lands one input (an entity, an upstream delta, or a
 // fanned element with its parent in scope) in a stage's retained set.
-func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey []byte, data, parent any, gen uint64, dirty Dirty) error {
+func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey []byte, data, parent any, gen uint64, o *inputOrigin, dirty Dirty) error {
 	st := n.def
 	// Fold-time expressions see the input with its source (source());
 	// retention keeps the bare input — the source is in its identity.
@@ -1027,17 +1068,36 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey 
 		dirty.Mark(n, prior)
 	}
 
-	// Retain the input as the stage sees it (the refold working set) —
-	// forEach stages retain the element WITH its parent, so drain-time
-	// refolds can still reach `$parent.`.
-	inputBytes, err := packStageInput(st, data, parent)
-	if err != nil {
-		return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
-	}
-	retained := encodeRetained(gen, inputBytes)
+	// Retain the input as the stage sees it (the refold working set): a
+	// pointer to a topic entity when the graph can read it back, otherwise
+	// a copy — forEach stages retain the element WITH its parent, so
+	// drain-time refolds can still reach `$parent.`.
+	var retained []byte
 	var in *decodedInput
 	if jsonStable(data) && jsonStable(parent) {
 		in = &decodedInput{data: data, parent: parent}
+	}
+	if o != nil && n.keepsPointers() {
+		retained = encodeRetainedPointer(gen, o)
+		if in == nil {
+			// The drain evaluates the input as stored; read it as stored
+			// here rather than back from the log.
+			bs, err := packStageInput(st, data, parent)
+			if err != nil {
+				return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
+			}
+			d, p, err := unpackStageInput(st, bs)
+			if err != nil {
+				return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
+			}
+			in = &decodedInput{data: d, parent: p}
+		}
+	} else {
+		inputBytes, err := packStageInput(st, data, parent)
+		if err != nil {
+			return fmt.Errorf("stage %q: retain input: %w", st.Name, err)
+		}
+		retained = encodeRetained(gen, inputBytes)
 	}
 	if err := g.noteIn(tx, n, outKey, inKey, retained, in, dirty); err != nil {
 		return err
@@ -1202,7 +1262,9 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 	if err != nil {
 		return err
 	}
+	g.refolding = dirty.changes(n, outKey)
 	out, obj, live, err := g.refoldOutput(tx, st, outKey, dirty.delta(n, outKey))
+	g.refolding = nil
 	if err != nil {
 		return err
 	}
@@ -1720,11 +1782,14 @@ func (g *Graph) refoldAggregate(tx *stagestore.Tx, st *Stage, outKey []byte) ([]
 	count := 0
 
 	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
-		_, payload := decodeRetained(val)
-		obj, parent, err := unpackStageInput(st, payload)
+		in, err := g.loadInput(st, inKey, val)
+		if errors.Is(err, errInputAbsent) {
+			return nil // scrubbed: absent until its retraction folds
+		}
 		if err != nil {
 			return err
 		}
+		obj, parent := in.data, in.parent
 		if ok, err := g.inputQualifies(tx, st, obj, parent); err != nil || !ok {
 			return err
 		}

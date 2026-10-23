@@ -3412,6 +3412,13 @@ components:
                 description: |
                   Delete-shaped inputs whose key could not resolve — lost
                   retractions, the key each meant to kill stays live. Omitted while zero.
+              scrubbedInputs:
+                type: integer
+                format: int64
+                description: |
+                  Reads of retained inputs a scrub had already erased from the log —
+                  inputs a later entry deletes or supersedes, held until the stage folds
+                  that entry. Nonzero while the stage lags behind a scrub. Omitted while zero.
               havingRejected:
                 type: integer
                 format: int64

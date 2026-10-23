@@ -294,6 +294,7 @@ func (db *DB) Sync(_ context.Context, id string, s cluster.Syncable) error {
 		}
 		return nil
 	}
+	db.handEntityReader(s)
 	err := db.workers.replace(workerKindSync, id,
 		func(replaced bool) *workerHandle {
 			if replaced && db.metrics != nil {

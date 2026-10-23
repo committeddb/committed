@@ -96,14 +96,14 @@ type aggContrib struct {
 // contribution evaluates one retained input exactly as refoldAggregate folds
 // it; nil means the input is not a member (a join does not admit it).
 // errAggFallback (or an evaluation error, which the caller also turns into a
-// full refold) means the input cannot be accounted incrementally.
+// full refold) means the input cannot be accounted incrementally;
+// errInputAbsent, that the log no longer holds it (pointer.go).
 func (g *Graph) contribution(tx *stagestore.Tx, st *Stage, inKey, retained []byte) (*aggContrib, error) {
-	_, payload := decodeRetained(retained)
-	obj, parent, err := unpackStageInput(st, payload)
+	in, err := g.loadInput(st, inKey, retained)
 	if err != nil {
 		return nil, err
 	}
-	return g.contributionOf(tx, st, inKey, obj, parent)
+	return g.contributionOf(tx, st, inKey, in.data, in.parent)
 }
 
 // contributionOf is contribution over an input already decoded.
@@ -660,6 +660,9 @@ func (g *Graph) refoldAggregateFull(tx *stagestore.Tx, st *Stage, outKey []byte)
 	ok := true
 	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
 		c, err := g.contribution(tx, st, inKey, val)
+		if errors.Is(err, errInputAbsent) {
+			return nil // scrubbed: absent until its retraction folds
+		}
 		if err != nil {
 			ok = false
 			return errAggFallback

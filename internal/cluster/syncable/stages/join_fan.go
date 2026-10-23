@@ -168,7 +168,7 @@ func (g *Graph) refanPair(tx *stagestore.Tx, n *graphNode, inKey, producerKey []
 	nullKey := fanInKey(inKey, fanNoMatchElemKey)
 	if matches {
 		n.fanned.Add(1)
-		if err := g.foldOneInput(tx, n, src, pairKey, withAlias(base, j.As, row), nil, gen, dirty); err != nil {
+		if err := g.foldOneInput(tx, n, src, pairKey, withAlias(base, j.As, row), nil, gen, nil, dirty); err != nil {
 			return err
 		}
 		if err := tx.PutRev(st.Name, fanJoinName, inKey, pairKey); err != nil {
@@ -196,7 +196,7 @@ func (g *Graph) refanPair(tx *stagestore.Tx, n *graphNode, inKey, producerKey []
 		return nil
 	}
 	n.fanned.Add(1)
-	if err := g.foldOneInput(tx, n, src, nullKey, withAlias(base, j.As, nil), nil, gen, dirty); err != nil {
+	if err := g.foldOneInput(tx, n, src, nullKey, withAlias(base, j.As, nil), nil, gen, nil, dirty); err != nil {
 		return err
 	}
 	return tx.PutRev(st.Name, fanJoinName, inKey, nullKey)
@@ -292,7 +292,7 @@ func (g *Graph) foldJoinFan(tx *stagestore.Tx, n *graphNode, src string, inKey [
 	for _, p := range pairs {
 		n.fanned.Add(1)
 		current[string(p.key)] = true
-		if err := g.foldOneInput(tx, n, src, p.key, p.data, nil, gen, dirty); err != nil {
+		if err := g.foldOneInput(tx, n, src, p.key, p.data, nil, gen, nil, dirty); err != nil {
 			return err
 		}
 		if err := tx.PutRev(st.Name, fanJoinName, inKey, p.key); err != nil {

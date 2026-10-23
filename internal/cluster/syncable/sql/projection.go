@@ -270,6 +270,16 @@ func NewProjection(d *DB, config *ProjectionConfig, m *metrics.Metrics, name str
 // before Init when their config declares stages.
 func (p *Projection) SetStoreDir(dir string) { p.storeDir = dir }
 
+// SetEntityReader implements cluster.EntityReaderAware: with the engine's
+// reader, the stages keep their topic inputs as pointers into the log
+// rather than copies, and read them back when a refold needs them. The
+// engine sets it after Init, before the worker's first fold.
+func (p *Projection) SetEntityReader(r cluster.EntityReader) {
+	if p.stages != nil {
+		p.stages.Log = r
+	}
+}
+
 // projectionIdentity is the SyncableIdentity of a projection config — its source
 // topics, database, and table. It makes the projection's checkpoint meaningful; a
 // re-POST that changes it re-points to a destination whose inherited checkpoint is
@@ -1770,7 +1780,7 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 			}
 			fc := flows[name]
 			out[name] = cluster.StageStat{
-				Keys: n, Inputs: fc.Inputs, InputsBySource: fc.InputsBySource, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, HavingRejected: fc.HavingRejected,
+				Keys: n, Inputs: fc.Inputs, InputsBySource: fc.InputsBySource, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, ScrubbedInputs: fc.ScrubbedInputs, HavingRejected: fc.HavingRejected,
 				WindowRowsRecomputed: fc.WindowRowsRecomputed, WindowLargestPartition: fc.WindowLargestPartition,
 				Joins: joinStats(fc.Joins),
 			}

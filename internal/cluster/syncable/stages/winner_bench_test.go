@@ -81,9 +81,10 @@ func BenchmarkWinnerLargeGroup(b *testing.B) {
 }
 
 // withoutFoldStateCheck turns off TestMain's per-output full-refold check
-// for a benchmark, which would otherwise time the check.
+// for a benchmark, which would otherwise time the check, and its stand-in
+// log, so inputs are kept as copies.
 func withoutFoldStateCheck(b *testing.B) {
-	check := checkFoldState
-	checkFoldState = nil
-	b.Cleanup(func() { checkFoldState = check })
+	check, log := checkFoldState, testInputLog
+	checkFoldState, testInputLog = nil, nil
+	b.Cleanup(func() { checkFoldState, testInputLog = check, log })
 }

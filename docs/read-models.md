@@ -984,7 +984,8 @@ set = [ { column = "total", from = "$.total" },
   each stage's row — `keys` (the store's current output count) plus
   `inputs`/`fanned` flow counters since the worker started, and
   `unkeyedDeletes` (delete-shaped inputs whose key would not resolve or
-  render), `havingRejected` (refolds an aggregate's `having` held back),
+  render), `scrubbedInputs` (reads of inputs a scrub had erased while the
+  stage lagged behind it), `havingRejected` (refolds an aggregate's `having` held back),
   `windowRowsRecomputed`/`windowLargestPartition` (a window stage's
   recompute cost and its largest partition), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
   arrived but the key is still live" in one read; each also warns once
