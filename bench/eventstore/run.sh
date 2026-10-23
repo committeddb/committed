@@ -7,7 +7,11 @@
 #
 #   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [--profile]
 #            [--pinned-labels a] [--segmented-labels a] [--profile-every SECONDS]
-#            [--save-log DEST] [--from-log SRC] [-- eventstore-load flags]
+#            [--save-log DEST] [--from-log SRC] [--node-env "VAR=value ..."]
+#            [-- eventstore-load flags]
+#
+# --node-env sets more environment on every node (space-separated
+# VAR=value pairs), e.g. --node-env COMMITTED_PROJECTION_STORE_CACHE_BYTES=4294967296.
 #
 # --save-log DEST, after a run with -history N -history-snapshot-only, takes
 # a live backup of a follower and stores it with the history's dataset.json
@@ -60,6 +64,7 @@ pinned=
 segmented=
 save_dest=
 from_log=
+node_env=
 while [ $# -gt 0 ]; do
   case $1 in
   --labels) labels=$2; shift 2 ;;
@@ -70,6 +75,7 @@ while [ $# -gt 0 ]; do
   --segmented-labels) segmented=$2; shift 2 ;;
   --save-log) save_dest=${2%/}; shift 2 ;;
   --from-log) from_log=${2%/}; shift 2 ;;
+  --node-env) node_env=$2; shift 2 ;;
   --) shift; break ;;
   *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -157,7 +163,7 @@ start_containers() {
       -e APP_DB_PASSWORD=$PW -e COMMITTED_NODE_ID="$i" -e COMMITTED_API_ADDR=":$(api_port "$i")" \
       -e COMMITTED_PEER_URL="http://bench-node$i:$(peer_port "$i")" -e COMMITTED_PEERS="$p" \
       -e COMMITTED_DATA_DIR=/data ${zoned:+-e COMMITTED_ZONE=z$i} ${BENCH_PROFILE:+-e COMMITTED_PPROF=true} \
-      ${backend:+-e COMMITTED_EVENT_LOG_BACKEND=$backend} \
+      ${backend:+-e COMMITTED_EVENT_LOG_BACKEND=$backend} $(for v in $node_env; do printf -- '-e %s ' "$v"; done) \
       alpine:3.22 committed node >/dev/null
   done
 }
@@ -199,7 +205,7 @@ start_nodes() {
       APP_DB_PASSWORD=$PW COMMITTED_NODE_ID=$i COMMITTED_API_ADDR=:$(api_port "$i") \
       COMMITTED_PEER_URL=http://${hosts[$((i - 1))]}:$(peer_port "$i") COMMITTED_PEERS=$p \
       COMMITTED_DATA_DIR='$dir/data' ${zoned:+COMMITTED_ZONE=z$i} ${BENCH_PROFILE:+COMMITTED_PPROF=true} \
-      ${backend:+COMMITTED_EVENT_LOG_BACKEND=$backend} nohup ./committed-bin node > node.log 2>&1 < /dev/null & echo \$! > '$dir/pid'"
+      ${backend:+COMMITTED_EVENT_LOG_BACKEND=$backend} $node_env nohup ./committed-bin node > node.log 2>&1 < /dev/null & echo \$! > '$dir/pid'"
   done
 }
 

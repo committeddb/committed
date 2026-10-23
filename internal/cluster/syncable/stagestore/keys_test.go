@@ -116,3 +116,39 @@ func TestKeyDictionaryUnderCollisions(t *testing.T) {
 		return nil
 	}))
 }
+
+// KeyAdded names the output keys given an id since the transaction began
+// or last forgot them: a key holding inputs from an earlier transaction is
+// not one, and a key whose last input left is one again once re-added.
+func TestKeyAdded(t *testing.T) {
+	s, _, err := Open(t.TempDir(), "p", "fp")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	put := func(tx *Tx, out, in string) error { return tx.PutIn("st", []byte(out), []byte(in), []byte("v")) }
+	require.NoError(t, s.Update(func(tx *Tx) error {
+		require.False(t, tx.KeyAdded("st", []byte("x")))
+		require.NoError(t, put(tx, "x", "a"))
+		require.True(t, tx.KeyAdded("st", []byte("x")))
+		require.False(t, tx.KeyAdded("other", []byte("x")), "per stage")
+		tx.ForgetAddedKeys()
+		require.False(t, tx.KeyAdded("st", []byte("x")))
+		require.NoError(t, put(tx, "x", "b"))
+		require.False(t, tx.KeyAdded("st", []byte("x")), "x already had an id")
+		return nil
+	}))
+	require.NoError(t, s.Update(func(tx *Tx) error {
+		require.NoError(t, put(tx, "x", "c"))
+		require.False(t, tx.KeyAdded("st", []byte("x")), "x holds inputs from an earlier transaction")
+		for _, in := range []string{"a", "b", "c"} {
+			if err := tx.DeleteIn("st", []byte("x"), []byte(in)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, s.Update(func(tx *Tx) error {
+		require.NoError(t, put(tx, "x", "d"))
+		require.True(t, tx.KeyAdded("st", []byte("x")), "x's id was released with its last input")
+		return nil
+	}))
+}

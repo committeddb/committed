@@ -464,9 +464,11 @@ type Tx struct {
 	iters  []*pebble.Iterator
 	// ids and keys cache the output-key dictionary (keys.go) both ways,
 	// keyed by stage and key or id; release holds the ids to free at the
-	// end of the transaction.
+	// end of the transaction; added holds the keys given an id since
+	// ForgetAddedKeys.
 	ids, keys map[string][]byte
 	release   map[string]releaseCandidate
+	added     map[string]bool
 }
 
 var errReadOnly = errors.New("stage store: a write in a read transaction")

@@ -166,6 +166,10 @@ type Graph struct {
 	// one of them back takes the batch's decoded input instead of the log
 	// (worker goroutine only).
 	refolding *aggDelta
+	// priorOut is the key's stored output as the fold state knows it, set
+	// by the refold when it can say without reading the output (worker
+	// goroutine only).
+	priorOut *knownOutput
 	// lastFanned is the entity a forEach stage's element was last read
 	// back from, fanned (pointer.go); it lasts one batch (worker goroutine
 	// only).
@@ -1259,11 +1263,12 @@ func (g *Graph) foldDeleteInput(tx *stagestore.Tx, n *graphNode, inKey []byte, d
 // sound and which turns a batch touching one key N times into one
 // refold and at most one downstream write.
 func (g *Graph) Drain(tx *stagestore.Tx, dirty Dirty) error {
-	// Window stages' pending positions and the last fanned entity belong
-	// to this batch: cleared on the way out, success or not (a failed
-	// batch rolls back and refolds from scratch).
+	// Window stages' pending positions, the last fanned entity and the
+	// store's added keys belong to this batch: cleared on the way out,
+	// success or not (a failed batch rolls back and refolds from scratch).
 	defer func() {
 		g.lastFanned = nil
+		tx.ForgetAddedKeys()
 		for _, n := range g.order {
 			if n.win != nil {
 				n.win.reset()
@@ -1301,14 +1306,26 @@ func (g *Graph) Drain(tx *stagestore.Tx, dirty Dirty) error {
 // or retraction) to sinks and consumer retention.
 func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty Dirty) error {
 	st := n.def
-	prior, err := tx.GetOut(st.Name, outKey)
+	g.refolding, g.priorOut = dirty.changes(n, outKey), nil
+	out, obj, live, err := g.refoldOutput(tx, st, outKey, dirty.delta(n, outKey))
+	known := g.priorOut
+	g.refolding, g.priorOut = nil, nil
 	if err != nil {
 		return err
 	}
-	g.refolding = dirty.changes(n, outKey)
-	out, obj, live, err := g.refoldOutput(tx, st, outKey, dirty.delta(n, outKey))
-	g.refolding = nil
-	if err != nil {
+	var prior []byte
+	if known != nil {
+		prior = known.out
+		if checkFoldState != nil {
+			stored, err := tx.GetOut(st.Name, outKey)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(stored, prior) {
+				panic(fmt.Sprintf("stage %q key %q: the fold state rendered the prior output %s, the store holds %s", st.Name, outKey, prior, stored))
+			}
+		}
+	} else if prior, err = tx.GetOut(st.Name, outKey); err != nil {
 		return err
 	}
 	if !live {

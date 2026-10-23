@@ -246,8 +246,8 @@ func TestIncrementalAggregateRecipeShape(t *testing.T) {
 		return nil
 	}))
 	n := g.byName["order"]
-	require.Equal(t, int64(streams), n.fullRefolds.Load(), "only each stream's first event refolds in full")
-	require.Equal(t, int64(streams*(events-1)), n.foldStateRefolds.Load())
+	require.Zero(t, n.fullRefolds.Load(), "a stream's first event folds from the empty state")
+	require.Equal(t, int64(streams*events), n.foldStateRefolds.Load())
 }
 
 // TestIncrementalAggregateStateMatchesRebuild: after a long random run, each
@@ -355,4 +355,53 @@ func requireObjectsMatchBytes(t *testing.T, store *stagestore.Store, g *Graph, s
 		return errRollback
 	})
 	require.ErrorIs(t, err, errRollback)
+}
+
+// A key new in a transaction folds from the empty state only in the batch
+// it arrived in: a later batch in the same transaction (one drain per
+// Actual) finds the inputs of earlier batches outside its delta, so a key
+// without a state refolds in full there.
+func TestAddedKeyFoldsFromEmptyOnlyInItsBatch(t *testing.T) {
+	sts := []Stage{{
+		Name: "g", From: "rows", KeyPath: []string{"$.k"}, Reduce: "aggregate",
+		Emit: []Emit{{Field: "n", Expr: "count(*)"}, {Field: "mx", Expr: "max($.v)"}},
+	}}
+	require.NoError(t, ValidateShapes(sts))
+	g := BuildGraph(sts)
+	store := openTestStore(t, Fingerprint(sts))
+	batches := [][]struct{ key, payload string }{
+		{{"a", `{"k":"x","v":1}`}, {"b", `{"k":"x","v":2}`}},
+		{{"c", `{"k":"x","v":0}`}},
+	}
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		for i, rows := range batches {
+			dirty := Dirty{}
+			for _, row := range rows {
+				if err := g.FoldTopicUpsert(tx, "rows", []byte(row.key), decodePayload(t, row.payload), 0, dirty); err != nil {
+					return err
+				}
+			}
+			if err := g.Drain(tx, dirty); err != nil {
+				return err
+			}
+			if i == 0 {
+				// A state the fold could not keep (an input outside it) is
+				// dropped: the key has members and no state.
+				if err := tx.DeleteAcc("g", []byte("x")); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+		got, err := tx.GetOut("g", []byte("x"))
+		require.NoError(t, err)
+		want, live, err := g.refoldAggregate(tx, g.byName["g"].def, []byte("x"))
+		require.NoError(t, err)
+		require.True(t, live)
+		require.Equal(t, string(want), string(got))
+		require.Contains(t, string(got), `"n":3`)
+		return nil
+	}))
 }

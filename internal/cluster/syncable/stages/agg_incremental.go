@@ -589,16 +589,33 @@ func (g *Graph) refoldAggregateIncremental(tx *stagestore.Tx, st *Stage, outKey 
 	return g.refoldAggregateFull(tx, st, outKey)
 }
 
+// knownOutput is a key's stored output (nil: none) as its refold knew it.
+type knownOutput struct{ out []byte }
+
 func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) ([]byte, any, bool, error) {
 	raw, err := tx.GetAcc(st.Name, outKey)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if raw == nil {
-		return nil, nil, false, errAggFallback
-	}
-	as, err := decodeAggState(st, raw)
-	if err != nil {
+	var as *aggState
+	switch {
+	case raw != nil:
+		if as, err = decodeAggState(st, raw); err != nil {
+			return nil, nil, false, errAggFallback
+		}
+		// The stored output is the state's rendering: every write of a
+		// state writes the output rendered from it, and a refold that
+		// cannot keep a state deletes it.
+		if prior, _, _, err := g.renderState(st, as); err == nil {
+			g.priorOut = &knownOutput{out: prior}
+		}
+	case tx.KeyAdded(st.Name, outKey):
+		// A key new in this batch: its inputs are all in the delta, so it
+		// folds from the empty state without reading them, and it had no
+		// output.
+		as = newAggState(st)
+		g.priorOut = &knownOutput{}
+	default:
 		return nil, nil, false, errAggFallback
 	}
 	keys := make([]string, 0, len(delta.inputs))

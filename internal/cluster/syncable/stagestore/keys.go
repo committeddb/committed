@@ -60,6 +60,10 @@ func (tx *Tx) keyID(stage string, outKey []byte, assign bool) (id []byte, found 
 				return nil, false, err
 			}
 			tx.remember(stage, ck, cand, outKey)
+			if tx.added == nil {
+				tx.added = map[string]bool{}
+			}
+			tx.added[ck] = true
 			return cand, true, nil
 		}
 		if bytes.Equal(v, outKey) {
@@ -68,6 +72,17 @@ func (tx *Tx) keyID(stage string, outKey []byte, assign bool) (id []byte, found 
 		}
 	}
 }
+
+// KeyAdded reports whether a stage's output key was given its id since
+// the transaction began or last called ForgetAddedKeys: an id is held
+// while any input is retained under the key, so every input the key
+// retains arrived since then.
+func (tx *Tx) KeyAdded(stage string, outKey []byte) bool {
+	return tx.added[stage+"\x00"+string(outKey)]
+}
+
+// ForgetAddedKeys starts KeyAdded afresh.
+func (tx *Tx) ForgetAddedKeys() { tx.added = nil }
 
 // keyOf resolves an id to its output key (nil if the id is free).
 func (tx *Tx) keyOf(stage string, id []byte) ([]byte, error) {
