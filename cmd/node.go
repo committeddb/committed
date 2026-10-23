@@ -34,6 +34,7 @@ import (
 	"github.com/committeddb/committed/internal/cluster/syncable/loopback"
 	syncsql "github.com/committeddb/committed/internal/cluster/syncable/sql"
 	syncdialects "github.com/committeddb/committed/internal/cluster/syncable/sql/dialects"
+	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 	"github.com/committeddb/committed/internal/version"
 )
 
@@ -183,6 +184,14 @@ docs/operations/ it points to.`,
 		eventLogOptions, err := loadEventLogOptions()
 		if err != nil {
 			zap.L().Fatal("event-log configuration", zap.Error(err))
+		}
+
+		projectionStoreMemory, err := loadProjectionStoreMemory()
+		if err == nil {
+			err = stagestore.SetMemory(projectionStoreMemory)
+		}
+		if err != nil {
+			zap.L().Fatal("projection store configuration", zap.Error(err))
 		}
 
 		// Node identity and addressing come from the environment so the

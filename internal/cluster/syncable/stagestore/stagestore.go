@@ -68,6 +68,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -108,7 +109,47 @@ type shared struct {
 var (
 	sharedMu sync.Mutex
 	shareds  = map[string]*shared{}
+	memory   = DefaultMemory
 )
+
+// Memory is the shared database's memory budget: Pebble's block cache, and
+// the size of one memtable (Pebble holds up to two while one flushes). A
+// node's store takes about CacheBytes + 2*MemTableBytes.
+type Memory struct {
+	CacheBytes    uint64
+	MemTableBytes uint64
+}
+
+// DefaultMemory is the budget a node runs with unless configured: a cache
+// large enough that a build's fold-state lookups stay in memory (at 64 MiB
+// they missed and read index blocks from disk on every lookup).
+var DefaultMemory = Memory{CacheBytes: 256 << 20, MemTableBytes: 32 << 20}
+
+// maxMemTableBytes is Pebble's limit on a memtable (it must be smaller).
+const maxMemTableBytes = 4 << 30
+
+// Validate reports a budget Pebble cannot run with.
+func (m Memory) Validate() error {
+	if m.CacheBytes == 0 || m.CacheBytes > math.MaxInt64 {
+		return errors.New("the cache size must be positive")
+	}
+	if m.MemTableBytes == 0 || m.MemTableBytes >= maxMemTableBytes {
+		return errors.New("the memtable size must be positive and under 4 GiB")
+	}
+	return nil
+}
+
+// SetMemory sets the memory budget of databases opened after it — the
+// node sets it once at startup, before any syncable opens its store.
+func SetMemory(m Memory) error {
+	if err := m.Validate(); err != nil {
+		return err
+	}
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	memory = m
+	return nil
+}
 
 // acquire opens (or references) a store dir's shared database. A database
 // Pebble cannot open is deleted and recreated, loudly: every syncable's
@@ -125,14 +166,14 @@ func acquire(dir string) (*shared, error) {
 	}
 	removeLegacyStores(dir)
 	path := dbDir(dir)
-	db, err := openPebble(path)
+	db, err := openPebble(path, memory)
 	if err != nil {
 		zap.L().Warn("stage store unreadable — deleting and rebuilding from the log (the store is derived state; no data is lost)",
 			zap.String("path", path), zap.Error(err))
 		if rmErr := os.RemoveAll(path); rmErr != nil {
 			return nil, fmt.Errorf("remove unreadable stage store %s: %w", path, rmErr)
 		}
-		if db, err = openPebble(path); err != nil {
+		if db, err = openPebble(path, memory); err != nil {
 			return nil, fmt.Errorf("recreate stage store %s: %w", path, err)
 		}
 	}
@@ -154,10 +195,10 @@ func release(dir string, sh *shared) error {
 	return errors.Join(err, sh.db.Close())
 }
 
-func openPebble(path string) (*pebble.DB, error) {
+func openPebble(path string, m Memory) (*pebble.DB, error) {
 	opts := &pebble.Options{
-		CacheSize:          256 << 20,
-		MemTableSize:       32 << 20,
+		CacheSize:          int64(m.CacheBytes), //nolint:gosec // G115: Validate bounds it to MaxInt64
+		MemTableSize:       m.MemTableBytes,
 		FormatMajorVersion: pebble.FormatNewest,
 		Logger:             pebbleLogger{},
 	}

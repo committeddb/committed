@@ -1,11 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-	"os"
-	"strconv"
-	"strings"
-
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
@@ -31,13 +26,5 @@ func loadEventLogOptions() ([]wal.Option, error) {
 }
 
 func eventCacheBytesEnv(name string) (uint64, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return defaultSegmentedCacheBytes, nil
-	}
-	value, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s must be a non-negative integer number of bytes", name)
-	}
-	return value, nil
+	return bytesEnv(name, defaultSegmentedCacheBytes)
 }
