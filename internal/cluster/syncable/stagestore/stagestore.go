@@ -438,6 +438,9 @@ func (s *Store) Update(fn func(tx *Tx) error) error {
 	b := s.sh.db.NewIndexedBatch()
 	tx := &Tx{prefix: s.prefix, r: b, w: b}
 	err := fn(tx)
+	if err == nil {
+		err = tx.releaseKeys()
+	}
 	err = errors.Join(err, tx.closeIters())
 	if err == nil {
 		err = b.Commit(pebble.NoSync)
@@ -459,6 +462,11 @@ type Tx struct {
 	r      pebble.Reader
 	w      *pebble.Batch // nil in a read transaction
 	iters  []*pebble.Iterator
+	// ids and keys cache the output-key dictionary (keys.go) both ways,
+	// keyed by stage and key or id; release holds the ids to free at the
+	// end of the transaction.
+	ids, keys map[string][]byte
+	release   map[string]releaseCandidate
 }
 
 var errReadOnly = errors.New("stage store: a write in a read transaction")
@@ -593,12 +601,27 @@ func (tx *Tx) DeleteOut(stage string, key []byte) error {
 // the input's key, and a re-emitted input may move to a NEW output key
 // (the old one must refold without it).
 func (tx *Tx) PutSrc(stage string, inKey, outKey []byte) error {
-	return tx.put(srcBucket(stage), inKey, outKey)
+	id, _, err := tx.keyID(stage, outKey, true)
+	if err != nil {
+		return err
+	}
+	return tx.put(srcBucket(stage), inKey, id)
 }
 
 // GetSrc reads the output key an input identity feeds (nil if unknown).
 func (tx *Tx) GetSrc(stage string, inKey []byte) ([]byte, error) {
-	return tx.get(srcBucket(stage), inKey)
+	id, err := tx.get(srcBucket(stage), inKey)
+	if err != nil || id == nil {
+		return nil, err
+	}
+	k, err := tx.keyOf(stage, id)
+	if err != nil {
+		return nil, err
+	}
+	if k == nil {
+		return nil, fmt.Errorf("stage store: an input names a free output-key id (store inconsistency)")
+	}
+	return k, nil
 }
 
 // DeleteSrc removes an input identity's mapping.
@@ -626,24 +649,44 @@ func (tx *Tx) DeleteDim(stage, join string, dimKey []byte) error {
 
 // PutIn retains one input for a stage's output key (the refold working
 // set: every stateful reduce retains its inputs — no O(1) winner mode).
+//
+// The input is stored under its output key's id (keys.go), then its input
+// key.
 func (tx *Tx) PutIn(stage string, outKey, inKey, val []byte) error {
-	return tx.put(inBucket(stage), frameKey(outKey, inKey), val)
+	id, _, err := tx.keyID(stage, outKey, true)
+	if err != nil {
+		return err
+	}
+	return tx.put(inBucket(stage), inEntryKey(id, inKey), val)
 }
 
 // DeleteIn removes one retained input.
 func (tx *Tx) DeleteIn(stage string, outKey, inKey []byte) error {
-	return tx.del(inBucket(stage), frameKey(outKey, inKey))
+	id, found, err := tx.keyID(stage, outKey, false)
+	if err != nil || !found {
+		return err
+	}
+	tx.mayRelease(stage, id)
+	return tx.del(inBucket(stage), inEntryKey(id, inKey))
 }
 
 // InputsFor iterates a stage's retained inputs for one output key, in
 // stable (bytewise inKey) order — the deterministic-refold order.
 func (tx *Tx) InputsFor(stage string, outKey []byte, fn func(inKey, val []byte) error) error {
-	return tx.each(inBucket(stage), framePrefix(outKey), fn)
+	id, found, err := tx.keyID(stage, outKey, false)
+	if err != nil || !found {
+		return err
+	}
+	return tx.each(inBucket(stage), id, fn)
 }
 
 // GetIn reads one retained input (nil if absent).
 func (tx *Tx) GetIn(stage string, outKey, inKey []byte) ([]byte, error) {
-	return tx.get(inBucket(stage), frameKey(outKey, inKey))
+	id, found, err := tx.keyID(stage, outKey, false)
+	if err != nil || !found {
+		return nil, err
+	}
+	return tx.get(inBucket(stage), inEntryKey(id, inKey))
 }
 
 func accBucket(stage string) []byte { return []byte("stage:" + stage + ":acc") }
@@ -829,11 +872,17 @@ func (tx *Tx) DependentsOf(stage, join string, dimKey []byte, fn func(outKey []b
 // set-at-a-time scan (rare: once per refresh marker).
 func (tx *Tx) InputsAll(stage string, fn func(outKey, inKey, val []byte) error) error {
 	return tx.each(inBucket(stage), nil, func(k, v []byte) error {
-		outKey, inKey, ok := splitFrame(k)
-		if !ok {
+		if len(k) < 8 {
 			return nil
 		}
-		return fn(outKey, inKey, v)
+		outKey, err := tx.keyOf(stage, k[:8])
+		if err != nil {
+			return err
+		}
+		if outKey == nil {
+			return fmt.Errorf("stage store: an input is retained under a free output-key id (store inconsistency)")
+		}
+		return fn(outKey, k[8:], v)
 	})
 }
 

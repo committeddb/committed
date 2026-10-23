@@ -531,6 +531,12 @@ func (d Dirty) delta(n *graphNode, outKey []byte) *aggDelta {
 // in, when not nil, is cur already decoded, which the drain then evaluates
 // instead of decoding cur again.
 func (g *Graph) noteIn(tx *stagestore.Tx, n *graphNode, outKey, inKey, cur []byte, in *decodedInput, dirty Dirty) error {
+	return g.noteInput(tx, n, outKey, inKey, cur, in, false, dirty)
+}
+
+// noteInput is noteIn, told whether the input is known to be new (nothing
+// retained for it before, so there is nothing to read).
+func (g *Graph) noteInput(tx *stagestore.Tx, n *graphNode, outKey, inKey, cur []byte, in *decodedInput, isNew bool, dirty Dirty) error {
 	if !n.def.keepsFoldState() {
 		return nil
 	}
@@ -545,11 +551,14 @@ func (g *Graph) noteIn(tx *stagestore.Tx, n *graphNode, outKey, inKey, cur []byt
 	}
 	ch := d.inputs[string(inKey)]
 	if ch == nil {
-		old, err := tx.GetIn(n.def.Name, outKey, inKey)
-		if err != nil {
-			return err
+		ch = &inputChange{}
+		if !isNew {
+			old, err := tx.GetIn(n.def.Name, outKey, inKey)
+			if err != nil {
+				return err
+			}
+			ch.old = bytes.Clone(old)
 		}
-		ch = &inputChange{old: bytes.Clone(old)}
 		d.inputs[string(inKey)] = ch
 	}
 	ch.cur, ch.curIn = bytes.Clone(cur), in
@@ -1099,7 +1108,8 @@ func (g *Graph) foldOneInput(tx *stagestore.Tx, n *graphNode, src string, inKey 
 		}
 		retained = encodeRetained(gen, inputBytes)
 	}
-	if err := g.noteIn(tx, n, outKey, inKey, retained, in, dirty); err != nil {
+	// No src entry: nothing was retained for this input before.
+	if err := g.noteInput(tx, n, outKey, inKey, retained, in, prior == nil, dirty); err != nil {
 		return err
 	}
 	if err := tx.PutIn(st.Name, outKey, inKey, retained); err != nil {
