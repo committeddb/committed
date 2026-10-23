@@ -166,6 +166,10 @@ type Graph struct {
 	// one of them back takes the batch's decoded input instead of the log
 	// (worker goroutine only).
 	refolding *aggDelta
+	// lastFanned is the entity a forEach stage's element was last read
+	// back from, fanned (pointer.go); it lasts one batch (worker goroutine
+	// only).
+	lastFanned *fannedParent
 	// Log, when set, reads committed entities back from the event log:
 	// stages then keep their topic inputs as pointers into it rather than
 	// copies (pointer.go). Set once, before the first fold.
@@ -693,7 +697,7 @@ func (g *Graph) foldUpsertFrom(tx *stagestore.Tx, n *graphNode, src string, inKe
 	}
 	inKey = n.def.inputKey(src, inKey)
 	if n.def.hasFan() {
-		return g.foldFan(tx, n, src, inKey, payload, gen, dirty)
+		return g.foldFan(tx, n, src, inKey, payload, gen, o, dirty)
 	}
 	if n.fanJoin >= 0 {
 		return g.foldJoinFan(tx, n, src, inKey, payload, gen, dirty)
@@ -736,6 +740,7 @@ func (g *Graph) FoldActuals(tx *stagestore.Tx, as []*cluster.Actual) error {
 // foldEntities updates retention for one Actual's entities, marking the
 // keys it dirties.
 func (g *Graph) foldEntities(tx *stagestore.Tx, a *cluster.Actual, dirty Dirty) error {
+	g.lastFanned = nil
 	for _, e := range a.Entities {
 		if !g.ConsumesTopic(e.Type.ID) {
 			continue
@@ -890,18 +895,25 @@ type JoinFlow struct {
 // the same threshold rationale as the sink's rules-unmatched run.
 const stageForEachNonArrayWarnRun = 1000
 
-// foldFan fans one input through a forEach stage: each element folds as
-// its own input — identity (parent key, element key) — and the fan
-// reverse-index reconciles: elements the re-emitted input no longer
-// carries retract, and the input's tombstone retracts them all.
-func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, src string, parentKey []byte, payload any, gen uint64, dirty Dirty) error {
+// fannedElem is one element a forEach stage fans from an input: its
+// identity in the stage (fanInKey) and the element.
+type fannedElem struct {
+	in []byte
+	el any
+}
+
+// fanOut fans one input through a forEach stage: its elements in fan
+// order, each identity once (the first element with it wins). raw counts
+// the elements the paths resolved, identifiable or not; miss describes
+// the value a matching path resolved instead of an array (""), and
+// matched is false when a multi-arm fan has no arm matching the input.
+func (n *graphNode) fanOut(src string, parentKey []byte, payload any) (elems []fannedElem, raw int, miss string, matched bool) {
 	st := n.def
 	type armFan struct {
 		ordinal int // -1 = single-path forEach (legacy identity bytes)
 		elems   []any
 	}
 	var fans []armFan
-	miss := ""
 	if len(st.Fan) > 0 {
 		// Multi-arm: every arm whose when matches this INPUT fans its
 		// path (UNION ALL). An input matching no arm is healthy
@@ -923,17 +935,58 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, src string, parentKey [
 			}
 			fans = append(fans, armFan{ai, elems})
 		}
-		if anyMatched && !anyHealthy {
-			miss = lastMiss
-		}
 		if !anyMatched {
-			return nil
+			return nil, 0, "", false
+		}
+		if !anyHealthy {
+			miss = lastMiss
 		}
 	} else {
 		var elems []any
 		miss = FanMiss(st.ForEach, payload, &elems)
 		fans = append(fans, armFan{-1, elems})
 	}
+	seen := map[string]bool{}
+	for _, f := range fans {
+		for _, el := range f.elems {
+			raw++
+			var kv any
+			var err error
+			if st.ElementKey != "" {
+				kv, err = ResolvePath(st.ElementKey, el, payload)
+			} else {
+				kv, err = n.resolveKeyValue(0, withSource(el, src), payload)
+			}
+			if err != nil || kv == nil {
+				continue // an unidentifiable element fans nothing (and reconciles away)
+			}
+			ek := []byte(KeyString(kv))
+			if f.ordinal >= 0 {
+				ek = fanArmElemKey(f.ordinal, ek)
+			}
+			elemIn := fanInKey(parentKey, ek)
+			if seen[string(elemIn)] {
+				continue
+			}
+			seen[string(elemIn)] = true
+			elems = append(elems, fannedElem{elemIn, el})
+		}
+	}
+	return elems, raw, miss, true
+}
+
+// foldFan fans one input through a forEach stage: each element folds as
+// its own input — identity (parent key, element key) — and the fan
+// reverse-index reconciles: elements the re-emitted input no longer
+// carries retract, and the input's tombstone retracts them all. An input
+// at origin o in the log keeps each element as a pointer to it.
+func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, src string, parentKey []byte, payload any, gen uint64, o *inputOrigin, dirty Dirty) error {
+	st := n.def
+	elems, raw, miss, matched := n.fanOut(src, parentKey, payload)
+	if !matched {
+		return nil
+	}
+	n.fanned.Add(int64(raw))
 	if miss != "" {
 		// A forEach path yielding no array fans ZERO elements — correct
 		// for the odd foreign event, catastrophic as a steady state: the
@@ -964,35 +1017,14 @@ func (g *Graph) foldFan(tx *stagestore.Tx, n *graphNode, src string, parentKey [
 		return err
 	}
 
-	current := map[string]bool{}
-	for _, f := range fans {
-		for _, el := range f.elems {
-			n.fanned.Add(1)
-			var kv any
-			var err error
-			if st.ElementKey != "" {
-				kv, err = ResolvePath(st.ElementKey, el, payload)
-			} else {
-				kv, err = n.resolveKeyValue(0, withSource(el, src), payload)
-			}
-			if err != nil || kv == nil {
-				continue // an unidentifiable element fans nothing (and reconciles away)
-			}
-			ek := []byte(KeyString(kv))
-			if f.ordinal >= 0 {
-				ek = fanArmElemKey(f.ordinal, ek)
-			}
-			elemIn := fanInKey(parentKey, ek)
-			if current[string(elemIn)] {
-				continue
-			}
-			current[string(elemIn)] = true
-			if err := g.foldOneInput(tx, n, src, elemIn, el, payload, gen, nil, dirty); err != nil {
-				return err
-			}
-			if err := tx.PutRev(st.Name, fanJoinName, parentKey, elemIn); err != nil {
-				return err
-			}
+	current := make(map[string]bool, len(elems))
+	for _, e := range elems {
+		current[string(e.in)] = true
+		if err := g.foldOneInput(tx, n, src, e.in, e.el, payload, gen, o, dirty); err != nil {
+			return err
+		}
+		if err := tx.PutRev(st.Name, fanJoinName, parentKey, e.in); err != nil {
+			return err
 		}
 	}
 	for pk := range prior {
@@ -1227,10 +1259,11 @@ func (g *Graph) foldDeleteInput(tx *stagestore.Tx, n *graphNode, inKey []byte, d
 // sound and which turns a batch touching one key N times into one
 // refold and at most one downstream write.
 func (g *Graph) Drain(tx *stagestore.Tx, dirty Dirty) error {
-	// Window stages' pending positions belong to this batch: cleared on
-	// the way out, success or not (a failed batch rolls back and refolds
-	// from scratch).
+	// Window stages' pending positions and the last fanned entity belong
+	// to this batch: cleared on the way out, success or not (a failed
+	// batch rolls back and refolds from scratch).
 	defer func() {
+		g.lastFanned = nil
 		for _, n := range g.order {
 			if n.win != nil {
 				n.win.reset()

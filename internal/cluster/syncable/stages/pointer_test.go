@@ -152,6 +152,113 @@ func TestTopicInputsArePointersWithALog(t *testing.T) {
 	require.Equal(t, []string{"13 rows c 2→3"}, reads.calls, "a migrated input reads back through its migration")
 }
 
+// A forEach stage's elements of a topic entity point to the entity: a
+// refold reads the entity back once and fans it again for each of its
+// elements it needs.
+func TestFanElementsArePointersToTheirEntity(t *testing.T) {
+	log, check := testInputLog, checkFoldState
+	testInputLog, checkFoldState = nil, nil // count only the graph's own reads
+	defer func() { testInputLog, checkFoldState = log, check }()
+	sts := []Stage{{
+		Name: "g", From: "orders", ForEach: "$.lines[*]", ElementKey: "$.sku", KeyPath: []string{"$parent.cust"},
+		Reduce: "latest", OrderBy: "$.q", OrderByType: "number", TieBy: "$.sku",
+		Emit: []Emit{{Field: "sku", From: "$.sku"}, {Field: "order", From: "$parent.id"}},
+	}}
+	require.NoError(t, ValidateShapes(sts))
+	g := BuildGraph(sts)
+	reads := &recordingReader{data: map[uint64]string{}}
+	g.Log = reads
+	store := openTestStore(t, Fingerprint(sts))
+	orders := &cluster.Type{ID: "orders", Version: 1}
+	fold := func(a *cluster.Actual) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error { return g.FoldActual(tx, a) }))
+	}
+	upsert := func(index uint64, key, data string) {
+		reads.data[index] = data
+		fold(&cluster.Actual{Index: index, Entities: []*cluster.Entity{{Type: orders, Key: []byte(key), Data: []byte(data)}}})
+	}
+	out := func() string {
+		var got []byte
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			var err error
+			got, err = tx.GetOut("g", []byte("x"))
+			return err
+		}))
+		return string(got)
+	}
+	upsert(10, "o1", `{"id":"o1","cust":"x","lines":[{"sku":"a","q":2},{"sku":"b","q":5}]}`)
+	upsert(11, "o2", `{"id":"o2","cust":"x","lines":[{"sku":"c","q":3},{"sku":"d","q":4},{"sku":"e","q":1}]}`)
+	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+		n := 0
+		err := tx.InputsFor("g", []byte("x"), func(inKey, val []byte) error {
+			n++
+			_, payload := decodeRetained(val)
+			_, ok, err := decodeRetainedPointer(payload)
+			require.NoError(t, err)
+			require.True(t, ok, "element %q is a copy", inKey)
+			return nil
+		})
+		require.Equal(t, 5, n)
+		return err
+	}))
+	require.Empty(t, reads.calls)
+	require.JSONEq(t, `{"sku":"b","order":"o1"}`, out())
+
+	// The winner's entity is deleted: the key refolds from o2's elements,
+	// one read of o2.
+	fold(&cluster.Actual{Index: 12, Entities: []*cluster.Entity{cluster.NewDeleteEntity(orders, []byte("o1"))}})
+	require.Equal(t, []string{"11 orders o2 0→1"}, reads.calls)
+	require.JSONEq(t, `{"sku":"d","order":"o2"}`, out())
+}
+
+// A forEach stage lagging behind a scrub of an entity it fanned leaves the
+// entity's elements out of a full refold until the delete folds, as for
+// any topic input.
+func TestScrubbedEntityLeavesItsElementsOut(t *testing.T) {
+	sts := []Stage{{
+		Name: "g", From: "orders", ForEach: "$.lines[*]", ElementKey: "$.sku", KeyPath: []string{"$parent.cust"},
+		Reduce: "aggregate", Emit: []Emit{{Field: "n", Expr: "count(*)"}, {Field: "q", Expr: "sum($.q)"}},
+	}}
+	require.NoError(t, ValidateShapes(sts))
+	g := BuildGraph(sts)
+	store := openTestStore(t, Fingerprint(sts))
+	var last uint64
+	up := func(key, payload string) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			return g.FoldTopicUpsertNow(tx, "orders", []byte(key), decodePayload(t, payload))
+		}))
+		last = suiteLog.next
+	}
+	out := func() string {
+		var got []byte
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			var err error
+			got, err = tx.GetOut("g", []byte("x"))
+			return err
+		}))
+		return string(got)
+	}
+	full := func() string {
+		var want []byte
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			w, _, err := g.refoldOutputBytes(tx, g.byName["g"].def, []byte("x"))
+			want = w
+			return err
+		}))
+		return string(want)
+	}
+	up("o1", `{"cust":"x","lines":[{"sku":"a","q":1},{"sku":"b","q":2}]}`)
+	up("o2", `{"cust":"x","lines":[{"sku":"c","q":100},{"sku":"d","q":200}]}`)
+	suiteLog.scrub(last) // o2's delete is further on in the log
+	require.JSONEq(t, `{"n":2,"q":3}`, full(), "a full refold leaves the scrubbed entity's elements out")
+	require.JSONEq(t, `{"n":4,"q":303}`, out(), "the fold state still holds them")
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		return g.FoldTopicDeleteNow(tx, "orders", []byte("o2"))
+	}))
+	require.JSONEq(t, `{"n":2,"q":3}`, out(), "once o2's delete folds")
+	require.Equal(t, full(), out())
+}
+
 type recordingReader struct {
 	data  map[uint64]string
 	calls []string

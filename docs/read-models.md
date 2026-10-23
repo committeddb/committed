@@ -1051,9 +1051,13 @@ set = [ { column = "total", from = "$.total" },
 - Stage state lives in one database per node under
   `<dataDir>/projections/`, each syncable's state in its own key range —
   derived, node-local, rebuildable from the log. It retains every input of every key, so it grows with the topics
-  it reads, in proportion to the number and size of inputs and the
-  number of stages that keep them: one aggregate stage over 1,000,000
-  events of about 260 bytes held 841 MB. **Editing stage definitions
+  it reads, in proportion to the number of inputs and the number of
+  stages that keep them. An input read from a topic, or an element a
+  `forEach` fans from one, is kept as a reference to its log entry, a
+  few bytes whatever the event's size; stage-fed inputs, merge sides,
+  window rows, fan-join pairs and join dimension rows are kept as
+  copies. One aggregate stage over 10,000,000 events held about 57 bytes
+  per event. **Editing stage definitions
   requires a rebuild** (the config-change guard enforces it): changed
   stages must re-derive from index 0, exactly like a changed table
   schema.

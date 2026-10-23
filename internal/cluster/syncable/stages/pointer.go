@@ -16,10 +16,15 @@ import (
 // worker has one, a dry run does not). A refold that needs the input reads
 // it back (loadInput).
 //
+// A forEach stage's element of a topic input points to the input's entity:
+// reading it back re-runs the fan over the entity and takes the element
+// with its identity (fanInKey's element key), with the entity as its
+// parent.
+//
 // Inputs of other kinds stay copies: stage-fed inputs and merge sides (the
-// log holds no such entity), fan elements and fan-join pairs (the element
-// is a fragment of its entity), window rows (a recompute reads every row it
-// walks), and join dimension rows (every input's lookup reads its row).
+// log holds no such entity), fan-join pairs (each pairs its element with a
+// dimension row), window rows (a recompute reads every row it walks), and
+// join dimension rows (every input's lookup reads its row).
 //
 // A pointer's entity can be gone from the log: a scrub erases an entity
 // once a later entry for its key deletes or supersedes it, and a stage
@@ -78,7 +83,16 @@ func decodeRetainedPointer(payload []byte) (*inputOrigin, bool, error) {
 // keepsPointers reports whether a stage keeps its topic inputs as pointers.
 func (n *graphNode) keepsPointers() bool {
 	st := n.def
-	return !st.hasFan() && n.fanJoin < 0 && n.win == nil && len(st.Merge) == 0
+	return n.fanJoin < 0 && n.win == nil && len(st.Merge) == 0
+}
+
+// splitFanInKey is fanInKey's inverse: the parent's input key.
+func splitFanInKey(elemIn []byte) ([]byte, bool) {
+	l, w := binary.Uvarint(elemIn)
+	if w <= 0 || uint64(len(elemIn)-w) < l { //nolint:gosec // G115: a length, never negative
+		return nil, false
+	}
+	return elemIn[w : w+int(l)], true //nolint:gosec // G115: bounded by len above
 }
 
 // inputEntity names the topic and entity key a topic input's identity
@@ -117,10 +131,29 @@ func (g *Graph) loadInput(st *Stage, inKey, retained []byte) (*decodedInput, err
 	if g.Log == nil {
 		return nil, fmt.Errorf("stage %q: a retained input points into the log, and this graph has no log to read it from", st.Name)
 	}
-	topic, key, ok := st.inputEntity(inKey)
+	entityIn := inKey
+	if st.hasFan() {
+		var ok bool
+		if entityIn, ok = splitFanInKey(inKey); !ok {
+			return nil, fmt.Errorf("stage %q: a retained element's identity names no parent", st.Name)
+		}
+	}
+	topic, key, ok := st.inputEntity(entityIn)
 	if !ok {
 		return nil, fmt.Errorf("stage %q: a retained input's identity names no entity", st.Name)
 	}
+	if st.hasFan() {
+		return g.loadElement(st, topic, entityIn, key, inKey, o)
+	}
+	obj, err := g.readEntity(st, topic, key, o)
+	if err != nil {
+		return nil, err
+	}
+	return &decodedInput{data: obj}, nil
+}
+
+// readEntity reads a pointer's entity back from the log, decoded.
+func (g *Graph) readEntity(st *Stage, topic string, key []byte, o *inputOrigin) (any, error) {
 	data, found, err := g.Log.ReadEntity(o.index, topic, key, o.from, o.to)
 	if err != nil {
 		return nil, fmt.Errorf("stage %q: read a retained input back: %w", st.Name, err)
@@ -135,7 +168,47 @@ func (g *Graph) loadInput(st *Stage, inKey, retained []byte) (*decodedInput, err
 	if err != nil {
 		return nil, cluster.Permanent(fmt.Errorf("[projection.stage] unmarshal entity data: %w", err))
 	}
-	return &decodedInput{data: obj}, nil
+	return obj, nil
+}
+
+// fannedParent is the last entity loadElement fanned, by its pointer: a
+// refold reads a key's inputs in identity order, so the elements of one
+// entity come together.
+type fannedParent struct {
+	stage, topic string
+	key          []byte
+	origin       inputOrigin
+	parent       any
+	elems        map[string]any
+}
+
+// loadElement reads a forEach stage's element back: its parent entity
+// from the log, fanned again.
+func (g *Graph) loadElement(st *Stage, topic string, parentIn, key, elemIn []byte, o *inputOrigin) (*decodedInput, error) {
+	f := g.lastFanned
+	if f == nil || f.stage != st.Name || f.topic != topic || f.origin != *o || !bytes.Equal(f.key, key) {
+		parent, err := g.readEntity(st, topic, key, o)
+		if err != nil {
+			return nil, err
+		}
+		n := g.byName[st.Name]
+		if n == nil {
+			return nil, fmt.Errorf("stage %q: not in the graph", st.Name)
+		}
+		elems, _, _, _ := n.fanOut(topic, parentIn, parent)
+		f = &fannedParent{stage: st.Name, topic: topic, key: key, origin: *o, parent: parent, elems: make(map[string]any, len(elems))}
+		for _, e := range elems {
+			f.elems[string(e.in)] = e.el
+		}
+		g.lastFanned = f
+	}
+	el, ok := f.elems[string(elemIn)]
+	if !ok {
+		// The entry fans the same elements it did when the element was
+		// kept: the same bytes through the same migration.
+		return nil, fmt.Errorf("stage %q: a retained element is not among its parent's elements", st.Name)
+	}
+	return &decodedInput{data: el, parent: f.parent}, nil
 }
 
 // testInputLog, when set, stands in for the log for the inputs this
