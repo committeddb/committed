@@ -26,7 +26,7 @@ func (l failedReclaimLog) Reclaim(ctx context.Context) (eventlog.ReclaimResult, 
 }
 
 func TestSharedReclamationResumesAfterReopen(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		for _, after := range []bool{false, true} {
 			phase := "before-removal"
 			if after {

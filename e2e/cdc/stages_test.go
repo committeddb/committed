@@ -5,7 +5,6 @@ package cdc_test
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/committeddb/committed/e2e/cdc/harness"
 	"github.com/committeddb/committed/e2e/cdc/mutation"
+	"github.com/committeddb/committed/internal/cluster/syncable/stagestore"
 )
 
 // TestStagedProjectionEndToEnd drives the stage engine through a REAL
@@ -90,10 +90,12 @@ set = [ { column = "n", from = "$.n" } ]
 	// (folding without emitting) before consuming; a fresh store WITHOUT
 	// recovery would count only post-restart events and silently
 	// under-report every aggregate.
-	storePath := filepath.Join(h.NodeDataDir(), "projections", "region-stats.db")
+	storeDir := filepath.Join(h.NodeDataDir(), "projections")
 	h.RestartCommittedAfter(t, func() {
-		require.FileExists(t, storePath, "the stage store must exist before the simulated takeover")
-		require.NoError(t, os.Remove(storePath))
+		has, err := stagestore.HasState(storeDir, "region-stats")
+		require.NoError(t, err)
+		require.True(t, has, "the stage store must exist before the simulated takeover")
+		require.NoError(t, stagestore.Remove(storeDir, "region-stats"))
 	})
 
 	// A new ASIA region lands on RECOVERED state: 2 (re-derived) + 1 = 3.

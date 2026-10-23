@@ -17,8 +17,11 @@ import (
 // re-announces and overwrites. The bucket rides along in snapshots (bbolt is
 // serialized whole into CreateSnapshot), so the mapping is durable across
 // restart, log compaction, and InstallSnapshot to a lagging follower.
-func (s *Storage) handleNodeAPIURL(e *cluster.Entity, _ uint64) error {
+func (s *Storage) handleNodeAPIURL(e *cluster.Entity, index uint64) error {
 	return s.update(func(tx *bolt.Tx) error {
+		if index <= addressesIgnoredThrough(tx) {
+			return nil // a previous cluster's announcement (see new_cluster.go)
+		}
 		b := tx.Bucket(memberAPIURLBucket)
 		if b == nil {
 			return ErrBucketMissing

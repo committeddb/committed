@@ -9,7 +9,6 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
@@ -62,11 +61,7 @@ func TestEventRecoveryRetainsErasedAppendProgress(t *testing.T) {
 				})
 				require.NoError(t, err)
 				require.NoError(t, log.Close())
-				if name == "tidwall" {
-					log, err = tidwall.Open(path)
-				} else {
-					log, err = segmented.Open(path, segmentlog.Options{})
-				}
+				log, err = segmented.Open(path, segmentlog.Options{})
 				require.NoError(t, err)
 				s := &Storage{eventLog: bindEventLog(log)}
 				require.NoError(t, s.recoverEventIndex())

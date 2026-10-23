@@ -2354,7 +2354,10 @@ paths:
         The node named here must already be running in join mode
         (`COMMITTED_JOIN=true`) with a peer set that lets it reach the
         existing members. The call blocks until the change has taken effect,
-        then returns 204. See docs/operations/membership.md.
+        then returns 204. Refused with 400: a learner add naming a current
+        voter (it would demote the voter), and any add naming an id that was
+        removed from the cluster (a removed node rejoins under a new id). See
+        docs/operations/membership.md.
       operationId: addMember
       requestBody:
         required: true
@@ -2369,6 +2372,14 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: |
+            Refused: another membership change is still taking effect
+            (`membership_change_in_progress`). Retry once it completes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503':
           $ref: '#/components/responses/MembershipUnconfirmed'
         '500':
@@ -2406,8 +2417,60 @@ paths:
         '409':
           description: |
             Refused: removing this member would remove the last voter, leaving no
-            node able to commit (`would_remove_last_voter`). Add another voter
-            first. See docs/operations/membership.md.
+            node able to commit (`would_remove_last_voter`) — add another voter
+            first — or another membership change is still taking effect
+            (`membership_change_in_progress`) — retry once it completes. See
+            docs/operations/membership.md.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/MembershipUnconfirmed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/membership/{id}/address:
+    put:
+      security:
+        - membershipAuth: []
+      tags: [membership]
+      summary: Record a member's raft peer address
+      description: |
+        Records member `{id}`'s raft peer address cluster-wide, through
+        consensus, and points every node's transport at it; returns 204 once
+        the change has applied on this node. A voter that moves announces its
+        new address on its own (its peers learn it from its messages and the
+        leader records it); use this for a node that can't — a learner, which
+        never campaigns, or a node that is down. See
+        docs/operations/membership.md.
+      operationId: setMemberAddress
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Raft node id of the member.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetMemberAddressRequest'
+      responses:
+        '204':
+          description: The address is recorded and in use.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: |
+            Refused: another membership change is still taking effect
+            (`membership_change_in_progress`). Retry once it completes.
           content:
             application/json:
               schema:
@@ -2450,6 +2513,14 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: |
+            Refused: another membership change is still taking effect
+            (`membership_change_in_progress`). Retry once it completes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503':
           $ref: '#/components/responses/MembershipUnconfirmed'
         '500':
@@ -3341,6 +3412,13 @@ components:
                 description: |
                   Delete-shaped inputs whose key could not resolve — lost
                   retractions, the key each meant to kill stays live. Omitted while zero.
+              scrubbedInputs:
+                type: integer
+                format: int64
+                description: |
+                  Reads of retained inputs a scrub had already erased from the log —
+                  inputs a later entry deletes or supersedes, held until the stage folds
+                  that entry. Nonzero while the stage lags behind a scrub. Omitted while zero.
               havingRejected:
                 type: integer
                 format: int64
@@ -3657,6 +3735,12 @@ components:
           type: integer
           format: int64
           description: Raft node id that produced this snapshot.
+        clusterId:
+          type: string
+          description: |
+            The cluster's id. Peers of other clusters are refused. Omitted while
+            the cluster has none (an upgraded cluster before every member runs
+            a release that assigns one).
         leaderId:
           type: integer
           format: int64
@@ -3738,6 +3822,35 @@ components:
           description: |
             Member's advertised HTTP API base URL, as self-announced. Omitted
             when the member has not announced one (no COMMITTED_API_URL).
+        peerUrl:
+          type: string
+          description: |
+            Member's recorded raft peer address — what the cluster agreed on.
+            Omitted when none is recorded.
+        currentPeerUrl:
+          type: string
+          description: |
+            The address the answering node's transport uses for this member
+            right now. It differs from `peerUrl` briefly while a node that
+            moved is having its new address recorded.
+        currentPeerUrlSource:
+          type: string
+          enum: [self, boot, membership, self-report, agreed]
+          description: |
+            Where `currentPeerUrl` came from: `self` (the answering node's own
+            entry), `boot` (chosen at startup from COMMITTED_PEERS or the
+            recorded address), `membership` (a member add or a snapshot),
+            `self-report` (the member reported it after its old address
+            stopped answering), `agreed` (recorded through consensus).
+
+    SetMemberAddressRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          description: The member's raft peer URL (http or https, host and port).
+          examples: ["http://n4:9022"]
 
     AddProposalRequest:
       type: object

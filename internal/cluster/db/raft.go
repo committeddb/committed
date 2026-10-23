@@ -14,7 +14,6 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
@@ -39,7 +38,16 @@ type Raft struct {
 	// raft.RestartNode (empty state, learn membership from the leader)
 	// instead of raft.StartNode (bootstrap from the static peer set). See
 	// WithJoin and the join field on options.
-	join         bool
+	join bool
+	// clusterName is COMMITTED_CLUSTER_NAME, mixed into a new cluster's
+	// derived id; ident is this node's cluster identity (cluster_identity.go).
+	clusterName string
+	ident       identity
+	// selfURL is this node's advertised peer URL (its COMMITTED_PEERS entry),
+	// which the leader records cluster-wide (agreed_addresses.go).
+	selfURL string
+	// guard is the apply-time membership guard's state (membership_guard.go).
+	guard        membershipGuard
 	raftErrorC   chan<- error
 	raftStopC    chan struct{}
 	id           uint64
@@ -58,19 +66,25 @@ type Raft struct {
 	// channels goroutine to assert compaction progress without racing
 	// the writer.
 	lastCompactedIndex atomic.Uint64
+	// snapshotLacksMember is set when a member was added after the snapshot
+	// this node holds: raft makes a node ignore a snapshot whose membership
+	// doesn't include it, so once the log is compacted a new member could only
+	// catch up from the next compaction's snapshot. prepareCompaction takes
+	// one at once instead.
+	snapshotLacksMember atomic.Bool
 	// Set before ApplyConfChange exposes a configuration, so membership
 	// waiters can require Raft to acknowledge its entry through Advance.
 	lastMembershipIndex atomic.Uint64
 	// lastCompactTime is the wall-clock moment (UnixNano) of the most
 	// recent compaction (or startRaft time if no compaction has happened).
 	// The age limb of the policy fires when (time.Now() - lastCompactTime)
-	// exceeds compactMaxAge. Written by the Ready loop (finishCompaction),
-	// read by the apply goroutine (prepareCompaction).
+	// exceeds compactMaxAge. Written by the append goroutine
+	// (finishCompaction), read by the apply goroutine (prepareCompaction).
 	lastCompactTime atomic.Int64
 	// pendingCompactTo is the raft-log truncation point a snapshot has been
 	// taken for (prepareCompaction, on the apply goroutine, where the state
-	// matches the applied index exactly) and the Ready loop has not yet cut
-	// (finishCompaction, serialized with Save's appends). 0 = none.
+	// matches the applied index exactly) and the append goroutine has not
+	// yet cut (finishCompaction, serialized with Save's appends). 0 = none.
 	pendingCompactTo atomic.Uint64
 
 	// applyQ hands committed entries to the apply goroutine (runApply), so a
@@ -82,12 +96,25 @@ type Raft struct {
 	queuedTo   atomic.Uint64
 	appliedTo  atomic.Uint64
 	applyDoneC chan struct{}
+	// appendQ hands raft's local writes to the append goroutine (runAppend),
+	// so a slow disk never stops this node's clock either; appendDoneC
+	// closes when runAppend exits. durable is the commit index it has made
+	// durable, which apply waits on. storageFailedC closes when a write
+	// fails, stopping the Ready loop. stepCtx ends at Close, releasing a
+	// response being stepped into raft.
+	appendQ         *appendQueue
+	appendDoneC     chan struct{}
+	durable         *durableCommit
+	storageFailedC  chan struct{}
+	storageFailOnce sync.Once
+	stepCtx         context.Context
+	cancelStep      context.CancelFunc
 	// compactionPressure is a hint set by db's disk-usage watcher when free
-	// space drops to critical/full: while set, maybeCompact triggers on every
-	// Ready iteration (subject to the same compact-point safety constraints)
-	// regardless of the size/age limbs, so the node tries to free raft-log
-	// disk sooner. Atomic because the watcher goroutine sets it while the
-	// serveChannels goroutine reads it in maybeCompact.
+	// space drops to critical/full: while set, prepareCompaction triggers
+	// after every applied batch and tick (subject to the same compact-point
+	// safety constraints) regardless of the size/age limbs, so the node tries
+	// to free raft-log disk sooner. Atomic because the watcher goroutine sets
+	// it while the apply goroutine reads it in prepareCompaction.
 	compactionPressure atomic.Bool
 
 	node    raft.Node
@@ -148,8 +175,8 @@ type Raft struct {
 	// against any new Raft constructed on the same Storage.
 	closeC chan struct{}
 	// serveChannelsDoneC is closed by serveChannels on exit. Close() waits
-	// on it to guarantee serveChannels (and therefore Storage.Save) is no
-	// longer running before returning.
+	// on it, and on the append and apply goroutines, to guarantee nothing
+	// writes to Storage after it returns.
 	serveChannelsDoneC chan struct{}
 	// closeOnce guards close(closeC) so Close() is idempotent and safe to
 	// call from multiple paths.
@@ -193,6 +220,10 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-cha
 		compactMaxAge:        cfg.compactMaxAge,
 		applyQ:               newApplyQueue(),
 		applyDoneC:           make(chan struct{}),
+		appendQ:              newAppendQueue(id),
+		appendDoneC:          make(chan struct{}),
+		durable:              newDurableCommit(0),
+		storageFailedC:       make(chan struct{}),
 		storage:              s,
 		applyNotifier:        applyNotifier,
 		appliedIndexNotifier: appliedIndexNotifier,
@@ -204,15 +235,17 @@ func newRaftWithOptions(id uint64, ps []raft.Peer, s raftStorage, proposeC <-cha
 		tlsInfo:              cfg.tlsInfo,
 		peerToken:            cfg.peerToken,
 		join:                 cfg.join,
+		clusterName:          cfg.clusterName,
 		closeC:               make(chan struct{}),
 		serveChannelsDoneC:   make(chan struct{}),
 
 		logger:  logger,
 		metrics: cfg.metrics,
 	}
+	n.stepCtx, n.cancelStep = context.WithCancel(context.Background())
 	n.lastCompactTime.Store(time.Now().UnixNano())
 	// Install the truncation lost-notifier on the storage BEFORE startRaft
-	// spawns serveChannels (the sole appendEntries caller, where the
+	// spawns the append goroutine (the sole appendEntries caller, where the
 	// callback fires). Setting it here, on this goroutine, before the spawn
 	// gives the field a happens-before edge to every appendEntries read, so
 	// no lock is needed on the storage side. db.New supplies db.notifyLost;
@@ -300,6 +333,11 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// for a production database: a partitioned-away leader shouldn't
 		// keep accepting reads indefinitely.
 		CheckQuorum: true,
+		// Local disk writes and applies run off the Ready loop, as messages
+		// (raft_storage_writes.go): a leader's own write of a large entry
+		// would otherwise hold up its heartbeats for as long as the write
+		// takes, and a follower would start an election.
+		AsyncStorageWrites: true,
 	}
 
 	// Applied tells raft which committed entries this node has already applied,
@@ -349,6 +387,19 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		n.logger.Info("starting node", zap.Uint64("id", id))
 		n.node = raft.StartNode(c, ps)
 	}
+	n.initClusterIdentity(hs.GetTerm() == 0 && !n.join, ps)
+	n.initIncarnation()
+	n.refreshRemoved()
+	if s, ok := n.storage.(interface{ SnapshotLacksMember() bool }); ok && s.SnapshotLacksMember() {
+		n.snapshotLacksMember.Store(true)
+	}
+	for _, p := range ps {
+		if p.ID == id {
+			if u, err := cluster.CanonicalPeerURL(string(p.Context)); err == nil {
+				n.selfURL = u
+			}
+		}
+	}
 
 	if n.transportFactory == nil {
 		// A wiring mistake, not a runtime condition: the composition root must
@@ -357,12 +408,17 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 		// that can never reach a peer.
 		panic("db: no transport factory configured — wire one with WithTransportFactory")
 	}
-	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger}
+	r := &httpTransportRaft{node: n.node, lastIndex: n.storage, logger: n.logger, identity: &n.ident, isMember: n.isMember, isRemoved: n.isRemoved}
 	// The transport serves peers' catch-up fetches from this node's event
 	// log when the storage has one (wal.Storage); the in-memory doubles do
 	// not, and serve nothing.
 	events, _ := n.storage.(EventServer)
-	t := n.transportFactory(id, ps, n.logger, r, events, n.tlsInfo, n.peerToken)
+	// Each peer's address is chosen once, here, before the transport exists
+	// (choosePeerAddresses): seeding the transport with both COMMITTED_PEERS
+	// and the recorded addresses and letting the first one win is what made a
+	// restore or a restart on new addresses dial the old ones forever.
+	seeds := n.choosePeerAddresses(ps)
+	t := n.transportFactory(id, seeds, n.logger, r, events, n.tlsInfo, n.peerToken)
 	if n.transportWrapper != nil {
 		// Wrap once, before serveRaft starts driving the transport. The
 		// wrapper returns a Transport that conforms to the same interface,
@@ -372,33 +428,24 @@ func (n *Raft) startRaft(id uint64, ps []raft.Peer) {
 	}
 	n.transport = t
 
-	// Reconcile the transport against durable membership BEFORE the raft loop
-	// starts driving it. On a RestartNode/join path raft rebuilds the (possibly
-	// grown) voter set from the persisted ConfState, but the transport above was
-	// seeded ONLY from the static COMMITTED_PEERS set — which a doc-following
-	// operator never updates after growing the cluster. Without this, a
-	// dynamically-added peer has no transport entry after restart and the cluster
-	// wedges leaderless. AddPeer is idempotent, so re-adding a COMMITTED_PEERS
-	// seed is a no-op. (serveRaft calls transport.Start, which also seeds from the
-	// static set and binds this node's listener — order doesn't matter.)
-	n.reconcileTransportFromMembership()
-
 	go n.serveRaft()
 	// Seed the apply marks from the durable applied index: raft re-delivers
 	// everything above it on start.
 	n.appliedTo.Store(n.storage.AppliedIndex())
 	n.queuedTo.Store(n.storage.AppliedIndex())
+	// Entries up to the stored commit are durable already.
+	n.durable.advance(hs.GetCommit())
 	go n.runApply()
+	go n.runAppend()
 	go n.serveChannels()
 }
 
-// reconcileTransportFromMembership (re)connects the transport to every member
-// whose raft URL is durably recorded (memberPeerURLBucket), skipping self. It is
-// called after the transport is created at startup and after a snapshot install,
-// so a dynamically-added peer stays reachable even though its live AddPeer (from
-// the original applyConfChange) does not re-run on restart — raft's ConfState and
-// snapshots replicate member IDs only, never addresses. AddPeer is idempotent, so
-// overlapping with the COMMITTED_PEERS seed is harmless.
+// reconcileTransportFromMembership connects the transport to every member whose
+// raft URL is recorded (memberPeerURLBucket) and the transport doesn't know yet,
+// skipping self. Called after a snapshot install, which brings the leader's
+// record of members this node may never have heard of. It only fills: an
+// address the transport already uses is never replaced here. (At startup the
+// addresses are chosen by choosePeerAddresses instead.)
 func (n *Raft) reconcileTransportFromMembership() {
 	for id, rawURL := range n.storage.MemberPeerURLs() {
 		if id == n.id {
@@ -418,7 +465,10 @@ func (n *Raft) reconcileTransportFromMembership() {
 // updates the peer transport so this node starts or stops exchanging raft
 // messages with the affected peer.
 //
-// ccCtx is the change's Context. For an add it carries the new peer's
+// index is the entry's log index. The membership guard checks the change
+// first (membership_guard.go), and removals are recorded here for it.
+//
+// The change's Context: for an add it carries the new peer's
 // advertised URL (db.AddMember stashes it there); the transport needs the
 // URL to dial the peer, and raft's ConfState replicates only node IDs, never
 // addresses — so the URL must ride along on the conf change itself. The
@@ -451,15 +501,63 @@ func (n *Raft) persistPeerURLOrFatal(peer uint64, rawURL []byte) {
 	}
 }
 
-func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
+// recordRemovedOrFatal and switchOnGuardOrFatal record the guard's
+// conf-change-pass state. Fatal for the reason persistPeerURLOrFatal is: the
+// applied index must not pass a lost write, and a lost removal or switch-on
+// would let this node's guard reach a different verdict from its peers'.
+func (n *Raft) recordRemovedOrFatal(id, index uint64) {
+	if err := n.storage.RecordRemovedMember(id, index); err != nil {
+		n.logger.Fatal("conf change: record removed member — refusing to advance the applied index past a lost write",
+			zap.Uint64("member", id), zap.Error(err))
+	}
+	n.refreshRemoved()
+}
+
+func (n *Raft) switchOnGuardOrFatal(index uint64) {
+	if err := n.storage.SetMembershipGuardIndex(index); err != nil {
+		n.logger.Fatal("conf change: switch on the membership guard — refusing to advance the applied index past a lost write",
+			zap.Error(err))
+	}
+	n.logger.Info("membership guard on: invalid membership changes are refused when applied", zap.Uint64("from index", index))
+}
+
+func (n *Raft) applyConfChange(entry raftpb.ConfChangeI, index uint64) {
+	// Both wire forms apply as v2, so the guard sees one shape; raft converts
+	// a v1 change the same way.
+	cc := n.guardConfChange(entry.AsV2(), index)
+	ccCtx := cc.Context
 	cs := n.node.ApplyConfChange(cc)
 	n.storage.ConfState(cs)
 
-	for _, ch := range cc.AsV2().Changes {
+	for _, ch := range cc.Changes {
+		if ch.GetNodeId() == 0 {
+			continue // refused by the guard
+		}
+		if ch.GetType() == raftpb.ConfChangeRemoveNode {
+			n.recordRemovedOrFatal(ch.GetNodeId(), index)
+		}
+		if ch.GetType() == raftpb.ConfChangeAddNode || ch.GetType() == raftpb.ConfChangeAddLearnerNode {
+			n.snapshotLacksMember.Store(true)
+		}
+		if ch.GetType() == raftpb.ConfChangeUpdateNode && string(ccCtx) == membershipGuardMarker {
+			n.switchOnGuardOrFatal(index)
+			continue
+		}
+		if index <= n.storage.AddressesIgnoredThrough() && ch.GetType() != raftpb.ConfChangeRemoveNode {
+			// A previous cluster's address (this directory was restored or
+			// recovered): COMMITTED_PEERS and self-report supply this
+			// cluster's.
+			continue
+		}
 		// A node needs no transport entry for itself: skip self so applying
 		// our own AddNode doesn't try to dial our own URL, and so a
 		// self-removal doesn't tear down a peer that was never added.
 		if ch.GetNodeId() == n.id {
+			if ch.GetType() == raftpb.ConfChangeUpdateNode {
+				// Its own agreed address is still recorded, so a snapshot
+				// carries it to members that never had it.
+				n.applyAgreedAddress(cs, ch.GetNodeId(), ccCtx)
+			}
 			continue
 		}
 		switch ch.GetType() {
@@ -471,15 +569,23 @@ func (n *Raft) applyConfChange(cc raftpb.ConfChangeI, ccCtx []byte) {
 				continue
 			}
 			// Persist the peer's raft URL BEFORE wiring the live transport, so
-			// the durable record exists even if the AddPeer below fails — a
-			// restart or snapshot install reconciles the transport from this
-			// bucket instead of the stale static COMMITTED_PEERS set (raft's
-			// ConfState replicates the member id only, never the address).
+			// the durable record exists even if the AddPeer below fails (raft's
+			// ConfState replicates the member id only, never the address). Fill
+			// only: an add never overwrites an address already recorded. A
+			// joiner replays the original bootstrap adds, which carry the
+			// cluster's FIRST addresses; overwriting would re-record addresses
+			// the cluster has since moved off. (Addresses change through a
+			// changed COMMITTED_PEERS at boot and, later, an agreed update.)
+			if _, recorded := n.storage.MemberPeerURLs()[ch.GetNodeId()]; recorded {
+				continue
+			}
 			n.persistPeerURLOrFatal(ch.GetNodeId(), ccCtx)
 			if err := n.transport.AddPeer(raft.Peer{ID: ch.GetNodeId(), Context: ccCtx}); err != nil {
 				n.logger.Error("conf change: add peer to transport",
 					zap.Uint64("peer", ch.GetNodeId()), zap.Error(err))
 			}
+		case raftpb.ConfChangeUpdateNode:
+			n.applyAgreedAddress(cs, ch.GetNodeId(), ccCtx)
 		case raftpb.ConfChangeRemoveNode:
 			n.transport.RemovePeer(ch.GetNodeId())
 			// Drop the removed node's announced API URL and durable peer URL so
@@ -523,6 +629,17 @@ func (n *Raft) membershipApplied() bool {
 	return st.Applied >= n.lastMembershipIndex.Load()
 }
 
+// membershipIdle reports that this node sees no membership change in
+// progress — the configuration isn't joint and its last change has applied —
+// and has applied everything it knows committed.
+func (n *Raft) membershipIdle() bool {
+	st := n.node.Status()
+	if len(st.Config.Voters[1]) > 0 || st.Applied < n.lastMembershipIndex.Load() {
+		return false
+	}
+	return st.Applied >= st.GetCommit()
+}
+
 // memberStatus reports the current raft configuration as observed by this
 // node: voters is the union of the incoming and (during a joint transition)
 // outgoing voter sets, learners is the learner set, and joint is true while
@@ -535,6 +652,15 @@ func (n *Raft) membershipApplied() bool {
 // Both maps are owned by the caller: Status() returns a Clone of the tracker
 // config, so Voters.IDs() and the Learners map are fresh per call. learners is
 // nil when there are none (a nil-map read is a safe miss).
+// isMember reports whether id is a voter or learner in this node's applied
+// configuration.
+func (n *Raft) isMember(id uint64) bool {
+	voters, learners, _ := n.memberStatus()
+	_, v := voters[id]
+	_, l := learners[id]
+	return v || l
+}
+
 func (n *Raft) memberStatus() (voters, learners map[uint64]struct{}, joint bool) {
 	cfg := n.node.Status().Config
 	return cfg.Voters.IDs(), cfg.Learners, len(cfg.Voters[1]) > 0
@@ -631,12 +757,22 @@ func (n *Raft) serveChannels() {
 				if !ok {
 					n.proposeC = nil
 				} else {
-					n.logger.Debug("proposal being sent to state machine")
-					// Blocks until accepted by the raft state machine, or until
-					// proposeCtx is cancelled at shutdown (so Close can't deadlock).
-					err := n.node.Propose(proposeCtx, []byte(prop))
-					sendProposeErr(err)
-					n.logger.Debug("proposal accepted by state machine")
+					// Every proposal already queued joins this one in a
+					// single raft step: one hand-off to raft per batch
+					// rather than per proposal, and one Ready for them all.
+					// Each stays its own entry, in submission order.
+					entries, open := n.collectProposals(prop)
+					// Returns once raft has taken the batch, or when
+					// proposeCtx is cancelled at shutdown (so Close can't
+					// deadlock). Step does not wait for raft's verdict: a
+					// batch raft drops (no leader, a leadership transfer,
+					// the uncommitted-entries limit) resolves through each
+					// waiter's leader-change fail-fast or propose timeout,
+					// as a drop always has.
+					sendProposeErr(n.node.Step(proposeCtx, &raftpb.Message{Type: raftpb.MsgProp.Enum(), Entries: entries}))
+					if !open {
+						n.proposeC = nil
+					}
 				}
 			case cc, ok := <-n.proposeConfC:
 				if !ok {
@@ -668,13 +804,22 @@ func (n *Raft) serveChannels() {
 	for {
 		select {
 		case <-ticker.C:
-			n.node.Tick()
+			// A candidate's election clock waits while its own vote is on
+			// its way to disk: raft counts that vote only once written, so
+			// a disk slower than the election timeout would restart every
+			// election before the vote counted, and a single node would
+			// never elect itself. Only a (pre-)candidate has its own vote
+			// pending; every other tick runs.
+			if !n.appendQ.ownVotePending() {
+				n.node.Tick()
+			}
 			// An idle node applies no batches, so the apply goroutine never
 			// gets to prepare a compaction; do it here while apply is idle
 			// (the age limb must fire on an idle cluster too: a member added
-			// to it is sent the latest snapshot, which must include it).
+			// to it is sent the latest snapshot, which must include it). The
+			// append goroutine makes the cut.
 			n.applyQ.ifIdle(n.prepareCompaction)
-			n.finishCompaction()
+			n.appendQ.nudge()
 		case rd := <-n.node.Ready():
 			status := n.node.Status()
 			isLeader := status.RaftState == raft.StateLeader
@@ -698,169 +843,36 @@ func (n *Raft) serveChannels() {
 			// is independent of Save/apply, so dispatch it up front.
 			n.dispatchReadStates(rd.ReadStates)
 
-			// Save persists the new entries durably. It does NOT apply them
-			// to bucket state — that happens via ApplyCommitted below, only
-			// on rd.CommittedEntries. Calling Save with rd.Entries and apply
-			// with rd.CommittedEntries is required by the etcd raft contract;
-			// rd.Entries may include uncommitted entries on a follower, so
-			// applying them to application state would diverge the cluster.
-			//
-			// Save errors are unrecoverable. Raft's invariants require that
-			// every entry returned from Ready be durably persisted before
-			// Advance is called: continuing past a failed Save and still
-			// calling Advance lets raft forget its unstable buffer while
-			// Storage lacks the corresponding entries, which panics the
-			// internal raft loop ("committed > lastIndex") the moment any
-			// new commit notification arrives. Treating Save failure as
-			// "this node is done" is the safe posture: stop the Ready loop
-			// (no more Send, ApplyCommitted, Advance), let peers notice the
-			// silence and re-elect around this node, and let Close tear
-			// down the transport and raft.Node.
-			//
-			// The send to raftErrorC is non-blocking so an unread error
-			// channel (raft_test's direct-constructed Raft) doesn't deadlock
-			// the return path. Production callers (db.DB) drain ErrorC so
-			// the send always lands immediately.
-			// A snapshot past this node's event log cannot be saved (the
-			// event log would be left with a permanent gap): fill the log
-			// from a peer first — the automatic catch-up, catchup.go — and
-			// only then save and install. The loop stalls here for the
-			// duration; the node is not-ready meanwhile. A false return is
-			// a storage without an event log (the fail-fast path below says
-			// so) or the node closing.
-			// A Ready carrying a snapshot or a membership change runs in
-			// step with apply, as it always did: it first waits for every
-			// queued batch to apply. A snapshot install replaces bbolt and
-			// its catch-up appends to the event log, neither of which may
-			// race an apply; a conf change's ConfState is written
-			// atomically with the applied index of ITS batch, and raft must
-			// see it applied (Advance) before the notifiers wake a waiter
-			// that proposes the next one. Both are rare. Every other Ready
-			// hands its committed entries to the apply goroutine and
-			// advances at once, so this loop never waits on apply.
-			syncApply := !raft.IsEmptySnap(rd.Snapshot) || hasConfChange(rd.CommittedEntries)
-			if syncApply && !n.applyQ.drain() {
-				closeRaftStop()
-				return
-			}
-
-			releaseCatchUp := func() {}
-			if !raft.IsEmptySnap(rd.Snapshot) {
-				if needIndex, needGen, needed := n.snapshotNeedsCatchUp(rd.Snapshot); needed {
-					release, ok := n.catchUpEventLog(rd.Snapshot, needIndex, needGen)
-					releaseCatchUp = release
-					if !ok {
-						select {
-						case <-n.closeC:
-							release()
-							return
-						default:
-						}
+			// Raft runs with AsyncStorageWrites: this loop never writes to
+			// disk or applies. Local writes arrive as messages, in order:
+			// MsgStorageAppend (entries, HardState, snapshot) goes to the
+			// append goroutine, MsgStorageApply (committed entries) to the
+			// apply goroutine, and each carries the responses to deliver
+			// once its write is done (a follower's MsgAppResp and votes, the
+			// acknowledgements raft waits for). Everything else goes out at
+			// once: a leader's appends and heartbeats leave before its own
+			// disk write finishes, and a follower's heartbeat responses
+			// before its write does, so no disk write holds up a heartbeat.
+			var out []*raftpb.Message
+			for _, m := range rd.Messages {
+				switch m.GetTo() {
+				case raft.LocalAppendThread:
+					n.appendQ.push(m)
+				case raft.LocalApplyThread:
+					if k := len(m.GetEntries()); k > 0 {
+						n.queuedTo.Store(max(n.queuedTo.Load(), m.GetEntries()[k-1].GetIndex()))
 					}
-				}
-			}
-			err := n.storage.Save(rd.HardState, rd.Entries, rd.Snapshot)
-			if err != nil {
-				n.logger.Error("storage save", zap.Error(err))
-				releaseCatchUp()
-				select {
-				case n.raftErrorC <- err:
+					n.applyQ.push(m.GetEntries(), m.GetResponses())
 				default:
-				}
-				return
-			}
-			n.transport.Send(rd.Messages)
-			if !syncApply {
-				releaseCatchUp()
-				if k := len(rd.CommittedEntries); k > 0 {
-					n.queuedTo.Store(rd.CommittedEntries[k-1].GetIndex())
-					n.applyQ.push(rd.CommittedEntries)
-				}
-				// raft may count these entries applied before they are:
-				// what it uses its applied index for is held back
-				// regardless (a conf change runs in step above; compaction
-				// trails the durable applied index).
-				n.node.Advance()
-				n.finishCompaction()
-				continue
-			}
-			if !raft.IsEmptySnap(rd.Snapshot) {
-				n.processSnapshot(rd.Snapshot)
-				if idx := n.storage.AppliedIndex(); idx > n.appliedTo.Load() {
-					n.appliedTo.Store(idx)
-					n.queuedTo.Store(max(n.queuedTo.Load(), idx))
+					out = append(out, m)
 				}
 			}
-			// The storage's own maintenance held off during a catch-up (a
-			// pending scrub) may run now, over the finished log and the
-			// installed metadata.
-			releaseCatchUp()
-			// Apply conf-changes FIRST — BEFORE ApplyCommittedBatch advances
-			// the durable applied index. applyConfChange calls
-			// node.ApplyConfChange (which computes the authoritative ConfState)
-			// and stages it via storage.ConfState; ApplyCommittedBatch then
-			// writes that ConfState ATOMICALLY with the applied index. If the
-			// applied index were persisted first (as it was when this ran
-			// after ApplyCommittedBatch), a crash before the ConfState became
-			// durable would — with c.Applied suppressing re-delivery — restart
-			// raft on a stale voter set (confstate-lost-in-crash-window). We
-			// keep using raft's ApplyConfChange for the config computation and
-			// only fix WHEN its result becomes durable.
-			for _, entry := range rd.CommittedEntries {
-				switch entry.GetType() {
-				case raftpb.EntryConfChangeV2:
-					// The normal membership path. db.AddMember / db.RemoveMember
-					// propose ConfChangeV2 entries (joint consensus), and raft
-					// itself proposes a zero-change ConfChangeV2 to leave the
-					// joint configuration once it commits (JointImplicit
-					// auto-leave). Both flow through here.
-					var cc raftpb.ConfChangeV2
-					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
-						// Guarded send (sendRaftError): the one-shot ErrorC
-						// consumer may already be gone (SIGTERM path reads it
-						// zero times), and a raw send here parks the Ready
-						// loop forever — deadlocking Close into SIGKILL.
-						n.sendRaftError(err)
-						continue
-					}
-					n.lastMembershipIndex.Store(entry.GetIndex())
-					n.applyConfChange(&cc, cc.Context)
-				case raftpb.EntryConfChange:
-					// Backward compatibility: a v1 ConfChange can only appear
-					// in a log written by a pre-joint-consensus binary, since
-					// this node now proposes v2 exclusively. etcd raft still
-					// applies v1 (ConfChangeI.AsV2 promotes it), so replaying it
-					// keeps an upgraded node consistent with what the old leader
-					// committed.
-					var cc raftpb.ConfChange
-					if err := proto.Unmarshal(entry.Data, &cc); err != nil {
-						n.sendRaftError(err) // guarded — see the v2 twin above
-						continue
-					}
-					n.lastMembershipIndex.Store(entry.GetIndex())
-					n.applyConfChange(&cc, cc.Context)
-				}
-			}
-			if k := len(rd.CommittedEntries); k > 0 {
-				n.queuedTo.Store(max(n.queuedTo.Load(), rd.CommittedEntries[k-1].GetIndex()))
-			}
-			// Advance HERE — after the apply, before anything observes
-			// "applied":
-			//
-			//   - raft's own applied index moves only at Advance. The applied
-			//     broadcast wakes waiters that may propose next (a membership
-			//     change proposes the next conf change the moment the previous
-			//     one shows in the configuration), and raft silently drops a
-			//     conf change proposed while its applied index has not passed
-			//     the previous one. Firing the broadcast before Advance let
-			//     exactly that happen (a CI hang, 2026-09-05). After Advance,
-			//     "applied" means raft agrees.
-			//   - raft's storage contract forbids compacting past raft's own
-			//     applied index; compaction works from the durable applied
-			//     index, which after a batch of more than the safety buffer is
-			//     ahead of raft's until Advance.
-			n.applyBatch(rd.CommittedEntries, n.node.Advance)
-			n.maybeCompact()
+			n.transport.Send(out)
+		case <-n.storageFailedC:
+			// The append goroutine could not persist a write: this node is
+			// done (see failStorage).
+			closeRaftStop()
+			return
 		case <-n.raftStopC:
 			return
 		case <-n.closeC:
@@ -911,6 +923,35 @@ func (n *Raft) forwardProposeErr(err error, shuttingDown bool) {
 	n.sendRaftError(err)
 }
 
+// Proposal batching: a batch stops taking queued proposals once it holds
+// maxProposeBatchEntries or reaches maxProposeBatchBytes (raft's
+// MaxSizePerMsg; raft splits its append messages at that size regardless).
+const (
+	maxProposeBatchEntries = 512
+	maxProposeBatchBytes   = 1024 * 1024
+)
+
+// collectProposals takes first and every proposal already waiting on
+// proposeC, up to the batch caps, without blocking. open is false when it
+// found proposeC closed.
+func (n *Raft) collectProposals(first []byte) (entries []*raftpb.Entry, open bool) {
+	entries = []*raftpb.Entry{{Data: first}}
+	size := len(first)
+	for len(entries) < maxProposeBatchEntries && size < maxProposeBatchBytes {
+		select {
+		case prop, ok := <-n.proposeC:
+			if !ok {
+				return entries, false
+			}
+			entries = append(entries, &raftpb.Entry{Data: prop})
+			size += len(prop)
+		default:
+			return entries, true
+		}
+	}
+	return entries, true
+}
+
 // stopTransport stops the peer transport and blocks until serveRaft has actually
 // exited (transportDoneC). It runs exactly once because its only caller, Close,
 // runs its whole body under closeOnce.
@@ -923,10 +964,10 @@ func (n *Raft) stopTransport() {
 }
 
 // Close fully tears down the Raft instance: it signals serveChannels and its
-// inner proposeC reader to exit, waits for serveChannels to actually stop
-// (which guarantees Storage.Save is no longer running), stops the transport,
-// and stops the underlying etcd raft.Node. It is safe to call Close more than
-// once.
+// inner proposeC reader to exit, waits for serveChannels and the append and
+// apply goroutines to actually stop (which guarantees Storage.Save and apply
+// are no longer running), stops the transport, and stops the underlying etcd
+// raft.Node. It is safe to call Close more than once.
 //
 // Stopping n.node is critical to prevent goroutine leaks: without it, every
 // Raft we create leaks the etcd raft.Node's internal `(*node).run` goroutine.
@@ -936,13 +977,16 @@ func (n *Raft) Close() error {
 	n.closeOnce.Do(func() {
 		close(n.closeC)
 		// Stop the apply goroutine after its current batch (the queued ones
-		// are durable in the raft log; a restart replays them), which also
-		// releases a Ready loop waiting in drain.
-		if n.applyQ != nil {
-			n.applyQ.stop()
-		}
+		// are durable in the raft log; a restart replays them) and the
+		// append goroutine after its current write (raft acknowledged none of
+		// the queued ones, so a restart loses nothing it promised).
+		n.applyQ.stop()
+		n.appendQ.stop()
+		n.durable.stop()
+		n.cancelStep()
 		<-n.serveChannelsDoneC
 		<-n.applyDoneC
+		<-n.appendDoneC
 		n.stopTransport()
 		if n.node != nil {
 			n.node.Stop()
@@ -1175,11 +1219,12 @@ func (n *Raft) maybeCompact() {
 
 // prepareCompaction decides whether to compact and, if so, takes the
 // metadata snapshot. It runs where the state matches the applied index
-// exactly: on the apply goroutine between batches, or in step on the Ready
-// loop. The raft-log cut it prepares is left to finishCompaction.
+// exactly: on the apply goroutine between batches, or on the Ready loop's
+// tick while apply is idle. The raft-log cut it prepares is left to
+// finishCompaction.
 func (n *Raft) prepareCompaction() {
 	if n.pendingCompactTo.Load() > n.lastCompactedIndex.Load() {
-		return // a prepared cut is still waiting for the Ready loop
+		return // a prepared cut is still waiting for the append goroutine
 	}
 	// Disk pressure is an independent trigger limb: it fires even when both
 	// the size and age limbs are disabled, so a node under disk pressure
@@ -1187,7 +1232,15 @@ func (n *Raft) prepareCompaction() {
 	// safety constraints below are unchanged, so this can never compact past
 	// applied/event-log highwater.
 	pressure := n.compactionPressure.Load()
-	if n.compactMaxSize == 0 && n.compactMaxAge == 0 && !pressure {
+	// A member added after the held snapshot can't install it; once the log
+	// is compacted (a never-compacted log serves it from index 1), take a
+	// snapshot that includes it whatever the policy says.
+	membership := false
+	if n.snapshotLacksMember.Load() {
+		first, err := n.storage.FirstIndex()
+		membership = err == nil && first > 1
+	}
+	if n.compactMaxSize == 0 && n.compactMaxAge == 0 && !pressure && !membership {
 		return
 	}
 
@@ -1210,7 +1263,7 @@ func (n *Raft) prepareCompaction() {
 			reason = "age"
 		}
 	}
-	if !triggered {
+	if !triggered && !membership {
 		return
 	}
 
@@ -1226,7 +1279,7 @@ func (n *Raft) prepareCompaction() {
 	// small enough that compaction still buys real disk savings, large enough that
 	// a short network blip doesn't force a snapshot install.
 	const safetyBuffer = uint64(8)
-	if applied <= safetyBuffer {
+	if applied <= safetyBuffer && !membership {
 		return
 	}
 
@@ -1239,8 +1292,13 @@ func (n *Raft) prepareCompaction() {
 	if applied > n.storage.EventIndex() {
 		return
 	}
-	compactTo := applied - safetyBuffer
-	if compactTo <= n.lastCompactedIndex.Load() {
+	var compactTo uint64
+	if applied > safetyBuffer {
+		compactTo = applied - safetyBuffer
+	}
+	// Only the policy cuts the log; a snapshot for a new member doesn't.
+	cut := triggered && compactTo > n.lastCompactedIndex.Load()
+	if !cut && !membership {
 		return
 	}
 
@@ -1255,6 +1313,13 @@ func (n *Raft) prepareCompaction() {
 		n.logger.Warn("create snapshot for compaction", zap.Uint64("index", applied), zap.Error(err))
 		return
 	}
+	if membership {
+		n.snapshotLacksMember.Store(false)
+	}
+	if !cut {
+		n.logger.Debug("snapshot taken for a new member", zap.Uint64("snapshotIndex", applied))
+		return
+	}
 	n.logger.Debug("raft log compaction prepared",
 		zap.Uint64("snapshotIndex", applied),
 		zap.Uint64("compactTo", compactTo),
@@ -1263,8 +1328,8 @@ func (n *Raft) prepareCompaction() {
 }
 
 // finishCompaction cuts the raft log at the point prepareCompaction took a
-// snapshot for. Ready loop only: the cut is serialized with Save's appends,
-// which share the entry log lock-free.
+// snapshot for. Append goroutine only: the cut is serialized with Save's
+// appends, which share the entry log lock-free.
 func (n *Raft) finishCompaction() {
 	compactTo := n.pendingCompactTo.Load()
 	if compactTo <= n.lastCompactedIndex.Load() {
@@ -1285,36 +1350,51 @@ func (n *Raft) finishCompaction() {
 	n.logger.Debug("raft log compacted", zap.Uint64("compactTo", compactTo))
 }
 
-// hasConfChange reports whether entries hold a membership change.
-func hasConfChange(entries []*raftpb.Entry) bool {
-	for _, e := range entries {
-		if t := e.GetType(); t == raftpb.EntryConfChange || t == raftpb.EntryConfChangeV2 {
-			return true
-		}
-	}
-	return false
-}
-
-// runApply is the apply goroutine: it applies the Ready loop's committed
-// entries in order, then prepares any due compaction while the state still
-// matches the applied index.
+// runApply is the apply goroutine: it applies raft's committed entries in
+// order (MsgStorageApply), then prepares any due compaction while the state
+// still matches the applied index.
+//
+// Raft hands an entry to apply once it is committed and in this node's
+// stable log, but the HardState that records the commit may still be on its
+// way to disk; a restart refuses an applied index above the stored commit
+// (raft panics at start), so each batch first waits for its commit to be
+// durable. The append goroutine writes that HardState before any later
+// snapshot, so the wait never meets a snapshot install waiting on apply.
 func (n *Raft) runApply() {
 	defer close(n.applyDoneC)
 	for {
-		entries, ok := n.applyQ.pop()
+		b, ok := n.applyQ.pop()
 		if !ok {
 			return
 		}
-		n.applyBatch(entries, nil)
+		if k := len(b.entries); k > 0 && !n.durable.wait(b.entries[k-1].GetIndex()) {
+			n.applyQ.done()
+			return
+		}
+		n.applyConfChanges(b.entries)
+		// Raft hears the batch is applied (its MsgStorageApplyResp) after
+		// the apply and before anything observes "applied":
+		//
+		//   - raft's own applied index moves only on that response. The
+		//     applied broadcast wakes waiters that may propose next (a
+		//     membership change proposes the next conf change the moment
+		//     the previous one shows in the configuration), and raft
+		//     silently drops a conf change proposed while its applied index
+		//     has not passed the previous one. Firing the broadcast first
+		//     let exactly that happen (a CI hang, 2026-09-05).
+		//   - raft's storage contract forbids compacting past raft's own
+		//     applied index; prepareCompaction below works from the durable
+		//     applied index.
+		n.applyBatch(b.entries, func() { n.deliver(b.responses) })
 		n.prepareCompaction()
 		n.applyQ.done()
 	}
 }
 
-// applyBatch applies one Ready's committed entries and announces them:
+// applyBatch applies one batch of committed entries and announces them:
 // waiters, the applied broadcast, metrics, the storage invariant. advance,
-// when set, runs after the apply and before the announcements (the in-step
-// path's node.Advance).
+// when set, runs after the apply and before the announcements (it tells
+// raft the batch is applied).
 //
 // Apply errors are crash-fatal: continuing past a half-applied entry diverges
 // the state machine, retrying risks masking programming bugs, and disk
@@ -1412,6 +1492,7 @@ func (n *Raft) ApplyBacklog() uint64 {
 // also fatal; a half-applied snapshot leaves the node in a hybrid
 // state that is worse than crashing and letting an operator rebuild.
 func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
+	before := n.storage.MemberPeerURLs()
 	if err := n.storage.RestoreSnapshot(snap); err != nil {
 		n.logger.Fatal("restore snapshot failed",
 			zap.Uint64("snapIndex", snap.Metadata.GetIndex()),
@@ -1419,16 +1500,33 @@ func (n *Raft) processSnapshot(snap *raftpb.Snapshot) {
 			zap.Error(err),
 		)
 	}
+	n.adoptSnapshotIdentity()
 	// The snapshot restored the (ids-only) ConfState into raft and swapped in the
 	// snapshot's bbolt — which carries the durable peer-URL bucket. Reconcile the
 	// transport from it so a node caught up via InstallSnapshot is connected to
 	// every current member, including ones added while it was lagging (whose live
 	// AddPeer it never saw). Mirrors the restart-path reconcile.
 	n.reconcileTransportFromMembership()
+	// Members this node knew that the snapshot's configuration no longer has
+	// were removed while it lagged; stop dialing them.
+	cs := snap.GetMetadata().GetConfState()
+	for id := range before {
+		if id != n.id && !confStateHas(cs, id) {
+			n.transport.RemovePeer(id)
+		}
+	}
+	n.refreshRemoved()
 }
 
 type httpTransportRaft struct {
 	node raft.Node
+	// isMember answers the transport's MembershipView question; isRemoved
+	// its IsIDRemoved.
+	isMember  func(uint64) bool
+	isRemoved func(uint64) bool
+	// identity is the node's cluster identity, exposed to the transport
+	// (ClusterIdentifier).
+	*identity
 	// lastIndex exposes the raft log's last index for the rewound-member
 	// guard below — a narrow view of Storage so the guard is testable with a
 	// one-method stub.
@@ -1465,6 +1563,12 @@ type httpTransportRaft struct {
 // guard rather than fatal-ing on a read; the library panic remains the
 // backstop.
 func (n *httpTransportRaft) Process(ctx context.Context, m *raftpb.Message) error {
+	// A node's own local messages — its storage writes' acknowledgements
+	// above all — never travel between nodes; one arriving from a peer is
+	// refused rather than stepped.
+	if raft.IsLocalMsg(m.GetType()) || raft.IsLocalMsgTarget(m.GetFrom()) {
+		return fmt.Errorf("local raft message %v from the network", m.GetType())
+	}
 	if m.GetType() == raftpb.MsgHeartbeat {
 		if li, err := n.lastIndex.LastIndex(); err == nil && m.GetCommit() > li {
 			n.logger.Fatal(
@@ -1482,8 +1586,44 @@ func (n *httpTransportRaft) Process(ctx context.Context, m *raftpb.Message) erro
 	}
 	return n.node.Step(ctx, m)
 }
-func (n *httpTransportRaft) IsIDRemoved(id uint64) bool  { return false }
+func (n *httpTransportRaft) IsIDRemoved(id uint64) bool { return n.isRemoved(id) }
+
+// IsMember implements MembershipView.
+func (n *httpTransportRaft) IsMember(id uint64) bool     { return n.isMember(id) }
 func (n *httpTransportRaft) ReportUnreachable(id uint64) { n.node.ReportUnreachable(id) }
 func (n *httpTransportRaft) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 	n.node.ReportSnapshot(id, status)
+}
+
+// applyAgreedAddress applies an UpdateNode carrying a member's agreed peer
+// address: it overwrites the recorded address and points the transport at it.
+// An UpdateNode for a node that isn't a member (stale, or for a removed node)
+// is ignored, so it can't re-record a removed node's address.
+func (n *Raft) applyAgreedAddress(cs *raftpb.ConfState, id uint64, ccCtx []byte) {
+	if len(ccCtx) == 0 || !confStateHas(cs, id) {
+		return
+	}
+	peerURL, err := cluster.CanonicalPeerURL(string(ccCtx))
+	if err != nil {
+		n.logger.Error("ignoring an agreed peer address that does not parse", zap.Uint64("member", id), zap.Error(err))
+		return
+	}
+	n.persistPeerURLOrFatal(id, []byte(peerURL))
+	if id == n.id {
+		return
+	}
+	if err := n.transport.SetPeerAddress(id, peerURL, PeerAddressFromAgreed); err != nil {
+		n.logger.Error("applying an agreed peer address", zap.Uint64("member", id), zap.Error(err))
+	}
+}
+
+func confStateHas(cs *raftpb.ConfState, id uint64) bool {
+	for _, set := range [][]uint64{cs.GetVoters(), cs.GetLearners(), cs.GetVotersOutgoing(), cs.GetLearnersNext()} {
+		for _, v := range set {
+			if v == id {
+				return true
+			}
+		}
+	}
+	return false
 }

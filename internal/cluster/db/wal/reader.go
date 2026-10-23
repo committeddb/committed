@@ -100,10 +100,8 @@ func userTopicEntities(entities []*cluster.Entity) []*cluster.Entity {
 	return filtered
 }
 
-// ErrActualNotFound is returned by ActualAt when no committed Actual exists
-// at the requested raft index (it was never committed, has been scrubbed, or
-// the entry there carries no proposal data).
-var ErrActualNotFound = errors.New("wal: no committed entry at raft index")
+// ErrActualNotFound is db.ErrActualNotFound, the engine's name for it.
+var ErrActualNotFound = db.ErrActualNotFound
 
 // ActualAt returns the committed Actual at raft index, read straight from the
 // permanent event log. It binary-searches the log by raft index (the event log

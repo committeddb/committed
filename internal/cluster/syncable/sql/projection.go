@@ -6,8 +6,9 @@ import (
 	gosql "database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
+	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 
@@ -41,12 +42,25 @@ type Projection struct {
 	// (never by tests constructing directly — those exercise stages via
 	// their own tempdir or not at all).
 	storeDir string
-	// stages/stageStore are the compiled stage graph and its state, set at
-	// Init when the config declares stages. stageSinks routes stage deltas
-	// to the table sources consuming each stage (from = "<stage>").
+	// stages is the compiled stage graph, set at Init when the config
+	// declares stages; stageStore is its state, opened on first use (see
+	// store). stageSinks routes stage deltas to the table sources
+	// consuming each stage (from = "<stage>").
 	stages     *stages.Graph
+	storeMu    sync.Mutex
 	stageStore *stagestore.Store
 	stageSinks map[string][]*projectionSource
+	// topicFed is set when a table source reads a topic directly. A stage-fed
+	// source also sits in sources (under the empty topic, so Close reaches its
+	// statements), so sources being non-empty does not say this.
+	topicFed bool
+	// batchWrites is set when a batch's row writes can go out as multi-row
+	// upserts: the one table source reads a stage, so the batch drain gives
+	// each key at most one write, and nothing else writes the table in
+	// between (no row owner or decorators, no lookup enrichment, no forEach).
+	// pending holds the batch's collected rows while foldStagesBatchTx runs.
+	batchWrites bool
+	pending     *pendingWrites
 	// decorators are the non-owner stage-fed sources, in declaration order —
 	// the sources whose retained stage output a row-owner write pulls (see
 	// pullDecorations).
@@ -238,6 +252,11 @@ type projectionStmt struct {
 	// positionally aligned with rule.Set. Runtime state kept off the
 	// config struct so parsed configs stay pure data.
 	setTrackers cluster.AmbiguityTrackers
+	// multi is the rule's statement config when its batch writes go out as
+	// multi-row upserts (see Projection.batchWrites), with each row count's
+	// SQL built once; nil otherwise.
+	multi    *Config
+	multiSQL map[int]string
 }
 
 // NewProjection constructs a Projection. m may be nil (no metrics);
@@ -250,6 +269,16 @@ func NewProjection(d *DB, config *ProjectionConfig, m *metrics.Metrics, name str
 // parser in production; direct constructors (tests, embedders) set it
 // before Init when their config declares stages.
 func (p *Projection) SetStoreDir(dir string) { p.storeDir = dir }
+
+// SetEntityReader implements cluster.EntityReaderAware: with the engine's
+// reader, the stages keep their topic inputs as pointers into the log
+// rather than copies, and read them back when a refold needs them. The
+// engine sets it after Init, before the worker's first fold.
+func (p *Projection) SetEntityReader(r cluster.EntityReader) {
+	if p.stages != nil {
+		p.stages.Log = r
+	}
+}
 
 // projectionIdentity is the SyncableIdentity of a projection config — its source
 // topics, database, and table. It makes the projection's checkpoint meaningful; a
@@ -308,12 +337,9 @@ func (p *Projection) Teardown(keep bool) (bool, error) {
 	// bytes and SUPPRESS every table delta — an empty rebuilt table,
 	// silently (the SyncBatch bug's sibling, via the rebuild door).
 	if len(p.config.Stages) > 0 {
-		if p.stageStore != nil {
-			_ = p.stageStore.Close()
-			p.stageStore = nil
-		}
+		_ = p.closeStore()
 		if p.storeDir != "" {
-			if err := os.Remove(stagestore.FilePath(p.storeDir, p.name)); err != nil && !os.IsNotExist(err) {
+			if err := stagestore.Remove(p.storeDir, p.name); err != nil {
 				return false, fmt.Errorf("teardown stage store: %w", err)
 			}
 		}
@@ -422,15 +448,9 @@ func (p *Projection) Init() error {
 		if p.storeDir == "" {
 			return fmt.Errorf("this projection declares stages but no stage-store directory is configured (storeDir is threaded from the node's data dir; direct constructions must set it)")
 		}
-		store, reset, err := stagestore.Open(p.storeDir, p.name, stageFingerprint(p.config))
-		if err != nil {
+		var err error
+		if p.stages, err = stageGraph(p.config); err != nil {
 			return err
-		}
-		p.stageStore = store
-		p.stages = stages.BuildGraph(p.config.Stages)
-		if reset {
-			zap.L().Warn("stage store reset — stage state re-derives as the log replays; pair stage-definition changes with a rebuild so replay starts from index 0",
-				zap.String("syncable", p.name), zap.String("path", store.Path()))
 		}
 	}
 
@@ -462,6 +482,8 @@ func (p *Projection) Init() error {
 		// under the empty key too so Close reaches its statements.
 		if src.FromStage != "" {
 			p.stageSinks[src.FromStage] = append(p.stageSinks[src.FromStage], ps)
+		} else {
+			p.topicFed = true
 		}
 		if ps.updateOnly {
 			p.decorators = append(p.decorators, ps)
@@ -586,6 +608,8 @@ func (p *Projection) Init() error {
 			}
 		}
 	}
+
+	p.enableBatchWrites()
 
 	// Shared row-delete (onDelete=delete-row, and any RTBF delete on such a topic).
 	deleteString := p.dialect.CreateDeleteSQL(ddlConfig)
@@ -760,8 +784,13 @@ func (p *Projection) Sync(ctx context.Context, a *cluster.Actual) (cluster.Shoul
 	// between the two leaves the store BEHIND, so the refold re-fires
 	// every delta and the sink re-applies idempotently.
 	if p.stages != nil {
+		store, err := p.store()
+		if err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
 		committed := false
-		err := p.stageStore.Update(func(stx *stagestore.Tx) error {
+		err = store.Update(func(stx *stagestore.Tx) error {
 			if err := p.foldStagesTx(ctx, tx, stx, a); err != nil {
 				return err
 			}
@@ -822,9 +851,14 @@ func (p *Projection) SyncBatch(ctx context.Context, as []*cluster.Actual) (bool,
 	// Staged path: same commit ordering as Sync — SQL inside the store tx —
 	// with one store transaction covering the whole batch.
 	if p.stages != nil {
+		store, err := p.store()
+		if err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
 		committed := false
-		berr := p.stageStore.Update(func(stx *stagestore.Tx) error {
-			if len(p.sources) == 0 {
+		berr := store.Update(func(stx *stagestore.Tx) error {
+			if !p.topicFed {
 				// Every table source reads a stage: fold the batch and
 				// drain once, so a key the batch touches many times
 				// refolds once (see stages.Graph.FoldActuals). With
@@ -1183,6 +1217,10 @@ func (p *Projection) applyRowFold(ctx context.Context, tx *gosql.Tx, src *projec
 			args = append(args, keys...)
 		} else {
 			args = p.dialect.BindArgs(values)
+		}
+		if p.pending != nil && r.multi != nil {
+			p.pending.add(r, values[:len(keys)], values)
+			continue
 		}
 		if _, err := tx.StmtContext(ctx, r.Stmt).ExecContext(ctx, args...); err != nil {
 			// Same NUL hint as the plain sink's row apply: name the offending
@@ -1576,10 +1614,149 @@ func (p *Projection) foldStagesBatchTx(ctx context.Context, tx *gosql.Tx, stx *s
 		return nil
 	}
 	defer func() { p.stages.OnDelta = nil }()
+	if p.batchWrites {
+		p.pending = &pendingWrites{}
+		defer func() { p.pending = nil }()
+	}
 	if err := p.stages.FoldActuals(stx, as); err != nil {
 		return err
 	}
+	if err := p.flushPending(ctx, tx); err != nil {
+		return err
+	}
 	return stx.SetFrontier(as[len(as)-1].Index)
+}
+
+// enableBatchWrites decides batchWrites (see the field) once the sources are
+// prepared, and gives each eligible rule its statement config.
+func (p *Projection) enableBatchWrites() {
+	if p.stages == nil || p.topicFed || len(p.config.Sources) != 1 || len(p.decorators) > 0 {
+		return
+	}
+	src := p.config.Sources[0]
+	if src.RowOwner || src.ForEach != "" {
+		return
+	}
+	pss := p.stageSinks[src.FromStage]
+	if len(pss) != 1 {
+		return
+	}
+	for _, r := range pss[0].rules {
+		if len(p.config.ruleEnrichments(r.rule)) > 0 {
+			return
+		}
+	}
+	for _, r := range pss[0].rules {
+		r.multi = p.config.ruleConfig(r.rule)
+		r.multiSQL = map[int]string{}
+	}
+	p.batchWrites = true
+}
+
+// pendingWrites is one batch's collected row upserts, per rule in the order
+// each rule first wrote. A later write to a key a rule already holds replaces
+// it in place, as executing both in turn would.
+type pendingWrites struct {
+	rules []*projectionStmt
+	rows  map[*projectionStmt]*pendingRows
+}
+
+type pendingRows struct {
+	at   map[string]int // key rendering -> index in values
+	vals [][]any
+}
+
+func (w *pendingWrites) add(r *projectionStmt, keys, values []any) {
+	if w.rows == nil {
+		w.rows = map[*projectionStmt]*pendingRows{}
+	}
+	pr := w.rows[r]
+	if pr == nil {
+		pr = &pendingRows{at: map[string]int{}}
+		w.rows[r] = pr
+		w.rules = append(w.rules, r)
+	}
+	var kb strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&kb, "%T:%v\x00", k, k)
+	}
+	row := append([]any(nil), values...)
+	if i, ok := pr.at[kb.String()]; ok {
+		pr.vals[i] = row
+		return
+	}
+	pr.at[kb.String()] = len(pr.vals)
+	pr.vals = append(pr.vals, row)
+}
+
+// maxMultiRowParams bounds one multi-row statement's placeholders, under the
+// 65535 both PostgreSQL and MySQL accept.
+const maxMultiRowParams = 60000
+
+// flushPending executes the collected rows, each rule's in multi-row
+// statements, and empties the collection. A no-op outside a batch fold.
+func (p *Projection) flushPending(ctx context.Context, tx *gosql.Tx) error {
+	w := p.pending
+	if w == nil || len(w.rules) == 0 {
+		return nil
+	}
+	for _, r := range w.rules {
+		rows := w.rows[r].vals
+		per := max(1, maxMultiRowParams/len(r.multi.Mappings))
+		for len(rows) > 0 {
+			n := min(len(rows), per)
+			sqlString, ok := r.multiSQL[n]
+			if !ok {
+				sqlString = p.dialect.CreateMultiRowUpsertSQL(r.multi, n)
+				r.multiSQL[n] = sqlString
+			}
+			args := make([]any, 0, n*len(r.multi.Mappings))
+			for _, row := range rows[:n] {
+				args = append(args, row...)
+			}
+			if _, err := tx.ExecContext(ctx, sqlString, args...); err != nil {
+				return execFailure(fmt.Sprintf("[projection.apply] exec %d-row upsert for rule [%s]", n, r.SQL), err, p.dialect.IsPermanent(err))
+			}
+			rows = rows[n:]
+		}
+	}
+	p.pending = &pendingWrites{}
+	return nil
+}
+
+// store returns the stage store, opening it on first use. Init does not
+// open it: a config is also parsed to validate it (a POST, a dry run) while
+// its worker runs, and that parse must not touch the worker's state —
+// which is also why the store is opened by name only by the instance that
+// uses it.
+func (p *Projection) store() (*stagestore.Store, error) {
+	p.storeMu.Lock()
+	defer p.storeMu.Unlock()
+	if p.stageStore != nil {
+		return p.stageStore, nil
+	}
+	store, reset, err := stagestore.Open(p.storeDir, p.name, stageFingerprint(p.config))
+	if err != nil {
+		return nil, err
+	}
+	if reset {
+		zap.L().Warn("stage store reset — stage state re-derives as the log replays; pair stage-definition changes with a rebuild so replay starts from index 0",
+			zap.String("syncable", p.name), zap.String("path", store.Path()))
+	}
+	p.stageStore = store
+	return store, nil
+}
+
+// closeStore closes the stage store if it is open.
+func (p *Projection) closeStore() error {
+	p.storeMu.Lock()
+	defer p.storeMu.Unlock()
+	if p.stageStore == nil {
+		return nil
+	}
+	err := p.stageStore.Close()
+	p.stageStore = nil
+	return err
 }
 
 // StageStats implements cluster.StageIntrospector: each declared stage's
@@ -1588,9 +1765,13 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 	if p.stages == nil {
 		return nil, nil
 	}
+	store, err := p.store()
+	if err != nil {
+		return nil, err
+	}
 	flows := p.stages.FlowCounts()
 	out := make(map[string]cluster.StageStat, len(p.config.Stages))
-	err := p.stageStore.View(func(tx *stagestore.Tx) error {
+	err = store.View(func(tx *stagestore.Tx) error {
 		for i := range p.config.Stages {
 			name := p.config.Stages[i].Name
 			n, err := tx.OutKeyCount(name)
@@ -1599,7 +1780,7 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 			}
 			fc := flows[name]
 			out[name] = cluster.StageStat{
-				Keys: n, Inputs: fc.Inputs, InputsBySource: fc.InputsBySource, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, HavingRejected: fc.HavingRejected,
+				Keys: n, Inputs: fc.Inputs, InputsBySource: fc.InputsBySource, Fanned: fc.Fanned, UnkeyedDeletes: fc.UnkeyedDeletes, ScrubbedInputs: fc.ScrubbedInputs, HavingRejected: fc.HavingRejected,
 				WindowRowsRecomputed: fc.WindowRowsRecomputed, WindowLargestPartition: fc.WindowLargestPartition,
 				Joins: joinStats(fc.Joins),
 			}
@@ -1638,8 +1819,12 @@ func (p *Projection) StageKeyExists(stage string, keyParts []string) (bool, erro
 	if err != nil || !ok {
 		return false, err
 	}
+	store, err := p.store()
+	if err != nil {
+		return false, err
+	}
 	var exists bool
-	err = p.stageStore.View(func(tx *stagestore.Tx) error {
+	err = store.View(func(tx *stagestore.Tx) error {
 		v, err := tx.GetOut(stage, []byte(key))
 		exists = v != nil
 		return err
@@ -1652,7 +1837,11 @@ func (p *Projection) StageFrontier() (uint64, bool, error) {
 	if p.stages == nil {
 		return 0, false, nil
 	}
-	f, err := p.stageStore.Frontier()
+	store, err := p.store()
+	if err != nil {
+		return 0, true, err
+	}
+	f, err := store.Frontier()
 	return f, true, err
 }
 
@@ -1664,7 +1853,11 @@ func (p *Projection) FoldStagesOnly(as []*cluster.Actual) error {
 	if len(as) == 0 {
 		return nil
 	}
-	return p.stageStore.Update(func(stx *stagestore.Tx) error {
+	store, err := p.store()
+	if err != nil {
+		return err
+	}
+	return store.Update(func(stx *stagestore.Tx) error {
 		if err := p.stages.FoldActuals(stx, as); err != nil {
 			return err
 		}
@@ -1708,6 +1901,10 @@ func (p *Projection) applyStageDelta(ctx context.Context, tx *gosql.Tx, stx *sta
 		live = false
 	}
 	if !live {
+		// A delete or clear must follow every write collected before it.
+		if err := p.flushPending(ctx, tx); err != nil {
+			return err
+		}
 		switch src.onDelete {
 		case onDeleteIgnore:
 			return nil
@@ -1980,10 +2177,8 @@ func (p *Projection) Close() error {
 			}
 		}
 	}
-	if p.stageStore != nil {
-		if cerr := p.stageStore.Close(); err == nil {
-			err = cerr
-		}
+	if cerr := p.closeStore(); err == nil {
+		err = cerr
 	}
 	for _, list := range p.sources {
 		for _, src := range list {

@@ -21,7 +21,6 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/interpretation"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
@@ -75,6 +74,19 @@ var (
 	// Rides along in snapshots (bbolt is serialized whole into CreateSnapshot).
 	// See member_peer_url.go and raft.applyConfChange / reconcileTransport.
 	memberPeerURLBucket = []byte("memberPeerURLs")
+	// clusterIdentityBucket holds the replicated copy of the cluster id (one
+	// key). The authoritative copy is node-local (<dataDir>/cluster-id, see
+	// node_identity.go); this one rides snapshots so a member that has no
+	// local id yet — a joiner — can check the one it adopted against it. See
+	// db/cluster_identity.go.
+	clusterIdentityBucket = []byte("clusterIdentity")
+	// removedMemberBucket maps a raft node id (8 big-endian bytes) to the log
+	// index of the conf change that first removed it, and membershipGuardBucket
+	// holds the index of the marker that switched on the apply-time membership
+	// guard. Both are written in the conf-change pass and ride snapshots. See
+	// membership_guard.go and db/membership_guard.go.
+	removedMemberBucket   = []byte("removedMembers")
+	membershipGuardBucket = []byte("membershipGuard")
 	// memberVersionBucket maps a raft node id (8 big-endian bytes, the key
 	// cluster.NodeVersionKey produces) to a marshaled cluster.NodeVersion — the
 	// node's self-announced cluster feature level. Entity-driven (written from
@@ -223,6 +235,8 @@ var internalEntities = []internalEntity{
 	{cluster.IsNodeAPIURL, "handleNodeAPIURL", memberAPIURLBucket, (*Storage).handleNodeAPIURL},
 	{cluster.IsNodeVersion, "handleNodeVersion", memberVersionBucket, (*Storage).handleNodeVersion},
 	{cluster.IsNodeZone, "handleNodeZone", memberZoneBucket, (*Storage).handleNodeZone},
+	{cluster.IsClusterIdentity, "handleClusterIdentity", clusterIdentityBucket, (*Storage).handleClusterIdentity},
+	{cluster.IsNodeIncarnation, "handleNodeIncarnation", memberIncarnationBucket, (*Storage).handleNodeIncarnation},
 }
 
 // buckets is every bbolt bucket Open must create: one per internal entity type
@@ -234,8 +248,20 @@ var buckets = func() [][]byte {
 		bs = append(bs, ie.bucket)
 	}
 	return append(bs, ingestSourceSeqBucket, ingestOrderBucket, appliedIndexBucket, confStateBucket, eventTombstoneBucket, topicRefreshEpochBucket, memberPeerURLBucket, typeMigrationEditBucket,
-		typeOnSupersedeBucket, scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket)
+		typeOnSupersedeBucket, scrubHistoryBucket, unhashedDeleteBucket, syncableCreateIndexBucket, removedMemberBucket, membershipGuardBucket)
 }()
+
+// createBuckets creates every bucket in buckets that tx's database lacks: at
+// Open, and after a snapshot install, whose database may come from a release
+// that predates some of them.
+func createBuckets(tx *bolt.Tx) error {
+	for _, bucket := range buckets {
+		if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+	}
+	return nil
+}
 
 type StateType int
 
@@ -250,6 +276,10 @@ type State struct {
 }
 
 type Storage struct {
+	// rootDir is the node data directory; node-local identity files live at
+	// its top level (node_identity.go), outside the metadata db a snapshot
+	// install replaces.
+	rootDir string
 	// raftLogDir is the on-disk directory tidwall/wal writes entry-log
 	// segments into. Kept around so RaftLogApproxSize can stat the
 	// segment files without poking through tidwall's internals.
@@ -258,10 +288,13 @@ type Storage struct {
 	// (an in-place snapshot install) replaces the whole log with a fresh one.
 	// entry() — the read chokepoint raft's node.run goroutine hits via
 	// Entries/Term — takes it for read; the swap takes it for write. Writers
-	// (appendEntries, Compact) run on the same serveChannels goroutine as the
-	// swap, so they cannot race it and stay lock-free.
+	// (appendEntries, Compact) run on the same goroutine as the swap (raft's
+	// append goroutine), so they cannot race it and stay lock-free.
 	entryMu  sync.RWMutex
 	EntryLog *wal.Log
+	// entryCache serves raft's reads of the log's newest entries from memory
+	// (see entryCache).
+	entryCache entryCache
 	// entryLogEpoch counts the times the entry log's files changed under a
 	// reader in a way it cannot see: replaced whole (a snapshot install's
 	// cut-over) or truncated from the back (a follower's log conflict). A
@@ -285,14 +318,14 @@ type Storage struct {
 	// Production append composition. eventAppendMu serializes a complete batch
 	// and precedes eventMu; the latter excludes native scrub/fetch handle swaps.
 	eventAppendMu sync.Mutex
+	// eventRewriteMu precedes eventAppendMu. A shared scrub holds it across
+	// its rewrite after releasing eventAppendMu, so applied events keep
+	// flowing; catch-up's reset, generation adoption, fetched appends and
+	// generation reclamation take it to wait for that rewrite instead.
+	eventRewriteMu sync.Mutex
 	// eventLogDir is the on-disk directory for eventLog (<datadir>/events).
-	// The scrubber rewrites the event log by building a sibling directory and
-	// renaming it over this one, so it needs the path (tidwall/wal doesn't
-	// expose it). Set once in Open and never changed.
+	// Set once in Open and never changed.
 	eventLogDir string
-	// eventOpenOptions preserves backend configuration across startup, scrub,
-	// reset, and peer adoption. Set once in Open.
-	eventOpenOptions tidwall.LegacyOptions
 	// eventMu guards the s.eventLog handle pointer and the on-disk events/
 	// directory identity against the scrubber's swap (close → rename → reopen),
 	// exactly mirroring how kvMu guards the bbolt handle against RestoreSnapshot.
@@ -365,11 +398,6 @@ type Storage struct {
 	// temp create/write to fail and assert the error branch removes the stray. Nil
 	// in production, where newBoltTmpPath returns a unique nanosecond-suffixed path.
 	boltTmpPathForTest func(prefix string) string
-	// scrubPostBulkHookForTest, when non-nil, is called in runScrub after the
-	// phase-A bulk copy and before the convergence/locked catch-up — the window a
-	// test uses to append late commits and prove the swap still folds them in. Nil
-	// in production.
-	scrubPostBulkHookForTest func()
 	// closeOnce makes Close idempotent: the owner (cmd/node) closes the Storage
 	// after db.Close returns, and some callers (and tests) may close it more than
 	// once, so a second Close must be a no-op rather than double-closing the
@@ -451,9 +479,9 @@ type Storage struct {
 	// reads until the reopen finishes. Without this an HTTP query that
 	// happened to run mid-restore would hit a closed-file error.
 	kvMu sync.RWMutex
-	// snapMu guards snapshot and hardState. Both are written from the
-	// raft serveChannels goroutine (Save, ConfState, CreateSnapshot,
-	// RestoreSnapshot) and read from the etcd raft node.run goroutine
+	// snapMu guards snapshot and hardState. Both are written from raft's
+	// append goroutine (Save, RestoreSnapshot) and apply goroutine
+	// (ConfState, CreateSnapshot) and read from the etcd raft node.run goroutine
 	// (Snapshot, called via raftLog.snapshot → maybeSendAppend whenever
 	// the leader needs to ship a snapshot to a lagging follower).
 	// Without serialization, the race detector flags the cross-
@@ -461,7 +489,7 @@ type Storage struct {
 	snapMu    sync.RWMutex
 	snapshot  *pb.Snapshot
 	hardState *pb.HardState
-	// firstIndex and lastIndex are mutated only from the raft serveChannels
+	// firstIndex and lastIndex are mutated only from raft's append
 	// goroutine (via appendEntries and Compact) but read from many other
 	// goroutines: sync workers (Reader.Read), ingest workers, HTTP handlers
 	// (db.ents()), and tests. Atomics make those reads race-free without
@@ -483,8 +511,8 @@ type Storage struct {
 	// away on this node's raft log (conceptually the "dummy" entry at
 	// the current wal first-seq — readable via Term for the match
 	// check, not via Entries). Zero means no compaction has happened
-	// on this storage. Mutated only from the raft serveChannels
-	// goroutine (via Compact) so single-writer atomic semantics apply.
+	// on this storage. Mutated only from raft's append goroutine (via
+	// Compact) so single-writer atomic semantics apply.
 	//
 	// Why separate from firstIndex: before this split, firstIndex was
 	// overloaded to mean BOTH the seq-mapping offset AND the compaction
@@ -508,7 +536,7 @@ type Storage struct {
 	// (getLastStates) only ever needs those two records, so appendState
 	// truncates the log to the older of the two after each write — the state
 	// log stays a handful of records instead of growing forever. Mutated only
-	// from the raft serveChannels goroutine (via Save) and Open, like
+	// from raft's append goroutine (via Save and Compact) and Open, like
 	// stateIndex.
 	lastSnapSeq      uint64
 	lastHardStateSeq uint64
@@ -584,7 +612,8 @@ type Storage struct {
 	// Ready, staged by ConfState() and flushed to confStateBucket ATOMICALLY
 	// with appliedIndex by saveAppliedIndex — so membership durability can
 	// never lag the applied index (confstate-lost-in-crash-window). Guarded by
-	// snapMu (ConfState already holds it); accessed only on the Ready loop.
+	// snapMu (ConfState already holds it); accessed only on the apply
+	// goroutine.
 	pendingConfState *pb.ConfState
 	// appliedConfState is the membership as of the latest applied conf
 	// change — what the NEXT CreateSnapshot stamps. It is kept apart from
@@ -610,7 +639,7 @@ type Storage struct {
 	// behind. firstEventIndex is maintained for Open recovery and diagnostics
 	// — stamped on the first append, and recomputed from the first surviving
 	// entry after a scrub rewrite (which can raise it past 1). Mutated only
-	// from the serveChannels goroutine (first write) and the scrub worker
+	// from raft's apply goroutine (first write) and the scrub worker
 	// (under eventMu.Lock), so the atomic is for race-free reads, not CAS.
 	firstEventIndex atomic.Uint64
 	// dataEventIndex is the highest raft index of a user-topic-DATA entry
@@ -626,7 +655,7 @@ type Storage struct {
 	//
 	// Bumped in ApplyCommitted with the same IsInternal filter the reader
 	// uses, so the two agree by construction. Monotonic (entries apply in
-	// index order). Mutated only from the serveChannels goroutine
+	// index order). Mutated only from raft's apply goroutine
 	// (ApplyCommitted) and Open; the atomic is for race-free reads from the
 	// HTTP status path on other goroutines, not CAS.
 	dataEventIndex atomic.Uint64
@@ -670,18 +699,11 @@ type Storage struct {
 	// wires db.notifyLost here (via SetLostNotifier) so blocking
 	// db.Propose waiters get the definitive ErrProposalLost. nil disables
 	// detection. Single-writer: set once at Open (WithLostCallback) or by
-	// SetLostNotifier before the raft serveChannels goroutine — the sole
+	// SetLostNotifier before raft's append goroutine — the sole
 	// appendEntries caller — starts, so reads in appendEntries need no
 	// lock. See SetLostNotifier.
 	lostCallback func([]uint64)
 }
-
-// DefaultEventCacheSegments is the default number of event-log segments held
-// parsed in memory (see WithEventCacheSegments). 16 ≈ up to ~340MB fully
-// resident — sized so the default is comfortable on a small (2GB) box, while
-// production deployments with many concurrent syncable readers raise it via
-// COMMITTED_EVENT_CACHE_SEGMENTS to fit their RAM.
-const DefaultEventCacheSegments = 16
 
 // openLog opens one of a node's Raft logs, turning tidwall's opaque
 // ErrCorrupt ("log corrupt") into an actionable ErrCorruptEntry: it records the
@@ -692,17 +714,6 @@ const DefaultEventCacheSegments = 16
 func openLog(dir, logName string, m *metrics.Metrics, walOpts *wal.Options) (*wal.Log, error) {
 	lg, err := wal.Open(dir, walOpts)
 	return lg, logOpenError(dir, logName, m, err)
-}
-
-func openEventLog(dir string, m *metrics.Metrics, opts tidwall.LegacyOptions) (*eventLogBinding, error) {
-	if err := rejectSegmentedEventDirectory(dir); err != nil {
-		return nil, err
-	}
-	lg, err := tidwall.OpenLegacy(dir, opts)
-	if err != nil {
-		return nil, logOpenError(dir, "event_log", m, err)
-	}
-	return bindLegacyEventLog(lg, m), nil
 }
 
 // logOpenError keeps operator diagnostics and metrics above the backend.
@@ -728,7 +739,7 @@ func Open(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<-
 
 // openStorage shares the node startup path with backend integration tests.
 // An explicit factory is used by backend integration tests. Public Open selects
-// the configured factory, defaulting to native tidwall.
+// the configured factory, defaulting to the segmented engine.
 func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest chan<- *db.IngestableWithID, openEvents eventLogOpener, opts ...Option) (*Storage, error) {
 	var cfg options
 	for _, opt := range opts {
@@ -738,7 +749,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 	if openEvents == nil {
 		openEvents = cfg.eventLogOpener
 		if openEvents == nil {
-			openEvents = openEventLog
+			openEvents = segmentedEventLogOpener(segmentedLogOptions())
 		}
 	}
 	entryLogDir := datadir.EntryLogDir(dir)
@@ -749,7 +760,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 	// Take the node's exclusive bbolt lock FIRST, before any recovery
 	// mutation below (the scrub-dir rollback, the discard sweep, the log
 	// opens' own healing of .SEAL/compression leftovers). Offline
-	// maintenance — backup, wal repair, wal decompress — holds this same
+	// maintenance — backup, wal repair, wal convert — holds this same
 	// lock via datadir.LockStoppedNode*, so acquiring it before touching
 	// anything means a node racing a held maintenance lock fails HERE,
 	// loudly, having mutated nothing: without this ordering the node would
@@ -838,26 +849,7 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		}
 	}()
 
-	// The event log gets a configurable segment cache (its readers — syncables
-	// replaying history — are concurrent, one resident segment each; see
-	// WithEventCacheSegments). The entry/state logs keep the library default:
-	// their reader is the single sequential Ready loop.
-	cacheSegments := cfg.eventCacheSegments
-	if cacheSegments <= 0 {
-		cacheSegments = DefaultEventCacheSegments
-	}
-	// Sealed segments compress at rest (zstd L3, ~7-9x on JSON event
-	// payloads); the active tail stays plain and the write path never
-	// compresses — the background sealer (sealer.go) does, off the Ready
-	// loop. Reads decompress inside the segment-load path, so the cache
-	// still holds decompressed tables and its RAM sizing is unchanged.
-	// Downgrade door: `committed wal decompress` (offline) rewrites the
-	// plain format for pre-0.8.0 binaries.
-	eventOpenOptions := tidwall.LegacyOptions{
-		SegmentCacheSize: cacheSegments,
-		SegmentSize:      cfg.eventSegmentSize,
-	}
-	eventLog, err := openEvents(eventLogDir, cfg.metrics, eventOpenOptions)
+	eventLog, err := openEvents(eventLogDir, cfg.metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -883,27 +875,9 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 		return nil, fmt.Errorf("sweep orphaned bbolt temp files: %w", err)
 	}
 
-	err = keyValueStorage.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range buckets {
-			_, err := tx.CreateBucketIfNotExists(bucket)
-			if err != nil {
-				return fmt.Errorf("create bucket: %s", err)
-			}
-		}
-
-		return nil
-	})
+	err = keyValueStorage.Update(createBuckets)
 	if err != nil {
 		return nil, err
-	}
-
-	// Migrate flat key=value entries in resource buckets to the versioned
-	// nested-bucket layout. Idempotent: a no-op if already migrated.
-	err = keyValueStorage.Update(func(tx *bolt.Tx) error {
-		return migrateToVersionedBuckets(tx)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("migrate to versioned buckets: %w", err)
 	}
 
 	logger := cfg.logger
@@ -913,32 +887,32 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 
 	dbs := make(map[string]cluster.Database)
 	ws = &Storage{
-		eventLayout:      layoutLock{name: "event log", logger: logger},
-		raftLayout:       layoutLock{name: "raft entry log", logger: logger},
-		raftLogDir:       entryLogDir,
-		EntryLog:         entryLog,
-		eventLog:         eventLog,
-		eventLogDir:      eventLogDir,
-		eventOpenOptions: eventOpenOptions,
-		StateLog:         stateLog,
-		keyValueStorage:  keyValueStorage,
-		databases:        dbs,
-		parser:           p,
-		sync:             sync,
-		ingest:           ingest,
-		logger:           logger,
-		fsyncDisabled:    cfg.fsyncDisabled,
-		safeMode:         cfg.safeMode,
-		configErrors:     make(map[string]configErr),
-		metrics:          cfg.metrics,
-		lostCallback:     cfg.lostCallback,
-		scrubSignal:      make(chan struct{}, 1),
-		scrubStop:        make(chan struct{}),
-		scrubDone:        make(chan struct{}),
-		sealerStop:       make(chan struct{}),
-		sealerDone:       make(chan struct{}),
-		sealerIdle:       cfg.sealerIdleInterval,
-		closeC:           make(chan struct{}),
+		rootDir:         dir,
+		eventLayout:     layoutLock{name: "event log", logger: logger},
+		raftLayout:      layoutLock{name: "raft entry log", logger: logger},
+		raftLogDir:      entryLogDir,
+		EntryLog:        entryLog,
+		eventLog:        eventLog,
+		eventLogDir:     eventLogDir,
+		StateLog:        stateLog,
+		keyValueStorage: keyValueStorage,
+		databases:       dbs,
+		parser:          p,
+		sync:            sync,
+		ingest:          ingest,
+		logger:          logger,
+		fsyncDisabled:   cfg.fsyncDisabled,
+		safeMode:        cfg.safeMode,
+		configErrors:    make(map[string]configErr),
+		metrics:         cfg.metrics,
+		lostCallback:    cfg.lostCallback,
+		scrubSignal:     make(chan struct{}, 1),
+		scrubStop:       make(chan struct{}),
+		scrubDone:       make(chan struct{}),
+		sealerStop:      make(chan struct{}),
+		sealerDone:      make(chan struct{}),
+		sealerIdle:      cfg.sealerIdleInterval,
+		closeC:          make(chan struct{}),
 	}
 	if ws.sealerIdle <= 0 {
 		ws.sealerIdle = sealerIdleInterval
@@ -1076,13 +1050,13 @@ func openStorage(dir string, p db.Parser, sync chan<- *db.SyncableWithID, ingest
 	// node is missing, before opening database connections or spawning
 	// workers below. See validateConfigSecrets for why missing secrets
 	// are fatal while other parse errors are left to the paths below.
-	if err = ws.validateConfigSecrets(); err != nil {
-		return nil, err
-	}
-
-	err = ws.loadDatabases()
-	if err != nil {
-		return nil, err
+	if !cfg.offline {
+		if err = ws.validateConfigSecrets(); err != nil {
+			return nil, err
+		}
+		if err = ws.loadDatabases(); err != nil {
+			return nil, err
+		}
 	}
 
 	// NOTE: ingestable workers for configs applied in a previous run are
@@ -1256,8 +1230,8 @@ func (s *Storage) Close() error {
 // it (with this ConfState) to the state log via appendState, so
 // InitialState returns the correct voter set on restart.
 //
-// Called by the raft Ready loop from raft.go after each EntryConfChange
-// apply. This is the write half of the "conf state must survive across
+// Called by the apply goroutine (raft.go) for each EntryConfChange it
+// applies. This is the write half of the "conf state must survive across
 // restart" invariant; the read half is wal.Open reloading the last
 // snapshot out of stateLog.
 func (s *Storage) ConfState(c *pb.ConfState) {
@@ -1407,6 +1381,9 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 	if entryReadRaceTestHook != nil {
 		entryReadRaceTestHook()
 	}
+	if es, ok := s.entryCache.slice(lo, hi, maxSize); ok {
+		return es, nil
+	}
 
 	var es []*pb.Entry
 	logIndex := lo - firstIndex
@@ -1437,9 +1414,10 @@ func (s *Storage) Entries(lo, hi, maxSize uint64) ([]*pb.Entry, error) {
 		}
 
 		totalSize += size
-		if len(es) == 0 || totalSize <= maxSize {
-			es = append(es, e)
+		if len(es) > 0 && totalSize > maxSize {
+			break
 		}
+		es = append(es, e)
 	}
 
 	return es, nil
@@ -1566,6 +1544,9 @@ func (s *Storage) Term(i uint64) (uint64, error) {
 	if entryReadRaceTestHook != nil {
 		entryReadRaceTestHook()
 	}
+	if t, ok := s.entryCache.term(i); ok {
+		return t, nil
+	}
 
 	logIndex := i - firstIndex + 1
 	e, _, err := s.entry(logIndex)
@@ -1610,7 +1591,7 @@ func (s *Storage) Snapshot() (*pb.Snapshot, error) {
 		return &pb.Snapshot{}, nil
 	}
 	// Clone under the read lock: this runs on raft's node goroutine,
-	// concurrent with the serve loop's ConfState()/Save() writers that
+	// concurrent with the ConfState()/Save() writers that
 	// mutate or replace s.snapshot. Returning the live pointer would race.
 	return proto.Clone(s.snapshot).(*pb.Snapshot), nil
 }
@@ -1633,7 +1614,7 @@ func (s *Storage) Snapshot() (*pb.Snapshot, error) {
 // Store order: compactedUpTo is advanced BEFORE TruncateFront fires.
 // Reads from etcd raft's internal node goroutine (storage.Term during
 // leader AppendEntries construction, e.g. maybeSendAppend) race
-// against the serveChannels Compact call; if we truncated the wal
+// against the append goroutine's Compact call; if we truncated the wal
 // first, a racing Term read of an about-to-be-compacted index would
 // pass the boundary check against the stale compactedUpTo value,
 // fall through to EntryLog.Read on a seq that no longer exists, and
@@ -1677,6 +1658,7 @@ func (s *Storage) Compact(compactIndex uint64) error {
 	if err := s.EntryLog.TruncateFront(i); err != nil {
 		return err
 	}
+	s.entryCache.compactThrough(compactIndex)
 
 	return nil
 }

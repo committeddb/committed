@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
@@ -22,14 +23,16 @@ func TestSafeMode_ScrubWorkerHeld(t *testing.T) {
 	s := NewStorage(t, nil)
 	defer s.Cleanup()
 	bound := scrubHistory(t, s)
-	require.Nil(t, s.SetPendingScrubBoundForTest(bound))
 	path := s.path
 	require.Nil(t, s.closeIdempotent())
 
-	// Reopen in safe mode: the pending scrub must NOT run.
+	// Reopen in safe mode, then apply the scrub command: it must NOT run.
 	ws, err := wal.Open(path, s.parser, nil, nil, wal.WithoutFsync(), wal.WithSafeMode())
 	require.NoError(t, err)
 	safe := &StorageWrapper{ws, path, s.parser, &sync.Once{}}
+	command, err := cluster.NewScrubEntity(bound, false)
+	require.NoError(t, err)
+	saveEntity(t, command, safe, 1, safe.AppliedIndex()+1)
 
 	// The scrub worker resumes a pending bound as its very first act when it
 	// exists; give a held one ample time to prove it doesn't.

@@ -776,6 +776,10 @@ type MemoryStorage struct {
 	// in-RAM stand-in for the bbolt memberPeerURLBucket.
 	peerURLMu sync.Mutex
 	peerURLs  map[uint64]string
+	// removed and guardIndex stand in for the removed-member and
+	// membership-guard buckets (guarded by peerURLMu too).
+	removed    map[uint64]uint64
+	guardIndex uint64
 }
 
 func NewMemoryStorage() *MemoryStorage {
@@ -900,6 +904,45 @@ func (ms *MemoryStorage) DeleteMemberPeerURL(id uint64) error {
 	defer ms.peerURLMu.Unlock()
 	delete(ms.peerURLs, id)
 	return nil
+}
+
+func (ms *MemoryStorage) RecordRemovedMember(id, index uint64) error {
+	ms.peerURLMu.Lock()
+	defer ms.peerURLMu.Unlock()
+	if ms.removed == nil {
+		ms.removed = make(map[uint64]uint64)
+	}
+	if _, ok := ms.removed[id]; !ok {
+		ms.removed[id] = index
+	}
+	return nil
+}
+
+func (ms *MemoryStorage) RemovedMembers() map[uint64]uint64 {
+	ms.peerURLMu.Lock()
+	defer ms.peerURLMu.Unlock()
+	out := make(map[uint64]uint64, len(ms.removed))
+	for k, v := range ms.removed {
+		out[k] = v
+	}
+	return out
+}
+
+func (ms *MemoryStorage) SetMembershipGuardIndex(index uint64) error {
+	ms.peerURLMu.Lock()
+	defer ms.peerURLMu.Unlock()
+	if ms.guardIndex == 0 {
+		ms.guardIndex = index
+	}
+	return nil
+}
+
+func (ms *MemoryStorage) AddressesIgnoredThrough() uint64 { return 0 }
+
+func (ms *MemoryStorage) MembershipGuardIndex() (uint64, bool) {
+	ms.peerURLMu.Lock()
+	defer ms.peerURLMu.Unlock()
+	return ms.guardIndex, ms.guardIndex != 0
 }
 
 // RestoreSnapshot is a no-op. The raft_test MemoryStorage exists to

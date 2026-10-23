@@ -61,7 +61,9 @@ is not retrying, it has stopped.
   config renamed, and it resumes where it left off.
 - **A rendering-version mismatch**: the destination's rows were written by
   a different version of committed than this binary renders (the note in
-  the destination says which). Re-POSTing the same config does **not**
+  the destination says which), or the destination holds rows but has no
+  note at all (restored from a backup taken before 0.8.0, or rebuilt by
+  hand). Re-POSTing the same config does **not**
   clear this one; the message names the verb that does — `rematerialize`
   for a keyed syncable, or `DELETE` and re-POST for one that cannot
   converge in place. See

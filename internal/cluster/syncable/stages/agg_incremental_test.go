@@ -2,6 +2,7 @@ package stages
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -46,6 +47,24 @@ func corpusStages() map[string][]Stage {
 			Emit{Field: "lcol", Collect: "$.s"},
 			Emit{Field: "lcold", Collect: "$.s", Distinct: true},
 		),
+		"joined": joinedStage(
+			[]Join{
+				{Topic: "dims", On: []string{"$.ref"}, As: "d", Where: []WhenClause{{Path: "$.on", Equals: true}}},
+				{Topic: "dims", On: []string{"$.alt"}, As: "a", Optional: true},
+			},
+			Emit{Field: "c", Expr: "count(*)"},
+			Emit{Field: "sr", Expr: "sum($.d.rate)"},
+			Emit{Field: "sa", Expr: "sum($.a.rate) filter (where $.f = 'y')"},
+			Emit{Field: "names", Expr: "array_agg($.d.name order by $.o)"},
+			Emit{Field: "mx", Expr: "max($.a.name)"},
+			Emit{Field: "ls", Sum: "$.n"},
+		),
+		"anti-joined": joinedStage(
+			[]Join{{Topic: "dims", On: []string{"$.ref"}, Absent: true, Where: []WhenClause{{Path: "$.on", Equals: true}}}},
+			Emit{Field: "c", Expr: "count(*)"},
+			Emit{Field: "sn", Expr: "sum($.n)"},
+			Emit{Field: "xs", Expr: "array_agg($.x order by $.o)"},
+		),
 		"extremes": stage(
 			Emit{Field: "mn", Expr: "min($.n)"},
 			Emit{Field: "mxn", Expr: "max($.n)"},
@@ -58,14 +77,37 @@ func corpusStages() map[string][]Stage {
 	}
 }
 
+// joinedStage is corpusStages' stage with joins to the dims topic.
+func joinedStage(joins []Join, emits ...Emit) []Stage {
+	return []Stage{{
+		Name: "g", From: "rows", KeyPath: []string{"$.k"}, Reduce: "aggregate",
+		When:  []WhenClause{{Expr: "coalesce($.w, true)"}},
+		Joins: joins,
+		Emit:  emits,
+	}}
+}
+
+// corpusDim is a random dimension row: a gate the joins filter on, and
+// values with nulls and equal-but-differently-written numbers.
+func corpusDim(rng *rand.Rand) string {
+	pick := func(vals ...string) string { return vals[rng.Intn(len(vals))] }
+	return fmt.Sprintf(`{"on":%s,"rate":%s,"name":%s}`,
+		pick(`true`, `true`, `false`, `null`),
+		pick(`1`, `2.0`, `2`, `null`, `-0.5`),
+		pick(`"m"`, `"n"`, `null`, `"N"`),
+	)
+}
+
 // corpusPayload is a random input: its group k (a change rekeys it), the
-// stage gate w, and values with nulls, equal-but-differently-written
-// numbers, mixed types, and order-key ties.
+// stage gate w, join references, and values with nulls,
+// equal-but-differently-written numbers, mixed types, and order-key ties.
 func corpusPayload(rng *rand.Rand) string {
 	pick := func(vals ...string) string { return vals[rng.Intn(len(vals))] }
-	return fmt.Sprintf(`{"k":%s,"w":%s,"n":%s,"x":%s,"s":%s,"o":%s,"f":%s,"d":%s}`,
+	return fmt.Sprintf(`{"k":%s,"w":%s,"ref":%s,"alt":%s,"n":%s,"x":%s,"s":%s,"o":%s,"f":%s,"d":%s}`,
 		pick(`"g0"`, `"g1"`, `"g2"`, `"G1"`),
 		pick(`true`, `true`, `true`, `false`, `null`),
+		pick(`"d0"`, `"d1"`, `"d2"`, `"d3"`, `null`),
+		pick(`"d0"`, `"d1"`, `"d4"`, `null`),
 		pick(`1`, `2`, `2.0`, `2.50`, `-3`, `null`, `"x"`, `12345678901234567890.5`),
 		pick(`"a"`, `"b"`, `"B"`, `""`, `null`),
 		pick(`"p"`, `"q"`, `1`, `true`, `null`),
@@ -90,9 +132,7 @@ func runIncrementalCorpus(t *testing.T, sts []Stage) {
 	g := BuildGraph(sts)
 	st := g.byName["g"].def
 	require.True(t, st.incrementalAggregate())
-	store, _, err := stagestore.Open(t.TempDir(), "inc", Fingerprint(sts))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
+	store := openTestStore(t, Fingerprint(sts))
 
 	rng := rand.New(rand.NewSource(7))
 	epoch := uint64(1)
@@ -101,6 +141,17 @@ func runIncrementalCorpus(t *testing.T, sts []Stage) {
 			dirty := Dirty{}
 			for range 1 + rng.Intn(6) {
 				row := fmt.Sprintf("r%02d", rng.Intn(24))
+				if len(st.Joins) > 0 && rng.Intn(4) == 0 {
+					dim := fmt.Sprintf("d%d", rng.Intn(5))
+					if rng.Intn(4) == 0 {
+						if err := g.FoldTopicDelete(tx, "dims", []byte(dim), dirty); err != nil {
+							return err
+						}
+					} else if err := g.FoldTopicUpsert(tx, "dims", []byte(dim), decodePayload(t, corpusDim(rng)), epoch, dirty); err != nil {
+						return err
+					}
+					continue
+				}
 				switch r := rng.Intn(20); {
 				case r < 14:
 					if err := g.FoldTopicUpsert(tx, "rows", []byte(row), decodePayload(t, corpusPayload(rng)), epoch, dirty); err != nil {
@@ -134,12 +185,13 @@ func runIncrementalCorpus(t *testing.T, sts []Stage) {
 			}
 			return nil
 		}))
+		requireObjectsMatchBytes(t, store, g, st, batch)
 	}
 	n := g.byName["g"]
-	t.Logf("refolds: %d from fold state, %d in full", n.aggIncremental.Load(), n.aggFull.Load())
+	t.Logf("refolds: %d from fold state, %d in full", n.foldStateRefolds.Load(), n.fullRefolds.Load())
 	// The corpus is built to hit fallbacks (ties across renderings,
 	// removed extremes, three hot keys); it must still exercise the state.
-	require.Greater(t, n.aggIncremental.Load(), int64(100), "the corpus never exercised the fold state")
+	require.Greater(t, n.foldStateRefolds.Load(), int64(100), "the corpus never exercised the fold state")
 }
 
 // TestIncrementalAggregateRecipeShape: the event-store recipe's stage —
@@ -159,9 +211,7 @@ func TestIncrementalAggregateRecipeShape(t *testing.T) {
 	require.NoError(t, ValidateShapes(sts))
 	g := BuildGraph(sts)
 	st := g.byName["order"].def
-	store, _, err := stagestore.Open(t.TempDir(), "inc", Fingerprint(sts))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
+	store := openTestStore(t, Fingerprint(sts))
 
 	const streams, events = 4, 300
 	for v := 1; v <= events; v++ {
@@ -196,8 +246,8 @@ func TestIncrementalAggregateRecipeShape(t *testing.T) {
 		return nil
 	}))
 	n := g.byName["order"]
-	require.Equal(t, int64(streams), n.aggFull.Load(), "only each stream's first event refolds in full")
-	require.Equal(t, int64(streams*(events-1)), n.aggIncremental.Load())
+	require.Zero(t, n.fullRefolds.Load(), "a stream's first event folds from the empty state")
+	require.Equal(t, int64(streams*events), n.foldStateRefolds.Load())
 }
 
 // TestIncrementalAggregateStateMatchesRebuild: after a long random run, each
@@ -207,9 +257,7 @@ func TestIncrementalAggregateStateMatchesRebuild(t *testing.T) {
 	require.NoError(t, ValidateShapes(sts))
 	g := BuildGraph(sts)
 	st := g.byName["g"].def
-	store, _, err := stagestore.Open(t.TempDir(), "inc", Fingerprint(sts))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
+	store := openTestStore(t, Fingerprint(sts))
 
 	rng := rand.New(rand.NewSource(11))
 	for range 400 {
@@ -233,7 +281,7 @@ func TestIncrementalAggregateStateMatchesRebuild(t *testing.T) {
 			stored, err := tx.GetAcc("g", []byte(k))
 			require.NoError(t, err)
 			stored = bytes.Clone(stored)
-			_, _, err = g.refoldAggregateFull(tx, st, []byte(k))
+			_, _, _, err = g.refoldAggregateFull(tx, st, []byte(k))
 			require.NoError(t, err)
 			rebuilt, err := tx.GetAcc("g", []byte(k))
 			require.NoError(t, err)
@@ -257,9 +305,7 @@ func TestIncrementalAggregateFallbacks(t *testing.T) {
 	}}
 	require.NoError(t, ValidateShapes(sts))
 	g := BuildGraph(sts)
-	store, _, err := stagestore.Open(t.TempDir(), "inc", Fingerprint(sts))
-	require.NoError(t, err)
-	defer func() { _ = store.Close() }()
+	store := openTestStore(t, Fingerprint(sts))
 	fold := func(row, payload string) {
 		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
 			dirty := Dirty{}
@@ -283,6 +329,79 @@ func TestIncrementalAggregateFallbacks(t *testing.T) {
 		state, err := tx.GetAcc("g", []byte("a"))
 		require.NoError(t, err)
 		require.Nil(t, state, "a key the state cannot account for keeps none")
+		return nil
+	}))
+}
+
+// errRollback discards a check's writes.
+var errRollback = errors.New("rollback")
+
+// requireObjectsMatchBytes: wherever the state path hands publishOutput the
+// rendered object in place of its bytes, the object is exactly what decoding
+// the bytes yields — so consumers see what they would have decoded.
+func requireObjectsMatchBytes(t *testing.T, store *stagestore.Store, g *Graph, st *Stage, batch int) {
+	t.Helper()
+	err := store.Update(func(tx *stagestore.Tx) error {
+		for _, k := range []string{"g0", "g1", "g2"} {
+			out, obj, live, err := g.refoldAggregateFull(tx, st, []byte(k))
+			require.NoError(t, err)
+			if !live || obj == nil {
+				continue
+			}
+			want, err := DecodeObject(out)
+			require.NoError(t, err)
+			require.Equal(t, want, obj, "batch %d key %s", batch, k)
+		}
+		return errRollback
+	})
+	require.ErrorIs(t, err, errRollback)
+}
+
+// A key new in a transaction folds from the empty state only in the batch
+// it arrived in: a later batch in the same transaction (one drain per
+// Actual) finds the inputs of earlier batches outside its delta, so a key
+// without a state refolds in full there.
+func TestAddedKeyFoldsFromEmptyOnlyInItsBatch(t *testing.T) {
+	sts := []Stage{{
+		Name: "g", From: "rows", KeyPath: []string{"$.k"}, Reduce: "aggregate",
+		Emit: []Emit{{Field: "n", Expr: "count(*)"}, {Field: "mx", Expr: "max($.v)"}},
+	}}
+	require.NoError(t, ValidateShapes(sts))
+	g := BuildGraph(sts)
+	store := openTestStore(t, Fingerprint(sts))
+	batches := [][]struct{ key, payload string }{
+		{{"a", `{"k":"x","v":1}`}, {"b", `{"k":"x","v":2}`}},
+		{{"c", `{"k":"x","v":0}`}},
+	}
+	require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+		for i, rows := range batches {
+			dirty := Dirty{}
+			for _, row := range rows {
+				if err := g.FoldTopicUpsert(tx, "rows", []byte(row.key), decodePayload(t, row.payload), 0, dirty); err != nil {
+					return err
+				}
+			}
+			if err := g.Drain(tx, dirty); err != nil {
+				return err
+			}
+			if i == 0 {
+				// A state the fold could not keep (an input outside it) is
+				// dropped: the key has members and no state.
+				if err := tx.DeleteAcc("g", []byte("x")); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+		got, err := tx.GetOut("g", []byte("x"))
+		require.NoError(t, err)
+		want, live, err := g.refoldAggregate(tx, g.byName["g"].def, []byte("x"))
+		require.NoError(t, err)
+		require.True(t, live)
+		require.Equal(t, string(want), string(got))
+		require.Contains(t, string(got), `"n":3`)
 		return nil
 	}))
 }

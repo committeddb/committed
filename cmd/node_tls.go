@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
 	"net"
 	nethttp "net/http"
 	"os"
@@ -110,7 +109,8 @@ func loadPeerTLSInfo() *transport.TLSInfo {
 		// G706 false positive: the "user-controlled" values are env
 		// vars from the process operator, who already has full control
 		// over the process. Log-injection is not a coherent threat here.
-		log.Fatalf("peer mTLS: all of COMMITTED_PEER_TLS_CA_FILE, COMMITTED_PEER_TLS_CERT_FILE, COMMITTED_PEER_TLS_KEY_FILE must be set together (got CA=%q CERT=%q KEY=%q)", ca, cert, key) //nolint:gosec // G706
+		zap.L().Fatal("peer mTLS: all of COMMITTED_PEER_TLS_CA_FILE, COMMITTED_PEER_TLS_CERT_FILE, COMMITTED_PEER_TLS_KEY_FILE must be set together",
+			zap.String("ca", ca), zap.String("cert", cert), zap.String("key", key))
 	}
 	return &transport.TLSInfo{
 		TrustedCAFile: ca,

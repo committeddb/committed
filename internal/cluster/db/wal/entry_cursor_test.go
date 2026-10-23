@@ -5,85 +5,11 @@ import (
 	"io"
 	"testing"
 
-	native "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
-
-func TestEntryCursorRetainsLegacyDecode(t *testing.T) {
-	log, err := native.Open(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = log.Close() })
-	for i, id := range []uint64{10, 30, 90} {
-		if err := log.Write(uint64(i+1), frame(experimentEntry(t, id, pb.EntryNormal))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	decoded := map[uint64]*pb.Entry{}
-	calls := 0
-	raw := tidwall.NewLegacyCursor(log, func(raw []byte) (uint64, *pb.Entry, error) {
-		calls++
-		payload, err := unframe(raw)
-		if err != nil {
-			return 0, nil, err
-		}
-		entry := new(pb.Entry)
-		if err := proto.Unmarshal(payload, entry); err != nil {
-			return 0, nil, err
-		}
-		decoded[entry.GetIndex()] = entry
-		return entry.GetIndex(), entry, nil
-	})
-	var c entryCursor = &decodedEntryCursor{seek: raw.Seek, close: raw.Close}
-	defer func() { _ = c.Close() }()
-	if err := c.SeekGE(11); err != nil {
-		t.Fatal(err)
-	}
-	current, err := c.Current()
-	if err != nil || current.GetIndex() != 30 || current != decoded[30] {
-		t.Fatal("lost selected decoded entry", current, err)
-	}
-	before := calls
-	for range 3 {
-		retry, err := c.Current()
-		if err != nil || retry != current || calls != before {
-			t.Fatal("retry repeated read/decode", err, calls)
-		}
-	}
-	c.Advance()
-	next, err := c.Current()
-	if err != nil || next.GetIndex() != 90 || calls != before+1 || next != decoded[90] {
-		t.Fatal("sequential entry decoded more than once", next, calls, err)
-	}
-	c.Advance()
-	if _, err := c.Current(); !errors.Is(err, eventlog.ErrNotFound) {
-		t.Fatal(err)
-	}
-	if err := log.Write(4, frame(experimentEntry(t, 100, pb.EntryNormal))); err != nil {
-		t.Fatal(err)
-	}
-	if next, err := c.Current(); err != nil || next.GetIndex() != 100 {
-		t.Fatal(next, err)
-	}
-	exact, err := exactEntry(c, 30)
-	if err != nil || exact != decoded[30] {
-		t.Fatal("exact lookup discarded the decoded search result", exact, err)
-	}
-	if _, err := exactEntry(c, 29); !errors.Is(err, ErrActualNotFound) {
-		t.Fatal("exact lookup returned the next surviving entry", err)
-	}
-	if err := c.SeekGE(10); err != nil {
-		t.Fatal(err)
-	}
-	if first, err := c.Current(); err != nil || first.GetIndex() != 10 {
-		t.Fatal(first, err)
-	}
-}
 
 func TestEntryCursorSharedBackends(t *testing.T) {
 	for name, open := range eventLogTestBackends() {

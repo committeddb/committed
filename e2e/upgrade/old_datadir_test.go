@@ -7,6 +7,7 @@
 // synthesizing "old" bytes with the current clusterpb package can never
 // reproduce a removed field or a legacy encoding). The CURRENT binary must:
 //
+//  0. convert its tidwall event log (`wal convert`, the 0.8.3 upgrade step);
 //  1. boot over it and serve /ready (open the old WAL, bbolt, raft state);
 //  2. replay the WHOLE old log through a syncable (a webhook sink receives
 //     every seeded entity — decode of every era's bytes, upserts and the
@@ -24,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -96,6 +98,9 @@ func runOldDataDirEra(t *testing.T, bin string, era fixtureEra) {
 	port := freePort(t)
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 
+	// 0. The upgrade step: every era wrote a tidwall event log.
+	runOrFail(t, bin, "wal", "convert", "--data", dataDir)
+
 	// 1. The current binary boots over the old-binary-written dir.
 	node := startNode(t, bin, dataDir, port)
 	t.Cleanup(func() { node.stopGraceful(t, base) })
@@ -119,32 +124,83 @@ func runOldDataDirEra(t *testing.T, bin string, era fixtureEra) {
 	// scrubber (physical removal of the deleted subject's upsert).
 	postScrub(t, base)
 
-	// The scrub is proven by a FRESH syncable's replay of the rewritten log:
-	// the erased subject's upsert is gone while every survivor still decodes
-	// and arrives. Poll by re-POSTing under new ids — the scrub completes in
-	// the background, so an early replay may still see the upsert.
-	deadline := time.Now().Add(60 * time.Second)
-	for attempt := 0; ; attempt++ {
-		verify := newWebhookSink()
-		id := fmt.Sprintf("era-verify-%d", attempt)
-		postWebhookSyncable(t, base, id, "movie", verify.srv.URL)
-		verify.awaitKeys(t, "upsert", "mv1", "mv2", "mv3", "mv4")
-		if !verify.sawUpsert("subject-erased") {
-			verify.srv.Close()
-			break
-		}
-		verify.srv.Close()
-		if time.Now().After(deadline) {
-			t.Fatal("the scrub never removed the erased subject's upsert from the old-era log")
-		}
-		time.Sleep(2 * time.Second)
-	}
+	awaitErased(t, base, "era-verify", "mv1", "mv2", "mv3", "mv4")
 
 	// 4. Restart over the rewritten dir: the post-scrub log reopens cleanly.
 	node.stopGraceful(t, base)
 	second := startNode(t, bin, dataDir, port)
 	t.Cleanup(func() { second.stopGraceful(t, base) })
 	waitReady(t, base)
+}
+
+// A data dir written by an old release restores, through this build's
+// backup and restore, into a new cluster that boots and replays the whole old
+// log, converting its event log as it restores. (Restore rewrites the
+// directory with this build's storage engine, so every era's bytes must open
+// under it.)
+func TestOldDataDir_RestoresIntoANewCluster(t *testing.T) {
+	bin := buildBinary(t)
+	for _, era := range fixtureEras {
+		t.Run(era.name, func(t *testing.T) {
+			src := filepath.Join(projectRoot(t), "e2e", "upgrade", "testdata", era.name, "datadir")
+			if _, err := os.Stat(src); err != nil {
+				captureFixture(t, era)
+			}
+			dataDir := filepath.Join(t.TempDir(), "datadir")
+			copyDir(t, src, dataDir)
+
+			archive := filepath.Join(t.TempDir(), "old.tar.gz")
+			runOrFail(t, bin, "backup", "--data", dataDir, "--to", archive, "--node-id", "1")
+			restored := filepath.Join(t.TempDir(), "restored")
+			out := runOrFail(t, bin, "restore", "--from", archive, "--data", restored, "--node-id", "1", "--new-cluster")
+			if !strings.Contains(out, "converted its tidwall event log") {
+				t.Fatalf("restore did not convert the old event log itself:\n%s", out)
+			}
+
+			port := freePort(t)
+			base := fmt.Sprintf("http://127.0.0.1:%d", port)
+			node := startNode(t, bin, restored, port)
+			t.Cleanup(func() { node.stopGraceful(t, base) })
+			waitReady(t, base)
+
+			sink := newWebhookSink()
+			defer sink.srv.Close()
+			postWebhookSyncable(t, base, "era-restored", "movie", sink.srv.URL)
+			sink.awaitKeys(t, "upsert", "mv1", "mv2", "mv3", "mv4")
+		})
+	}
+}
+
+// awaitErased proves a scrub by a FRESH syncable's replay of the rewritten
+// log: the erased subject's upsert is gone while every survivor still decodes
+// and arrives. It polls by re-POSTing under new ids (idPrefix-N): the scrub
+// completes in the background, so an early replay may still see the upsert.
+func awaitErased(t *testing.T, base, idPrefix string, survivors ...string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for attempt := 0; ; attempt++ {
+		verify := newWebhookSink()
+		postWebhookSyncable(t, base, fmt.Sprintf("%s-%d", idPrefix, attempt), "movie", verify.srv.URL)
+		verify.awaitKeys(t, "upsert", survivors...)
+		erased := !verify.sawUpsert("subject-erased")
+		verify.srv.Close()
+		if erased {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the scrub never removed the erased subject's upsert from the log")
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func runOrFail(t *testing.T, bin string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(bin, args...).CombinedOutput() //nolint:gosec // G204: the test's own binary
+	if err != nil {
+		t.Fatalf("committed %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }
 
 // --- webhook sink ---

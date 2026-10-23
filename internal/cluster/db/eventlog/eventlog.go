@@ -113,6 +113,15 @@ type EventLog interface {
 	// Backends may acquire it earlier. Matching read lifetimes may perform reads,
 	// never mutations. Lock acquisition is not context-cancelable.
 	RewriteWithPublicationLock(context.Context, uint64, Transform, sync.Locker) (RewriteResult, error)
+	// Seal closes the active append range, so every record appended before it
+	// returns lies below the returned exclusive end; a range with no append
+	// history is left in place. It lets a rewrite proceed while appends continue.
+	Seal() (uint64, error)
+	// RewriteSealedWithPublicationLock is RewriteWithPublicationLock limited to
+	// the ranges sealed when it starts: later appends and the active range are
+	// left untouched, and holders of the caller's read lock may append during
+	// preparation.
+	RewriteSealedWithPublicationLock(context.Context, uint64, Transform, sync.Locker) (RewriteResult, error)
 	// Generation reports the selected logical rewrite generation. Appends and
 	// reclamation do not advance it. After publication failure, reopen before
 	// consulting it. It identifies a selection, not scrub completion or a plan.

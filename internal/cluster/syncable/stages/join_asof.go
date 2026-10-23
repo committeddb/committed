@@ -236,7 +236,7 @@ func (g *Graph) reresolve(tx *stagestore.Tx, d dimRef, key, val []byte, dirty Di
 	}
 	prefix := key[:len(key)-len(rest)]
 	mark := func(outKey []byte) error {
-		dirty.Mark(n, outKey)
+		dirty.MarkFull(n, outKey)
 		if n.win != nil {
 			n.win.markFull(outKey) // membership may move every position
 		}

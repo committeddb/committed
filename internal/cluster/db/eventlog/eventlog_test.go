@@ -9,7 +9,6 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
@@ -61,9 +60,7 @@ func backendsWithSegmentBytes(segmentBytes int) []backend {
 			return segmented.Create(path, 0, segmentlog.LogOptions{SegmentBytes: segmentBytes, Encoding: segmentlog.Options{Compression: codec}})
 		}, func(path string) (eventlog.EventLog, error) {
 			return segmented.Open(path, segmentlog.Options{Compression: codec})
-		}}, backend{"tidwall/" + name, func(path string) (eventlog.EventLog, error) {
-			return tidwall.Create(path, 0, tidwall.Options{SegmentBytes: segmentBytes, Compress: compressed})
-		}, func(path string) (eventlog.EventLog, error) { return tidwall.Open(path) }})
+		}})
 	}
 	return result
 }

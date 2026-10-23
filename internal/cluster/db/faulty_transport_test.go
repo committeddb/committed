@@ -13,8 +13,7 @@ import (
 )
 
 // FaultyTransport wraps a per-node db.Transport and implements db.Transport.
-// Phase 1 is a group-level partition wrapper that delegates to the inner
-// transport's RemovePeer/AddPeer. Phase 2 adds Send-path fault injection
+// Phase 1 is a group-level partition wrapper (Partition / Heal). Phase 2 adds Send-path fault injection
 // (directional drops, latency, probabilistic drops) driven by per-transport
 // state updated via the shared FaultyCluster's DirectionalDrop / AddLatency /
 // DropRate APIs.
@@ -25,10 +24,14 @@ import (
 // single test cluster points at the same FaultyCluster, so Partition on
 // any one transport takes effect cluster-wide.
 //
-// The underlying mechanism for Partition / Heal is the inner transport's
-// RemovePeer / AddPeer pair — the same primitive PartitionPeerForTest and
-// UnpartitionPeerForTest already use. FaultyCluster just books-keeps which
-// directional drops are currently in effect so Heal can restore them.
+// Partition drops every raft message across the cut in Send (partitioned),
+// and also removes the peers from the inner transport's registry, which keeps
+// event catch-up fetches off the far side. Dropping in Send is what holds the
+// cut: a peer removed from the registry comes back on its own when a message
+// sent before the cut arrives (self-report re-creates the entry for a
+// member, as it must for a follower that never had a new leader's address),
+// so the registry alone leaks within a round trip. FaultyCluster books-keeps
+// the removals so Heal can restore them.
 //
 // Send-path faults (DirectionalDrop / AddLatency / DropRate) are INDEPENDENT
 // of Partition. They filter / delay messages inside Send() without touching
@@ -50,13 +53,14 @@ type FaultyTransport struct {
 
 	// sendMu guards the Send-path fault maps. Updated by
 	// FaultyCluster.DirectionalDrop / AddLatency / DropRate (called from
-	// test goroutines); read on every Send call (called from the raft
-	// Ready loop goroutine). A single mutex across all three maps keeps
+	// test goroutines); read on every Send call (from the raft Ready loop
+	// and the append and apply goroutines). A single mutex across all three maps keeps
 	// Send's fault-lookup path a single lock cycle.
-	sendMu    sync.Mutex
-	dirDrops  map[uint64]bool
-	latencies map[uint64]time.Duration
-	dropRates map[uint64]float64
+	sendMu      sync.Mutex
+	partitioned map[uint64]bool
+	dirDrops    map[uint64]bool
+	latencies   map[uint64]time.Duration
+	dropRates   map[uint64]float64
 
 	// rng is used by Send for DropRate probability rolls. Seeded by the
 	// FaultyCluster so per-test seeds propagate to every transport.
@@ -111,7 +115,14 @@ func (t *FaultyTransport) FetchEvents(ctx context.Context, req db.EventFetchRequ
 
 func (t *FaultyTransport) Start(stopC <-chan struct{}) error { return t.inner.Start(stopC) }
 func (t *FaultyTransport) AddPeer(p raft.Peer) error         { return t.inner.AddPeer(p) }
-func (t *FaultyTransport) RemovePeer(id uint64)              { t.inner.RemovePeer(id) }
+func (t *FaultyTransport) SetPeerAddress(id uint64, u, source string) error {
+	return t.inner.SetPeerAddress(id, u, source)
+}
+
+func (t *FaultyTransport) PeerAddress(id uint64) (db.PeerAddressView, bool) {
+	return t.inner.PeerAddress(id)
+}
+func (t *FaultyTransport) RemovePeer(id uint64) { t.inner.RemovePeer(id) }
 
 // Send filters and/or delays each outbound raft message per the per-
 // destination fault state. Composition rules (all three can be active
@@ -133,14 +144,15 @@ func (t *FaultyTransport) Send(msgs []*raftpb.Message) {
 	// Snapshot the per-destination state under sendMu, then release before
 	// doing any actual work. Holding sendMu across inner.Send or across a
 	// channel enqueue risks contention with DirectionalDrop/AddLatency calls
-	// from test goroutines; since Send is called from one Ready loop
-	// goroutine, the snapshot is race-free for the duration of this call.
+	// from test goroutines. Send is called from the Ready loop and from the
+	// append and apply goroutines (their responses); each call works on its
+	// own snapshot.
 	var direct []*raftpb.Message
 	var queued []pendingQueue
 
 	t.sendMu.Lock()
 	for _, m := range msgs {
-		if t.dirDrops != nil && t.dirDrops[m.GetTo()] {
+		if t.partitioned[m.GetTo()] || t.dirDrops[m.GetTo()] {
 			continue
 		}
 		if t.dropRates != nil {
@@ -429,13 +441,20 @@ func (c *FaultyCluster) Partition(groupA, groupB []uint64) {
 	}
 }
 
-// dropLocked removes peer `to` from node `from`'s transport and records it
-// for Heal. Silently no-ops if `from` is not registered.
+// dropLocked cuts node `from` off from peer `to` — Send drops its messages,
+// and the inner registry loses the peer — and records it for Heal. Silently
+// no-ops if `from` is not registered.
 func (c *FaultyCluster) dropLocked(from, to uint64) {
 	ft, ok := c.transports[from]
 	if !ok {
 		return
 	}
+	ft.sendMu.Lock()
+	if ft.partitioned == nil {
+		ft.partitioned = make(map[uint64]bool)
+	}
+	ft.partitioned[to] = true
+	ft.sendMu.Unlock()
 	ft.inner.RemovePeer(to)
 	c.partitioned = append(c.partitioned, partitionEntry{fromNode: from, peerID: to})
 }
@@ -451,6 +470,9 @@ func (c *FaultyCluster) Heal() {
 		if !ok {
 			continue
 		}
+		ft.sendMu.Lock()
+		delete(ft.partitioned, e.peerID)
+		ft.sendMu.Unlock()
 		peer, ok := c.peerByID(e.peerID)
 		if !ok {
 			continue
@@ -463,11 +485,8 @@ func (c *FaultyCluster) Heal() {
 // DirectionalDrop enables or disables drop-all for messages `from` → `to`.
 // Asymmetric by design: DirectionalDrop(1, 2, true) does NOT imply
 // DirectionalDrop(2, 1, true). This is the finer-grained cousin of
-// Partition — Partition uses RemovePeer/AddPeer at the transport's peer
-// registry level (which etcd rafthttp treats as bidirectional-ish:
-// incoming messages from a removed peer are also rejected by the raft
-// state machine because it doesn't know who sent them). DirectionalDrop
-// filters Send() at the outbound side only, leaving the inbound path open.
+// Partition — Partition drops both directions. DirectionalDrop filters
+// Send() at the outbound side only, leaving the inbound path open.
 //
 // That difference is the whole point of scenario (b) — a leader that
 // can't reach a follower but receives PreVote messages from that follower

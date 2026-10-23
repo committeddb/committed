@@ -15,7 +15,7 @@ import (
 // the same superseded versions on every replica, and the rewritten logs stay
 // byte-identical.
 func TestAdversarial_OnSupersedeScrubIsDeterministic(t *testing.T) {
-	forLifecycleBackends(t, testOnSupersedeScrubIsDeterministic)
+	forLifecycleConfigs(t, testOnSupersedeScrubIsDeterministic)
 }
 
 func testOnSupersedeScrubIsDeterministic(t *testing.T, storageOpts []wal.Option) {
@@ -124,5 +124,5 @@ func testOnSupersedeScrubIsDeterministic(t *testing.T, storageOpts []wal.Option)
 			alive[i] = false
 		}
 	}
-	assertEventLogPrefixMatches(t, rafts, dirs)
+	assertEventLogPrefixMatches(t, dirs)
 }

@@ -1,63 +1,14 @@
 # Memory sizing
 
 A committed node's steady-state footprint is modest — a few hundred MB under
-heavy ingest — and one knob matters as deployments grow: the event-log segment
-cache.
+heavy ingest, plus the projection store's budget — and two sets of knobs
+matter as deployments grow: the event-log caches and the projection store.
 
-## The tidwall event-log segment cache — `COMMITTED_EVENT_CACHE_SEGMENTS`
+## Event-log caches
 
-The permanent event log is stored in ~20MB segment files (compressed to a
-few MB at rest once sealed — see disk-limits § Event-log compression; a
-resident cache slot always holds the DECOMPRESSED ~20MB, so compression
-changes nothing about memory sizing). Reading an entry
-requires its segment's parsed index in memory, and the node keeps a bounded
-number of segments resident at once:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `COMMITTED_EVENT_CACHE_SEGMENTS` | `16` | How many event-log segments may be held parsed in memory at once. Each **resident** segment costs ~21MB; unused capacity costs nothing. Invalid values warn and keep the default. |
-
-**Why it matters: every syncable replaying history is a concurrent reader,
-holding one segment's working set.** A newly created (or rebuilt) syncable
-reads the log from the beginning; several of them sit at different positions,
-each needing its own segment resident. When the cache is smaller than the
-reader count, every read by one reader evicts another's segment, forcing a
-~20MB re-read per access — replay throughput collapses from memory speed to
-disk-parse speed.
-
-**Sizing rule of thumb: at least your concurrent syncable count + 2.**
-
-- Worst-case memory = `COMMITTED_EVENT_CACHE_SEGMENTS × ~21MB` — but only when
-  that many readers are actually spread across distinct segments; capacity is
-  not preallocation.
-- The default (16 ≈ up to ~340MB) is sized to be comfortable on a small (2GB)
-  box. It is deliberately conservative for production: on a 16GB machine,
-  `64` (~1.3GB worst case) is cheap insurance; size up freely with your RAM.
-- Steady-state streaming (all syncables caught up) concentrates reads in the
-  newest segments and needs almost none of this — the cache earns its memory
-  during **replays**: initial destination builds, projection rebuilds, and rebuilt
-  nodes catching destinations back up.
-
-The raft entry log is not tunable and needs no tuning: its reader is the
-single sequential consensus loop, which cannot thrash.
-
-## The rest of the footprint (for capacity planning)
-
-Measured under the heaviest ingest workload to date (17 concurrent table
-snapshots plus a scrub): ~290MB of Go heap, dominated by the two logs' write
-buffers (~150MB) and the scrub's working set (~85MB, transient, scales with
-log size), plus bbolt's file-backed pages in RSS. Pull a live profile from
-your own workload with [`COMMITTED_PPROF`](logging.md) — heap profiles are the
-authoritative answer for your data shape.
-
-## Segmented event-log caches
-
-`COMMITTED_EVENT_LOG_BACKEND` selects `tidwall` (the default) or `segmented`.
-The setting applies to the permanent event log; Raft logs remain tidwall-backed.
-Use the same backend when reopening an existing directory. This setting does not
-convert formats, and an incompatible event directory is refused.
-
-For `segmented`, these runtime byte budgets replace `COMMITTED_EVENT_CACHE_SEGMENTS`:
+The permanent event log is stored in segment files compressed in blocks, and
+reading a record decodes its block. The node keeps recently used segments in
+memory, in two tiers with separate byte budgets:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -70,3 +21,47 @@ readers remain immutable, and eviction does not invalidate an active reader.
 The active tail, reader-owned copies, and evicted entries still used by readers
 can consume memory beyond these budgets. Budgets are not persisted and can change
 between restarts. Setting both to zero disables caching.
+
+**Why it matters:** steady-state streaming (all syncables caught up) reads the
+newest segments, which the recent tier holds. The historical tier earns its
+memory during **replays** — initial destination builds, projection rebuilds,
+and rebuilt nodes catching destinations back up — where several readers sit at
+different positions in old history. Size it up with your RAM when you run many
+replays at once.
+
+## Projection store
+
+Projections with stages keep their stage state in one database per node
+(`<dataDir>/projections/`), shared by every projection on the node. Its
+memory is a block cache and a write buffer (memtable), of which up to two are
+held while one flushes, so the store takes about cache + 2 × memtable:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `COMMITTED_PROJECTION_STORE_CACHE_BYTES` | `268435456` (256 MiB) | Cache of the store's blocks, shared by every projection on the node. |
+| `COMMITTED_PROJECTION_STORE_MEMTABLE_BYTES` | `33554432` (32 MiB) | Size of one write buffer. Must be under 4 GiB. |
+
+Values are positive decimal byte counts; invalid values fail startup. The
+defaults total about 320 MiB.
+
+**Why it matters:** a projection build looks up the stage state of nearly
+every event it folds. While the store's index and hot state fit in the
+cache, those lookups stay in memory; once they don't, each one reads from
+disk and builds slow down sharply (with a 64 MiB cache, a 10M-event build ran
+at half the speed of the default). Give the cache more memory when the node
+builds large projections or hosts many: on a 16 GiB node, several GiB is
+reasonable. A larger memtable absorbs more writes between flushes, which
+helps sustained builds; 64–128 MiB is plenty.
+
+The raft entry log is not tunable and needs no tuning: its reader is the
+single sequential consensus loop, which cannot thrash.
+
+## The rest of the footprint (for capacity planning)
+
+Measured under the heaviest ingest workload to date (17 concurrent table
+snapshots plus a scrub): ~290MB of Go heap, dominated by the two logs' write
+buffers (~150MB) and the scrub's working set (~85MB, transient, scales with
+log size), plus bbolt's file-backed pages in RSS. The projection store's
+budget (above) comes on top. Pull a live profile from
+your own workload with [`COMMITTED_PPROF`](logging.md) — heap profiles are the
+authoritative answer for your data shape.

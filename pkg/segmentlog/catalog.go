@@ -66,7 +66,7 @@ func validDataName(name, suffix string) bool {
 }
 
 func validateCatalog(c Catalog) error {
-	if c.History == ([16]byte{}) || c.Revision == 0 || c.Start == ^uint64(0) || c.SegmentBytes > maxGroupBytes || (c.SegmentBytes > 0 && c.SegmentBytes < format.FrameOverhead) {
+	if c.History == ([16]byte{}) || c.Revision == 0 || c.Start == ^uint64(0) || c.SegmentBytes > maxSegmentBytes || (c.SegmentBytes > 0 && c.SegmentBytes < format.FrameOverhead) {
 		return ErrInvalid
 	}
 	next := c.Start

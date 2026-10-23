@@ -89,6 +89,7 @@ func (db *DB) buildSyncable(id string) (cluster.Syncable, error) {
 	// Mirror the build sites: every syncable — a replay included — reads the
 	// authoritative interpretation (stamp ⊕ restatement fold) before consuming.
 	syncable = interpretation.Wrap(syncable, db.storage.InterpretationRegistry, db.storage)
+	db.handEntityReader(syncable)
 	return syncable, nil
 }
 

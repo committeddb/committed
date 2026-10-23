@@ -1,0 +1,227 @@
+"meta"	"fingerprint"	4eeb3045c2d81dc49e7aa3f02fc77b25a9790fc19483db582d86dd924087d27e
+"meta"	"format"	"\x00\x00\x00\x00\x00\x00\x00\x04"
+"meta"	"frontier"	"\x00\x00\x00\x00\x00\x00\x00\x0e"
+"stage:activity:acc"	"J1"	{"c":2,"a":[{"n":2},{"n":1,"s":"5"},{"i":[{"k":"WyJwcm9wcyIsIjUiXQ==","v":{"s":"props"},"o":[{"s":"props"}]},{"k":"WyJyZWZ1bmRzIiwicjQiXQ==","v":{"s":"refunds"},"o":[{"s":"refunds"}]}]}],"e":[{},{},{}]}
+"stage:activity:acc"	"j1"	{"c":1,"a":[{"n":1},{"n":1,"s":"1"},{"i":[{"k":"WyJyZWZ1bmRzIiwicjMiXQ==","v":{"s":"refunds"},"o":[{"s":"refunds"}]}]}],"e":[{},{},{}]}
+"stage:activity:in"	"\b\xc1\x13\a\xb5dad[\"refunds\",\"r3\"]"	pointer(gen 2) {"acct":"j1","amount":1,"at":"2026-01-02"}
+"stage:activity:in"	"\t.\x13\a\xb5\xc13D[\"props\",\"5\"]"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
+"stage:activity:in"	"\t.\x13\a\xb5\xc13D[\"refunds\",\"r4\"]"	pointer(gen 2) {"acct":"J1","amount":5,"at":"2026-01-04"}
+"stage:activity:keys"	"\b\xc1\x13\a\xb5dad"	j1
+"stage:activity:keys"	"\t.\x13\a\xb5\xc13D"	J1
+"stage:activity:out"	"J1"	{"n":2,"refunded":5,"srcs":"props,refunds"}
+"stage:activity:out"	"j1"	{"n":1,"refunded":1,"srcs":"refunds"}
+"stage:activity:src"	"[\"props\",\"5\"]"	"\t.\x13\a\xb5\xc13D"
+"stage:activity:src"	"[\"refunds\",\"r3\"]"	"\b\xc1\x13\a\xb5dad"
+"stage:activity:src"	"[\"refunds\",\"r4\"]"	"\t.\x13\a\xb5\xc13D"
+"stage:cand:acc"	"j1"	{"dead":0,"inputs":1,"rank":null,"winner":"j1"}
+"stage:cand:acc"	"j2"	{"dead":0,"inputs":1,"rank":null,"winner":null}
+"stage:cand:acc"	"j4"	{"dead":0,"inputs":1,"rank":null,"winner":"j4"}
+"stage:cand:dim:blocks"	"j2"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"blocked\":true}"
+"stage:cand:dim:owners"	"o3"	"\x00\x00\x00\x00\x00\x00\x00\x02{\"id\":\"o3\",\"name\":null}"
+"stage:cand:dim:props[$.pid]"	"J1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
+"stage:cand:in"	"\b\xc1\x10\a\xb5d\\Kj4"	pointer(gen 1) {"id":"J4","ownerId":"o4","status":"open"}
+"stage:cand:in"	"\b\xc1\x13\a\xb5dadj1"	pointer(gen 1) {"id":"J1","ownerId":"O1","status":"open"}
+"stage:cand:in"	"\b\xc1\x16\a\xb5df}j2"	pointer(gen 1) {"id":"J2","ownerId":"o2","status":"open"}
+"stage:cand:keys"	"\b\xc1\x10\a\xb5d\\K"	j4
+"stage:cand:keys"	"\b\xc1\x13\a\xb5dad"	j1
+"stage:cand:keys"	"\b\xc1\x16\a\xb5df}"	j2
+"stage:cand:out"	"j1"	{"amount":11,"owner":null}
+"stage:cand:out"	"j4"	{"amount":0,"owner":null}
+"stage:cand:rev:blocks"	"\x02j1j1"	
+"stage:cand:rev:blocks"	"\x02j2j2"	
+"stage:cand:rev:blocks"	"\x02j4j4"	
+"stage:cand:rev:owners"	"\x02o1j1"	
+"stage:cand:rev:owners"	"\x02o2j2"	
+"stage:cand:rev:owners"	"\x02o4j4"	
+"stage:cand:rev:props[$.pid]"	"\x02J1j1"	
+"stage:cand:rev:props[$.pid]"	"\x02J2j2"	
+"stage:cand:rev:props[$.pid]"	"\x02J4j4"	
+"stage:cand:src"	"j1"	"\b\xc1\x13\a\xb5dad"
+"stage:cand:src"	"j2"	"\b\xc1\x16\a\xb5df}"
+"stage:cand:src"	"j4"	"\b\xc1\x10\a\xb5d\\K"
+"stage:els:acc"	"w1"	{"c":10,"a":[],"e":[{"n":10,"s":"59"},{"n":8},{"n":2},{"i":[{"k":"AmUyAAFh","v":{"n":"2"}},{"k":"AmUzAABp","v":{"n":"2"}},{"k":"AmUzAABl","v":{"n":"5/2"}},{"k":"AmUxAABh","v":{"n":"10"}},{"k":"AmUzAABo","v":{"s":""}},{"k":"AmUyAAFj","v":{"s":"B"}},{"k":"AmUzAABn","v":{"s":"a"}},{"k":"AmUxAABi","v":{"s":"b"}},{"k":"AmUzAABm","v":{"b":false}},{"k":"AmUzAABk","v":{"b":true}}]},{"n":10,"b":{"s":"a"}},{"n":10,"b":{"s":"z"}}]}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e1\x00\x00a"	pointer(gen 1) {"elements":[{"amount":10,"id":"a","tag":"m","v":10,"wa":"W1"},{"amount":5,"id":"b","tag":"b","v":"b","wa":"w1"}],"txn":"t1","type":"created"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e1\x00\x00b"	pointer(gen 1) {"elements":[{"amount":10,"id":"a","tag":"m","v":10,"wa":"W1"},{"amount":5,"id":"b","tag":"b","v":"b","wa":"w1"}],"txn":"t1","type":"created"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e2\x00\x01a"	pointer(gen 1) {"added":[{"amount":7,"id":"a","tag":"z","v":2,"wa":"w1"},{"amount":1,"id":"c","tag":"a","v":"B","wa":"w1"}],"txn":"t1","type":"elements-added"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e2\x00\x01c"	pointer(gen 1) {"added":[{"amount":7,"id":"a","tag":"z","v":2,"wa":"w1"},{"amount":1,"id":"c","tag":"a","v":"B","wa":"w1"}],"txn":"t1","type":"elements-added"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e3\x00\x00d"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e3\x00\x00e"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e3\x00\x00f"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e3\x00\x00g"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e3\x00\x00h"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
+"stage:els:in"	"\bˇ\a\xb5m{\x05\x02e3\x00\x00i"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
+"stage:els:keys"	"\bˇ\a\xb5m{\x05"	w1
+"stage:els:out"	"w1"	{"big":8,"first":"a","last":"z","small":2,"total":59,"vals":[2,2.5,10,"","B","a","b",false,true]}
+"stage:els:rev:\x00fan"	"\x02e1\x02e1\x00\x00a"	
+"stage:els:rev:\x00fan"	"\x02e1\x02e1\x00\x00b"	
+"stage:els:rev:\x00fan"	"\x02e2\x02e2\x00\x01a"	
+"stage:els:rev:\x00fan"	"\x02e2\x02e2\x00\x01c"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00d"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00e"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00f"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00g"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00h"	
+"stage:els:rev:\x00fan"	"\x02e3\x02e3\x00\x00i"	
+"stage:els:src"	"\x02e1\x00\x00a"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e1\x00\x00b"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e2\x00\x01a"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e2\x00\x01c"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e3\x00\x00d"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e3\x00\x00e"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e3\x00\x00f"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e3\x00\x00g"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e3\x00\x00h"	"\bˇ\a\xb5m{\x05"
+"stage:els:src"	"\x02e3\x00\x00i"	"\bˇ\a\xb5m{\x05"
+"stage:first-activity:acc"	"j1"	{"dead":0,"inputs":3,"rank":"v3/5uKOcCF//IHJlZnVuZHMAAQ==","winner":"[\"refunds\",\"r3\"]"}
+"stage:first-activity:in"	"\b\xc1\x13\a\xb5dad[\"refund-notes\",\"r1\"]"	pointer(gen 1) {"acct":"j1","at":"2026-01-02"}
+"stage:first-activity:in"	"\b\xc1\x13\a\xb5dad[\"refunds\",\"r3\"]"	pointer(gen 2) {"acct":"j1","amount":1,"at":"2026-01-02"}
+"stage:first-activity:in"	"\b\xc1\x13\a\xb5dad[\"refunds\",\"r4\"]"	pointer(gen 2) {"acct":"J1","amount":5,"at":"2026-01-04"}
+"stage:first-activity:keys"	"\b\xc1\x13\a\xb5dad"	j1
+"stage:first-activity:out"	"j1"	{"at":"2026-01-02","kind":"refunds"}
+"stage:first-activity:src"	"[\"refund-notes\",\"r1\"]"	"\b\xc1\x13\a\xb5dad"
+"stage:first-activity:src"	"[\"refunds\",\"r3\"]"	"\b\xc1\x13\a\xb5dad"
+"stage:first-activity:src"	"[\"refunds\",\"r4\"]"	"\b\xc1\x13\a\xb5dad"
+"stage:fx-usd:acc"	"x1"	{"dead":0,"inputs":1,"rank":null,"winner":"x1"}
+"stage:fx-usd:acc"	"x2"	{"dead":0,"inputs":1,"rank":null,"winner":"x2"}
+"stage:fx-usd:arev:0:fx-rates"	"\x03eur@\x80\x06G4(H\xe0\x00x2"	"\r"
+"stage:fx-usd:arev:0:fx-rates"	"\x03eur@\x80\x06G\x98\xbd}\xc0\x00x1"	"\r"
+"stage:fx-usd:in"	"\b\xf1\x06\a\xb5\x8do\x0fx2"	pointer(gen 0) {"amount":100,"ccy":"EUR","id":"x2","paid":"2025-12-31"}
+"stage:fx-usd:in"	"\b\xf1\a\a\xb5\x8dp\xc2x1"	pointer(gen 0) {"amount":100,"ccy":"EUR","id":"x1","paid":"2026-01-05"}
+"stage:fx-usd:keys"	"\b\xf1\x06\a\xb5\x8do\x0f"	x2
+"stage:fx-usd:keys"	"\b\xf1\a\a\xb5\x8dp\xc2"	x1
+"stage:fx-usd:odim:0:fx-rates"	"\x03eur@\x80\x06Dة\v\xa0\x00\x10\x02r0"	"\r\x00\x00\x00\x00\x00\x00\x00\x02{\"ccy\":\"EUR\",\"day\":\"2025-12-01\",\"rate\":1.05,\"seq\":0}"
+"stage:fx-usd:odim:0:fx-rates"	"\x03eur@\x80\x06G\xfdR\xb2\xa0\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x03\x00r2"	"\r\x00\x00\x00\x00\x00\x00\x00\x02{\"ccy\":\"eur\",\"day\":\"2026-01-10\",\"rate\":1.2,\"seq\":2}"
+"stage:fx-usd:opos:0:fx-rates"	"r0"	"\x03eur@\x80\x06Dة\v\xa0\x00\x10\x02r0"
+"stage:fx-usd:opos:0:fx-rates"	"r2"	"\x03eur@\x80\x06G\xfdR\xb2\xa0\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x03\x00r2"
+"stage:fx-usd:out"	"x1"	{"usd":105}
+"stage:fx-usd:out"	"x2"	{"usd":105}
+"stage:fx-usd:src"	"x1"	"\b\xf1\a\a\xb5\x8dp\xc2"
+"stage:fx-usd:src"	"x2"	"\b\xf1\x06\a\xb5\x8do\x0f"
+"stage:job:in"	"\b\xc1\x10\a\xb5d\\Kc\x00j4"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":0,\"owner\":null}"
+"stage:job:in"	"\b\xc1\x13\a\xb5dadc\x00j1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"owner\":null}"
+"stage:job:in"	"\b\xc1\x13\a\xb5dadwa\x00j1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"Id\":\"J1\",\"name\":\"east\"}"
+"stage:job:keys"	"\b\xc1\x10\a\xb5d\\K"	j4
+"stage:job:keys"	"\b\xc1\x13\a\xb5dad"	j1
+"stage:job:out"	"j1"	{"amount":11,"area":"east"}
+"stage:job:out"	"j4"	{"amount":0,"area":null}
+"stage:latest-status:acc"	"j1"	{"dead":0,"inputs":3,"rank":"CTIwMjYwMTAyAjI=","winner":"s2"}
+"stage:latest-status:in"	"\b\xc1\x13\a\xb5dads1"	pointer(gen 0) {"job":"j1","seq":1,"status":"open","ts":20260102}
+"stage:latest-status:in"	"\b\xc1\x13\a\xb5dads2"	pointer(gen 0) {"job":"j1","seq":2,"status":"done","ts":20260102}
+"stage:latest-status:in"	"\b\xc1\x13\a\xb5dads3"	pointer(gen 0) {"job":"j1","seq":9,"status":"stale","ts":20260101}
+"stage:latest-status:keys"	"\b\xc1\x13\a\xb5dad"	j1
+"stage:latest-status:out"	"j1"	{"status":"done"}
+"stage:latest-status:src"	"s1"	"\b\xc1\x13\a\xb5dad"
+"stage:latest-status:src"	"s2"	"\b\xc1\x13\a\xb5dad"
+"stage:latest-status:src"	"s3"	"\b\xc1\x13\a\xb5dad"
+"stage:ledger-frames:in"	"\xafc\xdcL\x86\x01\xec\x8cl1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"A\",\"amount\":5,\"at\":\"2026-01-02\",\"seq\":1}"
+"stage:ledger-frames:in"	"\xafc\xdcL\x86\x01\xec\x8cl3"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"a\",\"amount\":1,\"at\":\"2026-01-03\",\"seq\":3}"
+"stage:ledger-frames:in"	"\xafc\xdcL\x86\x01\xec\x8cl4"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"a\",\"amount\":2,\"at\":\"2026-01-02\",\"seq\":4}"
+"stage:ledger-frames:keys"	"\xafc\xdcL\x86\x01\xec\x8c"	a
+"stage:ledger-frames:ord"	"\x01a@\x80\x06G\\c\xf7\xa0\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x02\x00l1"	"\t\x15"
+"stage:ledger-frames:ord"	"\x01a@\x80\x06G\\c\xf7\xa0\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x05\x00l4"	"\t\x15"
+"stage:ledger-frames:ord"	"\x01a@\x80\x06Gp\x81\xcf\x00\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x04\x00l3"	"\t\x15"
+"stage:ledger-frames:out"	"l1"	{"day_n":2,"final":3,"ma2":5}
+"stage:ledger-frames:out"	"l3"	{"day_n":3,"final":3,"ma2":3}
+"stage:ledger-frames:out"	"l4"	{"day_n":2,"final":3,"ma2":7}
+"stage:ledger-frames:pos"	"l1"	"\x01a@\x80\x06G\\c\xf7\xa0\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x02\x00l1"
+"stage:ledger-frames:pos"	"l3"	"\x01a@\x80\x06Gp\x81\xcf\x00\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x04\x00l3"
+"stage:ledger-frames:pos"	"l4"	"\x01a@\x80\x06G\\c\xf7\xa0\x00\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x05\x00l4"
+"stage:ledger-frames:row"	"l1"	{"rn":1,"rank":1,"dense":1,"accs":[{},{},{}],"first":[null,null,null],"hasFirst":true}
+"stage:ledger-frames:row"	"l3"	{"rn":3,"rank":3,"dense":2,"accs":[{},{},{}],"first":[null,null,null],"hasFirst":true}
+"stage:ledger-frames:row"	"l4"	{"rn":2,"rank":1,"dense":1,"accs":[{},{},{}],"first":[null,null,null],"hasFirst":true}
+"stage:ledger-frames:src"	"l1"	"\xafc\xdcL\x86\x01\xec\x8c"
+"stage:ledger-frames:src"	"l3"	"\xafc\xdcL\x86\x01\xec\x8c"
+"stage:ledger-frames:src"	"l4"	"\xafc\xdcL\x86\x01\xec\x8c"
+"stage:ledger-rows:in"	"\xafc\xdcL\x86\x01\xec\x8cl1"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"A\",\"amount\":5,\"at\":\"2026-01-02\",\"seq\":1}"
+"stage:ledger-rows:in"	"\xafc\xdcL\x86\x01\xec\x8cl3"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"a\",\"amount\":1,\"at\":\"2026-01-03\",\"seq\":3}"
+"stage:ledger-rows:in"	"\xafc\xdcL\x86\x01\xec\x8cl4"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"acct\":\"a\",\"amount\":2,\"at\":\"2026-01-02\",\"seq\":4}"
+"stage:ledger-rows:keys"	"\xafc\xdcL\x86\x01\xec\x8c"	a
+"stage:ledger-rows:ord"	"\x01a\xbf\x7f\xf9\xb8\x8f~0\xff\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x04\x00l3"	"\t\x15"
+"stage:ledger-rows:ord"	"\x01a\xbf\x7f\xf9\xb8\xa3\x9c\b_\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x02\x00l1"	"\t\x15"
+"stage:ledger-rows:ord"	"\x01a\xbf\x7f\xf9\xb8\xa3\x9c\b_\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x05\x00l4"	"\t\x15"
+"stage:ledger-rows:out"	"l1"	{"bal":8,"first":3,"n":2,"prev":1,"seq":1}
+"stage:ledger-rows:out"	"l3"	{"bal":1,"first":3,"n":1,"prev":0,"seq":3}
+"stage:ledger-rows:out"	"l4"	{"bal":8,"first":3,"n":3,"prev":5,"seq":4}
+"stage:ledger-rows:pos"	"l1"	"\x01a\xbf\x7f\xf9\xb8\xa3\x9c\b_\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x02\x00l1"
+"stage:ledger-rows:pos"	"l3"	"\x01a\xbf\x7f\xf9\xb8\x8f~0\xff\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x04\x00l3"
+"stage:ledger-rows:pos"	"l4"	"\x01a\xbf\x7f\xf9\xb8\xa3\x9c\b_\xff\x10\x03\x80\x00\x00\x00\x00\x00\x00\x01\x05\x00l4"
+"stage:ledger-rows:row"	"l1"	{"rn":2,"rank":2,"dense":2,"accs":[{},{"n":2,"sum":{"n":"6"}},{},{}],"first":[null,null,null,{"n":"3"}],"hasFirst":true}
+"stage:ledger-rows:row"	"l3"	{"rn":1,"rank":1,"dense":1,"accs":[{},{"n":1,"sum":{"n":"1"}},{},{}],"first":[null,null,null,{"n":"3"}],"hasFirst":true}
+"stage:ledger-rows:row"	"l4"	{"rn":3,"rank":2,"dense":2,"accs":[{},{"n":3,"sum":{"n":"8"}},{},{}],"first":[null,null,null,{"n":"3"}],"hasFirst":true}
+"stage:ledger-rows:src"	"l1"	"\xafc\xdcL\x86\x01\xec\x8c"
+"stage:ledger-rows:src"	"l3"	"\xafc\xdcL\x86\x01\xec\x8c"
+"stage:ledger-rows:src"	"l4"	"\xafc\xdcL\x86\x01\xec\x8c"
+"stage:lines:acc"	"r1"	{"c":1,"a":[],"e":[{"n":1,"s":"2"}]}
+"stage:lines:in"	"\b܃\a\xb5{\xe7l\x02r1s1"	pointer(gen 1) {"lines":[{"note":null,"order":"r1","qty":2,"sku":"s1"},{"note":null,"order":"r1","qty":0,"sku":"s2"},{"order":"r1","qty":4,"sku":"s3"}]}
+"stage:lines:keys"	"\b܃\a\xb5{\xe7l"	r1
+"stage:lines:out"	"r1"	{"qty":2}
+"stage:lines:rev:\x00fan"	"\x02r1\x02r1s1"	
+"stage:lines:rev:\x00fan"	"\x02r1\x02r1s2"	
+"stage:lines:rev:\x00fan"	"\x02r1\x02r1s3"	
+"stage:lines:src"	"\x02r1s1"	"\b܃\a\xb5{\xe7l"
+"stage:member-props:acc"	"[\"u1\",\"11\"]"	{"dead":0,"inputs":1,"rank":null,"winner":"\u0003pm1\u00015"}
+"stage:member-props:acc"	"[\"u2\",\"0\"]"	{"dead":0,"inputs":1,"rank":null,"winner":"\u0003pm2\u0000"}
+"stage:member-props:in"	"[O\xe9Jz\xb6zi\x03pm1\x015"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"pp\":{\"amount\":11,\"pid\":\"J1\"},\"project\":\"J1\",\"user\":\"u1\"}"
+"stage:member-props:in"	"a\xb1\x96\x0e\x8b\f\xd1b\x03pm2\x00"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"pp\":null,\"project\":\"J7\",\"user\":\"u2\"}"
+"stage:member-props:keys"	"[O\xe9Jz\xb6zi"	["u1","11"]
+"stage:member-props:keys"	"a\xb1\x96\x0e\x8b\f\xd1b"	["u2","0"]
+"stage:member-props:mdim:props"	"\x02J15"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
+"stage:member-props:mpos:props"	"5"	J1
+"stage:member-props:out"	"[\"u1\",\"11\"]"	{"amount":11}
+"stage:member-props:out"	"[\"u2\",\"0\"]"	{"amount":null}
+"stage:member-props:parent"	"pm1"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"project\":\"J1\",\"user\":\"u1\"}"
+"stage:member-props:parent"	"pm2"	"\x00\x00\x00\x00\x00\x00\x00\x01{\"project\":\"J7\",\"user\":\"u2\"}"
+"stage:member-props:rev:\x00fan"	"\x03pm1\x03pm1\x015"	
+"stage:member-props:rev:\x00fan"	"\x03pm2\x03pm2\x00"	
+"stage:member-props:rev:\x00fanon:props"	"\x02J1pm1"	
+"stage:member-props:rev:\x00fanon:props"	"\x02J7pm2"	
+"stage:member-props:src"	"\x03pm1\x015"	"[O\xe9Jz\xb6zi"
+"stage:member-props:src"	"\x03pm2\x00"	"a\xb1\x96\x0e\x8b\f\xd1b"
+"stage:monthly:acc"	"2026-01-01 00:00:00+00:00"	{"c":2,"a":[{"n":2,"s":"13"},{"n":1},{"i":[{"k":"cTE=","v":{"s":"ada"}},{"k":"cTI=","v":{"s":"ada"}}]},{"n":2,"s":"13"}],"e":[{},{},{},{}]}
+"stage:monthly:acc"	"2026-02-01 00:00:00+00:00"	{"c":1,"a":[{"n":1,"s":"-4"},{},{"i":[{"k":"cTM=","v":{"s":"bea"}}]},{"n":1,"s":"-4"}],"e":[{},{},{},{}]}
+"stage:monthly:in"	"\x06]\xc0\aҬ\xcc\xedq3"	pointer(gen 0) {"amount":-4,"at":"2026-01-31 20:00:00-05:00","payer":"Bea"}
+"stage:monthly:in"	"K\x00\x7f\x996K\xa9lq1"	pointer(gen 0) {"amount":10,"at":"2026-01-05T10:00:00Z","payer":"Ada"}
+"stage:monthly:in"	"K\x00\x7f\x996K\xa9lq2"	pointer(gen 0) {"amount":3,"at":"2026-01-20","payer":"ada"}
+"stage:monthly:keys"	"\x06]\xc0\aҬ\xcc\xed"	2026-02-01 00:00:00+00:00
+"stage:monthly:keys"	"K\x00\x7f\x996K\xa9l"	2026-01-01 00:00:00+00:00
+"stage:monthly:out"	"2026-01-01 00:00:00+00:00"	{"avg":6.5,"big":1,"payers":1,"source":"ledger"}
+"stage:monthly:src"	"q1"	"K\x00\x7f\x996K\xa9l"
+"stage:monthly:src"	"q2"	"K\x00\x7f\x996K\xa9l"
+"stage:monthly:src"	"q3"	"\x06]\xc0\aҬ\xcc\xed"
+"stage:payer-list:acc"	"all"	{"c":3,"a":[{"i":[{"k":"cTE=","v":{"s":"ada"},"o":[{"n":"10"}]},{"k":"cTI=","v":{"s":"ada"},"o":[{"n":"3"}]},{"k":"cTM=","v":{"s":"bea"},"o":[{"n":"-4"}]}]},{"i":[{"k":"cTE=","v":{"s":"Ada"},"o":[{"s":"Ada"}]},{"k":"cTM=","v":{"s":"Bea"},"o":[{"s":"Bea"}]},{"k":"cTI=","v":{"s":"ada"},"o":[{"s":"ada"}]}]},{"i":[{"k":"cTE=","v":null},{"k":"cTI=","v":null},{"k":"cTM=","v":null}]}],"e":[{},{},{}]}
+"stage:payer-list:in"	"\xe6\xf0\x9b\x19\x05\x19ڤq1"	pointer(gen 0) {"amount":10,"at":"2026-01-05T10:00:00Z","payer":"Ada"}
+"stage:payer-list:in"	"\xe6\xf0\x9b\x19\x05\x19ڤq2"	pointer(gen 0) {"amount":3,"at":"2026-01-20","payer":"ada"}
+"stage:payer-list:in"	"\xe6\xf0\x9b\x19\x05\x19ڤq3"	pointer(gen 0) {"amount":-4,"at":"2026-01-31 20:00:00-05:00","payer":"Bea"}
+"stage:payer-list:keys"	"\xe6\xf0\x9b\x19\x05\x19ڤ"	all
+"stage:payer-list:out"	"all"	{"by_amount":["ada","ada","bea"],"names":"Ada, Bea, ada","notes":[null,null,null]}
+"stage:payer-list:src"	"q1"	"\xe6\xf0\x9b\x19\x05\x19ڤ"
+"stage:payer-list:src"	"q2"	"\xe6\xf0\x9b\x19\x05\x19ڤ"
+"stage:payer-list:src"	"q3"	"\xe6\xf0\x9b\x19\x05\x19ڤ"
+"stage:props:acc"	"5"	{"dead":0,"inputs":1,"rank":null,"winner":"p1"}
+"stage:props:in"	"\xafc\xa8L\x86\x01\x940p1"	pointer(gen 1) {"amount":10,"id":"5.0000","projectId":"J1"}
+"stage:props:keys"	"\xafc\xa8L\x86\x01\x940"	5
+"stage:props:out"	"5"	{"amount":11,"pid":"J1"}
+"stage:props:src"	"p1"	"\xafc\xa8L\x86\x01\x940"
+"stage:props[$.pid]:acc"	"J1"	{"dead":0,"inputs":1,"rank":null,"winner":"5"}
+"stage:props[$.pid]:in"	"\t.\x13\a\xb5\xc13D5"	"\x00\x00\x00\x00\x00\x00\x00\x00{\"amount\":11,\"pid\":\"J1\"}"
+"stage:props[$.pid]:keys"	"\t.\x13\a\xb5\xc13D"	J1
+"stage:props[$.pid]:out"	"J1"	{"amount":11,"pid":"J1"}
+"stage:props[$.pid]:src"	"5"	"\t.\x13\a\xb5\xc13D"
+"stage:txn-live:acc"	"t1"	{"dead":0,"inputs":2,"rank":null,"winner":"e2"}
+"stage:txn-live:acc"	"t2"	{"dead":1,"inputs":2,"rank":null,"winner":"e3"}
+"stage:txn-live:in"	"\b\xc7\xfe\a\xb5j\\ce3"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
+"stage:txn-live:in"	"\b\xc7\xfe\a\xb5j\\ce4"	pointer(gen 2) {"txn":"t2","type":"deleted"}
+"stage:txn-live:in"	"\b\xc7\xff\a\xb5j^\x16e1"	pointer(gen 1) {"elements":[{"amount":10,"id":"a","tag":"m","v":10,"wa":"W1"},{"amount":5,"id":"b","tag":"b","v":"b","wa":"w1"}],"txn":"t1","type":"created"}
+"stage:txn-live:in"	"\b\xc7\xff\a\xb5j^\x16e2"	pointer(gen 1) {"added":[{"amount":7,"id":"a","tag":"z","v":2,"wa":"w1"},{"amount":1,"id":"c","tag":"a","v":"B","wa":"w1"}],"txn":"t1","type":"elements-added"}
+"stage:txn-live:keys"	"\b\xc7\xfe\a\xb5j\\c"	t2
+"stage:txn-live:keys"	"\b\xc7\xff\a\xb5j^\x16"	t1
+"stage:txn-live:out"	"t1"	{"kind":"elements-added"}
+"stage:txn-live:src"	"e1"	"\b\xc7\xff\a\xb5j^\x16"
+"stage:txn-live:src"	"e2"	"\b\xc7\xff\a\xb5j^\x16"
+"stage:txn-live:src"	"e3"	"\b\xc7\xfe\a\xb5j\\c"
+"stage:txn-live:src"	"e4"	"\b\xc7\xfe\a\xb5j\\c"
+"stage:work-areas[$.Id]:acc"	"j1"	{"dead":0,"inputs":1,"rank":null,"winner":"w1"}
+"stage:work-areas[$.Id]:in"	"\b\xc1\x13\a\xb5dadw1"	pointer(gen 0) {"Id":"J1","name":"east"}
+"stage:work-areas[$.Id]:keys"	"\b\xc1\x13\a\xb5dad"	j1
+"stage:work-areas[$.Id]:out"	"j1"	{"Id":"J1","name":"east"}
+"stage:work-areas[$.Id]:src"	"w1"	"\b\xc1\x13\a\xb5dad"

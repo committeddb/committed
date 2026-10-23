@@ -12,7 +12,7 @@ import (
 // serveRecordEvents implements the existing record wire format over a logical
 // cursor. The caller holds the event layout freeze, preserving generation and
 // cursor ownership while callbacks run without eventMu held. Appends may continue;
-// the stream stops at its captured frontier. Native whole-file serving is separate.
+// the stream stops at its captured frontier.
 func (s *Storage) serveRecordEvents(ctx context.Context, after, to uint64, sink db.EventSink, maxBytes int) (db.EventServeResult, error) {
 	var result db.EventServeResult
 	if err := ctx.Err(); err != nil {
@@ -57,7 +57,7 @@ func (s *Storage) serveRecordEvents(ctx context.Context, after, to uint64, sink 
 		if record.ID > end {
 			break
 		}
-		// Like native serving, allow the first record crossing the byte budget.
+		// Allow the first record crossing the byte budget.
 		// Probe the next survivor before reporting More, even across erased gaps.
 		if len(data) >= maxBytes {
 			result.More = true

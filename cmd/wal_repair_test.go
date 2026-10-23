@@ -132,26 +132,6 @@ func TestRunWalSplice_DryRunCommitGzipAndRefusal(t *testing.T) {
 	require.NotEqual(t, wal.LogClean, diag.Status, "a refused splice must leave the log as it was")
 }
 
-// wal decompress needs --data, and on a data dir with no compressed segments
-// it reports the dir already downgrade-ready without touching it.
-func TestWalDecompress_RequiresDataAndIsANoOpOnPlainLogs(t *testing.T) {
-	prev := walDecompressData
-	t.Cleanup(func() { walDecompressData = prev })
-
-	walDecompressData = ""
-	require.ErrorContains(t, walDecompressCmd.RunE(walDecompressCmd, nil), "--data is required")
-
-	dataDir := t.TempDir()
-	seedRaftLog(t, dataDir, 3)
-	before, err := os.ReadDir(datadir.EventsDir(dataDir))
-	require.NoError(t, err)
-	walDecompressData = dataDir
-	require.NoError(t, walDecompressCmd.RunE(walDecompressCmd, nil))
-	after, err := os.ReadDir(datadir.EventsDir(dataDir))
-	require.NoError(t, err)
-	require.Equal(t, len(before), len(after), "nothing to rewrite, nothing rewritten")
-}
-
 func TestWalRepairReportsIncompleteSegmentedTail(t *testing.T) {
 	base := t.TempDir()
 	dir := filepath.Join(base, "events")

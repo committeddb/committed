@@ -5,10 +5,9 @@
 // while the node is STOPPED — the directory is then quiescent, so the whole
 // of it (the raft entry/state logs, the permanent event log, and the BoltDB
 // metadata) is trivially consistent and can be archived with a plain file
-// walk. Restore unpacks the archive into a fresh data directory; a node
-// started against it recovers exactly as it would from its own disk — there
-// is no raft-state reconstruction, the restored directory IS a node's
-// directory.
+// walk. Restore unpacks the archive into a fresh data directory, and the
+// restore command rewrites it as a member of a new cluster (RestoreWith's
+// prepare step; see wal.RestoreAs) — the log and state stay as they were.
 //
 // The node holds an exclusive OS lock on its BoltDB file for its whole life, so
 // a backup cannot be read from a running node's directory by a second process —
@@ -29,6 +28,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -122,6 +122,20 @@ type Manifest struct {
 	// tamperer who rewrites the manifest to match altered files is not defended
 	// here — that needs a signed manifest.)
 	Files []FileEntry `json:"files,omitempty"`
+}
+
+// Fingerprint identifies the archive's content: a hash of its file list
+// (paths, sizes and SHA-256s), independent of when it was taken. Restore
+// folds it into the restored cluster's id, so machines restored from
+// different archives can't form one cluster.
+func (m *Manifest) Fingerprint() []byte {
+	files := slices.Clone(m.Files)
+	slices.SortFunc(files, func(a, b FileEntry) int { return strings.Compare(a.Path, b.Path) })
+	h := sha256.New()
+	for _, f := range files {
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00%s\x00", f.Path, f.Size, f.SHA256)
+	}
+	return h.Sum(nil)
 }
 
 // Marker is written to RESTORED.json in a restored data directory.
@@ -280,6 +294,15 @@ func dirExists(path string) bool {
 // untouched — no half-populated directory to block a retry (requireEmptyDir) or
 // boot a Frankenstein node.
 func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
+	return RestoreWith(r, targetDir, now, nil)
+}
+
+// RestoreWith is Restore with a prepare step: once the staged tree has
+// verified, prepare runs on the staging directory, before the tree is made
+// durable and published, so a failed prepare leaves targetDir untouched like
+// any other failure. The restore command uses it to rewrite the directory as
+// a member of a new cluster.
+func RestoreWith(r io.Reader, targetDir string, now time.Time, prepare func(stagingDir string, m *Manifest) error) (*Manifest, error) {
 	// Normalize away a trailing slash so filepath.Dir yields the real parent for
 	// the staging sibling (Dir("/data/node/") would otherwise be "/data/node").
 	targetDir = filepath.Clean(targetDir)
@@ -386,6 +409,11 @@ func Restore(r io.Reader, targetDir string, now time.Time) (*Manifest, error) {
 	// that boots with fresh-empty metadata, silently losing all config.
 	if err := datadir.RequireCompleteNodeDir(filePaths(manifest.Files)); err != nil {
 		return nil, fmt.Errorf("restore: %w", err)
+	}
+	if prepare != nil {
+		if err := prepare(staging, manifest); err != nil {
+			return nil, fmt.Errorf("restore: %w", err)
+		}
 	}
 
 	// Record provenance in the marker, not the full (possibly large) file list.

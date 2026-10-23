@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	tlstransport "go.etcd.io/etcd/client/pkg/v3/transport"
 	"go.etcd.io/raft/v3"
@@ -22,6 +23,12 @@ import (
 type Transport interface {
 	Start(stopC <-chan struct{}) error
 	AddPeer(peer raft.Peer) error
+	// SetPeerAddress changes the address the transport uses for a peer
+	// (starting the peer if it is unknown), recording where it came from
+	// (one of the PeerAddressFrom* sources). AddPeer only fills.
+	SetPeerAddress(id uint64, rawURL, source string) error
+	// PeerAddress reports the address the transport uses for a peer.
+	PeerAddress(id uint64) (PeerAddressView, bool)
 	RemovePeer(id uint64)
 	Send(msgs []*raftpb.Message)
 	Stop()
@@ -153,4 +160,28 @@ type TransportFactory func(id uint64, peers []raft.Peer, logger *zap.Logger, r T
 type DiskReportTransport interface {
 	SetDiskReporter(func(uint64, string) (cluster.DiskVerdict, error))
 	SendDiskReport(context.Context, uint64, string) (cluster.DiskVerdict, error)
+}
+
+// Where a peer's current address came from (PeerAddressView.Source).
+const (
+	PeerAddressFromBoot       = "boot"        // chosen at startup (COMMITTED_PEERS or recorded)
+	PeerAddressFromMembership = "membership"  // a member add, or a snapshot's record
+	PeerAddressFromSelfReport = "self-report" // the peer reported it, after its old address failed
+	PeerAddressFromAgreed     = "agreed"      // an applied UpdateNode (self-report recorded, or set by an operator)
+)
+
+// PeerAddressView is the transport's view of one peer's address.
+type PeerAddressView struct {
+	URL    string
+	Source string
+	// Delivered is true once a message has been delivered to URL since it
+	// became the peer's address.
+	Delivered   bool
+	LastSuccess time.Time // zero: never delivered
+}
+
+// MembershipView lets the transport ask whether a node id is a current
+// member (voter or learner), so a self-report from a non-member is ignored.
+type MembershipView interface {
+	IsMember(id uint64) bool
 }

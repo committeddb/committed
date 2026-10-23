@@ -3,8 +3,6 @@ package db
 import (
 	"context"
 	"errors"
-	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +27,6 @@ type fakeReceiver struct {
 	snapCompleted uint64
 	resets        int
 	genSets       []uint64
-	adopted       [][]string
 	records       int
 	resetErr      error // returned by the next ResetEventLog, once
 	fenced        int   // BeginCatchUp calls
@@ -91,14 +88,7 @@ func (f *fakeReceiver) AppendFetchedRecords([]byte) error {
 	return nil
 }
 
-func (f *fakeReceiver) AdoptEventSegments(paths []string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.adopted = append(f.adopted, paths)
-	return nil
-}
-func (f *fakeReceiver) EventFetchDir() string { return "" }
-func (f *fakeReceiver) advance(to uint64)     { f.mu.Lock(); f.eventIndex = to; f.mu.Unlock() }
+func (f *fakeReceiver) advance(to uint64) { f.mu.Lock(); f.eventIndex = to; f.mu.Unlock() }
 
 // fakePeers is a Transport whose FetchEvents answers from a script: each
 // call sees the request and returns what a peer would, moving the
@@ -210,29 +200,6 @@ func TestCatchUp_ARefusedResetIsRetriedNotSkipped(t *testing.T) {
 	require.Equal(t, EventFetchRequest{After: 0, To: 100, MinGeneration: 4}, peers.seen()[0])
 }
 
-// A peer's segment that does not align with this node's log means the two
-// are not the same log after all; the node's own content is discarded and
-// fetched whole rather than retried forever.
-func TestCatchUp_MisalignedSegmentsRefetchWhole(t *testing.T) {
-	recv := &fakeReceiver{eventIndex: 30, gen: 4, snapCompleted: 4}
-	peers := &fakePeers{recv: recv}
-	calls := 0
-	peers.answer = func(req EventFetchRequest, sink EventSink) (EventFetchResult, error) {
-		calls++
-		if calls == 1 {
-			require.NoError(t, sink.Begin(4, 100))
-			return EventFetchResult{Peer: 2}, fmt.Errorf("adopt 00000000000000000031: %w: this log ends at seq 30, the first file starts at 40", ErrEventLogMisaligned)
-		}
-		require.NoError(t, sink.Begin(4, 100))
-		recv.advance(100)
-		return EventFetchResult{Peer: 2, EventServeResult: EventServeResult{Generation: 4, EventIndex: 100, LastIndex: 100}}, nil
-	}
-	n := newCatchUpRaft(t, recv, peers)
-	require.True(t, catchUp(n, 100, 4))
-	require.Equal(t, 1, recv.resets)
-	require.Equal(t, EventFetchRequest{After: 0, To: 100, MinGeneration: 4}, peers.seen()[1], "the second exchange starts over")
-}
-
 // A log whose generation predates the snapshot's completed scrub is
 // discarded before anything is fetched; a peer at a newer generation than
 // the log's makes the loop discard the log and fetch it whole; a peer at
@@ -326,7 +293,7 @@ func TestCatchUp_StopsOnCloseAndReportsProgress(t *testing.T) {
 // durably before any content, a log with content refuses another.
 func TestFetchSink_Begin(t *testing.T) {
 	recv := &fakeReceiver{}
-	sink := &fetchSink{recv: recv, dir: t.TempDir(), logger: zap.NewNop()}
+	sink := &fetchSink{recv: recv}
 	require.NoError(t, sink.Begin(9, 100))
 	require.Equal(t, []uint64{9}, recv.genSets)
 
@@ -343,42 +310,14 @@ type eventIndexOnly struct{ raftStorage }
 
 func (eventIndexOnly) EventIndex() uint64 { return 0 }
 
-// The receiving sink stages segments and adopts them in one batch — at the
-// end of the stream, or before the records that must follow them — so a
-// stream of many segments costs one reopen, not one per file.
-func TestFetchSink_AdoptsSegmentsInBatches(t *testing.T) {
+// A whole segment file comes only from a peer still on a release before
+// 0.8.3: the sink refuses it, naming that, and appends nothing.
+func TestFetchSink_RefusesSegmentFiles(t *testing.T) {
 	recv := &fakeReceiver{}
-	dir := t.TempDir()
-	sink := &fetchSink{recv: recv, dir: dir, logger: zap.NewNop()}
+	sink := &fetchSink{recv: recv}
 	require.NoError(t, sink.Begin(1, 100))
-	seg := func(name string) {
-		require.NoError(t, sink.Segment(name, 3, strings.NewReader("abc")))
-	}
-	seg("00000000000000000001")
-	seg("00000000000000000010")
-	require.Empty(t, recv.adopted, "nothing adopted until the batch closes")
-	require.NoError(t, sink.Records([]byte("run")))
-	require.Len(t, recv.adopted, 1)
-	require.Equal(t, []string{filepath.Join(dir, "00000000000000000001"), filepath.Join(dir, "00000000000000000010")}, recv.adopted[0],
-		"the segments before a run of records go in first, together")
-	require.Equal(t, 1, recv.records)
-	seg("00000000000000000020")
-	require.NoError(t, sink.End(EventServeResult{}))
-	require.Len(t, recv.adopted, 2)
-	require.Equal(t, []string{filepath.Join(dir, "00000000000000000020")}, recv.adopted[1], "the rest at the end")
-	require.NoError(t, sink.End(EventServeResult{}))
-	require.Len(t, recv.adopted, 2, "an empty batch is nothing")
-
-	// A stream cut after staging never reaches End; the next stream owns
-	// its own files and the cut one's are gone.
-	seg("00000000000000000030")
-	stale := filepath.Join(dir, "00000000000000000030")
-	require.FileExists(t, stale)
-	require.NoError(t, sink.Begin(1, 100))
-	require.NoFileExists(t, stale, "a cut stream's staged file is discarded")
-	seg("00000000000000000040")
-	require.NoError(t, sink.End(EventServeResult{}))
-	require.Equal(t, []string{filepath.Join(dir, "00000000000000000040")}, recv.adopted[2], "only this stream's segment is adopted")
+	require.ErrorIs(t, sink.Segment("00000000000000000001", 3, strings.NewReader("abc")), ErrPeerSentSegmentFiles)
+	require.Zero(t, recv.records)
 }
 
 // A storage without an event log cannot catch up: the loop declines and the

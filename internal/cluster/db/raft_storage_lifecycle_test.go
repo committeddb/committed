@@ -16,11 +16,13 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-// Every node, joiner, and restart in a scenario uses the same options.
-func forLifecycleBackends(t *testing.T, scenario func(*testing.T, []wal.Option)) {
+// Every scenario runs on the default event log and on one with tiny
+// segments, so it crosses rotation, sealing and compression. Every node,
+// joiner, and restart in a scenario uses the same options.
+func forLifecycleConfigs(t *testing.T, scenario func(*testing.T, []wal.Option)) {
 	t.Helper()
-	t.Run("tidwall", func(t *testing.T) { scenario(t, nil) })
-	t.Run("segmented", func(t *testing.T) {
+	t.Run("default", func(t *testing.T) { scenario(t, nil) })
+	t.Run("small-segments", func(t *testing.T) {
 		scenario(t, []wal.Option{wal.WithSegmentedEventLog(segmentlog.LogOptions{
 			SegmentBytes: 2048,
 			Encoding:     segmentlog.Options{Compression: segmentlog.ZstdDefault},
@@ -29,15 +31,12 @@ func forLifecycleBackends(t *testing.T, scenario func(*testing.T, []wal.Option))
 	})
 }
 
-// Compare logical IDs and original protobuf bytes. Native physical sequences
-// are not a valid way to inspect the segmented engine after a scrub.
-func compareSegmentedEventPrefix(t *testing.T, dirs []string) bool {
+// assertEventLogPrefixMatches reopens each node's event log and requires
+// the prefix every node holds to be identical: logical IDs and the original
+// protobuf bytes. Physical sequences are not comparable after a scrub. Runs
+// with every raft + storage already closed so the on-disk state is stable.
+func assertEventLogPrefixMatches(t *testing.T, dirs []string) {
 	t.Helper()
-	recognized, err := segmentlog.RecognizeDirectory(filepath.Join(dirs[0], "events"))
-	require.NoError(t, err)
-	if !recognized {
-		return false
-	}
 	logs := make([]*segmented.Log, 0, len(dirs))
 	through := ^uint64(0)
 	for _, dir := range dirs {
@@ -64,11 +63,10 @@ func compareSegmentedEventPrefix(t *testing.T, dirs []string) bool {
 			require.Equal(t, expected, records)
 		}
 	}
-	return true
 }
 
 func TestAdversarial_StorageLeaderRestart(t *testing.T) {
-	forLifecycleBackends(t, func(t *testing.T, options []wal.Option) {
+	forLifecycleConfigs(t, func(t *testing.T, options []wal.Option) {
 		nodes, _, dirs, fatalC := newSevereLagCluster(t, 3, nil, options...)
 		t.Cleanup(func() {
 			for _, node := range nodes {

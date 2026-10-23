@@ -4,6 +4,7 @@ package mysql_test
 
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // G501: a key generator for test rows, not a hash of anything secret
 	"fmt"
 	"runtime"
 	"strconv"
@@ -83,7 +84,8 @@ func psDecodeChunks(t *testing.T, pos []byte, table string) *dialectpb.TableChun
 // chunk reads, no concurrent writes).
 func psDurableRows(t *testing.T, plan *dialectpb.TableChunkProgress) int {
 	t.Helper()
-	parse := func(s string, def int) int {
+	parse := func(b []byte, def int) int {
+		s := string(b)
 		if s == "" {
 			return def
 		}
@@ -337,4 +339,66 @@ func TestMysqlParallelSnapshotSpeedup(t *testing.T) {
 		single, parallel, ratio, descents, runtime.NumCPU())
 	require.Positive(t, descents,
 		"a globally ascending 100k-row stream means the 4 chunk readers ran serially, not concurrently")
+}
+
+// TestMysqlParallelSnapshotBinaryKeys snapshots a table keyed by BINARY(16)
+// (the UUID-as-binary shape the binary split strategy exists for) through
+// the chunked path. The chunk bounds and cursors are raw key bytes, mostly
+// not valid UTF-8, so the checkpoint must carry them as bytes; every row
+// arrives exactly once.
+func TestMysqlParallelSnapshotBinaryKeys(t *testing.T) {
+	const table = "ps_binary"
+	const rows = 2000
+	db := createDB(t)
+	defer db.Close()
+	_, err := db.Exec("DROP TABLE IF EXISTS " + table)
+	require.NoError(t, err)
+	_, err = db.Exec("CREATE TABLE " + table + " (id BINARY(16) NOT NULL PRIMARY KEY, v INT)")
+	require.NoError(t, err)
+	var b strings.Builder
+	b.WriteString("INSERT INTO " + table + " (id, v) VALUES ")
+	for i := 1; i <= rows; i++ {
+		if i > 1 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, "(x'%x',%d)", md5.Sum([]byte(strconv.Itoa(i))), i)
+	}
+	_, err = db.Exec(b.String())
+	require.NoError(t, err)
+	_, err = db.Exec("ANALYZE TABLE " + table)
+	require.NoError(t, err)
+
+	cfg := psConfig(table, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr := make(chan *cluster.Proposal, 256)
+	po := make(chan cluster.Position, 64)
+	go func() { _ = (&mysql.MySQLDialect{}).Ingest(ctx, cfg, nil, 0, pr, po) }()
+
+	seen := map[string]int{}
+	chunks := 0
+	deadline := time.After(90 * time.Second)
+	for len(seen) < rows {
+		select {
+		case p := <-pr:
+			if isRefreshMarkerProposal(p) {
+				continue
+			}
+			for _, e := range p.Entities {
+				seen[string(e.Key)]++
+			}
+			if p.Position != nil {
+				if plan := psDecodeChunks(t, p.Position, table); plan != nil {
+					chunks = len(plan.Chunks)
+				}
+			}
+		case <-po:
+		case <-deadline:
+			t.Fatalf("the binary-keyed snapshot delivered %d of %d rows", len(seen), rows)
+		}
+	}
+	require.GreaterOrEqual(t, chunks, 2, "the binary split strategy planned the table into chunks")
+	for k, n := range seen {
+		require.Equal(t, 1, n, "key %x arrived %d times", k, n)
+	}
 }

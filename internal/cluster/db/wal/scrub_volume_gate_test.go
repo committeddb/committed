@@ -56,8 +56,10 @@ func TestHasScrubBacklog_MetadataVolumeGate(t *testing.T) {
 	// the reclaimable estimate over the ratio: now the rewrite pays for itself.
 	saveEntity(t, userSnapshotType(t, "snapstream"), s, 1, idx)
 	idx++
+	// Enough of it to outweigh the event log's fixed overhead (the segmented
+	// catalog), which a log this small cannot amortize.
 	big := bytes.Repeat([]byte("y"), 2048)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 30; i++ {
 		saveEntity(t, cluster.NewUpsertEntity(&cluster.Type{ID: "snapstream"}, []byte("same-key"), big), s, 1, idx)
 		idx++
 	}

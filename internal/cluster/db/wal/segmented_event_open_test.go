@@ -24,7 +24,6 @@ func TestOpenSelectsSegmentedEventLog(t *testing.T) {
 		s, err := Open(path, nil, nil, nil, option, WithSafeMode())
 		require.NoError(t, err)
 		require.NotNil(t, s.eventLog.managed)
-		require.Nil(t, s.eventLog.native)
 		if !reopen {
 			for index := uint64(1); index <= 12; index++ {
 				entry := &pb.Entry{Index: proto.Uint64(index), Term: proto.Uint64(3), Type: pb.EntryNormal.Enum()}
@@ -57,40 +56,30 @@ func eventDirectoryBytes(t *testing.T, base string) map[string][]byte {
 	return result
 }
 
+// A tidwall event log, or a segmented one missing its catalog, is refused
+// without the events directory changing, and the refusal releases the locks.
 func TestOpenRefusesIncompatibleEventFormat(t *testing.T) {
-	for _, existing := range []string{"native", "segmented", "missing-catalog"} {
+	for _, existing := range []string{"tidwall", "missing-catalog"} {
 		t.Run(existing, func(t *testing.T) {
 			path := t.TempDir()
-			segmented := WithSegmentedEventLog(segmentlog.LogOptions{})
-			options := []Option{WithSafeMode()}
-			if existing != "native" {
-				options = append(options, segmented)
-			}
-			s, err := Open(path, nil, nil, nil, options...)
+			s, err := Open(path, nil, nil, nil, WithSafeMode())
 			require.NoError(t, err)
 			require.NoError(t, s.AppendFetchedRecords(fetchedStream(frame(experimentEntry(t, 10, pb.EntryNormal)))))
 			require.NoError(t, s.Close())
-			if existing == "missing-catalog" {
+			if existing == "tidwall" {
+				require.NoError(t, RewriteEventLogAsTidwallForTest(path, 1<<20))
+			} else {
 				require.NoError(t, os.Remove(filepath.Join(datadir.EventsDir(path), "metadata.db")))
 			}
 			before := eventDirectoryBytes(t, path)
-			wrongOptions := []Option{WithSafeMode()}
-			if existing == "native" {
-				wrongOptions = append(wrongOptions, segmented)
-			}
-			_, err = Open(path, nil, nil, nil, wrongOptions...)
+			_, err = Open(path, nil, nil, nil, WithSafeMode())
 			require.Error(t, err)
-			require.Equal(t, before, eventDirectoryBytes(t, path), "wrong backend must not initialize or rewrite the events directory")
-			if existing == "missing-catalog" {
-				_, err = Open(path, nil, nil, nil, segmented, WithSafeMode())
-				require.Error(t, err)
-				require.Equal(t, before, eventDirectoryBytes(t, path))
-			} else {
-				resumed, err := Open(path, nil, nil, nil, options...)
-				require.NoError(t, err, "failed open must release locks")
-				require.Equal(t, uint64(10), resumed.EventIndex())
-				require.NoError(t, resumed.Close())
+			if existing == "tidwall" {
+				require.ErrorIs(t, err, ErrTidwallEventLog)
 			}
+			require.Equal(t, before, eventDirectoryBytes(t, path), "a refused open must not initialize or rewrite the events directory")
+			_, err = Open(path, nil, nil, nil, WithSafeMode())
+			require.Error(t, err, "the refusal is the same on a second open: it released its locks")
 		})
 	}
 }

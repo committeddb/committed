@@ -40,13 +40,10 @@ func (c *workloadCompressor) CompressNextSealed() (bool, error) {
 
 func streamingWorkloadStore(t testing.TB, backend string, extra ...Option) (*Storage, *workloadCompressor) {
 	t.Helper()
-	options := []Option{WithSealerIdleInterval(time.Millisecond)}
-	if backend == "segmented" {
-		options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
-			Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault},
-			Cache:    segmentlog.CacheOptions{RecentBytes: 160 << 20, HistoricalBytes: 160 << 20},
-		}))
-	}
+	options := []Option{WithSealerIdleInterval(time.Millisecond), WithSegmentedEventLog(segmentlog.LogOptions{
+		Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault},
+		Cache:    segmentlog.CacheOptions{RecentBytes: 160 << 20, HistoricalBytes: 160 << 20},
+	})}
 	s, err := Open(t.TempDir(), nil, nil, nil, append(options, extra...)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -189,7 +186,7 @@ func streamingExpectedRows(t testing.TB, entries []*pb.Entry) []*clusterpb.LogRo
 func TestStreamingWorkload(t *testing.T) {
 	entries, _, _ := workloadEntries(t, 1024)
 	expected := streamingExpectedRows(t, entries)
-	for _, backend := range []string{"tidwall", "segmented"} {
+	for _, backend := range []string{"segmented"} {
 		for _, scenario := range []struct {
 			name    string
 			starts  []int
@@ -242,7 +239,7 @@ func benchmarkStreamingWorkload(b *testing.B, records, prefix int, constrained b
 	for _, first := range catchupStarts {
 		wantActuals += len(entries) - first
 	}
-	for _, backend := range []string{"tidwall", "segmented"} {
+	for _, backend := range []string{"segmented"} {
 		b.Run(backend, func(b *testing.B) {
 			totals := map[string]float64{}
 			b.ReportAllocs()
@@ -250,14 +247,10 @@ func benchmarkStreamingWorkload(b *testing.B, records, prefix int, constrained b
 				b.StopTimer()
 				var options []Option
 				if constrained {
-					if backend == "tidwall" {
-						options = append(options, WithEventCacheSegments(2))
-					} else {
-						options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
-							Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault},
-							Cache:    segmentlog.CacheOptions{RecentBytes: 32 << 20, HistoricalBytes: 32 << 20},
-						}))
-					}
+					options = append(options, WithSegmentedEventLog(segmentlog.LogOptions{
+						Encoding: segmentlog.Options{Compression: segmentlog.ZstdDefault},
+						Cache:    segmentlog.CacheOptions{RecentBytes: 32 << 20, HistoricalBytes: 32 << 20},
+					}))
 				}
 				s, compressor := streamingWorkloadStore(b, backend, options...)
 				for first := 0; first < prefix; first += 256 {

@@ -183,6 +183,7 @@ func (s *single) migrateEntities(ctx context.Context, a *cluster.Actual) ([]*clu
 		copy := *e
 		copy.Type = latest
 		copy.Data = data
+		copy.MigratedFrom = e.Version
 		out = append(out, &copy)
 	}
 	return out, nil

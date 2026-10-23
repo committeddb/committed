@@ -165,10 +165,10 @@ func planTableChunks(
 	for i := 0; i <= len(bounds); i++ {
 		c := &dialectpb.ChunkCursor{}
 		if i > 0 {
-			c.Lower = bounds[i-1]
+			c.Lower = []byte(bounds[i-1])
 		}
 		if i < len(bounds) {
-			c.Upper = bounds[i]
+			c.Upper = []byte(bounds[i])
 		}
 		plan.Chunks = append(plan.Chunks, c)
 	}

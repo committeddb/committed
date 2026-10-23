@@ -3,10 +3,7 @@ package db
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -60,13 +57,6 @@ type EventReceiver interface {
 	// AppendFetchedRecords appends a run of records in the peer wire
 	// encoding; records at or below this node's event index are skipped.
 	AppendFetchedRecords(data []byte) error
-	// AdoptEventSegments takes staged whole segment files into the log, in
-	// order; the files are consumed. A receiver may import their logical
-	// records instead of installing the physical files. On error, a durable
-	// prefix may remain; EventIndex determines where a retry resumes.
-	AdoptEventSegments(paths []string) error
-	// EventFetchDir is the staging directory for segment files in flight.
-	EventFetchDir() string
 	// BeginCatchUp fences the storage's own maintenance that would run over a
 	// log being filled — a pending scrub resumed at Open or woken by a
 	// replay — and returns the release, which the Ready loop runs once the
@@ -75,10 +65,10 @@ type EventReceiver interface {
 	BeginCatchUp() func()
 }
 
-// ErrEventLogMisaligned is a fetched segment file that does not start where
-// this node's event log ends: the two logs are not the same log at the same
-// generation after all, and the receiver's is fetched whole instead.
-var ErrEventLogMisaligned = errors.New("event segments do not align with this node's event log")
+// ErrPeerSentSegmentFiles refuses whole event-log segment files from a peer:
+// only a release before 0.8.3, serving the tidwall engine's files, sends them,
+// and a cluster cannot mix the two engines.
+var ErrPeerSentSegmentFiles = errors.New("a peer sent tidwall event-log segment files, which only a release before 0.8.3 sends; stop it and upgrade it as docs/operations/upgrade.md describes")
 
 // CatchUpStatus is a node's progress through a catch-up: the raft index its
 // event log has reached, the one the pending snapshot needs, when it began,
@@ -240,7 +230,7 @@ func (n *Raft) catchUpEventLog(snap *raftpb.Snapshot, need, needGen uint64) (rel
 		zap.Uint64("eventIndex", have), zap.Uint64("snapshotIndex", need),
 		zap.Uint64("generation", recv.EventLogGeneration()), zap.Uint64("snapshotCompletedScrubBound", needGen))
 
-	sink := &fetchSink{recv: recv, dir: recv.EventFetchDir(), logger: n.logger}
+	sink := &fetchSink{recv: recv}
 	backoff := catchUpInitialBackoff
 	// One warning per cause per cadence: a change of cause is always loud
 	// once, however recently another cause warned.
@@ -318,13 +308,6 @@ func (n *Raft) catchUpEventLog(snap *raftpb.Snapshot, need, needGen uint64) (rel
 			case errors.As(err, &mismatch):
 				warn("catch-up is waiting for a peer at the generation this node needs (the peers that answer are behind on a scrub)",
 					zap.Uint64("peer", mismatch.Peer), zap.Uint64("peerGeneration", mismatch.Have), zap.Uint64("wanted", mismatch.Want))
-			case errors.Is(err, ErrEventLogMisaligned):
-				// Same generation, yet not the same log at the boundary: this
-				// node's own content cannot be trusted as a prefix.
-				if reset("a peer's segment does not align with this node's event log", zap.Error(err)) {
-					backoff = catchUpInitialBackoff
-					continue
-				}
 			default:
 				warn("catch-up is waiting: no peer is serving the events this node is missing",
 					zap.Uint64("eventIndex", have), zap.Uint64("snapshotIndex", need), zap.Error(err))
@@ -341,24 +324,15 @@ func (n *Raft) catchUpEventLog(snap *raftpb.Snapshot, need, needGen uint64) (rel
 	}
 }
 
-// fetchSink is the receiving side of a fetch: it pins the generation,
-// stages segment files under the events directory and adopts them in
-// batches — at the end of the stream, or before a run of records that
-// must follow them — and appends record runs. Everything adopted is
-// durable before the next exchange is asked for, and a stream cut short
-// leaves its staged-but-unadopted files behind for the next exchange to
-// overwrite, so an interrupted fetch resumes from wherever it got to.
+// fetchSink is the receiving side of a fetch: it pins the generation and
+// appends record runs. Everything appended is durable before the next
+// exchange is asked for, so an interrupted fetch resumes from wherever it got
+// to.
 type fetchSink struct {
-	recv   EventReceiver
-	dir    string
-	logger *zap.Logger
-	staged []string
+	recv EventReceiver
 }
 
 func (f *fetchSink) Begin(gen, _ uint64) error {
-	// A previous stream that was cut short left its staged files behind;
-	// they belong to that stream, not this one.
-	f.discardStaged()
 	if f.recv.EventIndex() == 0 {
 		// An empty log takes the peer's generation, durably, before any
 		// content — a restart mid-fetch must resume at it, not start over.
@@ -370,69 +344,9 @@ func (f *fetchSink) Begin(gen, _ uint64) error {
 	return nil
 }
 
-func (f *fetchSink) Segment(name string, size int64, r io.Reader) error {
-	if err := os.MkdirAll(f.dir, 0o700); err != nil {
-		return err
-	}
-	path := filepath.Join(f.dir, name)
-	_ = os.Remove(path) // a previous attempt's partial file
-	if err := writeStagedSegment(path, size, r); err != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("stage %s: %w", name, err)
-	}
-	f.staged = append(f.staged, path)
-	return nil
-}
+// Segment refuses a whole segment file: a 0.8.3 peer serves records only.
+func (f *fetchSink) Segment(string, int64, io.Reader) error { return ErrPeerSentSegmentFiles }
 
-func (f *fetchSink) Records(data []byte) error {
-	if err := f.adoptStaged(); err != nil {
-		return err
-	}
-	return f.recv.AppendFetchedRecords(data)
-}
+func (f *fetchSink) Records(data []byte) error { return f.recv.AppendFetchedRecords(data) }
 
-func (f *fetchSink) End(EventServeResult) error { return f.adoptStaged() }
-
-// adoptStaged passes the staged batch to the receiver. Native receivers
-// install it in one reopen; shared receivers import its records. The
-// files are consumed either way: adoption moves them, and a refused batch
-// is removed so a retry stages afresh.
-func (f *fetchSink) adoptStaged() error {
-	if len(f.staged) == 0 {
-		return nil
-	}
-	paths := f.staged
-	f.staged = nil
-	if err := f.recv.AdoptEventSegments(paths); err != nil {
-		for _, p := range paths {
-			_ = os.Remove(p)
-		}
-		return err
-	}
-	return nil
-}
-
-func (f *fetchSink) discardStaged() {
-	for _, p := range f.staged {
-		_ = os.Remove(p)
-	}
-	f.staged = nil
-}
-
-func writeStagedSegment(path string, size int64, r io.Reader) error {
-	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: under this node's own data directory
-	if err != nil {
-		return err
-	}
-	n, err := io.Copy(out, io.LimitReader(r, size))
-	if err == nil && n != size {
-		err = fmt.Errorf("short segment: %d of %d bytes", n, size)
-	}
-	if err == nil {
-		err = out.Sync()
-	}
-	if cerr := out.Close(); err == nil {
-		err = cerr
-	}
-	return err
-}
+func (f *fetchSink) End(EventServeResult) error { return nil }

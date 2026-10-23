@@ -14,7 +14,7 @@ Committed is specifically NOT a database designed for querying.
 
 ## What makes it distinctive
 
-- **vs. an event store's projection layer**: keep your write side. Committed reads the events table you already have in Postgres, MySQL, or SQL Server and [builds the read models](docs/recipes/event-store-read-models.md): without downtime, failing loudly, and with no plumbing code.
+- **vs. an event store's projection layer**: keep your write side. Committed reads the events table you already have in Postgres, MySQL, or SQL Server and [builds the read models](docs/recipes/event-store-read-models.md): without downtime, failing loudly, with no plumbing code, and keeping pace with [10,000 events/sec on three 2-vCPU nodes](docs/operations/performance.md).
 - **vs. Kafka**: a single replicated log instead of partitioned topics, with built-in *output-side* projection (syncables) rather than consumer offsets. Configs live in the log, not ZooKeeper/KRaft.
 - **vs. etcd**: same Raft substrate, but append-only log semantics instead of KV — and a worker model for ingest/sync that etcd doesn't have.
 - **vs. an RDBMS / Debezium pipeline**: Committed collapses "replicated log + CDC source + sink connectors" into one process. You don't need Kafka + Debezium + Kafka Connect + a separate consensus layer; the same binary holds the log, the source, and the destination.
@@ -86,7 +86,8 @@ Committed is specifically NOT a database designed for querying.
 ### Recovering
 
 - [Rebuilding a node](docs/operations/rebuild.md) — a node that fell behind
-  catches up by itself; replace one whose disk or state cannot be trusted.
+  catches up by itself; replace one whose disk or state cannot be trusted, or
+  recover a cluster that lost its majority.
 - [Backup and restore](docs/operations/backup.md) — archive a node, stopped or
   live, to a portable tarball for disaster recovery and total-loss rebuilds.
 - [Safe mode](docs/operations/safe-mode.md) — boot with workers held to break a

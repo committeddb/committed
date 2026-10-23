@@ -32,6 +32,10 @@ func (l observedEventPublication) RewriteWithPublicationLock(ctx context.Context
 	return l.EventLog.RewriteWithPublicationLock(ctx, generation, transform, eventPublicationLock{lock, l.entered})
 }
 
+func (l observedEventPublication) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+	return l.EventLog.RewriteSealedWithPublicationLock(ctx, generation, transform, eventPublicationLock{lock, l.entered})
+}
+
 func TestEventLogActualReadDuringRewritePreparation(t *testing.T) {
 	for _, cached := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cached=%t", cached), func(t *testing.T) {

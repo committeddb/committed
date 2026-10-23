@@ -39,7 +39,7 @@ func (t *learnerSnapshotDropTransport) Send(messages []*raftpb.Message) {
 }
 
 func TestAdversarial_LearnerRestartRetriesDroppedSnapshotWithoutElection(t *testing.T) {
-	forLifecycleBackends(t, func(t *testing.T, storageOpts []wal.Option) {
+	forLifecycleConfigs(t, func(t *testing.T, storageOpts []wal.Option) {
 		ports := pickFreePorts(4)
 		peers := make([]raft.Peer, 4)
 		for i, port := range ports {

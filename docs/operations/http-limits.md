@@ -53,14 +53,22 @@ the cap may be too tight for legitimate proposals — raise
 
 | Env var | Default | Notes |
 |---|---|---|
-| `COMMITTED_MAX_PROPOSAL_BYTES` | `16777216` (16 MiB) | Integer bytes. Applies to the *marshaled* proposal, so the framed wire size. |
+| `COMMITTED_MAX_PROPOSAL_BYTES` | `16777216` (16 MiB) | Integer bytes. Applies to the *marshaled* proposal, so the framed wire size. At most `67108835` (just under 64 MiB): the largest proposal whose raft entry fits one event-log record. A node refuses to start with a larger value. |
 
 Proposals and configs are KB-sized in practice; 16 MiB is generous
 headroom for schema-heavy configs while still keeping any one entry
 small enough that raft replication doesn't stall the cluster. Lower
 it if your workload is uniformly small and you want a tighter bound;
 raise it if you legitimately post larger configs and start seeing
-413s.
+413s. Size a raise against memory: a proposal is held whole several times
+on its way in (the request body, the proposal, the raft entry, each
+follower's replication message, the apply batch), so budget about five
+times the cap per proposal in flight, and a large entry delays the entries
+queued behind it while it replicates. Heartbeats travel separately from
+entries and from each node's disk writes, so neither a slow transfer nor
+a slow disk starts an election. A large proposal is confirmed once a
+majority of nodes have received it and written it to disk, so its
+response takes that long.
 
 ## HTTP server timeouts
 

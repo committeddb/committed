@@ -39,7 +39,7 @@ func (s *recordServeSink) End(result db.EventServeResult) error {
 }
 
 func TestSharedServeExistingPeerRecords(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		t.Run(name, func(t *testing.T) {
 			source, err := openStorage(t.TempDir(), nil, nil, nil, storageTestOpeners()[name], WithSafeMode())
 			require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestSharedServeExistingPeerRecords(t *testing.T) {
 }
 
 func TestSharedServeErrorsAndErasedSuffix(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented"} {
+	for _, name := range []string{"segmented"} {
 		t.Run(name, func(t *testing.T) {
 			source, err := openStorage(t.TempDir(), nil, nil, nil, storageTestOpeners()[name], WithSafeMode())
 			require.NoError(t, err)

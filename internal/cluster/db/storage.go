@@ -1,6 +1,8 @@
 package db
 
 import (
+	"errors"
+
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 
@@ -44,14 +46,16 @@ type Storage interface {
 type ConsensusStorage interface {
 	raft.Storage
 	// Save persists raft state and entries durably. It does NOT apply the
-	// entries to application state — that happens via ApplyCommitted, which
-	// the raft Ready loop calls separately on rd.CommittedEntries.
+	// entries to application state — that happens via ApplyCommittedBatch,
+	// which the apply goroutine calls separately on committed entries. Save
+	// runs on the append goroutine, concurrently with apply and with raft's
+	// own reads.
 	Save(st *raftpb.HardState, ents []*raftpb.Entry, snap *raftpb.Snapshot) error
 	// ApplyCommitted dispatches a single committed raft entry to the
 	// per-entity handlers that update application state (BoltDB buckets,
-	// time series, downstream channels). It is called by the raft Ready loop
-	// on entries from rd.CommittedEntries, after Save has persisted them and
-	// before n.node.Advance(). Implementations must be idempotent on
+	// time series, downstream channels). It is called on committed entries
+	// after Save has persisted them and before raft is told they are
+	// applied. Implementations must be idempotent on
 	// re-apply (e.g. by skipping entries with index <= AppliedIndex). An
 	// error from ApplyCommitted is treated as fatal by raft.go because
 	// continuing past a half-applied entry diverges the state machine.
@@ -62,8 +66,8 @@ type ConsensusStorage interface {
 	// identical to calling ApplyCommitted per entry (same order, same
 	// idempotent skip of already-applied entries); the crash-replay window
 	// widens from one entry to at most one batch, which restart replay
-	// already covers. The Ready loop calls this once per Ready instead of
-	// looping ApplyCommitted.
+	// already covers. The apply goroutine calls this once per batch
+	// instead of looping ApplyCommitted.
 	ApplyCommittedBatch(entries []*raftpb.Entry) error
 	// AppliedIndex returns the highest log index that has been fully
 	// applied to application state. Survives restart so the Ready loop's
@@ -83,8 +87,8 @@ type ConsensusStorage interface {
 	// followers whose raft log has been compacted past.
 	CreateSnapshot(index uint64, confState *raftpb.ConfState) (*raftpb.Snapshot, error)
 	// ConfState updates the conf state associated with the storage's
-	// in-memory snapshot metadata. Called by the raft Ready loop after
-	// each EntryConfChange apply, with the new ConfState returned by
+	// in-memory snapshot metadata. Called by the apply goroutine for
+	// each EntryConfChange it applies, with the new ConfState returned by
 	// raft.Node.ApplyConfChange. The update is persisted on the next
 	// Save call (which writes the current snapshot metadata to the
 	// state log), so InitialState returns the correct voter set on
@@ -93,8 +97,8 @@ type ConsensusStorage interface {
 	// heartbeats or forward proposals.
 	ConfState(c *raftpb.ConfState)
 	// RestoreSnapshot installs the metadata state carried by snap onto
-	// this node, replacing current bbolt contents. Called from the
-	// raft Ready loop when raft delivers a non-empty rd.Snapshot. The
+	// this node, replacing current bbolt contents. Called by the append
+	// goroutine, with apply held off, when raft delivers a snapshot. The
 	// permanent event log is NOT in the snapshot; a node whose event
 	// log is behind the snapshot's metadata index is expected to
 	// fatal-exit at the Ready loop's subsequent invariant check.
@@ -126,6 +130,11 @@ type EventLogStorage interface {
 	// single dead-lettered Actual without disturbing any reader cursor.
 	ActualAt(index uint64) (*cluster.Actual, error)
 }
+
+// ErrActualNotFound is returned by ActualAt when no committed Actual exists
+// at the requested raft index (it was never committed, has been scrubbed, or
+// the entry there carries no proposal data).
+var ErrActualNotFound = errors.New("wal: no committed entry at raft index")
 
 // ConfigStorage reads the applied configuration documents — databases,
 // syncables, ingestables, types — with their version history, plus the
@@ -332,6 +341,20 @@ type MembershipStorage interface {
 	MemberZone(id uint64) (string, bool)
 	MemberZones() map[uint64]string
 	DeleteMemberZone(id uint64) error
+	// RecordRemovedMember / RemovedMembers persist every id removed from the
+	// configuration with the index of the conf change that first removed it;
+	// SetMembershipGuardIndex / MembershipGuardIndex the index of the marker
+	// that switched on the apply-time membership guard. Both are first-wins
+	// and written in the conf-change pass. See membership_guard.go.
+	RecordRemovedMember(id, index uint64) error
+	RemovedMembers() map[uint64]uint64
+	SetMembershipGuardIndex(index uint64) error
+	MembershipGuardIndex() (uint64, bool)
+	// AddressesIgnoredThrough returns the index at or below which entries
+	// carry a previous cluster's addresses — a restore or recover rewrote the
+	// directory as a new cluster — so applying them records no address. 0
+	// otherwise.
+	AddressesIgnoredThrough() uint64
 }
 
 // lostNotifierSetter is the optional Storage extension that accepts the

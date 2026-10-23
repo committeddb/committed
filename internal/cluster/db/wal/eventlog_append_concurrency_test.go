@@ -12,24 +12,17 @@ import (
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 func TestEventLogAppendDuringActualDecode(t *testing.T) {
-	for _, backend := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, backend := range []string{"segmented", "segmented-cached"} {
 		t.Run(backend, func(t *testing.T) {
-			var log eventlog.EventLog
-			var err error
-			if backend == "tidwall" {
-				log, err = tidwall.Create(t.TempDir(), 1, tidwall.Options{SegmentBytes: 128})
-			} else {
-				opts := segmentlog.LogOptions{SegmentBytes: 128}
-				if backend == "segmented-cached" {
-					opts.Cache = segmentlog.CacheOptions{RecentBytes: 1024, HistoricalBytes: 1024}
-				}
-				log, err = segmented.Create(t.TempDir(), 1, opts)
+			opts := segmentlog.LogOptions{SegmentBytes: 128}
+			if backend == "segmented-cached" {
+				opts.Cache = segmentlog.CacheOptions{RecentBytes: 1024, HistoricalBytes: 1024}
 			}
+			log, err := segmented.Create(t.TempDir(), 1, opts)
 			if err != nil {
 				t.Fatal(err)
 			}

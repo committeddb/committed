@@ -172,6 +172,44 @@ func (p *Projection) StampRendering(ctx context.Context) error {
 	return stampRendering(ctx, p.db, p.dialect, p.config.Table)
 }
 
+// DestinationHasRows implements cluster.RenderingStamped: the table, and the
+// keyless applied log beside it.
+func (c *Syncable) DestinationHasRows(ctx context.Context) (bool, error) {
+	tables := []string{c.config.Table}
+	if !c.config.Keyed() {
+		tables = append(tables, AppliedSidecarName(c.config.Table))
+	}
+	return anyHasRows(ctx, c.db, c.dialect, tables)
+}
+
+// DestinationHasRows implements cluster.RenderingStamped: the table, and every
+// helper table the projection keeps (the list Teardown drops).
+func (p *Projection) DestinationHasRows(ctx context.Context) (bool, error) {
+	kept := p.keptTables()
+	tables := make([]string, 0, 1+len(kept))
+	tables = append(tables, p.config.Table)
+	for _, kt := range kept {
+		tables = append(tables, kt.name)
+	}
+	return anyHasRows(ctx, p.db, p.dialect, tables)
+}
+
+// anyHasRows reports whether any of tables holds a row.
+func anyHasRows(ctx context.Context, db *gosql.DB, dialect Dialect, tables []string) (bool, error) {
+	for _, table := range tables {
+		var one int
+		err := db.QueryRowContext(ctx, dialect.HasRowsSQL(table)).Scan(&one)
+		switch {
+		case errors.Is(err, gosql.ErrNoRows):
+			continue
+		case err != nil:
+			return false, fmt.Errorf("probe %s for rows: %w", table, err)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 var (
 	_ cluster.RenderingStamped = (*Syncable)(nil)
 	_ cluster.RenderingStamped = (*Projection)(nil)

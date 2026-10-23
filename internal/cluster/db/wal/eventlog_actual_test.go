@@ -7,23 +7,17 @@ import (
 	"testing"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 
-	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-func TestEventLogActualMatchesLegacy(t *testing.T) {
+func TestEventLogActualMatchesProduction(t *testing.T) {
 	adapter, _ := newSegmentedEventAdapter(t)
-	legacy, err := tidwal.Open(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = legacy.Close() })
-	storage := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(legacy), nil)}
+	storage := &Storage{eventLog: productionBinding(t)}
+	production := storage.eventLog.managed
 	typ, _ := eventTestType(cluster.TypeRef{ID: "items", Version: 1})
 	storage.typeCache.Store(cluster.TypeRef{ID: "items", Version: 1}, typeCacheEntry{t: typ})
 	storage.appliedIndex.Store(100)
@@ -42,8 +36,8 @@ func TestEventLogActualMatchesLegacy(t *testing.T) {
 	if err := adapter.appendRaw(inputs); err != nil {
 		t.Fatal(err)
 	}
-	for i, raw := range inputs {
-		if err := legacy.Write(uint64(i+1), frame(raw)); err != nil {
+	for _, raw := range inputs {
+		if err := production.Append([]eventlog.Record{{ID: rawIndex(t, raw), Payload: raw}}); err != nil {
 			t.Fatal(err)
 		}
 	}

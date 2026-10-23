@@ -9,7 +9,7 @@ import (
 // recoverFetchedGeneration runs before background maintenance starts. Catch-up
 // persists the source generation in application metadata before initializing
 // the empty backend. Complete that publication after interruption; a log with
-// append history cannot be relabeled. Native generation lives only in metadata.
+// append history cannot be relabeled.
 func (s *Storage) recoverFetchedGeneration(completed uint64) error {
 	log := s.eventLog.managed
 	if log == nil || completed == 0 {

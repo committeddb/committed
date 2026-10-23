@@ -63,7 +63,7 @@ func replayInRuns(t *testing.T, ops []stageOp, runs []int) string {
 	}
 	require.Equal(t, len(ops), i)
 	require.NoError(t, store.Close())
-	dump, _ := dumpStore(t, stagestore.FilePath(dir, "fixture"))
+	dump, _ := dumpStore(t, dir, "fixture")
 	return dump
 }
 

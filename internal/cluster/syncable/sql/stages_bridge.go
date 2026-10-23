@@ -65,6 +65,30 @@ func stageNamed(c *ProjectionConfig, name string) int { return stages.IndexOf(c.
 
 func stageFingerprint(c *ProjectionConfig) string { return stages.Fingerprint(c.Stages) }
 
+// stageGraph builds the graph the projection's stages run on: the stages
+// compile to their plan, and the evaluator runs the stages the plan lowers
+// to. Admission compiles and lowers the same way (validateProjectionStages),
+// so an admitted config cannot fail here.
+func stageGraph(c *ProjectionConfig) (*stages.Graph, error) {
+	lowered, err := plannedStages(c)
+	if err != nil {
+		return nil, err
+	}
+	return stages.BuildGraph(lowered), nil
+}
+
+func plannedStages(c *ProjectionConfig) ([]stages.Stage, error) {
+	plan, err := stages.CompilePlan(c.Stages)
+	if err != nil {
+		return nil, err
+	}
+	lowered, err := plan.Stages()
+	if err != nil {
+		return nil, fmt.Errorf("internal: the stages' plan does not lower (%w) — please report this config", err)
+	}
+	return lowered, nil
+}
+
 func decodeStageObject(bs []byte) (any, error) { return stages.DecodeObject(bs) }
 
 func isBareOrderPath(s string) bool { return stages.IsBareOrderPath(s) }

@@ -7,13 +7,10 @@
 // storage or choose a backend. It remains in this package to share production
 // policy helpers and error identities; it is not wired into production Storage.
 //
-// Physical backend implementations live in db/eventlog/tidwall and
-// db/eventlog/segmented. The latter delegates to pkg/segmentlog, which owns opaque
-// records, immutable segments, the active tail, caching, and atomic publication.
-// Production logical operations use entryStore; native codec composition is in
-// legacy_event_*.go. The eventLogBinding keeps logical operations and native
-// maintenance capabilities separate. Experimental backend construction lives
-// in test fixtures. Production holds a
-// binding with a tidwall.LegacyLog owner; the raw handle stays in that backend.
-// Replacement coordination still uses the native-format lifecycle.
+// The event log's physical backend is db/eventlog/segmented, which delegates to
+// pkg/segmentlog: opaque records, immutable segments, the active tail, caching,
+// and atomic publication. Production logical operations use entryStore over an
+// eventLogBinding. A tidwall event log, written before 0.8.3, is only ever read,
+// by the converter (convert.go, tidwall_event_reader.go); the Raft logs remain
+// tidwall-backed.
 package wal

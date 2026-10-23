@@ -16,8 +16,9 @@ checksums are CRC32C. Payloads remain opaque, with sparse increasing IDs.
 
 Header CRCs cover their first 28 bytes. Group CRC covers its entire header, body,
 and first 12 trailer bytes. Every record also carries its frame checksum.
-Each group is nonempty and contains at most 32 MiB of framed data. A payload is
-at most 16 MiB. IDs must stay at or above the tail's Start, strictly increase
+Each group is nonempty and contains at most 64 MiB + 16 bytes of framed data
+(one maximum record and its frame; rotation keeps ordinary groups at or below
+the 32 MiB segment target). A payload is at most 64 MiB (`MaxRecordBytes`). IDs must stay at or above the tail's Start, strictly increase
 within and across groups, and be less than MaxUint64. ID zero is valid.
 
 Ordinary append groups express the boundary of one local append call. Tail

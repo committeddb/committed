@@ -12,7 +12,7 @@ import (
 )
 
 func TestInitializeFetchedGeneration(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		t.Run(name, func(t *testing.T) {
 			path := t.TempDir()
 			opener := storageTestOpeners()[name]
@@ -72,7 +72,7 @@ func TestInitializeFetchedGeneration(t *testing.T) {
 }
 
 func TestInitializeFetchedGenerationUncertainPublication(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		for _, after := range []bool{false, true} {
 			phase := "before-publication"
 			if after {
@@ -119,15 +119,4 @@ func TestInitializeFetchedGenerationUncertainPublication(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestInitializeFetchedGenerationRejectsNativeFormat(t *testing.T) {
-	s, err := Open(t.TempDir(), nil, nil, nil, WithSafeMode())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-	release := s.BeginCatchUp()
-	defer release()
-	require.ErrorIs(t, s.initializeFetchedGeneration(t.Context(), 7), eventlog.ErrUnsupported)
-	require.Zero(t, s.EventLogGeneration())
-	require.NoError(t, s.appendFetchedEntries(0, [][]byte{experimentEntry(t, 10, pb.EntryNormal)}))
 }

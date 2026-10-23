@@ -119,6 +119,23 @@ particular) normalize what they store — key order, duplicate keys, number
 formatting — so expect a semantically equal document back, not identical
 bytes.
 
+### Secondary indexes
+
+`[[sql.indexes]]` declares an index on the destination table, for the
+columns your queries filter or join on:
+
+```toml
+[[sql.indexes]]
+name  = "orders_by_customer"
+index = ["customer_id", "placed_at"]   # or one string: "customer_id, placed_at"
+```
+
+`name` is the index's name in the database and `index` its columns, in
+order. committed creates the indexes with the table. On PostgreSQL it also
+creates an index missing from an existing table each time the syncable
+starts; on MySQL, an index added to the config after the table exists must
+be created by hand.
+
 ### History tables
 
 A keyless history table (no `primaryKey`) is **replay-safe**: committed dedups

@@ -10,26 +10,41 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/backup"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 var (
-	restoreFrom string
-	restoreData string
+	restoreFrom       string
+	restoreData       string
+	restoreNodeID     uint64
+	restoreNewCluster bool
+	restoreClusterID  string
 )
 
 var restoreCmd = &cobra.Command{
 	Use:   "restore",
-	Short: "Restore a backup tar into a fresh data directory",
-	Long: `Unpack a backup produced by "committed backup" into a new data directory.
-The manifest is validated and any archive entry that would escape the target
-is rejected. The target --data directory must not exist or must be empty;
-restore never overwrites existing data.
+	Short: "Restore a backup tar into a fresh data directory, as a member of a new cluster",
+	Long: `Unpack a backup produced by "committed backup" into a new data directory,
+as one machine of a new cluster. The manifest is validated and any archive
+entry that would escape the target is rejected. The target --data directory
+must not exist or must be empty; restore never overwrites existing data.
 
-After restoring, start a node against the directory with the SAME
-COMMITTED_NODE_ID and COMMITTED_PEERS the source node used — the restored
-directory IS a node's directory, so it recovers exactly as it would from its
-own disk.
+A restored cluster is a new cluster with its own cluster id: it never talks
+to the cluster the backup came from, or to another restore of it. Restore
+every machine from the same archive (the newest), each as a different member
+of the backed-up cluster:
+
+  committed restore --from ARCHIVE --data DIR --node-id 1 --new-cluster
+      prints a cluster seed
+  committed restore --from ARCHIVE --data DIR --node-id 2 --cluster-id SEED
+  committed restore --from ARCHIVE --data DIR --node-id 3 --cluster-id SEED
+
+Then start each node with the COMMITTED_NODE_ID it was restored as and a
+COMMITTED_PEERS that names the new machines' addresses. Recorded addresses
+are dropped; the restored node refuses to start under another node id.
+Restored ingestables and syncables start automatically.
 
 RTBF note: a backup is a frozen copy. Restoring resurrects any subject that
 was deleted-and-scrubbed AFTER the backup was taken. committed keeps no ledger
@@ -51,6 +66,13 @@ func runRestore() error {
 	if restoreData == "" {
 		return fmt.Errorf("--data is required (the empty target data directory)")
 	}
+	if restoreNodeID == 0 {
+		return fmt.Errorf("--node-id is required: the member of the backed-up cluster this machine becomes")
+	}
+	seed, err := restoreSeed()
+	if err != nil {
+		return err
+	}
 
 	f, err := os.Open(restoreFrom) //nolint:gosec // G304: the backup path is operator-supplied via --from
 	if err != nil {
@@ -68,22 +90,53 @@ func runRestore() error {
 		r = gz
 	}
 
-	m, err := backup.Restore(r, restoreData, time.Now())
+	var id cluster.ClusterID
+	var restored *wal.Restored
+	m, err := backup.RestoreWith(r, restoreData, time.Now(), func(staging string, m *backup.Manifest) error {
+		id = cluster.RestoredClusterID(seed, m.Fingerprint())
+		var err error
+		restored, err = wal.RestoreAs(staging, id, restoreNodeID)
+		return err
+	})
 	if err != nil {
 		return err
 	}
 
 	_, _ = fmt.Fprintf(os.Stdout, "restored %d files into %s (backup taken %s", len(m.Files), restoreData, m.CreatedAt)
 	if m.NodeID != 0 {
-		_, _ = fmt.Fprintf(os.Stdout, ", node %d", m.NodeID)
+		_, _ = fmt.Fprintf(os.Stdout, ", from node %d", m.NodeID)
 	}
 	_, _ = fmt.Fprintln(os.Stdout, ")")
-	_, _ = fmt.Fprintln(os.Stdout, "start a node against this directory with the source node's COMMITTED_NODE_ID and COMMITTED_PEERS; see docs/operations/backup.md")
+	if c := restored.Converted; c != nil {
+		_, _ = fmt.Fprintf(os.Stdout, "converted its tidwall event log to the segmented engine: %d records through raft index %d\n", c.Records, c.LastIndex)
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "node %d of a new cluster %s (members: %s)\n", restoreNodeID, id, wal.MembersString(restored.Membership.ConfState))
+	if restoreNewCluster {
+		_, _ = fmt.Fprintf(os.Stdout, "restore the other members from this same archive with --cluster-id %s\n", seed)
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "start it with COMMITTED_NODE_ID=%d and COMMITTED_PEERS naming the new machines' addresses; see docs/operations/backup.md\n", restoreNodeID)
 	return nil
+}
+
+// restoreSeed is the cluster seed: minted for --new-cluster, given by
+// --cluster-id for the rest of the same restore.
+func restoreSeed() (cluster.ClusterID, error) {
+	switch {
+	case restoreNewCluster && restoreClusterID != "":
+		return cluster.ClusterID{}, fmt.Errorf("give --new-cluster for the first machine of a restore or --cluster-id for the rest, not both")
+	case restoreNewCluster:
+		return cluster.NewClusterID()
+	case restoreClusterID != "":
+		return cluster.ParseClusterID(restoreClusterID)
+	}
+	return cluster.ClusterID{}, fmt.Errorf("--new-cluster or --cluster-id is required: --new-cluster for the first machine of a restore (it prints a seed), --cluster-id SEED for the others")
 }
 
 func init() {
 	restoreCmd.Flags().StringVar(&restoreFrom, "from", "", "backup path to restore (.tar or .tar.gz); required")
 	restoreCmd.Flags().StringVar(&restoreData, "data", "", "empty target data directory; required")
+	restoreCmd.Flags().Uint64Var(&restoreNodeID, "node-id", 0, "the member of the backed-up cluster this machine becomes; required")
+	restoreCmd.Flags().BoolVar(&restoreNewCluster, "new-cluster", false, "first machine of a restore: mint a new cluster seed and print it")
+	restoreCmd.Flags().StringVar(&restoreClusterID, "cluster-id", "", "the other machines of a restore: the seed --new-cluster printed")
 	rootCmd.AddCommand(restoreCmd)
 }

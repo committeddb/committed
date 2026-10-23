@@ -171,10 +171,11 @@ nothing changed. Committed prevents this with a **label** on each piece of
 derived state saying which version wrote it, so a binary never writes by
 one rule into state produced by another.
 
-**Projection stage stores** (`<dataDir>/projections/`, one file per
-projection, node-local, rebuilt from the log) carry two labels: the
-**config fingerprint** (what you declared — change the config and the
-store rebuilds) and the store **format version** (the engine's own
+**Projection stage stores** (`<dataDir>/projections/`, one database per
+node with each projection's state in its own key range, node-local,
+rebuilt from the log) carry two labels: the **config fingerprint** (what
+your stages compute — change that and the store rebuilds; a change of
+spelling alone does not) and the store **format version** (the engine's own
 choices: key framing, fan-element identity, retained-input shape, synthetic
 stage names, key-part rendering, the order `collect`, `min`, and `max`
 impose). A release that changes any of those bumps the format version, and
@@ -203,6 +204,14 @@ Every time a worker starts serving a syncable it reads the note first:
   updates the note), or `DELETE` and re-POST for a table that cannot be
   rewritten in place. This is deliberate rather than automatic because it
   touches a table your readers are using.
+- There is no note: if the syncable has not written yet, or the table is
+  empty, the worker writes the note and serves. If the syncable has
+  written and the table holds rows (a database restored from a backup
+  taken before 0.8.0, or a table rebuilt by hand), committed cannot tell
+  which version wrote them, so the syncable **stops** the same way. The
+  fix is `rematerialize` for a keyed table; otherwise `DELETE`, drop the
+  table yourself (with no note, committed cannot tell it created it), and
+  re-POST.
 
 **Iceberg tables** carry the same note as table properties
 (`committed.rendering-version`, and `committed.owned` on the tables and
@@ -415,6 +424,11 @@ the old binary cannot read:
   know the magic byte — can't read it. Upgrading *to* a checksum-aware
   release is therefore one-way; rolling a node back to a pre-checksum
   binary means a [rebuild](../operations/rebuild.md), not a binary swap.
+- **Converting to the segmented event log (0.8.3).** `committed wal
+  convert` rewrites a node's tidwall event log in the segmented format,
+  which no earlier binary opens, and 0.8.3 runs nothing else. Going back
+  means restoring a backup taken before the conversion (see
+  [upgrade.md](../operations/upgrade.md#upgrading-from-082-to-083)).
 - **A frame-version or snapshot-format bump**, when one ships, is called
   out as one-way in that release's notes.
 - **Restoring a backup archive onto an older binary.** The manifest records
@@ -423,9 +437,9 @@ the old binary cannot read:
   across releases, never back. The gate is coarse on purpose: an archive
   can carry both entries an older build cannot apply and an on-disk layout
   it cannot read (from 0.8.0, compressed event-log segments, which a
-  pre-0.8.0 binary opens as a partial log rather than failing). The
-  downgrade door is a restore on the newer binary followed by `committed
-  wal decompress`, not an archive an older binary accepts — see
+  pre-0.8.0 binary opens as a partial log rather than failing; from 0.8.3,
+  the segmented event log, which no earlier binary opens). There is no
+  downgrade door from 0.8.3 — see
   [backup.md](../operations/backup.md#version-compatibility).
 - **Rolling back below a feature whose entries are already on your log.**
   The cluster feature level keeps a feature dormant until every member can

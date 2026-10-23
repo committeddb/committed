@@ -330,18 +330,18 @@ of durable state.*
 
 ### Face 1 — the storage highwatermark: `P_local == R_local`
 
-**After any Ready loop iteration, `P_local == R_local`** where:
+**After any applied batch, `P_local == R_local`** where:
 
 - `P_local` = local permanent event log highwatermark (the highest raft
   index applied to events)
 - `R_local` = local raft applied index (the highest raft index
   acknowledged to raft)
 
-The two advance together within each Ready iteration: the batch apply
+The two advance together within each applied batch: the batch apply
 appends every committed entry's event-log record in one batched write,
 applies the entities, then persists the applied index once — so `P > R`
 transiently inside a batch (and across a crash, which restart replay
-closes) and the invariant is checked only at iteration end.
+closes) and the invariant is checked only at batch end.
 
 The node **fatal-exits when `P_local < R_local`** — raft has acknowledged an
 index the permanent log doesn't have (the dangerous direction; e.g. an
@@ -719,8 +719,8 @@ The sub-cases all converge on the right answer:
 
 ### Determinism of the scrub
 
-The rewrite must produce byte-identical files on every node or a peer
-catch-up could not extend one node's log with another's segment files. The survivor set is a pure function of three frozen,
+The rewrite must produce identical records on every node or a peer
+catch-up could not extend one node's log with another's. The survivor set is a pure function of three frozen,
 replicated inputs: the event-log bytes, the tombstone set **filtered to
 delete index `<= B`**, and `B` itself (carried in the committed command).
 
@@ -883,10 +883,10 @@ raft entry, every node must produce identical state transitions and
 identical permanent log writes. This is **load-bearing**, not
 nice-to-have, because:
 
-- **Byte-identical files across nodes make one node's log extend
-  another's.** A peer catch-up ships whole segment files and appends
-  them to the receiver's log; that is only sound because the receiver's
-  own prefix is, byte for byte, what the peer holds.
+- **Identical records across nodes make one node's log extend
+  another's.** A peer catch-up streams records and appends them to the
+  receiver's log; that is only sound because the receiver's own prefix
+  holds, record for record, what the peer holds.
 - **Hash comparison across nodes is a free correctness check.** A
   divergence indicates a determinism bug — exactly the kind of bug that
   is otherwise nearly impossible to find in distributed systems.
@@ -907,7 +907,7 @@ The apply-path determinism audit is **complete**. Findings:
   index is the only ordering authority. No wall-clock is read at apply.
 - **Map iteration, random IDs, UUIDs, node-id fields, float math,
   goroutine ordering, OS-dependent calls** — none found in the apply
-  path. `applyEntity` runs single-threaded inside the raft Ready loop,
+  path. `applyEntity` runs single-threaded on raft's apply goroutine,
   every per-handler bbolt write is a marshaled protobuf with scalar/bytes
   fields only, and channel notifies in `saveSyncable`/`saveIngestable`
   happen *after* the bucket write so they don't race the state.

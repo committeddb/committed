@@ -377,6 +377,12 @@ func (StorageStubs) MemberZone(uint64) (string, bool) { return "", false }
 func (StorageStubs) MemberZones() map[uint64]string   { return nil }
 func (StorageStubs) DeleteMemberZone(uint64) error    { return nil }
 
+func (StorageStubs) RecordRemovedMember(id, index uint64) error { return nil }
+func (StorageStubs) RemovedMembers() map[uint64]uint64          { return nil }
+func (StorageStubs) SetMembershipGuardIndex(index uint64) error { return nil }
+func (StorageStubs) AddressesIgnoredThrough() uint64            { return 0 }
+func (StorageStubs) MembershipGuardIndex() (uint64, bool)       { return 0, false }
+
 // TypeMigrationEditedAt stub: no in-place migration edits in unit fixtures.
 func (StorageStubs) TypeMigrationEditedAt(string) uint64 { return 0 }
 func (StorageStubs) DeleteMemberVersion(id uint64) error { return nil }

@@ -69,7 +69,15 @@ func newWalDBRemat(t *testing.T, sink cluster.Syncable) (*db.DB, *wal.Storage) {
 
 func newWalDBRematOpts(t *testing.T, sink cluster.Syncable, opts ...db.Option) (*db.DB, *wal.Storage) {
 	t.Helper()
-	dir := t.TempDir()
+	d, s := openWalDBRematAt(t, t.TempDir(), sink, opts...)
+	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
+	return d, s
+}
+
+// openWalDBRematAt opens a node on dir, so a test can close it and reopen the
+// same data dir (a node restart); the caller closes it.
+func openWalDBRematAt(t *testing.T, dir string, sink cluster.Syncable, opts ...db.Option) (*db.DB, *wal.Storage) {
+	t.Helper()
 	p := parser.New()
 	fakeParser := &clusterfakes.FakeSyncableParser{}
 	fakeParser.ParseReturns(sink, nil)
@@ -79,7 +87,6 @@ func newWalDBRematOpts(t *testing.T, sink cluster.Syncable, opts ...db.Option) (
 	s, err := wal.Open(dir, p, syncCh, ingestCh, wal.WithoutFsync())
 	require.NoError(t, err)
 	d := db.New(uint64(1), db.Peers{1: ""}, s, p, syncCh, ingestCh, append([]db.Option{db.WithTickInterval(testTickInterval)}, opts...)...)
-	t.Cleanup(func() { _ = d.Close(); _ = s.Close() })
 	return d, s
 }
 

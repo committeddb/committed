@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"maps"
 	"net/url"
 	"os"
@@ -13,8 +12,10 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/auth"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/wal"
 )
 
 // getenvDefault returns the value of env var name, or def when it is
@@ -32,8 +33,7 @@ func getenvDefault(name, def string) string {
 func nodeID() uint64 {
 	id, err := parseNodeID(os.Getenv("COMMITTED_NODE_ID"))
 	if err != nil {
-		// G706 false positive: the value is an operator-supplied env var.
-		log.Fatalf("%v", err) //nolint:gosec // G706
+		zap.L().Fatal("COMMITTED_NODE_ID", zap.Error(err))
 	}
 	return id
 }
@@ -61,10 +61,27 @@ func parseNodeID(raw string) (uint64, error) {
 func loadPeers(id uint64) db.Peers {
 	peers, err := parsePeers(id, os.Getenv("COMMITTED_PEERS"), getenvDefault("COMMITTED_PEER_URL", "http://127.0.0.1:9022"))
 	if err != nil {
-		// G706 false positive: the value is an operator-supplied env var.
-		log.Fatalf("%v", err) //nolint:gosec // G706
+		zap.L().Fatal("COMMITTED_PEERS", zap.Error(err))
+	}
+	if peerURL, set := os.LookupEnv("COMMITTED_PEER_URL"); set {
+		if own, differs := selfURLDisagrees(peers, id, peerURL); differs {
+			zap.L().Warn("COMMITTED_PEER_URL disagrees with this node's COMMITTED_PEERS entry; this node advertises the COMMITTED_PEERS entry",
+				zap.String("COMMITTED_PEER_URL", peerURL), zap.String("COMMITTED_PEERS entry", own))
+		}
 	}
 	return peers
+}
+
+// selfURLDisagrees reports whether COMMITTED_PEER_URL names a different
+// address from this node's COMMITTED_PEERS entry, which is the one it
+// advertises; it returns that entry.
+func selfURLDisagrees(peers db.Peers, id uint64, peerURL string) (string, bool) {
+	own := peers[id]
+	u, err := cluster.CanonicalPeerURL(peerURL)
+	if err != nil {
+		return own, true
+	}
+	return own, u != own
 }
 
 // parsePeers builds the static raft peer set for first-boot bootstrap
@@ -76,11 +93,11 @@ func loadPeers(id uint64) db.Peers {
 //	COMMITTED_PEERS="1=http://n1:9022,2=http://n2:9022,3=http://n3:9022"
 //
 // Every node receives the same COMMITTED_PEERS and the set must include
-// this node's own id. Membership is consumed only on first boot; on
-// restart it is restored from the WAL (raft.RestartNode), so editing
-// COMMITTED_PEERS after a node has state has no effect — use the
-// "committed member add/remove" commands (the /v1/membership API) for
-// live membership changes. A node joining an existing cluster sets
+// this node's own id. Its ids bootstrap membership on first boot only; on
+// restart membership is restored from the WAL (raft.RestartNode) and
+// changes through the /v1/membership API. Its addresses are read on every
+// boot: an entry changed since the last boot is used and recorded (see
+// db.choosePeerAddresses). A node joining an existing cluster sets
 // COMMITTED_JOIN=true so its COMMITTED_PEERS seeds the transport without
 // bootstrapping a competing configuration.
 //
@@ -93,7 +110,11 @@ func loadPeers(id uint64) db.Peers {
 // than a loud refusal to start.
 func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
 	if raw == "" {
-		return db.Peers{id: selfURL}, nil
+		u, err := cluster.CanonicalPeerURL(selfURL)
+		if err != nil {
+			return nil, fmt.Errorf("COMMITTED_PEER_URL: %w", err)
+		}
+		return db.Peers{id: u}, nil
 	}
 
 	peers := make(db.Peers)
@@ -115,7 +136,11 @@ func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
 		if _, dup := peers[pid]; dup {
 			return nil, fmt.Errorf("COMMITTED_PEERS has a duplicate peer id %d", pid)
 		}
-		peers[pid] = v
+		u, err := cluster.CanonicalPeerURL(v)
+		if err != nil {
+			return nil, fmt.Errorf("COMMITTED_PEERS entry %q: %w", entry, err)
+		}
+		peers[pid] = u
 	}
 	if len(peers) == 0 {
 		return nil, fmt.Errorf("COMMITTED_PEERS is set but contains no valid peers")
@@ -130,6 +155,21 @@ func parsePeers(id uint64, raw, selfURL string) (db.Peers, error) {
 // when the var is unset or unparseable, with a logged warning for
 // the unparseable case — a typo in an HTTP-limit env var should be
 // visible, not silently reverted to the default.
+// loadMaxProposalBytes reads COMMITTED_MAX_PROPOSAL_BYTES. A cap above what the
+// event log can store (wal.MaxProposalBytes) is refused: it would admit
+// proposals that every node fails to apply.
+func loadMaxProposalBytes() (uint64, bool, error) {
+	n, ok := parseInt64Env("COMMITTED_MAX_PROPOSAL_BYTES")
+	if !ok {
+		return 0, false, nil
+	}
+	bytes := uint64(n) //nolint:gosec // G115: parseInt64Env returns only positive values
+	if bytes > wal.MaxProposalBytes {
+		return 0, false, fmt.Errorf("COMMITTED_MAX_PROPOSAL_BYTES=%d is over %d, the largest proposal the event log stores", n, wal.MaxProposalBytes)
+	}
+	return bytes, true, nil
+}
+
 func parseInt64Env(name string) (int64, bool) {
 	raw := os.Getenv(name)
 	if raw == "" {
@@ -243,7 +283,7 @@ func boolEnv(name string) (bool, error) {
 func boolEnvOrExit(name string) bool {
 	v, err := boolEnv(name)
 	if err != nil {
-		log.Fatalf("%v — refusing to start rather than silently treating it as false", err) //nolint:gosec // G706: the value is the operator's own env
+		zap.L().Fatal("refusing to start rather than silently treating it as false", zap.Error(err))
 	}
 	return v
 }

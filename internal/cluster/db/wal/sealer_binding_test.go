@@ -33,12 +33,7 @@ func TestEventBindingCompressionCapability(t *testing.T) {
 			binding, err := open(t.TempDir())
 			require.NoError(t, err)
 			defer func() { _ = binding.Close() }()
-			if name == "tidwall" {
-				// The raw tidwall fixture omits the production compression wrapper.
-				require.Nil(t, binding.compressor)
-			} else {
-				require.NotNil(t, binding.compressor)
-			}
+			require.NotNil(t, binding.compressor)
 		})
 	}
 	log := &compressingEventLog{observedSealedCompressor: observedSealedCompressor{calls: make(chan struct{}, 1)}}

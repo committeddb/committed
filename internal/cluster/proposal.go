@@ -286,6 +286,12 @@ type Entity struct {
 	// topic was fully refreshed. See NewRefreshBoundaryEntity and IsRefreshBoundary.
 	RefreshBoundary bool
 
+	// MigratedFrom is the type version Data was migrated from on its way to a
+	// syncable (the always-current read path), 0 when Data is as stored. A
+	// syncable that keeps a pointer to the entity records it, so reading the
+	// entity back migrates it the same way (EntityReader).
+	MigratedFrom int
+
 	// KeepData marks a syncable-config delete tombstone whose operator asked to
 	// preserve the destination data: the owner node skips the destination
 	// teardown on apply. Carried ON THE ENTITY so every node applies the same
