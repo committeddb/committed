@@ -98,6 +98,14 @@ func (tx *Tx) keyOf(stage string, id []byte) ([]byte, error) {
 	return k, nil
 }
 
+// peekKey is keyOf without remembering the key: for scans over every key.
+func (tx *Tx) peekKey(stage string, id []byte) ([]byte, error) {
+	if k, ok := tx.keys[stage+"\x00"+string(id)]; ok {
+		return k, nil
+	}
+	return tx.get(keysBucket(stage), id)
+}
+
 func (tx *Tx) remember(stage, keyCK string, id, outKey []byte) {
 	if tx.ids == nil {
 		tx.ids, tx.keys = map[string][]byte{}, map[string][]byte{}

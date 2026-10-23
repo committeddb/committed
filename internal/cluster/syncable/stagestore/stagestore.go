@@ -871,18 +871,25 @@ func (tx *Tx) DependentsOf(stage, join string, dimKey []byte, fn func(outKey []b
 }
 
 // InputsAll iterates EVERY retained input of a stage — the epoch sweep's
-// set-at-a-time scan (rare: once per refresh marker).
+// set-at-a-time scan (rare: once per refresh marker). It resolves ids
+// without caching them, which over every key of a large stage would hold
+// the whole dictionary in memory; a key's inputs are adjacent, so the last
+// id resolved is the one to keep.
 func (tx *Tx) InputsAll(stage string, fn func(outKey, inKey, val []byte) error) error {
+	var lastID, outKey []byte
 	return tx.each(inBucket(stage), nil, func(k, v []byte) error {
 		if len(k) < 8 {
 			return nil
 		}
-		outKey, err := tx.keyOf(stage, k[:8])
-		if err != nil {
-			return err
-		}
-		if outKey == nil {
-			return fmt.Errorf("stage store: an input is retained under a free output-key id (store inconsistency)")
+		if !bytes.Equal(k[:8], lastID) {
+			var err error
+			if outKey, err = tx.peekKey(stage, k[:8]); err != nil {
+				return err
+			}
+			if outKey == nil {
+				return fmt.Errorf("stage store: an input is retained under a free output-key id (store inconsistency)")
+			}
+			lastID = append(lastID[:0], k[:8]...)
 		}
 		return fn(outKey, k[8:], v)
 	})

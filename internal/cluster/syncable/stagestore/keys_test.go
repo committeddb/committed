@@ -152,3 +152,36 @@ func TestKeyAdded(t *testing.T) {
 		return nil
 	}))
 }
+
+// The epoch sweep's scan over every input resolves each key without
+// keeping the key dictionary in the transaction: on a large stage that
+// would hold every key in memory.
+func TestInputsAllKeepsNoKeyCache(t *testing.T) {
+	s, _, err := Open(t.TempDir(), "p", "fp")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	want := map[string]string{}
+	require.NoError(t, s.Update(func(tx *Tx) error {
+		for i := range 200 {
+			out, in := fmt.Sprintf("k%d", i%50), fmt.Sprintf("i%d", i)
+			want[in] = out
+			if err := tx.PutIn("st", []byte(out), []byte(in), []byte("v")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	got := map[string]string{}
+	require.NoError(t, s.View(func(tx *Tx) error {
+		if err := tx.InputsAll("st", func(outKey, inKey, _ []byte) error {
+			got[string(inKey)] = string(outKey)
+			return nil
+		}); err != nil {
+			return err
+		}
+		require.Empty(t, tx.keys)
+		require.Empty(t, tx.ids)
+		return nil
+	}))
+	require.Equal(t, want, got)
+}
