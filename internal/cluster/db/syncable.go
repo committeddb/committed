@@ -160,10 +160,8 @@ func (db *DB) ProposeSyncable(ctx context.Context, c *cluster.Configuration) err
 	// The parse above ran the syncable's full Init purely for VALIDATION —
 	// the apply path re-parses and that instance becomes the worker. Close
 	// this one, or its resources leak per POST: prepared statements on the
-	// destination pool, and — for a staged projection — the stage store's
-	// EXCLUSIVE file lock, which would leave the apply-side worker blocked
-	// on open forever (the e2e symptom: config accepted, worker never
-	// starts).
+	// destination pool. (A staged projection's stage store is not among
+	// them: only the worker opens it, on first use.)
 	if validated != nil {
 		if cerr := validated.Close(); cerr != nil {
 			db.logger.Warn("closing validation-parse syncable failed", zap.String("id", name), zap.Error(cerr))

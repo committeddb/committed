@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
@@ -959,6 +960,75 @@ func TestProjectionTeardownResetsStageStore(t *testing.T) {
 	// and LANDS again — no suppression from stale state.
 	p2 := boot()
 	require.NoError(t, p2.Close())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A config is parsed again while its worker runs — to validate a re-POST,
+// or for a dry run — and that parse (Init, then Close) must neither wait on
+// nor touch the worker's stage store: Init does not open it.
+func TestProjectionValidationParseLeavesTheWorkersStore(t *testing.T) {
+	txnType := &cluster.Type{ID: "txns", Name: "Txn"}
+	config := &sql.ProjectionConfig{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Columns: []sql.ProjectionColumn{
+			{Name: "job_id", SQLType: "VARCHAR(64)"},
+			{Name: "n", SQLType: "INT"},
+		},
+		Stages: []sql.ProjectionStage{{
+			Name: "by-job", From: "txns", KeyPath: []string{"$.job"},
+			Reduce: "aggregate", Emit: []sql.StageEmit{{Field: "n", Count: true}},
+		}},
+		Sources: []sql.ProjectionSource{{
+			FromStage: "by-job",
+			KeyPath:   []string{"$.job"},
+			Rules:     []sql.ProjectionRule{{Set: []sql.ProjectionSet{{Column: "n", From: "$.n"}}}},
+		}},
+	}
+	ddlConfig := &sql.Config{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Mappings:   []sql.Mapping{{Column: "job_id", SQLType: "VARCHAR(64)"}, {Column: "n", SQLType: "INT"}},
+	}
+	ruleConfig := &sql.Config{
+		Table:      "job_totals",
+		PrimaryKey: []string{"job_id"},
+		Mappings:   []sql.Mapping{{Column: "job_id"}, {Column: "n"}},
+	}
+	storeDir := t.TempDir()
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	initProjection := func() (*sql.Projection, *sqlmock.ExpectedPrepare) {
+		mock.ExpectExec(dialect.CreateDDL(ddlConfig)).WillReturnResult(driver.ResultNoRows)
+		rulePrepare := mock.ExpectPrepare(dialect.CreateSQL(ruleConfig))
+		mock.ExpectPrepare(dialect.CreateDeleteSQL(ddlConfig))
+		p := sql.NewProjection(db, config, nil, "job_totals")
+		p.SetStoreDir(storeDir)
+		require.NoError(t, p.Init())
+		return p, rulePrepare
+	}
+	worker, rulePrepare := initProjection()
+	mock.ExpectBegin()
+	rulePrepare.ExpectExec().WithArgs("j1", int64(1), "j1", int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	_, err = worker.Sync(context.Background(), &cluster.Actual{Index: 10, Entities: []*cluster.Entity{
+		cluster.NewUpsertEntity(txnType, []byte("t1"), []byte(`{"job":"j1"}`)),
+	}})
+	require.NoError(t, err)
+
+	start := time.Now()
+	validation, _ := initProjection()
+	require.NoError(t, validation.Close())
+	require.Less(t, time.Since(start), time.Second, "the validation parse waited on the worker's store")
+
+	exists, err := worker.StageKeyExists("by-job", []string{"j1"})
+	require.NoError(t, err)
+	require.True(t, exists, "the worker's stage state survives the validation parse")
+	require.NoError(t, worker.Close())
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
