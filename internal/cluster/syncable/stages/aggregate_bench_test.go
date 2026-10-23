@@ -25,6 +25,7 @@ var recipeEmits = []Emit{
 // (append) or changes the last retained one (update). The group is loaded in
 // one transaction with one drain, which costs one refold rather than n.
 func BenchmarkAggregateLargeGroup(b *testing.B) {
+	withoutFoldStateCheck(b)
 	for _, shape := range []struct {
 		name  string
 		emits []Emit
@@ -101,6 +102,7 @@ func BenchmarkAggregateLargeGroup(b *testing.B) {
 // transaction and one drain. It reports CPU per event and the store's bytes
 // per event on disk.
 func BenchmarkAggregateLiveBatches(b *testing.B) {
+	withoutFoldStateCheck(b)
 	const streams, batch = 20000, 500
 	stages := []Stage{{Name: "order", From: "events", KeyPath: []string{"$.stream_id"}, Reduce: "aggregate", Emit: recipeEmits}}
 	cfg := stageConfig(stages...)

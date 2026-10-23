@@ -16,7 +16,7 @@ import (
 
 // planned and unplanned count the graphs this package's tests built
 // through their plan and as handed.
-var planned, unplanned atomic.Int64
+var planned, unplanned, foldStateChecks atomic.Int64
 
 // TestMain routes every graph this package's tests build through its
 // plan: BuildGraph runs the lowered stages, which must compile back to
@@ -43,6 +43,16 @@ func TestMain(m *testing.M) {
 		planned.Add(1)
 		return lowered
 	}
+	checkFoldState = func(g *Graph, tx *stagestore.Tx, st *Stage, outKey, out []byte, live bool) {
+		want, wantLive, err := g.refoldOutputBytes(tx, st, outKey)
+		if err != nil {
+			panic(fmt.Sprintf("stage %q key %q: the full refold failed where the fold state did not: %v", st.Name, outKey, err))
+		}
+		if live != wantLive || (live && !bytes.Equal(out, want)) {
+			panic(fmt.Sprintf("stage %q key %q: the fold state produced %s (live %v), the full refold %s (live %v)", st.Name, outKey, out, live, want, wantLive))
+		}
+		foldStateChecks.Add(1)
+	}
 	dir, err := os.MkdirTemp("", "stages-test-store-*")
 	if err != nil {
 		panic(err)
@@ -56,7 +66,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = keep.Close()
 	_ = os.RemoveAll(dir)
-	fmt.Fprintf(os.Stderr, "graphs built through their plan: %d, as handed: %d\n", planned.Load(), unplanned.Load())
+	fmt.Fprintf(os.Stderr, "graphs built through their plan: %d, as handed: %d; fold-state outputs checked against a full refold: %d\n", planned.Load(), unplanned.Load(), foldStateChecks.Load())
 	os.Exit(code)
 }
 

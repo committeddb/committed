@@ -47,6 +47,24 @@ func corpusStages() map[string][]Stage {
 			Emit{Field: "lcol", Collect: "$.s"},
 			Emit{Field: "lcold", Collect: "$.s", Distinct: true},
 		),
+		"joined": joinedStage(
+			[]Join{
+				{Topic: "dims", On: []string{"$.ref"}, As: "d", Where: []WhenClause{{Path: "$.on", Equals: true}}},
+				{Topic: "dims", On: []string{"$.alt"}, As: "a", Optional: true},
+			},
+			Emit{Field: "c", Expr: "count(*)"},
+			Emit{Field: "sr", Expr: "sum($.d.rate)"},
+			Emit{Field: "sa", Expr: "sum($.a.rate) filter (where $.f = 'y')"},
+			Emit{Field: "names", Expr: "array_agg($.d.name order by $.o)"},
+			Emit{Field: "mx", Expr: "max($.a.name)"},
+			Emit{Field: "ls", Sum: "$.n"},
+		),
+		"anti-joined": joinedStage(
+			[]Join{{Topic: "dims", On: []string{"$.ref"}, Absent: true, Where: []WhenClause{{Path: "$.on", Equals: true}}}},
+			Emit{Field: "c", Expr: "count(*)"},
+			Emit{Field: "sn", Expr: "sum($.n)"},
+			Emit{Field: "xs", Expr: "array_agg($.x order by $.o)"},
+		),
 		"extremes": stage(
 			Emit{Field: "mn", Expr: "min($.n)"},
 			Emit{Field: "mxn", Expr: "max($.n)"},
@@ -59,14 +77,37 @@ func corpusStages() map[string][]Stage {
 	}
 }
 
+// joinedStage is corpusStages' stage with joins to the dims topic.
+func joinedStage(joins []Join, emits ...Emit) []Stage {
+	return []Stage{{
+		Name: "g", From: "rows", KeyPath: []string{"$.k"}, Reduce: "aggregate",
+		When:  []WhenClause{{Expr: "coalesce($.w, true)"}},
+		Joins: joins,
+		Emit:  emits,
+	}}
+}
+
+// corpusDim is a random dimension row: a gate the joins filter on, and
+// values with nulls and equal-but-differently-written numbers.
+func corpusDim(rng *rand.Rand) string {
+	pick := func(vals ...string) string { return vals[rng.Intn(len(vals))] }
+	return fmt.Sprintf(`{"on":%s,"rate":%s,"name":%s}`,
+		pick(`true`, `true`, `false`, `null`),
+		pick(`1`, `2.0`, `2`, `null`, `-0.5`),
+		pick(`"m"`, `"n"`, `null`, `"N"`),
+	)
+}
+
 // corpusPayload is a random input: its group k (a change rekeys it), the
-// stage gate w, and values with nulls, equal-but-differently-written
-// numbers, mixed types, and order-key ties.
+// stage gate w, join references, and values with nulls,
+// equal-but-differently-written numbers, mixed types, and order-key ties.
 func corpusPayload(rng *rand.Rand) string {
 	pick := func(vals ...string) string { return vals[rng.Intn(len(vals))] }
-	return fmt.Sprintf(`{"k":%s,"w":%s,"n":%s,"x":%s,"s":%s,"o":%s,"f":%s,"d":%s}`,
+	return fmt.Sprintf(`{"k":%s,"w":%s,"ref":%s,"alt":%s,"n":%s,"x":%s,"s":%s,"o":%s,"f":%s,"d":%s}`,
 		pick(`"g0"`, `"g1"`, `"g2"`, `"G1"`),
 		pick(`true`, `true`, `true`, `false`, `null`),
+		pick(`"d0"`, `"d1"`, `"d2"`, `"d3"`, `null`),
+		pick(`"d0"`, `"d1"`, `"d4"`, `null`),
 		pick(`1`, `2`, `2.0`, `2.50`, `-3`, `null`, `"x"`, `12345678901234567890.5`),
 		pick(`"a"`, `"b"`, `"B"`, `""`, `null`),
 		pick(`"p"`, `"q"`, `1`, `true`, `null`),
@@ -100,6 +141,17 @@ func runIncrementalCorpus(t *testing.T, sts []Stage) {
 			dirty := Dirty{}
 			for range 1 + rng.Intn(6) {
 				row := fmt.Sprintf("r%02d", rng.Intn(24))
+				if len(st.Joins) > 0 && rng.Intn(4) == 0 {
+					dim := fmt.Sprintf("d%d", rng.Intn(5))
+					if rng.Intn(4) == 0 {
+						if err := g.FoldTopicDelete(tx, "dims", []byte(dim), dirty); err != nil {
+							return err
+						}
+					} else if err := g.FoldTopicUpsert(tx, "dims", []byte(dim), decodePayload(t, corpusDim(rng)), epoch, dirty); err != nil {
+						return err
+					}
+					continue
+				}
 				switch r := rng.Intn(20); {
 				case r < 14:
 					if err := g.FoldTopicUpsert(tx, "rows", []byte(row), decodePayload(t, corpusPayload(rng)), epoch, dirty); err != nil {
@@ -136,10 +188,10 @@ func runIncrementalCorpus(t *testing.T, sts []Stage) {
 		requireObjectsMatchBytes(t, store, g, st, batch)
 	}
 	n := g.byName["g"]
-	t.Logf("refolds: %d from fold state, %d in full", n.aggIncremental.Load(), n.aggFull.Load())
+	t.Logf("refolds: %d from fold state, %d in full", n.foldStateRefolds.Load(), n.fullRefolds.Load())
 	// The corpus is built to hit fallbacks (ties across renderings,
 	// removed extremes, three hot keys); it must still exercise the state.
-	require.Greater(t, n.aggIncremental.Load(), int64(100), "the corpus never exercised the fold state")
+	require.Greater(t, n.foldStateRefolds.Load(), int64(100), "the corpus never exercised the fold state")
 }
 
 // TestIncrementalAggregateRecipeShape: the event-store recipe's stage —
@@ -194,8 +246,8 @@ func TestIncrementalAggregateRecipeShape(t *testing.T) {
 		return nil
 	}))
 	n := g.byName["order"]
-	require.Equal(t, int64(streams), n.aggFull.Load(), "only each stream's first event refolds in full")
-	require.Equal(t, int64(streams*(events-1)), n.aggIncremental.Load())
+	require.Equal(t, int64(streams), n.fullRefolds.Load(), "only each stream's first event refolds in full")
+	require.Equal(t, int64(streams*(events-1)), n.foldStateRefolds.Load())
 }
 
 // TestIncrementalAggregateStateMatchesRebuild: after a long random run, each

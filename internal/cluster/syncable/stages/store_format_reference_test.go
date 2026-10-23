@@ -2,6 +2,7 @@ package stages
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -402,11 +403,23 @@ func dumpStore(t *testing.T, dir, name string) (string, uint64) {
 // renderAggState renders a fold state in the JSON form, so the reference pins
 // what a state holds rather than how it is encoded: both encodings decode to
 // the same state (decodeAggState), and the encoding has its own pin
-// (TestAggStateBinaryLayout).
+// (TestAggStateBinaryLayout). A winner state (winner.go) renders as its
+// fields.
 func renderAggState(t *testing.T, v []byte) []byte {
 	t.Helper()
 	if len(v) > 0 && v[0] == '{' {
 		return v
+	}
+	if len(v) > 0 && v[0] == winnerStateV1 {
+		ws, err := decodeWinnerState(v)
+		require.NoError(t, err)
+		var winner any
+		if ws.inKey != nil {
+			winner = string(ws.inKey)
+		}
+		out, err := json.Marshal(map[string]any{"inputs": ws.inputs, "dead": ws.dead, "winner": winner, "rank": ws.rank})
+		require.NoError(t, err)
+		return out
 	}
 	as, err := parseAggState(v)
 	require.NoError(t, err)

@@ -173,10 +173,12 @@ The expression language follows PostgreSQL; see
 for everything a stage can do, including joins to other topics and window
 functions over a stream's history, and for what it costs.
 
-The cost of the second property is disk and time. The stage keeps each
-stream's events on the node, under the data directory, and recomputes a
-stream from all of its events on every new one, so a stream with thousands
-of events costs more per event than a short one. Separately, an events
+The cost of the second property is disk, and time when an event changes.
+The stage keeps each stream's events on the node, under the data directory.
+A new event updates the stream's running totals, so a stream with thousands
+of events costs about the same per event as a short one; deleting or
+changing the event that holds the `max` recomputes its stream from all of
+its events. Separately, an events
 table that commits one event per transaction streams in at the
 [per-transaction rate](../operations/performance.md#the-envelope); a
 source that appends faster than that for long falls behind.

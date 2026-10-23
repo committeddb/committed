@@ -38,15 +38,17 @@ import (
 //   - any evaluation error, so the error surfaces exactly as the full
 //     refold raises it.
 //
-// Only aggregate stages without joins keep a state: a join makes an input's
-// contribution depend on dimension rows, which change without the input.
+// A join makes an input's membership and contribution depend on dimension
+// rows, which change without the input: a dimension change marks its
+// dependent keys full (Dirty.MarkFull), so each refolds in full and its
+// state is rebuilt under the new rows. Merge stages keep no state.
 
 // errAggFallback asks for a full refold of the key.
 var errAggFallback = errors.New("aggregate key needs a full refold")
 
 // incrementalAggregate reports whether a stage keeps a fold state.
 func (st *Stage) incrementalAggregate() bool {
-	return st.Reduce == "aggregate" && len(st.Joins) == 0 && len(st.Merge) == 0
+	return st.Reduce == "aggregate" && len(st.Merge) == 0
 }
 
 // usesItems reports whether a slot keeps its contributions as an item list:
@@ -92,19 +94,29 @@ type aggContrib struct {
 }
 
 // contribution evaluates one retained input exactly as refoldAggregate folds
-// it. errAggFallback (or an evaluation error, which the caller also turns
-// into a full refold) means the input cannot be accounted incrementally.
-func contribution(st *Stage, inKey, retained []byte) (*aggContrib, error) {
+// it; nil means the input is not a member (a join does not admit it).
+// errAggFallback (or an evaluation error, which the caller also turns into a
+// full refold) means the input cannot be accounted incrementally.
+func (g *Graph) contribution(tx *stagestore.Tx, st *Stage, inKey, retained []byte) (*aggContrib, error) {
 	_, payload := decodeRetained(retained)
 	obj, parent, err := unpackStageInput(st, payload)
 	if err != nil {
 		return nil, err
 	}
-	return contributionOf(st, inKey, obj, parent)
+	return g.contributionOf(tx, st, inKey, obj, parent)
 }
 
 // contributionOf is contribution over an input already decoded.
-func contributionOf(st *Stage, inKey []byte, obj, parent any) (*aggContrib, error) {
+func (g *Graph) contributionOf(tx *stagestore.Tx, st *Stage, inKey []byte, obj, parent any) (*aggContrib, error) {
+	if len(st.Joins) > 0 {
+		if ok, err := g.inputQualifies(tx, st, obj, parent); err != nil || !ok {
+			return nil, err
+		}
+		var err error
+		if obj, err = g.joinLookupScope(tx, st, obj, parent); err != nil {
+			return nil, err
+		}
+	}
 	obj = withSource(obj, st.inputSource(inKey))
 	c := &aggContrib{slots: make([]slotContrib, len(st.aggSlots)), emits: make([]emitContrib, len(st.Emit))}
 	for k := range st.aggSlots {
@@ -564,13 +576,16 @@ func (g *Graph) refoldAggregateIncremental(tx *stagestore.Tx, st *Stage, outKey 
 	n := g.byName[st.Name]
 	if delta != nil {
 		if out, obj, live, err := g.tryIncremental(tx, st, outKey, delta); err == nil {
-			n.aggIncremental.Add(1)
+			n.foldStateRefolds.Add(1)
+			if checkFoldState != nil {
+				checkFoldState(g, tx, st, outKey, out, live)
+			}
 			return out, obj, live, nil
 		} else if !errors.Is(err, errAggFallback) {
 			return nil, nil, false, err
 		}
 	}
-	n.aggFull.Add(1)
+	n.fullRefolds.Add(1)
 	return g.refoldAggregateFull(tx, st, outKey)
 }
 
@@ -599,21 +614,23 @@ func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delt
 		}
 		var oc, nc *aggContrib
 		if ch.old != nil {
-			if oc, err = contribution(st, inKey, ch.old); err != nil {
+			if oc, err = g.contribution(tx, st, inKey, ch.old); err != nil {
 				return nil, nil, false, errAggFallback
 			}
 		}
 		if ch.cur != nil {
 			if ch.curIn != nil {
-				nc, err = contributionOf(st, inKey, ch.curIn.data, ch.curIn.parent)
+				nc, err = g.contributionOf(tx, st, inKey, ch.curIn.data, ch.curIn.parent)
 			} else {
-				nc, err = contribution(st, inKey, ch.cur)
+				nc, err = g.contribution(tx, st, inKey, ch.cur)
 			}
 			if err != nil {
 				return nil, nil, false, errAggFallback
 			}
 		}
 		switch {
+		case oc == nil && nc == nil:
+			continue // a non-member before and after
 		case oc != nil && nc != nil:
 			err = as.replace(st, inKey, oc, nc)
 		case oc != nil:
@@ -642,10 +659,13 @@ func (g *Graph) refoldAggregateFull(tx *stagestore.Tx, st *Stage, outKey []byte)
 	as := newAggState(st)
 	ok := true
 	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
-		c, err := contribution(st, inKey, val)
+		c, err := g.contribution(tx, st, inKey, val)
 		if err != nil {
 			ok = false
 			return errAggFallback
+		}
+		if c == nil {
+			return nil // not a member
 		}
 		if err := as.apply(st, append([]byte(nil), inKey...), c, +1); err != nil {
 			ok = false
