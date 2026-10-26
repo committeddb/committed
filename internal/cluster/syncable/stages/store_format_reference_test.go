@@ -80,7 +80,7 @@ func TestStoreFormatReference(t *testing.T) {
 	require.NoError(t, store.Update(func(tx *stagestore.Tx) error { return tx.SetFrontier(14) }))
 	require.NoError(t, store.Close())
 
-	dump, format := dumpStore(t, dir, "fixture")
+	dump, format := dumpStore(t, g, dir, "fixture")
 	referencePath := filepath.Join("testdata", fmt.Sprintf("store_format_%d.reference", format))
 	if os.Getenv("UPDATE_STORE_REFERENCE") == "1" {
 		require.NoError(t, os.WriteFile(referencePath, []byte(dump), 0o644))
@@ -190,7 +190,8 @@ func storeReferenceFixture() []Stage {
 		},
 		// Ordered aggregates: array_agg's order-by with a descending key and
 		// a null element, string_agg's distinct value order, and the
-		// value-order tiebreak — engine-chosen orders the store pins.
+		// value-order tiebreak — engine-chosen orders the store pins — and
+		// an array_agg read as [1], whose state keeps only that item.
 		{
 			Name: "payer-list", From: "payments", KeyPath: []string{"'all'"},
 			Reduce: "aggregate",
@@ -198,6 +199,7 @@ func storeReferenceFixture() []Stage {
 				{Field: "by_amount", Expr: "array_agg(lower($.payer) order by $.amount desc)"},
 				{Field: "names", Expr: "string_agg(distinct $.payer, ', ' order by $.payer)"},
 				{Field: "notes", Expr: "array_agg($.note)"},
+				{Field: "top", Expr: "(array_agg($.payer order by $.amount))[1]"},
 			},
 		},
 		// Window: one row per input in business order — the ord/pos/row
@@ -383,7 +385,7 @@ func TestStoreReferenceFixtureCoversTheVocabulary(t *testing.T) {
 // namespace bytes), values raw when printable and quoted otherwise — so the
 // reference is plain text and a diff names the entry that moved. It also
 // returns the format number the store recorded in its meta bucket.
-func dumpStore(t *testing.T, dir, name string) (string, uint64) {
+func dumpStore(t *testing.T, g *Graph, dir, name string) (string, uint64) {
 	t.Helper()
 	var sb strings.Builder
 	var format uint64
@@ -392,7 +394,7 @@ func dumpStore(t *testing.T, dir, name string) (string, uint64) {
 			format = binary.BigEndian.Uint64(v)
 		}
 		if strings.HasSuffix(string(bucket), ":acc") {
-			v = renderAggState(t, v)
+			v = renderAggState(t, g, string(bucket), v)
 		}
 		if strings.HasSuffix(string(bucket), ":in") {
 			v = renderRetained(v)
@@ -403,16 +405,12 @@ func dumpStore(t *testing.T, dir, name string) (string, uint64) {
 	return sb.String(), format
 }
 
-// renderAggState renders a fold state in the JSON form, so the reference pins
-// what a state holds rather than how it is encoded: both encodings decode to
-// the same state (decodeAggState), and the encoding has its own pin
-// (TestAggStateBinaryLayout). A winner state (winner.go) renders as its
-// fields.
-func renderAggState(t *testing.T, v []byte) []byte {
+// renderAggState renders a fold state as JSON, so the reference pins what a
+// state holds and a diff names the field that moved; the encoding has its
+// own pin (TestAggStateBinaryLayout). A winner state (winner.go) renders as
+// its fields.
+func renderAggState(t *testing.T, g *Graph, bucket string, v []byte) []byte {
 	t.Helper()
-	if len(v) > 0 && v[0] == '{' {
-		return v
-	}
 	if len(v) > 0 && v[0] == winnerStateV1 {
 		ws, err := decodeWinnerState(v)
 		require.NoError(t, err)
@@ -424,9 +422,65 @@ func renderAggState(t *testing.T, v []byte) []byte {
 		require.NoError(t, err)
 		return out
 	}
-	as, err := parseAggState(v)
+	n := g.byName[strings.TrimSuffix(strings.TrimPrefix(bucket, "stage:"), ":acc")]
+	require.NotNil(t, n, "fold state of an unknown stage in %s", bucket)
+	as, err := decodeAggState(n.def, v)
 	require.NoError(t, err)
-	out, err := encodeAggStateJSON(as)
+	return renderStateJSON(t, as)
+}
+
+type storedItem struct {
+	K []byte `json:"k"`
+	V any    `json:"v"`
+	O []any  `json:"o,omitempty"`
+}
+
+type storedSlot struct {
+	N     int64        `json:"n,omitempty"`
+	Sum   string       `json:"s,omitempty"`
+	Best  any          `json:"b,omitempty"`
+	Items []storedItem `json:"i,omitempty"`
+}
+
+type storedState struct {
+	Count int64        `json:"c"`
+	Slots []storedSlot `json:"a"`
+	Emits []storedSlot `json:"e"`
+}
+
+// renderStateJSON renders a fold state with values in the window codec's
+// typed tags.
+func renderStateJSON(t *testing.T, as *aggState) []byte {
+	t.Helper()
+	value := func(v any) any {
+		if v == nil {
+			return nil
+		}
+		return encodeWinValue(v)
+	}
+	slot := func(ss *slotState) storedSlot {
+		out := storedSlot{N: ss.n, Best: value(ss.best)}
+		if ss.sum != nil {
+			out.Sum = ss.sum.RatString()
+		}
+		for i := range ss.items {
+			it := &ss.items[i]
+			si := storedItem{K: it.inKey, V: value(it.val)}
+			for _, o := range it.ord {
+				si.O = append(si.O, value(o))
+			}
+			out.Items = append(out.Items, si)
+		}
+		return out
+	}
+	s := storedState{Count: as.count, Slots: make([]storedSlot, len(as.slots)), Emits: make([]storedSlot, len(as.emits))}
+	for i := range as.slots {
+		s.Slots[i] = slot(&as.slots[i])
+	}
+	for i := range as.emits {
+		s.Emits[i] = slot(&as.emits[i])
+	}
+	out, err := json.Marshal(s)
 	require.NoError(t, err)
 	return out
 }

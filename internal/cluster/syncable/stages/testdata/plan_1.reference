@@ -439,6 +439,10 @@
         {
           "name": "notes",
           "expr": "array_agg($.note)"
+        },
+        {
+          "name": "top",
+          "expr": "(array_agg($.payer order by $.amount))[1]"
         }
       ]
     },

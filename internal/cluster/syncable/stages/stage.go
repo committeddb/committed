@@ -945,6 +945,7 @@ func ValidateShapes(stages []Stage) error {
 				if err != nil {
 					return fmt.Errorf("%s: %w", ew, err)
 				}
+				markFirstOnly(compiled, st.aggSlots)
 				e.compiled = compiled
 				continue
 			}
@@ -987,6 +988,7 @@ func ValidateShapes(stages []Stage) error {
 			if err != nil {
 				return fmt.Errorf("%s having: %w", where, err)
 			}
+			markFirstOnly(compiled, st.aggSlots)
 			st.havingCompiled = compiled
 		}
 		if len(st.Merge) > 0 && stageUsesSource(st) {

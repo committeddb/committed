@@ -10,12 +10,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// codecStage has two expression slots, one with two order keys, and two
-// legacy arms — every shape a state carries.
+// codecStage has a slot of every layout — one item list with two order
+// keys, a first-only list with one — and a legacy arm of every layout,
+// with an expr emit (which keeps nothing) between them.
 func codecStage() *Stage {
 	return &Stage{
-		aggSlots: []exprAgg{{}, {order: make([]aggOrder, 2)}},
-		Emit:     []Emit{{Count: true}, {Collect: "$.s"}},
+		aggSlots: []exprAgg{
+			{fn: "count"},
+			{fn: "sum"},
+			{fn: "min"},
+			{fn: "array_agg", order: make([]aggOrder, 2)},
+			{fn: "array_agg", order: make([]aggOrder, 1), firstOnly: true},
+		},
+		Emit: []Emit{{Count: true}, {Collect: "$.s"}, {Expr: "count(*)"}, {Sum: "$.n"}, {Max: "$.n"}},
 	}
 }
 
@@ -42,27 +49,47 @@ func randomStateValue(rng *rand.Rand) any {
 	return ""
 }
 
+// randomAggState fills each slot as its fold would: only the fields its
+// layout keeps, with a sum present exactly when n is not 0 and a first-only
+// slot holding one item exactly when n is above 0.
 func randomAggState(rng *rand.Rand, st *Stage) *aggState {
-	slot := func(nOrd int) slotState {
-		ss := slotState{n: rng.Int63n(1e9) - 5e8, best: randomStateValue(rng)}
-		if rng.Intn(2) == 0 {
-			ss.sum = big.NewRat(rng.Int63n(1e6)-5e5, rng.Int63n(1000)+1)
+	item := func(i, nOrd int) stateItem {
+		it := stateItem{inKey: fmt.Appendf(nil, "in%d", i), val: randomStateValue(rng)}
+		for range nOrd {
+			it.ord = append(it.ord, randomStateValue(rng))
 		}
-		for i := range rng.Intn(4) {
-			it := stateItem{inKey: fmt.Appendf(nil, "in%d", i), val: randomStateValue(rng)}
-			for range nOrd {
-				it.ord = append(it.ord, randomStateValue(rng))
+		return it
+	}
+	slot := func(l slotLayout, nOrd int) slotState {
+		var ss slotState
+		switch l {
+		case layoutCount:
+			ss.n = rng.Int63n(1e9) - 5e8
+		case layoutSum:
+			if rng.Intn(3) > 0 {
+				ss.n = rng.Int63n(1e9) + 1
+				ss.sum = big.NewRat(rng.Int63n(1e6)-5e5, rng.Int63n(1000)+1)
 			}
-			ss.items = append(ss.items, it)
+		case layoutBest:
+			ss.n, ss.best = rng.Int63n(1e9), randomStateValue(rng)
+		case layoutItems:
+			for i := range rng.Intn(4) {
+				ss.items = append(ss.items, item(i, nOrd))
+			}
+		case layoutFirst:
+			if ss.n = rng.Int63n(3); ss.n > 0 {
+				ss.items = []stateItem{item(0, nOrd)}
+			}
 		}
 		return ss
 	}
-	as := &aggState{count: rng.Int63n(1e6), slots: make([]slotState, len(st.aggSlots)), emits: make([]slotState, len(st.Emit))}
+	as := newAggState(st)
+	as.count = rng.Int63n(1e6)
 	for i := range as.slots {
-		as.slots[i] = slot(len(st.aggSlots[i].order))
+		as.slots[i] = slot(st.aggSlots[i].layout(), len(st.aggSlots[i].order))
 	}
 	for i := range as.emits {
-		as.emits[i] = slot(0)
+		as.emits[i] = slot(emitLayout(&st.Emit[i]), 0)
 	}
 	return as
 }
@@ -74,49 +101,12 @@ func TestAggStateBinaryRoundTrip(t *testing.T) {
 	rng := rand.New(rand.NewSource(3))
 	for i := range 2000 {
 		as := randomAggState(rng, st)
-		raw, err := encodeAggState(as)
-		require.NoError(t, err)
+		raw := encodeAggState(st, as)
 		got, err := decodeAggState(st, raw)
 		require.NoError(t, err, "state %d", i)
 		require.Equal(t, as, got, "state %d", i)
-		again, err := encodeAggState(got)
-		require.NoError(t, err)
-		require.Equal(t, raw, again, "state %d", i)
+		require.Equal(t, raw, encodeAggState(st, got), "state %d", i)
 	}
-}
-
-// A store written by an earlier release holds JSON states; they still read.
-func TestAggStateReadsLegacyJSON(t *testing.T) {
-	st := codecStage()
-	rng := rand.New(rand.NewSource(5))
-	for i := range 500 {
-		as := randomAggState(rng, st)
-		for _, slots := range [][]slotState{as.slots, as.emits} {
-			for k := range slots { // JSON repairs invalid UTF-8, so compare on valid strings
-				slots[k].best = validUTF8(slots[k].best)
-				for j := range slots[k].items {
-					slots[k].items[j].val = validUTF8(slots[k].items[j].val)
-					for o := range slots[k].items[j].ord {
-						slots[k].items[j].ord[o] = validUTF8(slots[k].items[j].ord[o])
-					}
-				}
-			}
-		}
-		raw, err := encodeAggStateJSON(as)
-		require.NoError(t, err)
-		require.Equal(t, byte('{'), raw[0])
-		got, err := decodeAggState(st, raw)
-		require.NoError(t, err, "state %d", i)
-		require.Equal(t, as, nilEmptyOrders(got), "state %d", i)
-	}
-}
-
-// validUTF8 quotes a string, which makes it valid UTF-8.
-func validUTF8(v any) any {
-	if s, ok := v.(string); ok {
-		return fmt.Sprintf("%q", s)
-	}
-	return v
 }
 
 // A cut or corrupted state is refused (the key then refolds in full), never
@@ -125,63 +115,46 @@ func TestAggStateRejectsDamage(t *testing.T) {
 	st := codecStage()
 	rng := rand.New(rand.NewSource(9))
 	for range 300 {
-		raw, err := encodeAggState(randomAggState(rng, st))
-		require.NoError(t, err)
+		raw := encodeAggState(st, randomAggState(rng, st))
 		for cut := range len(raw) {
 			_, err := decodeAggState(st, raw[:cut])
 			require.Error(t, err, "a state cut to %d of %d bytes decoded", cut, len(raw))
 		}
-		_, err = decodeAggState(st, append(append([]byte(nil), raw...), 0))
+		_, err := decodeAggState(st, append(append([]byte(nil), raw...), 0))
 		require.Error(t, err, "trailing bytes")
 		damaged := append([]byte(nil), raw...)
 		damaged[rng.Intn(len(damaged))] ^= byte(1 + rng.Intn(255))
 		require.NotPanics(t, func() { _, _ = decodeAggState(st, damaged) })
 	}
-	_, err := decodeAggState(&Stage{aggSlots: []exprAgg{{}}}, mustEncode(t, randomAggState(rng, st)))
+	_, err := decodeAggState(&Stage{aggSlots: []exprAgg{{fn: "count"}}}, encodeAggState(st, randomAggState(rng, st)))
 	require.Error(t, err, "a state of another shape")
 }
 
-func mustEncode(t *testing.T, as *aggState) []byte {
-	t.Helper()
-	raw, err := encodeAggState(as)
-	require.NoError(t, err)
-	return raw
-}
-
-// TestAggStateBinaryLayout pins the binary layout: stores hold these bytes
-// across upgrades, so a layout change needs a new version byte (and a read
-// path for this one), never a silent reinterpretation.
+// TestAggStateBinaryLayout pins the binary layout: a layout change is a
+// store format change (stagestore.formatVersion), never a silent
+// reinterpretation of stored bytes.
 func TestAggStateBinaryLayout(t *testing.T) {
+	st := codecStage()
 	as := &aggState{
 		count: 3,
 		slots: []slotState{
-			{n: 2, sum: big.NewRat(-7, 4), best: "b"},
-			{n: 1, items: []stateItem{{inKey: []byte("k1"), val: timestampVal{us: 5, zoned: true}, ord: []any{dateVal{days: -1}, nil}}}},
+			{n: 2},
+			{n: 2, sum: big.NewRat(-7, 4)},
+			{n: 1, best: "b"},
+			{items: []stateItem{{inKey: []byte("k1"), val: timestampVal{us: 5, zoned: true}, ord: []any{dateVal{days: -1}, nil}}}},
+			{n: 2, items: []stateItem{{inKey: []byte("k2"), val: "x", ord: []any{true}}}},
 		},
 		emits: []slotState{
-			{n: 3, best: true},
-			{items: []stateItem{{inKey: []byte("k2"), val: intervalVal{months: 1, days: 2, us: 3}}, {inKey: []byte("k3"), val: false}}},
+			{n: 3},
+			{items: []stateItem{{inKey: []byte("k3"), val: intervalVal{months: 1, days: 2, us: 3}}, {inKey: []byte("k4"), val: false}}},
+			{},
+			{},
+			{n: 1, best: big.NewRat(9, 1)},
 		},
 	}
-	raw, err := encodeAggState(as)
-	require.NoError(t, err)
-	require.Equal(t, "010602040101010701040201620002000001026b31060a02070100020600040000000002026b320802040600026b330300", hex.EncodeToString(raw))
-	got, err := decodeAggState(&Stage{aggSlots: []exprAgg{{}, {order: make([]aggOrder, 2)}}, Emit: []Emit{{}, {}}}, raw)
+	raw := encodeAggState(st, as)
+	require.Equal(t, "0206040401010701040202016201026b31060a07010004026b32020178040602026b3308020406026b34030002010001090101", hex.EncodeToString(raw))
+	got, err := decodeAggState(st, raw)
 	require.NoError(t, err)
 	require.Equal(t, as, got)
-}
-
-// nilEmptyOrders makes the JSON reader's empty order lists nil, as the fold
-// builds them; nothing tells the two apart.
-func nilEmptyOrders(as *aggState) *aggState {
-	for _, slots := range [][]slotState{as.slots, as.emits} {
-		for k := range slots {
-			for j := range slots[k].items {
-				if len(slots[k].items[j].ord) == 0 {
-					slots[k].items[j].ord = nil
-				}
-			}
-		}
-	}
-	return as
 }

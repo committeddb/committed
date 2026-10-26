@@ -44,6 +44,7 @@ func corpusStages() map[string][]Stage {
 			Emit{Field: "adt", Expr: "array_agg(distinct case when $.f = 'y' then $.d::date else $.d::timestamp end)"},
 			Emit{Field: "sa", Expr: "string_agg($.x, ',' order by $.o)"},
 			Emit{Field: "first", Expr: "(array_agg($.x order by $.o))[1]"},
+			Emit{Field: "firstf", Expr: "(array_agg($.s order by $.o desc nulls last) filter (where $.f = 'y'))[1]"},
 			Emit{Field: "lcol", Collect: "$.s"},
 			Emit{Field: "lcold", Collect: "$.s", Distinct: true},
 		),
@@ -331,6 +332,68 @@ func TestIncrementalAggregateFallbacks(t *testing.T) {
 		require.Nil(t, state, "a key the state cannot account for keeps none")
 		return nil
 	}))
+}
+
+// An array_agg read only as [1] keeps just its first item and the item
+// count. Adding an item, removing another, or changing the first so it
+// stays first folds from the state; removing the first, or moving it back,
+// refolds in full. Any other read of the array keeps every item.
+func TestFirstOnlyStateKeepsOneItem(t *testing.T) {
+	marked := func(src string) bool {
+		sts := aggStage([]Emit{{Field: "v", Expr: src}}, "")
+		require.NoError(t, ValidateShapes(sts))
+		return BuildGraph(sts).byName["g"].def.aggSlots[0].firstOnly
+	}
+	require.True(t, marked("(array_agg($.s order by $.v desc))[1]"))
+	require.True(t, marked("coalesce((array_agg($.s) filter (where $.v > 1))[1], 'none')"))
+	require.False(t, marked("(array_agg($.s))[2]"))
+	require.False(t, marked("(array_agg($.s))[1:1]"))
+	require.False(t, marked("(array_agg(distinct $.s))[1]"))
+	require.False(t, marked("array_agg($.s)"))
+
+	sts := aggStage([]Emit{{Field: "status", Expr: "(array_agg($.s order by $.v desc))[1]"}}, "")
+	require.NoError(t, ValidateShapes(sts))
+	g := BuildGraph(sts)
+	st := g.byName["g"].def
+	store := openTestStore(t, Fingerprint(sts))
+	n := g.byName["g"]
+	step := func(row, payload string, wantStatus string, wantFull bool, wantItems int64) {
+		t.Helper()
+		full := n.fullRefolds.Load()
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			dirty := Dirty{}
+			var err error
+			if payload == "" {
+				err = g.FoldTopicDelete(tx, "rows", []byte(row), dirty)
+			} else {
+				err = g.FoldTopicUpsert(tx, "rows", []byte(row), decodePayload(t, payload), 0, dirty)
+			}
+			if err != nil {
+				return err
+			}
+			return g.Drain(tx, dirty)
+		}))
+		require.Equal(t, wantFull, n.fullRefolds.Load() > full, "%s %s: refolded in full", row, payload)
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			got, err := g.Output(tx, "g", []byte("a"))
+			require.NoError(t, err)
+			require.JSONEq(t, `{"status":"`+wantStatus+`"}`, string(got))
+			raw, err := tx.GetAcc("g", []byte("a"))
+			require.NoError(t, err)
+			as, err := decodeAggState(st, raw)
+			require.NoError(t, err)
+			require.Equal(t, wantItems, as.slots[0].n)
+			require.Len(t, as.slots[0].items, 1, "only the first item is kept")
+			return nil
+		}))
+	}
+	step("r1", `{"k":"a","v":1,"s":"placed"}`, "placed", false, 1)
+	step("r2", `{"k":"a","v":2,"s":"paid"}`, "paid", false, 2)
+	step("r3", `{"k":"a","v":3,"s":"shipped"}`, "shipped", false, 3)
+	step("r1", "", "shipped", false, 2)
+	step("r3", `{"k":"a","v":4,"s":"delivered"}`, "delivered", false, 2)
+	step("r3", `{"k":"a","v":0,"s":"returned"}`, "paid", true, 2)
+	step("r2", "", "returned", true, 1)
 }
 
 // errRollback discards a check's writes.
