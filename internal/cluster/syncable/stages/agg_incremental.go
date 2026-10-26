@@ -522,8 +522,10 @@ func slotResult(s *exprAgg, ss *slotState) any {
 }
 
 // renderState is the key's output from its state: the refold's results,
-// having, and emit rendering (aggregateOutput), fed from the state.
-func (g *Graph) renderState(st *Stage, as *aggState) ([]byte, any, bool, error) {
+// having, and emit rendering (aggregateOutput), fed from the state. count
+// says whether a having rejection counts in the stage's flow counters: it
+// does for a refold's result, not for a read of an output already counted.
+func (g *Graph) renderState(st *Stage, as *aggState, count bool) ([]byte, any, bool, error) {
 	if as.count == 0 {
 		return nil, nil, false, nil
 	}
@@ -565,7 +567,7 @@ func (g *Graph) renderState(st *Stage, as *aggState) ([]byte, any, bool, error) 
 			legacy.maxs[i] = es.best
 		}
 	}
-	return g.aggregateOutputObject(st, results, legacy)
+	return g.aggregateOutputObject(st, results, legacy, count)
 }
 
 // refoldAggregateIncremental refolds an aggregate key from its fold state
@@ -574,8 +576,12 @@ func (g *Graph) renderState(st *Stage, as *aggState) ([]byte, any, bool, error) 
 // with its retained set.
 func (g *Graph) refoldAggregateIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) ([]byte, any, bool, error) {
 	n := g.byName[st.Name]
-	if delta != nil {
-		if out, obj, live, err := g.tryIncremental(tx, st, outKey, delta); err == nil {
+	as, err := g.loadAggState(tx, st, outKey)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if delta != nil && as != nil {
+		if out, obj, live, err := g.tryIncremental(tx, st, outKey, as, delta); err == nil {
 			n.foldStateRefolds.Add(1)
 			if checkFoldState != nil {
 				checkFoldState(g, tx, st, outKey, out, live)
@@ -589,35 +595,49 @@ func (g *Graph) refoldAggregateIncremental(tx *stagestore.Tx, st *Stage, outKey 
 	return g.refoldAggregateFull(tx, st, outKey)
 }
 
-// knownOutput is a key's stored output (nil: none) as its refold knew it.
-type knownOutput struct{ out []byte }
+// knownOutput is a key's output before its refold (nil: none) as the fold
+// state knows it; unknown when the key kept a state that could not be
+// rendered (written by a later release, or damaged).
+type knownOutput struct {
+	out     []byte
+	unknown bool
+}
 
-func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) ([]byte, any, bool, error) {
+// loadAggState reads a key's fold state to refold from (nil: none), and
+// sets g.priorOut to the key's output before the refold when the state
+// says it. A key that keeps a state has no stored output: its output is
+// the state's rendering (see refoldKey).
+func (g *Graph) loadAggState(tx *stagestore.Tx, st *Stage, outKey []byte) (*aggState, error) {
 	raw, err := tx.GetAcc(st.Name, outKey)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, err
 	}
-	var as *aggState
 	switch {
 	case raw != nil:
-		if as, err = decodeAggState(st, raw); err != nil {
-			return nil, nil, false, errAggFallback
+		as, err := decodeAggState(st, raw)
+		if err != nil {
+			g.priorOut = &knownOutput{unknown: true}
+			return nil, nil
 		}
-		// The stored output is the state's rendering: every write of a
-		// state writes the output rendered from it, and a refold that
-		// cannot keep a state deletes it.
-		if prior, _, _, err := g.renderState(st, as); err == nil {
-			g.priorOut = &knownOutput{out: prior}
+		prior, _, _, err := g.renderState(st, as, false)
+		if err != nil {
+			g.priorOut = &knownOutput{unknown: true}
+			return nil, nil
 		}
+		g.priorOut = &knownOutput{out: prior}
+		return as, nil
 	case tx.KeyAdded(st.Name, outKey):
 		// A key new in this batch: its inputs are all in the delta, so it
 		// folds from the empty state without reading them, and it had no
 		// output.
-		as = newAggState(st)
 		g.priorOut = &knownOutput{}
-	default:
-		return nil, nil, false, errAggFallback
+		return newAggState(st), nil
 	}
+	return nil, nil
+}
+
+func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, as *aggState, delta *aggDelta) ([]byte, any, bool, error) {
+	var err error
 	keys := make([]string, 0, len(delta.inputs))
 	for k := range delta.inputs {
 		keys = append(keys, k)
@@ -662,7 +682,7 @@ func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delt
 	if as.count < 0 {
 		return nil, nil, false, errAggFallback
 	}
-	out, obj, live, err := g.renderState(st, as)
+	out, obj, live, err := g.renderState(st, as, true)
 	if err != nil {
 		return nil, nil, false, errAggFallback // the full refold raises it
 	}
@@ -702,7 +722,7 @@ func (g *Graph) refoldAggregateFull(tx *stagestore.Tx, st *Stage, outKey []byte)
 		}
 		return g.refoldAggregateNoObject(tx, st, outKey)
 	}
-	out, obj, live, err := g.renderState(st, as)
+	out, obj, live, err := g.renderState(st, as, true)
 	if err != nil {
 		if derr := tx.DeleteAcc(st.Name, outKey); derr != nil {
 			return nil, nil, false, derr
@@ -713,6 +733,7 @@ func (g *Graph) refoldAggregateFull(tx *stagestore.Tx, st *Stage, outKey []byte)
 }
 
 func (g *Graph) storeAggState(tx *stagestore.Tx, st *Stage, outKey []byte, as *aggState) error {
+	g.keptState = as.count != 0
 	if as.count == 0 {
 		return tx.DeleteAcc(st.Name, outKey)
 	}
@@ -1143,4 +1164,56 @@ func decodeAggStateJSON(st *Stage, raw []byte) (*aggState, error) {
 func (g *Graph) refoldAggregateNoObject(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, any, bool, error) {
 	out, live, err := g.refoldAggregate(tx, st, outKey)
 	return out, nil, live, err
+}
+
+// Output reads a stage's current output for one key (nil if absent): for
+// an incremental aggregate key that keeps a fold state, its rendering;
+// otherwise the stored output.
+func (g *Graph) Output(tx *stagestore.Tx, stage string, outKey []byte) ([]byte, error) {
+	if n := g.byName[stage]; n != nil && n.def.incrementalAggregate() {
+		raw, err := tx.GetAcc(stage, outKey)
+		if err != nil {
+			return nil, err
+		}
+		if raw != nil {
+			return g.renderStored(n.def, raw)
+		}
+	}
+	return tx.GetOut(stage, outKey)
+}
+
+// OutputCount reports how many keys of a stage hold an output — the
+// introspection read that distinguishes "the fan produced nothing" from
+// "the join never matched". 0 for a stage that has never folded.
+func (g *Graph) OutputCount(tx *stagestore.Tx, stage string) (int, error) {
+	count, err := tx.OutKeyCount(stage)
+	if err != nil {
+		return 0, err
+	}
+	n := g.byName[stage]
+	if n == nil || !n.def.incrementalAggregate() {
+		return count, nil
+	}
+	err = tx.EachAcc(stage, func(_, raw []byte) error {
+		out, err := g.renderStored(n.def, raw)
+		if out != nil {
+			count++
+		}
+		return err
+	})
+	return count, err
+}
+
+// renderStored is a stored fold state's output (nil: none, as when having
+// holds the key back).
+func (g *Graph) renderStored(st *Stage, raw []byte) ([]byte, error) {
+	as, err := decodeAggState(st, raw)
+	if err != nil {
+		return nil, fmt.Errorf("stage %q: decode fold state: %w", st.Name, err)
+	}
+	out, _, live, err := g.renderState(st, as, false)
+	if err != nil || !live {
+		return nil, err
+	}
+	return out, nil
 }

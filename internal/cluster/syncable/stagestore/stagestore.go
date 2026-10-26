@@ -555,10 +555,10 @@ func (tx *Tx) SetFrontier(index uint64) error {
 	return tx.put(metaBucket, metaFrontier, v[:])
 }
 
-// OutKeyCount reports how many output keys a stage currently holds —
-// the introspection read that distinguishes "the fan produced nothing"
-// from "the join never matched" (the field triage that had no way to
-// ask). 0 for a stage that has never folded.
+// OutKeyCount reports how many output keys a stage holds in its out
+// bucket — without the keys an incremental aggregate renders from their
+// fold state (stages.Graph.OutputCount counts both). 0 for a stage that
+// has never folded.
 func (tx *Tx) OutKeyCount(stage string) (int, error) {
 	it, err := tx.iter(tx.key(outBucket(stage), nil))
 	if err != nil {
@@ -706,6 +706,11 @@ func (tx *Tx) GetAcc(stage string, outKey []byte) ([]byte, error) {
 // DeleteAcc removes an aggregate key's fold state.
 func (tx *Tx) DeleteAcc(stage string, outKey []byte) error {
 	return tx.del(accBucket(stage), outKey)
+}
+
+// EachAcc iterates a stage's fold states, in key order.
+func (tx *Tx) EachAcc(stage string, fn func(outKey, val []byte) error) error {
+	return tx.each(accBucket(stage), nil, fn)
 }
 
 func ordBucket(stage string) []byte { return []byte("stage:" + stage + ":ord") }

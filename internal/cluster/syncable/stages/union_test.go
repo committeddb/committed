@@ -61,7 +61,7 @@ func (h *unionHarness) out(stage, key string) string {
 	h.t.Helper()
 	var got string
 	require.NoError(h.t, h.store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut(stage, []byte(key))
+		v, err := h.g.Output(tx, stage, []byte(key))
 		got = string(v)
 		return err
 	}))

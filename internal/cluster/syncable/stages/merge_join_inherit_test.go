@@ -47,7 +47,7 @@ func TestMergeFrontedJoinInheritsNormalize(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("unbilled", []byte(key))
+			v, err := g.Output(tx, "unbilled", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -108,7 +108,7 @@ func TestMergeFrontedJoinInheritsOnType(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("unquoted", []byte(key))
+			v, err := g.Output(tx, "unquoted", []byte(key))
 			got = string(v)
 			return err
 		}))

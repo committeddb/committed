@@ -156,7 +156,7 @@ func TestStageEvaluatorChain(t *testing.T) {
 	out := func(stage, key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut(stage, []byte(key))
+			v, err := g.Output(tx, stage, []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -213,7 +213,7 @@ func TestStageWhenRetraction(t *testing.T) {
 	get := func() string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("sold", []byte("p1"))
+			v, err := g.Output(tx, "sold", []byte("p1"))
 			got = string(v)
 			return err
 		}))
@@ -255,7 +255,7 @@ func TestStageLatestArgmax(t *testing.T) {
 	get := func() string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("vws", []byte("v1"))
+			v, err := g.Output(tx, "vws", []byte("v1"))
 			got = string(v)
 			return err
 		}))
@@ -347,7 +347,7 @@ func TestStageFilteringJoin(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("alive", []byte(key))
+			v, err := g.Output(tx, "alive", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -417,7 +417,7 @@ func TestStageEpochSweep(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("by-job", []byte(key))
+			v, err := g.Output(tx, "by-job", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -467,7 +467,7 @@ func TestStageForEachFanThenFold(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("by-wa", []byte(key))
+			v, err := g.Output(tx, "by-wa", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -522,7 +522,7 @@ func TestStageForEachParentScope(t *testing.T) {
 	}))
 	var got string
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut("elems", []byte("a"))
+		v, err := g.Output(tx, "elems", []byte("a"))
 		got = string(v)
 		return err
 	}))
@@ -566,7 +566,7 @@ func TestJoinOnStage(t *testing.T) {
 	get := func() string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("funded", []byte("p1"))
+			v, err := g.Output(tx, "funded", []byte("p1"))
 			got = string(v)
 			return err
 		}))
@@ -628,7 +628,7 @@ func TestStageLiveSet(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("txn-live", []byte(key))
+			v, err := g.Output(tx, "txn-live", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -690,7 +690,7 @@ func TestStageCompositeKey(t *testing.T) {
 	get := func(card, wa string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("sums", []byte(stageOutKey([]string{card, wa})))
+			v, err := g.Output(tx, "sums", []byte(stageOutKey([]string{card, wa})))
 			got = string(v)
 			return err
 		}))
@@ -740,7 +740,7 @@ func TestStageAntiJoin(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("uninvoiced", []byte(key))
+			v, err := g.Output(tx, "uninvoiced", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -811,7 +811,7 @@ func TestStageCompositeJoinOnStage(t *testing.T) {
 	get := func(stage, key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut(stage, []byte(key))
+			v, err := g.Output(tx, stage, []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -867,7 +867,7 @@ func TestStageCompositeJoinOnTopic(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("sold-jobs", []byte(key))
+			v, err := g.Output(tx, "sold-jobs", []byte(key))
 			got = string(v)
 			return err
 		}))

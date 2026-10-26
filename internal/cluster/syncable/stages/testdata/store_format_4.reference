@@ -8,8 +8,6 @@
 "stage:activity:in"	"\t.\x13\a\xb5\xc13D[\"refunds\",\"r4\"]"	pointer(gen 2) {"acct":"J1","amount":5,"at":"2026-01-04"}
 "stage:activity:keys"	"\b\xc1\x13\a\xb5dad"	j1
 "stage:activity:keys"	"\t.\x13\a\xb5\xc13D"	J1
-"stage:activity:out"	"J1"	{"n":2,"refunded":5,"srcs":"props,refunds"}
-"stage:activity:out"	"j1"	{"n":1,"refunded":1,"srcs":"refunds"}
 "stage:activity:src"	"[\"props\",\"5\"]"	"\t.\x13\a\xb5\xc13D"
 "stage:activity:src"	"[\"refunds\",\"r3\"]"	"\b\xc1\x13\a\xb5dad"
 "stage:activity:src"	"[\"refunds\",\"r4\"]"	"\t.\x13\a\xb5\xc13D"
@@ -51,7 +49,6 @@
 "stage:els:in"	"\bˇ\a\xb5m{\x05\x02e3\x00\x00h"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
 "stage:els:in"	"\bˇ\a\xb5m{\x05\x02e3\x00\x00i"	pointer(gen 2) {"elements":[{"amount":6,"id":"d","tag":"k","v":true,"wa":"w1"},{"amount":6,"id":"e","tag":"k","v":2.5,"wa":"w1"},{"amount":6,"id":"f","tag":"k","v":false,"wa":"w1"},{"amount":6,"id":"g","tag":"k","v":"a","wa":"w1"},{"amount":6,"id":"h","tag":"k","v":"","wa":"w1"},{"amount":6,"id":"i","tag":"k","v":2,"wa":"w1"}],"txn":"t2","type":"created"}
 "stage:els:keys"	"\bˇ\a\xb5m{\x05"	w1
-"stage:els:out"	"w1"	{"big":8,"first":"a","last":"z","small":2,"total":59,"vals":[2,2.5,10,"","B","a","b",false,true]}
 "stage:els:rev:\x00fan"	"\x02e1\x02e1\x00\x00a"	
 "stage:els:rev:\x00fan"	"\x02e1\x02e1\x00\x00b"	
 "stage:els:rev:\x00fan"	"\x02e2\x02e2\x00\x01a"	
@@ -154,7 +151,6 @@
 "stage:lines:acc"	"r1"	{"c":1,"a":[],"e":[{"n":1,"s":"2"}]}
 "stage:lines:in"	"\b܃\a\xb5{\xe7l\x02r1s1"	pointer(gen 1) {"lines":[{"note":null,"order":"r1","qty":2,"sku":"s1"},{"note":null,"order":"r1","qty":0,"sku":"s2"},{"order":"r1","qty":4,"sku":"s3"}]}
 "stage:lines:keys"	"\b܃\a\xb5{\xe7l"	r1
-"stage:lines:out"	"r1"	{"qty":2}
 "stage:lines:rev:\x00fan"	"\x02r1\x02r1s1"	
 "stage:lines:rev:\x00fan"	"\x02r1\x02r1s2"	
 "stage:lines:rev:\x00fan"	"\x02r1\x02r1s3"	
@@ -184,7 +180,6 @@
 "stage:monthly:in"	"K\x00\x7f\x996K\xa9lq2"	pointer(gen 0) {"amount":3,"at":"2026-01-20","payer":"ada"}
 "stage:monthly:keys"	"\x06]\xc0\aҬ\xcc\xed"	2026-02-01 00:00:00+00:00
 "stage:monthly:keys"	"K\x00\x7f\x996K\xa9l"	2026-01-01 00:00:00+00:00
-"stage:monthly:out"	"2026-01-01 00:00:00+00:00"	{"avg":6.5,"big":1,"payers":1,"source":"ledger"}
 "stage:monthly:src"	"q1"	"K\x00\x7f\x996K\xa9l"
 "stage:monthly:src"	"q2"	"K\x00\x7f\x996K\xa9l"
 "stage:monthly:src"	"q3"	"\x06]\xc0\aҬ\xcc\xed"
@@ -193,7 +188,6 @@
 "stage:payer-list:in"	"\xe6\xf0\x9b\x19\x05\x19ڤq2"	pointer(gen 0) {"amount":3,"at":"2026-01-20","payer":"ada"}
 "stage:payer-list:in"	"\xe6\xf0\x9b\x19\x05\x19ڤq3"	pointer(gen 0) {"amount":-4,"at":"2026-01-31 20:00:00-05:00","payer":"Bea"}
 "stage:payer-list:keys"	"\xe6\xf0\x9b\x19\x05\x19ڤ"	all
-"stage:payer-list:out"	"all"	{"by_amount":["ada","ada","bea"],"names":"Ada, Bea, ada","notes":[null,null,null]}
 "stage:payer-list:src"	"q1"	"\xe6\xf0\x9b\x19\x05\x19ڤ"
 "stage:payer-list:src"	"q2"	"\xe6\xf0\x9b\x19\x05\x19ڤ"
 "stage:payer-list:src"	"q3"	"\xe6\xf0\x9b\x19\x05\x19ڤ"

@@ -95,7 +95,7 @@ func TestKeyExpressionFolds(t *testing.T) {
 	out := func(parts ...string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("by-month", []byte(OutKey(parts)))
+			v, err := g.Output(tx, "by-month", []byte(OutKey(parts)))
 			got = string(v)
 			return err
 		}))
@@ -149,7 +149,7 @@ func TestKeyExpressionComposesWithKeyTypeAndNormalize(t *testing.T) {
 	}
 	var got string
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut("by-email", []byte(OutKey([]string{"ada@x.com", "5"})))
+		v, err := g.Output(tx, "by-email", []byte(OutKey([]string{"ada@x.com", "5"})))
 		got = string(v)
 		return err
 	}))
@@ -188,7 +188,7 @@ func TestJoinIntoKeyExpressionStage(t *testing.T) {
 	fold("budget-topic", "b1", `{"id":"b1","month":"2024-03-01 00:00:00+00:00","budget":100}`)
 	var got string
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut("budgets", []byte("b1"))
+		v, err := g.Output(tx, "budgets", []byte("b1"))
 		got = string(v)
 		return err
 	}))
@@ -211,7 +211,7 @@ func TestFanIdentityUsesKeyExpression(t *testing.T) {
 	}))
 	var got string
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut("lines", []byte("CD"))
+		v, err := g.Output(tx, "lines", []byte("CD"))
 		got = string(v)
 		return err
 	}))

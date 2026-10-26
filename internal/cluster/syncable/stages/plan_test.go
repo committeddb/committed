@@ -46,7 +46,9 @@ func TestMain(m *testing.M) {
 	testInputLog = suiteInputLog
 	checkFoldState = func(g *Graph, tx *stagestore.Tx, st *Stage, outKey, out []byte, live bool) {
 		scrubbed := g.byName[st.Name].scrubbedInputs.Load()
+		rejected := g.byName[st.Name].havingRejected.Load()
 		want, wantLive, err := g.refoldOutputBytes(tx, st, outKey)
+		g.byName[st.Name].havingRejected.Store(rejected) // the check's refold is not the graph's
 		if g.byName[st.Name].scrubbedInputs.Load() != scrubbed {
 			return // a scrubbed input: the fold state holds it until its delete folds (pointer.go)
 		}

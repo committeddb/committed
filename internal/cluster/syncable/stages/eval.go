@@ -166,10 +166,11 @@ type Graph struct {
 	// one of them back takes the batch's decoded input instead of the log
 	// (worker goroutine only).
 	refolding *aggDelta
-	// priorOut is the key's stored output as the fold state knows it, set
-	// by the refold when it can say without reading the output (worker
-	// goroutine only).
-	priorOut *knownOutput
+	// priorOut is the key's output before its refold as the fold state
+	// knows it, and keptState whether the refold left the key a fold
+	// state; set by the refold (worker goroutine only).
+	priorOut  *knownOutput
+	keptState bool
 	// lastFanned is the entity a forEach stage's element was last read
 	// back from, fanned (pointer.go); it lasts one batch (worker goroutine
 	// only).
@@ -1304,29 +1305,48 @@ func (g *Graph) Drain(tx *stagestore.Tx, dirty Dirty) error {
 // refoldKey recomputes one key's output from its retained input set,
 // stores it, and — when the bytes changed — cascades the delta (upsert
 // or retraction) to sinks and consumer retention.
+//
+// An incremental aggregate key that keeps a fold state stores no output:
+// its output is the state's rendering (Graph.Output). The out bucket holds
+// the output of a key whose refold could not keep a state, so this keeps
+// the bucket in step as a key gains or loses its state.
 func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty Dirty) error {
 	st := n.def
-	g.refolding, g.priorOut = dirty.changes(n, outKey), nil
+	g.refolding, g.priorOut, g.keptState = dirty.changes(n, outKey), nil, false
 	out, obj, live, err := g.refoldOutput(tx, st, outKey, dirty.delta(n, outKey))
-	known := g.priorOut
-	g.refolding, g.priorOut = nil, nil
+	known, kept := g.priorOut, g.keptState
+	g.refolding, g.priorOut, g.keptState = nil, nil, false
 	if err != nil {
 		return err
 	}
+	// stored: the prior output is (or would be) in the out bucket.
+	stored := known == nil
 	var prior []byte
-	if known != nil {
+	if stored {
+		if prior, err = tx.GetOut(st.Name, outKey); err != nil {
+			return err
+		}
+	} else {
 		prior = known.out
 		if checkFoldState != nil {
-			stored, err := tx.GetOut(st.Name, outKey)
-			if err != nil {
+			if dup, err := tx.GetOut(st.Name, outKey); err != nil {
 				return err
-			}
-			if !bytes.Equal(stored, prior) {
-				panic(fmt.Sprintf("stage %q key %q: the fold state rendered the prior output %s, the store holds %s", st.Name, outKey, prior, stored))
+			} else if dup != nil {
+				panic(fmt.Sprintf("stage %q key %q keeps a fold state and a stored output %s", st.Name, outKey, dup))
 			}
 		}
-	} else if prior, err = tx.GetOut(st.Name, outKey); err != nil {
-		return err
+	}
+	if st.incrementalAggregate() {
+		if err := g.placeOutput(tx, st, outKey, prior, out, stored, live && !kept); err != nil {
+			return err
+		}
+	}
+	if known != nil && known.unknown {
+		// The prior output cannot be known, so say the new one.
+		if !live {
+			return g.retractOutput(tx, n, outKey, dirty)
+		}
+		return g.publishOutput(tx, n, outKey, out, obj, dirty)
 	}
 	if !live {
 		if prior == nil {
@@ -1340,13 +1360,28 @@ func (g *Graph) refoldKey(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty 
 	return g.publishOutput(tx, n, outKey, out, obj, dirty)
 }
 
+// placeOutput keeps an incremental aggregate key's out-bucket entry in
+// step with its refold: the output is stored when the key keeps no state
+// (inBucket), and an entry the key's state now renders is removed.
+func (g *Graph) placeOutput(tx *stagestore.Tx, st *Stage, outKey, prior, out []byte, stored, inBucket bool) error {
+	switch {
+	case inBucket && (!stored || !bytes.Equal(prior, out)):
+		return tx.PutOut(st.Name, outKey, out)
+	case !inBucket && stored && prior != nil:
+		return tx.DeleteOut(st.Name, outKey)
+	}
+	return nil
+}
+
 // retractOutput deletes a stage's output for one key and cascades the
 // retraction: the chaining terminal, the joins using this stage as their
 // dimension, consumer retention, and merge sides.
 func (g *Graph) retractOutput(tx *stagestore.Tx, n *graphNode, outKey []byte, dirty Dirty) error {
 	st := n.def
-	if err := tx.DeleteOut(st.Name, outKey); err != nil {
-		return err
+	if !st.incrementalAggregate() { // refoldKey places those (placeOutput)
+		if err := tx.DeleteOut(st.Name, outKey); err != nil {
+			return err
+		}
 	}
 	if g.OnDelta != nil {
 		if err := g.OnDelta(st.Name, outKey, nil, false); err != nil {
@@ -1390,8 +1425,10 @@ func (g *Graph) retractOutput(tx *stagestore.Tx, n *graphNode, outKey []byte, di
 // obj is out decoded, or nil to decode it here.
 func (g *Graph) publishOutput(tx *stagestore.Tx, n *graphNode, outKey, out []byte, obj any, dirty Dirty) error {
 	st := n.def
-	if err := tx.PutOut(st.Name, outKey, out); err != nil {
-		return err
+	if !st.incrementalAggregate() { // refoldKey places those (placeOutput)
+		if err := tx.PutOut(st.Name, outKey, out); err != nil {
+			return err
+		}
 	}
 	if obj == nil {
 		var err error
@@ -1951,20 +1988,21 @@ type legacyFolds struct {
 // results and legacy arms: having, then each emit. The one rendering both
 // the full refold and the fold state (agg_incremental.go) go through.
 func (g *Graph) aggregateOutput(st *Stage, results aggResults, lf legacyFolds) ([]byte, bool, error) {
-	bs, _, live, err := g.aggregateOutputObject(st, results, lf)
+	bs, _, live, err := g.aggregateOutputObject(st, results, lf, true)
 	return bs, live, err
 }
 
 // aggregateOutputObject is aggregateOutput that also returns the emitted
-// object when it stands for its bytes (jsonStable), nil otherwise.
-func (g *Graph) aggregateOutputObject(st *Stage, results aggResults, lf legacyFolds) ([]byte, any, bool, error) {
+// object when it stands for its bytes (jsonStable), nil otherwise. count
+// says whether a having rejection counts (renderState).
+func (g *Graph) aggregateOutputObject(st *Stage, results aggResults, lf legacyFolds, count bool) ([]byte, any, bool, error) {
 	sums, mins, maxs, counts, collects := lf.sums, lf.mins, lf.maxs, lf.counts, lf.collects
 	var err error
 	if st.havingCompiled != nil {
 		// SQL's HAVING: only TRUE keeps the key (false, null, and a data
 		// error hold it back, as a when arm does).
 		if v, err := Eval(st.havingCompiled, results, nil); err != nil || v != true {
-			if n := g.byName[st.Name]; n != nil {
+			if n := g.byName[st.Name]; n != nil && count {
 				n.havingRejected.Add(1)
 			}
 			return nil, nil, false, nil

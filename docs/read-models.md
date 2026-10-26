@@ -1056,7 +1056,7 @@ set = [ { column = "total", from = "$.total" },
   `forEach` fans from one, is kept as a reference to its log entry, a
   few bytes whatever the event's size; stage-fed inputs, merge sides,
   window rows, fan-join pairs and join dimension rows are kept as
-  copies. One aggregate stage over 10,000,000 events held about 57 bytes
+  copies. One aggregate stage over 10,000,000 events held about 49 bytes
   per event. **Editing stage definitions
   requires a rebuild** (the config-change guard enforces it): changed
   stages must re-derive from index 0, exactly like a changed table

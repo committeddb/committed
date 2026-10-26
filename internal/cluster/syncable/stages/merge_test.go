@@ -26,7 +26,7 @@ func mergeHarness(t *testing.T, sts []Stage) (fold func(topic, key, payload stri
 	get = func(stage, key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut(stage, []byte(key))
+			v, err := g.Output(tx, stage, []byte(key))
 			got = string(v)
 			return err
 		}))

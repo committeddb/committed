@@ -173,7 +173,7 @@ func runIncrementalCorpus(t *testing.T, sts []Stage) {
 
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
 			for _, k := range []string{"g0", "g1", "g2"} {
-				got, err := tx.GetOut("g", []byte(k))
+				got, err := g.Output(tx, "g", []byte(k))
 				require.NoError(t, err)
 				want, live, err := g.refoldAggregate(tx, st, []byte(k))
 				require.NoError(t, err)
@@ -236,7 +236,7 @@ func TestIncrementalAggregateRecipeShape(t *testing.T) {
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
 		for s := range streams {
 			key := fmt.Appendf(nil, "s%d", s)
-			got, err := tx.GetOut("order", key)
+			got, err := g.Output(tx, "order", key)
 			require.NoError(t, err)
 			want, live, err := g.refoldAggregate(tx, st, key)
 			require.NoError(t, err)
@@ -319,7 +319,7 @@ func TestIncrementalAggregateFallbacks(t *testing.T) {
 	fold("r2", `{"k":"a","f":"y","d":"2026-01-02","i":"2 days"}`)
 	st := g.byName["g"].def
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		got, err := tx.GetOut("g", []byte("a"))
+		got, err := g.Output(tx, "g", []byte("a"))
 		require.NoError(t, err)
 		want, live, err := g.refoldAggregate(tx, st, []byte("a"))
 		require.NoError(t, err)
@@ -395,7 +395,7 @@ func TestAddedKeyFoldsFromEmptyOnlyInItsBatch(t *testing.T) {
 		return nil
 	}))
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		got, err := tx.GetOut("g", []byte("x"))
+		got, err := g.Output(tx, "g", []byte("x"))
 		require.NoError(t, err)
 		want, live, err := g.refoldAggregate(tx, g.byName["g"].def, []byte("x"))
 		require.NoError(t, err)
@@ -404,4 +404,78 @@ func TestAddedKeyFoldsFromEmptyOnlyInItsBatch(t *testing.T) {
 		require.Contains(t, string(got), `"n":3`)
 		return nil
 	}))
+}
+
+// A key that keeps a fold state stores no output, its output being the
+// state's rendering; a key whose state is dropped stores its output, and
+// drops it again when its state is rebuilt. A key retracted by a full
+// refold (a key marked full, as a dimension change marks one) still says
+// its retraction, its prior output coming from its state.
+func TestOutputIsStoredOnlyWithoutAState(t *testing.T) {
+	sts := []Stage{{
+		Name: "g", From: "rows", KeyPath: []string{"$.k"}, Reduce: "aggregate",
+		Emit: []Emit{{Field: "m", Expr: "min(case when $.f = 'y' then $.d::date else $.d::timestamp end)"}},
+	}}
+	require.NoError(t, ValidateShapes(sts))
+	g := BuildGraph(sts)
+	store := openTestStore(t, Fingerprint(sts))
+	var deltas []string
+	g.OnDelta = func(_ string, outKey []byte, obj any, live bool) error {
+		deltas = append(deltas, fmt.Sprintf("%s live=%v", outKey, live))
+		return nil
+	}
+	n := g.byName["g"]
+	apply := func(full bool, fn func(tx *stagestore.Tx, dirty Dirty) error) {
+		require.NoError(t, store.Update(func(tx *stagestore.Tx) error {
+			dirty := Dirty{}
+			if err := fn(tx, dirty); err != nil {
+				return err
+			}
+			if full {
+				dirty.MarkFull(n, []byte("a"))
+			}
+			return g.Drain(tx, dirty)
+		}))
+	}
+	upsert := func(row, payload string) {
+		apply(false, func(tx *stagestore.Tx, dirty Dirty) error {
+			return g.FoldTopicUpsert(tx, "rows", []byte(row), decodePayload(t, payload), 0, dirty)
+		})
+	}
+	del := func(row string, full bool) {
+		apply(full, func(tx *stagestore.Tx, dirty Dirty) error {
+			return g.FoldTopicDelete(tx, "rows", []byte(row), dirty)
+		})
+	}
+	check := func(state bool, want string) {
+		t.Helper()
+		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
+			acc, err := tx.GetAcc("g", []byte("a"))
+			require.NoError(t, err)
+			stored, err := tx.GetOut("g", []byte("a"))
+			require.NoError(t, err)
+			got, err := g.Output(tx, "g", []byte("a"))
+			require.NoError(t, err)
+			require.Equal(t, want, string(got))
+			if state {
+				require.NotNil(t, acc, "the key keeps a state")
+				require.Nil(t, stored, "a key with a state stores no output")
+			} else {
+				require.Nil(t, acc, "the key keeps no state")
+				require.Equal(t, want, string(stored), "a key without a state stores its output")
+			}
+			return nil
+		}))
+	}
+
+	upsert("r1", `{"k":"a","f":"n","d":"2026-01-02"}`)
+	check(true, `{"m":"2026-01-02 00:00:00"}`)
+	upsert("r2", `{"k":"a","f":"y","d":"2026-01-02"}`) // a tie the state cannot order
+	check(false, `{"m":"2026-01-02 00:00:00"}`)
+	del("r2", false) // the state rebuilds without the tie
+	check(true, `{"m":"2026-01-02 00:00:00"}`)
+	deltas = nil
+	del("r1", true)
+	check(false, ``)
+	require.Equal(t, []string{"a live=false"}, deltas, "the full refold retracts the key")
 }

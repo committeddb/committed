@@ -1774,7 +1774,7 @@ func (p *Projection) StageStats() (map[string]cluster.StageStat, error) {
 	err = store.View(func(tx *stagestore.Tx) error {
 		for i := range p.config.Stages {
 			name := p.config.Stages[i].Name
-			n, err := tx.OutKeyCount(name)
+			n, err := p.stages.OutputCount(tx, name)
 			if err != nil {
 				return err
 			}
@@ -1825,7 +1825,7 @@ func (p *Projection) StageKeyExists(stage string, keyParts []string) (bool, erro
 	}
 	var exists bool
 	err = store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut(stage, []byte(key))
+		v, err := p.stages.Output(tx, stage, []byte(key))
 		exists = v != nil
 		return err
 	})
@@ -1957,7 +1957,7 @@ func (p *Projection) pullDecorations(ctx context.Context, tx *gosql.Tx, stx *sta
 	}
 	outKey := []byte(stages.OutKey(parts))
 	for _, d := range p.decorators {
-		out, err := stx.GetOut(d.fromStage, outKey)
+		out, err := p.stages.Output(stx, d.fromStage, outKey)
 		if err != nil {
 			return err
 		}

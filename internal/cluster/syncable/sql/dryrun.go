@@ -135,7 +135,7 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 	}
 	err = store.View(func(tx *stagestore.Tx) error {
 		for name, fc := range flows {
-			keys, err := tx.OutKeyCount(name)
+			keys, err := g.OutputCount(tx, name)
 			if err != nil {
 				return err
 			}

@@ -37,7 +37,7 @@ func TestFanMultiArm(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("els", []byte(key))
+			v, err := g.Output(tx, "els", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -92,7 +92,7 @@ func TestFanArmIdentityNamespaced(t *testing.T) {
 	}))
 	var got string
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut("both", []byte("k1"))
+		v, err := g.Output(tx, "both", []byte("k1"))
 		got = string(v)
 		return err
 	}))

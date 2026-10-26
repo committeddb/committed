@@ -138,7 +138,7 @@ func TestTopicInputsArePointersWithALog(t *testing.T) {
 	}))
 	require.Equal(t, []string{"11 rows b 0→3"}, reads.calls)
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		out, err := tx.GetOut("g", []byte("x"))
+		out, err := g.Output(tx, "g", []byte("x"))
 		require.NoError(t, err)
 		require.JSONEq(t, `{"o":1}`, string(out))
 		return nil
@@ -181,7 +181,7 @@ func TestFanElementsArePointersToTheirEntity(t *testing.T) {
 		var got []byte
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
 			var err error
-			got, err = tx.GetOut("g", []byte("x"))
+			got, err = g.Output(tx, "g", []byte("x"))
 			return err
 		}))
 		return string(got)
@@ -233,7 +233,7 @@ func TestScrubbedEntityLeavesItsElementsOut(t *testing.T) {
 		var got []byte
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
 			var err error
-			got, err = tx.GetOut("g", []byte("x"))
+			got, err = g.Output(tx, "g", []byte("x"))
 			return err
 		}))
 		return string(got)
@@ -304,7 +304,7 @@ func TestScrubbedInputIsAbsentUntilItsDeleteFolds(t *testing.T) {
 				var got []byte
 				require.NoError(t, store.View(func(tx *stagestore.Tx) error {
 					var err error
-					got, err = tx.GetOut("g", []byte("x"))
+					got, err = g.Output(tx, "g", []byte("x"))
 					return err
 				}))
 				return string(got)

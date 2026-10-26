@@ -75,7 +75,7 @@ func (h *windowHarness) outputs(stage string) map[string]string {
 	got := map[string]string{}
 	require.NoError(h.t, h.store.View(func(tx *stagestore.Tx) error {
 		for k := range h.keys {
-			v, err := tx.GetOut(stage, []byte(k))
+			v, err := h.g.Output(tx, stage, []byte(k))
 			if err != nil {
 				return err
 			}

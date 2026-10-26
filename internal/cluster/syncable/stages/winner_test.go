@@ -135,7 +135,7 @@ func runWinnerCorpus(t *testing.T, sts []Stage) {
 
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
 			for _, k := range []string{"g0", "g1", "g2"} {
-				got, err := tx.GetOut("g", []byte(k))
+				got, err := g.Output(tx, "g", []byte(k))
 				require.NoError(t, err)
 				want, live, err := oracle(tx, st, []byte(k))
 				require.NoError(t, err)
@@ -178,7 +178,7 @@ func TestWinnerStateAppendsReadNoInputs(t *testing.T) {
 	require.Equal(t, int64(1), n.fullRefolds.Load(), "only the key's first input refolds in full")
 	require.Equal(t, int64(199), n.foldStateRefolds.Load())
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		got, err := tx.GetOut("g", []byte("a"))
+		got, err := g.Output(tx, "g", []byte("a"))
 		require.NoError(t, err)
 		require.True(t, bytes.Equal(got, []byte(`{"o":198}`)), "got %s", got)
 		return nil
