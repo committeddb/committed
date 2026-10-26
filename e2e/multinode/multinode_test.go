@@ -438,12 +438,30 @@ func projectRoot(t *testing.T) string {
 	}
 }
 
+// portsGiven are the ports freePort has handed out in this test binary.
+var (
+	portsMu    sync.Mutex
+	portsGiven = map[int]bool{}
+)
+
+// freePort returns a free port never handed out before in this test binary:
+// the port is free only until its probe closes, and the kernel may hand the
+// same one out again, so two nodes given it would collide when the second
+// binds.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	portsMu.Lock()
+	defer portsMu.Unlock()
+	for {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		port := l.Addr().(*net.TCPAddr).Port
+		require.NoError(t, l.Close())
+		if !portsGiven[port] {
+			portsGiven[port] = true
+			return port
+		}
+	}
 }
 
 func waitReady(t *testing.T, base string) {
