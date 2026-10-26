@@ -32,7 +32,7 @@
 //	stage:<name>:odim:<join> ordered joins: frame(onKey)+sortKey+producerKey -> order end + row
 //	stage:<name>:opos:<join> ordered joins: producerKey -> its current odim key
 //	stage:<name>:arev:<join> as-of joins: frame(onKey)+asOf sort key+outKey -> asOf end
-//	stage:<name>:acc         aggregate stages without joins: output key -> its fold state
+//	stage:<name>:acc         aggregate stages without joins: output key's id -> its fold state
 //
 // The odim/opos buckets exist only for joins declaring orderBy: every
 // matching row (version) of a reference, in business order, so the join
@@ -693,24 +693,52 @@ func (tx *Tx) GetIn(stage string, outKey, inKey []byte) ([]byte, error) {
 
 func accBucket(stage string) []byte { return []byte("stage:" + stage + ":acc") }
 
+// A fold state is stored under its output key's id (keys.go): a key keeps
+// a state only while it retains inputs, so it holds an id, and releasing
+// the id drops any state under it.
+
 // PutAcc records an aggregate key's fold state.
 func (tx *Tx) PutAcc(stage string, outKey, val []byte) error {
-	return tx.put(accBucket(stage), outKey, val)
+	id, found, err := tx.keyID(stage, outKey, false)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("stage store: a fold state for an output key that retains no input (store inconsistency)")
+	}
+	return tx.put(accBucket(stage), id, val)
 }
 
 // GetAcc reads an aggregate key's fold state (nil if absent).
 func (tx *Tx) GetAcc(stage string, outKey []byte) ([]byte, error) {
-	return tx.get(accBucket(stage), outKey)
+	id, found, err := tx.keyID(stage, outKey, false)
+	if err != nil || !found {
+		return nil, err
+	}
+	return tx.get(accBucket(stage), id)
 }
 
 // DeleteAcc removes an aggregate key's fold state.
 func (tx *Tx) DeleteAcc(stage string, outKey []byte) error {
-	return tx.del(accBucket(stage), outKey)
+	id, found, err := tx.keyID(stage, outKey, false)
+	if err != nil || !found {
+		return err
+	}
+	return tx.del(accBucket(stage), id)
 }
 
-// EachAcc iterates a stage's fold states, in key order.
+// EachAcc iterates a stage's fold states, in id order.
 func (tx *Tx) EachAcc(stage string, fn func(outKey, val []byte) error) error {
-	return tx.each(accBucket(stage), nil, fn)
+	return tx.each(accBucket(stage), nil, func(id, val []byte) error {
+		outKey, err := tx.peekKey(stage, id)
+		if err != nil {
+			return err
+		}
+		if outKey == nil {
+			return fmt.Errorf("stage store: a fold state under a free output-key id (store inconsistency)")
+		}
+		return fn(outKey, val)
+	})
 }
 
 func ordBucket(stage string) []byte { return []byte("stage:" + stage + ":ord") }

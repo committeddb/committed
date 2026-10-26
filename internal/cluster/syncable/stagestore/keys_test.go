@@ -185,3 +185,50 @@ func TestInputsAllKeepsNoKeyCache(t *testing.T) {
 	}))
 	require.Equal(t, want, got)
 }
+
+// A fold state lives under its output key's id: it is read back by the
+// key, needs the key to retain an input, and is dropped with the id, so a
+// key given the id next starts without one.
+func TestFoldStateFollowsItsKeyID(t *testing.T) {
+	hash := keyHash
+	t.Cleanup(func() { keyHash = hash })
+	keyHash = func([]byte) uint64 { return 7 } // every key probes from one id
+
+	s, _, err := Open(t.TempDir(), "p", "fp")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	require.NoError(t, s.Update(func(tx *Tx) error {
+		require.ErrorContains(t, tx.PutAcc("st", []byte("a"), []byte("state-a")), "retains no input")
+		require.NoError(t, tx.PutIn("st", []byte("a"), []byte("i1"), []byte("v")))
+		require.NoError(t, tx.PutIn("st", []byte("b"), []byte("i2"), []byte("v")))
+		require.NoError(t, tx.PutAcc("st", []byte("a"), []byte("state-a")))
+		return tx.PutAcc("st", []byte("b"), []byte("state-b"))
+	}))
+	require.NoError(t, s.View(func(tx *Tx) error {
+		got, err := tx.GetAcc("st", []byte("b"))
+		require.NoError(t, err)
+		require.Equal(t, "state-b", string(got))
+		states := map[string]string{}
+		require.NoError(t, tx.EachAcc("st", func(k, v []byte) error {
+			states[string(k)] = string(v)
+			return nil
+		}))
+		require.Equal(t, map[string]string{"a": "state-a", "b": "state-b"}, states)
+		return nil
+	}))
+
+	// a's last input leaves with its state left behind; b's id is the next
+	// one, so a's id stays held until b goes too.
+	require.NoError(t, s.Update(func(tx *Tx) error {
+		require.NoError(t, tx.DeleteIn("st", []byte("b"), []byte("i2")))
+		return tx.DeleteIn("st", []byte("a"), []byte("i1"))
+	}))
+	require.NoError(t, s.Update(func(tx *Tx) error {
+		require.NoError(t, tx.PutIn("st", []byte("c"), []byte("i3"), []byte("v")))
+		got, err := tx.GetAcc("st", []byte("c"))
+		require.NoError(t, err)
+		require.Nil(t, got, "c took a's id; a's state went with it")
+		return nil
+	}))
+}

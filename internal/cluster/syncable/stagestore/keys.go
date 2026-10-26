@@ -10,8 +10,8 @@ import (
 // output key and recorded against it in src, so a key that gathers many
 // inputs would repeat its bytes in each of them (a 36-byte UUID stream key
 // for every event of the stream). Each stage instead stores an output key
-// once, in its keys bucket, under an 8-byte id, and the in and src buckets
-// refer to the id.
+// once, in its keys bucket, under an 8-byte id, and the in, src and acc
+// buckets refer to the id.
 //
 // The id is the key's hash; a collision takes the next free id (linear
 // probing), so finding a key's id reads ids from its hash on until the key
@@ -178,6 +178,11 @@ func (tx *Tx) tryRelease(c releaseCandidate) (done bool, err error) {
 		return k == nil, err
 	}
 	if err := tx.del(keysBucket(c.stage), c.id); err != nil {
+		return false, err
+	}
+	// A fold state outliving its key's inputs is never handed to the next
+	// key given this id.
+	if err := tx.del(accBucket(c.stage), c.id); err != nil {
 		return false, err
 	}
 	delete(tx.keys, c.stage+"\x00"+string(c.id))
