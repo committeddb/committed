@@ -3,7 +3,9 @@
 version: "2"
 
 run:
-  timeout: 5m
+  # A clean CI lint takes 4–5 minutes, so 5m timed out with 0 issues; the
+  # CI job's own limit (25 minutes) still bounds a real hang.
+  timeout: 10m
   # Build tags compiled when linting. docker/integration pull in the
   # testcontainers -> docker -> moby tree, but that tree loads in well under a
   # second and is NOT a lint bottleneck, so every tag is linted for full
