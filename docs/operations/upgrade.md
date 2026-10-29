@@ -58,6 +58,14 @@ them need no feature level:
   rebuilt. Other MySQL ingestables are unaffected.
 - **Backups:** an archive taken on 0.8.3 records feature level 4, which a
   0.8.2 binary refuses to restore.
+- **Projection stage state is re-derived:** the stage store moved to one
+  database per node, so the first time a 0.8.3 node runs a projection with
+  stages, it deletes the old store file and re-derives the projection's
+  state from the log. The destination is not rewritten and stays readable,
+  but new entries reach it only after the re-derivation completes; status
+  shows `re-deriving` with progress meanwhile. It is much faster than in
+  0.8.2, but a large log still takes a while (a 100-million-event history
+  took about an hour on three nodes).
 - **Binary primary keys snapshot.** A MySQL or SQL Server table whose
   primary key is a single binary column (`BINARY`, `VARBINARY`, a UUID
   stored as `BINARY(16)`) holding bytes that are not valid UTF-8 failed its

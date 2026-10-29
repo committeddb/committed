@@ -154,6 +154,15 @@ could not offer committed 10,000/sec. At the rate it did accept, committed
 kept up (catch-up 1.2 s) with a p99 of 2.0 s, most of it waiting on the
 change-tracking queries.
 
+Building a read model over history — measured 2026-10-23 on the same three
+nodes: the event-store recipe's projection built from an existing log of
+100 million events (15.7 million streams) in 67 minutes, 24,700 events/sec
+on average, and every one of its 15,742,438 rows matched the source. The
+build runs on one worker, so its rate is one node's. The projection's stage
+state took about 53 bytes per event, against 33 for the log itself; 0.8.2
+needed about 610 bytes per event for the same projection, and slowed to
+15,500 events/sec by 81 million events.
+
 ## Re-measuring
 
 Prerequisites: Go 1.27+ and `make` — nothing else. Unlike the Docker-backed

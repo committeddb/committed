@@ -33,8 +33,9 @@ replays at once.
 
 Projections with stages keep their stage state in one database per node
 (`<dataDir>/projections/`), shared by every projection on the node. Its
-memory is a block cache and a write buffer (memtable), of which up to two are
-held while one flushes, so the store takes about cache + 2 × memtable:
+memory is a block cache, and the store takes about the cache's size: the
+write buffers (memtables, up to two held while one flushes) are carved out of
+the cache rather than added to it, and what they leave caches blocks:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -42,7 +43,9 @@ held while one flushes, so the store takes about cache + 2 × memtable:
 | `COMMITTED_PROJECTION_STORE_MEMTABLE_BYTES` | `33554432` (32 MiB) | Size of one write buffer. Must be under 4 GiB. |
 
 Values are positive decimal byte counts; invalid values fail startup. The
-defaults total about 320 MiB.
+defaults total about 256 MiB, of which about 192 MiB caches blocks. Keep two
+memtables well under the cache: when they take all of it, nothing is cached
+and builds run at about a third of the speed.
 
 **Why it matters:** a projection build looks up the stage state of nearly
 every event it folds. While the store's index and hot state fit in the
@@ -50,8 +53,8 @@ cache, those lookups stay in memory; once they don't, each one reads from
 disk and builds slow down sharply (with a 64 MiB cache, a 10M-event build ran
 at half the speed of the default). Give the cache more memory when the node
 builds large projections or hosts many: on a 16 GiB node, several GiB is
-reasonable. A larger memtable absorbs more writes between flushes, which
-helps sustained builds; 64–128 MiB is plenty.
+reasonable. The default memtable is enough: 128 MiB and 512 MiB memtables
+built a 10M-event projection no faster.
 
 The raft entry log is not tunable and needs no tuning: its reader is the
 single sequential consensus loop, which cannot thrash.

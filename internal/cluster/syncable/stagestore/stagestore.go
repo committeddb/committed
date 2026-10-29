@@ -114,7 +114,8 @@ var (
 
 // Memory is the shared database's memory budget: Pebble's block cache, and
 // the size of one memtable (Pebble holds up to two while one flushes). A
-// node's store takes about CacheBytes + 2*MemTableBytes.
+// node's store takes about CacheBytes: Pebble reserves its memtables from
+// the cache, so what they leave caches blocks.
 type Memory struct {
 	CacheBytes    uint64
 	MemTableBytes uint64
