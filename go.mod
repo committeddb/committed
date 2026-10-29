@@ -1,6 +1,6 @@
 module github.com/committeddb/committed
 
-go 1.27.2
+go 1.27.3
 
 // Patched, stripped fork: adds UseNumberForJSONDecimal so JSON-embedded MySQL
 // DECIMAL leaves stream as exact unquoted numbers (CDC↔snapshot byte parity).
