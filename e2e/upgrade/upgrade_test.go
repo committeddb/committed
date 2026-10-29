@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -118,12 +119,36 @@ func projectRoot(t *testing.T) string {
 	}
 }
 
+// Ports come from a low range of their own (16000–20999), below every
+// ephemeral floor (32768 on Linux, 49152 on macOS), as the cdc harness's do
+// (e2e/cdc/harness/committed.go): a port the kernel assigned for 127.0.0.1:0
+// is one it also assigns to outbound connections, so a node restarted on its
+// port can find a connection holding it. Ports are handed out in turn, none
+// twice until the range wraps; the pid offset keeps concurrent test binaries
+// apart.
+var (
+	portsMu  sync.Mutex
+	nextPort = 16000 + os.Getpid()%1000
+)
+
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	portsMu.Lock()
+	defer portsMu.Unlock()
+	for range 5000 {
+		port := nextPort
+		if nextPort++; nextPort >= 21000 {
+			nextPort = 16000
+		}
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		require.NoError(t, l.Close())
+		return port
+	}
+	t.Fatal("no free port in 16000–20999")
+	return 0
 }
 
 // startNode spawns `committed node` against dataDir on port, with auth off

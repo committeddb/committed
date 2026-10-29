@@ -438,30 +438,36 @@ func projectRoot(t *testing.T) string {
 	}
 }
 
-// portsGiven are the ports freePort has handed out in this test binary.
+// Ports come from a low range of their own (11000–15999), below every
+// ephemeral floor (32768 on Linux, 49152 on macOS), as the cdc harness's do
+// (e2e/cdc/harness/committed.go): a port the kernel assigned for 127.0.0.1:0
+// is one it may hand out again, and also assigns to outbound connections, so
+// a node restarted on its port can find a connection holding it. Ports are
+// handed out in turn, none twice until the range wraps; the pid offset keeps
+// concurrent test binaries apart.
 var (
-	portsMu    sync.Mutex
-	portsGiven = map[int]bool{}
+	portsMu  sync.Mutex
+	nextPort = 11000 + os.Getpid()%1000
 )
 
-// freePort returns a free port never handed out before in this test binary:
-// the port is free only until its probe closes, and the kernel may hand the
-// same one out again, so two nodes given it would collide when the second
-// binds.
 func freePort(t *testing.T) int {
 	t.Helper()
 	portsMu.Lock()
 	defer portsMu.Unlock()
-	for {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		require.NoError(t, err)
-		port := l.Addr().(*net.TCPAddr).Port
-		require.NoError(t, l.Close())
-		if !portsGiven[port] {
-			portsGiven[port] = true
-			return port
+	for range 5000 {
+		port := nextPort
+		if nextPort++; nextPort >= 16000 {
+			nextPort = 11000
 		}
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		require.NoError(t, l.Close())
+		return port
 	}
+	t.Fatal("no free port in 11000–15999")
+	return 0
 }
 
 func waitReady(t *testing.T, base string) {
