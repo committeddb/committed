@@ -122,6 +122,11 @@ type options struct {
 	// COMMITTED_JOIN is truthy.
 	join bool
 
+	// clusterName is COMMITTED_CLUSTER_NAME: mixed into a new cluster's
+	// derived id so two clusters bootstrapped from identical COMMITTED_PEERS
+	// get different ids. Set via WithClusterName.
+	clusterName string
+
 	// ingestSupervisor{InitialBackoff,MaxBackoff,MaxAttempts} govern the
 	// auto-restart behavior when an ingest worker parks in a freeze branch. The
 	// supervisor waits backoff (starting at InitialBackoff, doubling on each
@@ -287,6 +292,11 @@ func WithZone(zone string) Option {
 // sets this from the COMMITTED_JOIN env var.
 func WithJoin() Option {
 	return func(o *options) { o.join = true }
+}
+
+// WithClusterName sets COMMITTED_CLUSTER_NAME (see options.clusterName).
+func WithClusterName(name string) Option {
+	return func(o *options) { o.clusterName = name }
 }
 
 // WithLeaderChangeGracePeriod overrides how long db.DB's leader-change

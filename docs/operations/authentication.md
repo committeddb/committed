@@ -343,8 +343,16 @@ have TLS is a worse failure mode than a noisy startup refusal.
 **Peer URLs must use `https://`** when mTLS is enabled. Mixed schemes
 (some nodes configured for TLS, others for plaintext, or URLs that
 disagree with the TLS config) manifest as TLS handshake errors at
-connect time. Fix the URLs so every peer's `--url` points at the
-`https://` variant.
+connect time.
+
+**Switching an existing cluster to mTLS** is a full restart, not a rolling
+one — a TLS node and a plaintext node can't talk. Stop every node, then
+start each with the three variables set and every `COMMITTED_PEERS` entry
+changed to its `https://` address. An entry you change wins over the
+address the cluster recorded (see
+[membership.md](membership.md#peer-addresses-and-cluster-identity)), so
+nothing else needs editing. A member added later is added with its
+`https://` URL.
 
 ### Generating a cluster CA
 

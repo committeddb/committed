@@ -58,6 +58,34 @@ func TestRenderingStamp_ReadWriteDelete(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// The row probe covers the helper tables committed keeps beside the
+// destination: a keyless syncable's applied log can hold rows while the
+// table itself is empty, and a keyed syncable has no such sidecar.
+func TestDestinationHasRows_ProbesSidecars(t *testing.T) {
+	dialect, mock, err := testdialects.NewSQLMockDialect()
+	require.NoError(t, err)
+	db, err := sql.NewDB(dialect, "")
+	require.NoError(t, err)
+	defer db.Close()
+	ctx := context.Background()
+	my := &dialects.MySQLDialect{}
+	empty := func() *sqlmock.Rows { return sqlmock.NewRows([]string{"1"}) }
+
+	keyless := sql.New(db, &sql.Config{Topic: "t", Table: "events"})
+	mock.ExpectQuery(my.HasRowsSQL("events")).WillReturnRows(empty())
+	mock.ExpectQuery(my.HasRowsSQL(sql.AppliedSidecarName("events"))).WillReturnRows(empty().AddRow(1))
+	hasRows, err := keyless.DestinationHasRows(ctx)
+	require.NoError(t, err)
+	require.True(t, hasRows, "a row in the applied log counts")
+
+	keyed := sql.New(db, &sql.Config{Topic: "t", Table: "events", PrimaryKey: []string{"id"}})
+	mock.ExpectQuery(my.HasRowsSQL("events")).WillReturnRows(empty())
+	hasRows, err = keyed.DestinationHasRows(ctx)
+	require.NoError(t, err)
+	require.False(t, hasRows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // The production dialects' note statements are pinned verbatim: they are
 // DDL and DML committed runs in the customer's database, and the reference
 // destination dumps (destination_reference_test.go) depend on their shape.
@@ -69,6 +97,7 @@ func TestRenderingStamp_DialectStatements(t *testing.T) {
 	require.Equal(t, `INSERT INTO "committed__destinations" (table_name, rendering_version, owned, materialized_at) VALUES ($1, $2, true, now()) ON CONFLICT (table_name) DO UPDATE SET rendering_version = EXCLUDED.rendering_version, owned = true, materialized_at = now()`, pg.DestinationClaimSQL())
 	require.Equal(t, `UPDATE "committed__destinations" SET owned = false WHERE table_name = $1`, pg.DestinationDisownSQL())
 	require.Equal(t, `DELETE FROM "committed__destinations" WHERE table_name = $1`, pg.DestinationDeleteSQL())
+	require.Equal(t, `SELECT 1 FROM "app"."events" LIMIT 1`, pg.HasRowsSQL("app.events"))
 
 	my := &dialects.MySQLDialect{}
 	require.Equal(t, "SELECT rendering_version, owned FROM `committed__destinations` WHERE table_name = ?", my.DestinationSelectSQL())
@@ -76,4 +105,5 @@ func TestRenderingStamp_DialectStatements(t *testing.T) {
 	require.Equal(t, "INSERT INTO `committed__destinations` (table_name, rendering_version, owned, materialized_at) VALUES (?, ?, TRUE, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE rendering_version = VALUES(rendering_version), owned = TRUE, materialized_at = CURRENT_TIMESTAMP", my.DestinationClaimSQL())
 	require.Equal(t, "UPDATE `committed__destinations` SET owned = FALSE WHERE table_name = ?", my.DestinationDisownSQL())
 	require.Equal(t, "DELETE FROM `committed__destinations` WHERE table_name = ?", my.DestinationDeleteSQL())
+	require.Equal(t, "SELECT 1 FROM `app`.`events` LIMIT 1", my.HasRowsSQL("app.events"))
 }

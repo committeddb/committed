@@ -15,7 +15,11 @@ const (
 	tailHeaderSize   = 32
 	groupHeaderSize  = 32
 	groupTrailerSize = 16
-	maxGroupBytes    = 32 << 20
+	// maxSegmentBytes bounds the rotation target; maxGroupBytes bounds one
+	// append group, which holds up to a target's worth of records or a single
+	// record up to the maximum.
+	maxSegmentBytes = 32 << 20
+	maxGroupBytes   = format.MaxBlock
 )
 
 var (
@@ -291,7 +295,8 @@ func (t *Tail) rolloverState() (TailState, [sha256.Size]byte, error) {
 // Append writes one bounded group and syncs before acknowledging success. Invalid
 // input does not poison the handle; any write/short-write/sync failure does.
 // IDs must increase across calls and stay at/above the tail's Start. Empty calls
-// are invalid. Group payload frames may total at most 32 MiB. Callers must not
+// are invalid. Group payload frames may total at most one maximum record
+// (MaxRecordBytes) plus its frame. Callers must not
 // mutate supplied payloads during the call.
 func (t *Tail) Append(records []Record) error {
 	t.mu.Lock()

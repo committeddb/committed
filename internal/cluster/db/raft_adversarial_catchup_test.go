@@ -70,7 +70,7 @@ func requireNoFatal(t *testing.T, fatalC <-chan fatalEvent) {
 // promoted and participate — with byte-identical events. This is the
 // "add a node" flow with no rsync step.
 func TestAdversarial_EmptyLearnerCatchesUp(t *testing.T) {
-	forLifecycleBackends(t, testEmptyLearnerCatchesUp)
+	forLifecycleConfigs(t, testEmptyLearnerCatchesUp)
 }
 
 func testEmptyLearnerCatchesUp(t *testing.T, storageOpts []wal.Option) {
@@ -119,10 +119,17 @@ func testEmptyLearnerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 	leader.submitConfChange(addLearnerCC(4, string(all[3].Context)))
 	waitForLearner(t, leader, 4)
 
-	// It catches up: the fetch path runs once, the snapshot installs, and
-	// the learner applies everything the cluster has.
+	// It catches up: the fetch path runs once, the snapshot installs, the
+	// learner applies everything the cluster has, and the catch-up status
+	// clears. The status clears just after the install advances the
+	// applied index, so it is waited for, not checked once.
+	caughtUp := func() bool {
+		_, active := node4.raft.CatchUp()
+		return !active && node4.storage.AppliedIndex() >= leader.storage.AppliedIndex() &&
+			node4.storage.EventIndex() == node4.storage.AppliedIndex()
+	}
 	deadline := time.Now().Add(30 * time.Second)
-	for node4.storage.AppliedIndex() < leader.storage.AppliedIndex() || node4.storage.EventIndex() != node4.storage.AppliedIndex() {
+	for !caughtUp() {
 		if time.Now().After(deadline) {
 			st, active := node4.raft.CatchUp()
 			t.Fatalf("learner did not catch up: applied=%d event=%d leader applied=%d catchingUp=%v %+v",
@@ -133,9 +140,6 @@ func testEmptyLearnerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 	}
 	if runs := node4.raft.CatchUpRunsForTest(); runs != 1 {
 		t.Fatalf("learner began %d catch-ups, expected exactly 1", runs)
-	}
-	if _, active := node4.raft.CatchUp(); active {
-		t.Fatal("catch-up status must clear once the snapshot has installed")
 	}
 
 	// Promote it and prove it is a full participant.
@@ -160,7 +164,7 @@ func testEmptyLearnerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 		_ = s.Close()
 	}
 	rafts = nil // the deferred cleanup has nothing left to close
-	assertEventLogPrefixMatches(t, nodes, dirs)
+	assertEventLogPrefixMatches(t, dirs)
 }
 
 // A member that was away while the cluster committed and completed a scrub
@@ -172,7 +176,7 @@ func testEmptyLearnerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 // peers and without the erased upsert. Right-to-be-forgotten survives the
 // member's absence.
 func TestAdversarial_MemberBackFromAScrubRefetchesWhole(t *testing.T) {
-	forLifecycleBackends(t, testMemberBackFromAScrubRefetchesWhole)
+	forLifecycleConfigs(t, testMemberBackFromAScrubRefetchesWhole)
 }
 
 func testMemberBackFromAScrubRefetchesWhole(t *testing.T, storageOpts []wal.Option) {
@@ -313,5 +317,5 @@ func testMemberBackFromAScrubRefetchesWhole(t *testing.T, storageOpts []wal.Opti
 			alive[i] = false
 		}
 	}
-	assertEventLogPrefixMatches(t, rafts, dirs)
+	assertEventLogPrefixMatches(t, dirs)
 }

@@ -44,6 +44,9 @@ type exprAgg struct {
 	slot     int
 	order    []aggOrder // array_agg/string_agg's order by
 	sep      string     // string_agg's delimiter (a literal)
+	// firstOnly: an array_agg read only as its first element,
+	// (array_agg(…))[1], whose fold state keeps just that item.
+	firstOnly bool
 }
 
 // aggOrder is one order-by key of an ordered aggregate.

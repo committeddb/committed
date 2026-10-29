@@ -151,9 +151,8 @@ func measureRolloverComparison(t testing.TB, backend backend, batchSize, batches
 }
 
 func TestEventLogRolloverComparison(t *testing.T) {
-	// The first two variants are plain: compression would add different work to
-	// tidwall rollover while segmented compression applies only during rewrites.
-	for _, backend := range backendsWithSegmentBytes(64 << 10)[:2] {
+	// Rollover itself never compresses, so plain and zstd measure the same path.
+	for _, backend := range backendsWithSegmentBytes(64 << 10) {
 		t.Run(backend.name, func(t *testing.T) { measureRolloverComparison(t, backend, 8, 10) })
 	}
 }

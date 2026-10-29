@@ -20,6 +20,8 @@ func (s *Storage) reclaimSharedGeneration(ctx context.Context, generation uint64
 	if err := ctx.Err(); err != nil {
 		return eventlog.ReclaimResult{}, err
 	}
+	s.eventRewriteMu.Lock()
+	defer s.eventRewriteMu.Unlock()
 	s.eventAppendMu.Lock()
 	defer s.eventAppendMu.Unlock()
 	release, ok := s.eventLayout.move()

@@ -194,3 +194,23 @@ func TestZonePin_UnsatisfiableStrictStallAndCatchUp(t *testing.T) {
 	require.False(t, unsatisfiable)
 	require.Equal(t, uint64(1), d.SyncableOwner("stalled"))
 }
+
+// An edit that changes a syncable's zone takes effect at once: the pin is
+// read from the stored config on every check, and the parsed zone is reused
+// only while the config bytes are unchanged.
+func TestZonePin_EditTakesEffect(t *testing.T) {
+	sink := &zoneRecorderSink{}
+	d, _ := newWalDBZone(t, "z-east", sink, true)
+
+	require.NoError(t, proposePinnedRecorder(t, d, "pinned", "z-east"))
+	zone, _, ok := d.SyncableZonePin("pinned")
+	require.True(t, ok)
+	require.Equal(t, "z-east", zone)
+
+	require.NoError(t, d.ProposeSyncable(testCtx(t), &cluster.Configuration{
+		ID: "pinned", MimeType: "text/toml", Data: []byte("[syncable]\nname = \"pinned\"\ntype = \"recorder\"\n"),
+	}))
+	_, _, ok = d.SyncableZonePin("pinned")
+	require.False(t, ok, "the unpinned edit is read, not the earlier parse")
+	require.Equal(t, uint64(1), d.SyncableOwner("pinned"), "unpinned, the leader serves it")
+}

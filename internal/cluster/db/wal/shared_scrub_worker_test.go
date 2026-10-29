@@ -11,7 +11,6 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -48,13 +47,13 @@ func stageSharedScrubCommand(t *testing.T, s *Storage) {
 }
 
 func TestSharedScrubWorkerRetriesAdmission(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		for _, condition := range []string{"protected-reader", "layout-freeze", "apply-watermark", "shutdown"} {
 			t.Run(name+"/"+condition, func(t *testing.T) {
 				opener := storageTestOpeners()[name]
 				var observed *observedScrubGeneration
-				wrapped := func(path string, m *metrics.Metrics, options tidwall.LegacyOptions) (*eventLogBinding, error) {
-					binding, err := opener(path, m, options)
+				wrapped := func(path string, m *metrics.Metrics) (*eventLogBinding, error) {
+					binding, err := opener(path, m)
 					if err == nil {
 						observed = &observedScrubGeneration{EventLog: binding.managed}
 						binding.managed = observed
@@ -102,7 +101,7 @@ func TestSharedScrubWorkerRetriesAdmission(t *testing.T) {
 }
 
 func TestSharedScrubWorkerResumesOnOpen(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		t.Run(name, func(t *testing.T) {
 			path := t.TempDir()
 			opener := storageTestOpeners()[name]
@@ -121,12 +120,12 @@ func TestSharedScrubWorkerResumesOnOpen(t *testing.T) {
 }
 
 func TestSharedScrubWorkerDoesNotRetryBackendFailure(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		t.Run(name, func(t *testing.T) {
 			opener := storageTestOpeners()[name]
 			var observed *observedScrubGeneration
-			wrapped := func(path string, m *metrics.Metrics, options tidwall.LegacyOptions) (*eventLogBinding, error) {
-				binding, err := opener(path, m, options)
+			wrapped := func(path string, m *metrics.Metrics) (*eventLogBinding, error) {
+				binding, err := opener(path, m)
 				if err == nil {
 					observed = &observedScrubGeneration{EventLog: binding.managed, failure: eventlog.ErrPoisoned}
 					binding.managed = observed

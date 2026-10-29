@@ -90,7 +90,7 @@ func TestLogicalTransferCapturesAppendFrontier(t *testing.T) {
 }
 
 func TestLogicalTransferExcludesRewritePublication(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		t.Run(name, func(t *testing.T) {
 			s, err := openStorage(t.TempDir(), nil, nil, nil, storageTestOpeners()[name], WithSafeMode())
 			require.NoError(t, err)

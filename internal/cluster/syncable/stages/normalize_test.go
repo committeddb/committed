@@ -33,7 +33,7 @@ func TestStageKeyPathNormalize(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("by-guid", []byte(key))
+			v, err := g.Output(tx, "by-guid", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -77,7 +77,7 @@ func TestTopicJoinNormalize(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("billable", []byte(key))
+			v, err := g.Output(tx, "billable", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -209,7 +209,7 @@ func TestStageJoinInheritsProducerNormalize(t *testing.T) {
 	get := func(stage, key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut(stage, []byte(key))
+			v, err := g.Output(tx, stage, []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -296,7 +296,7 @@ func TestNumericKeyPartsCanonicalize(t *testing.T) {
 	get := func(stage, key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut(stage, []byte(key))
+			v, err := g.Output(tx, stage, []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -412,7 +412,7 @@ func TestForEachWhenParentPath(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("billed-pairs", []byte(OutKey([]string{"J1", "W1"})))
+			v, err := g.Output(tx, "billed-pairs", []byte(OutKey([]string{"J1", "W1"})))
 			got = string(v)
 			_ = key
 			return err
@@ -490,7 +490,7 @@ func TestTypedKeys(t *testing.T) {
 	get := func(stage, key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut(stage, []byte(key))
+			v, err := g.Output(tx, stage, []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -563,7 +563,7 @@ func TestTypedKeysValidated(t *testing.T) {
 	fold("t", "p1", `{"id":"p1","waRef":12.5}`)
 	var got string
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut("c", []byte("p1"))
+		v, err := g.Output(tx, "c", []byte("p1"))
 		got = string(v)
 		return err
 	}))

@@ -97,7 +97,8 @@ Labels are shown in `{braces}`.
 
 | Metric | What it tells you |
 |---|---|
-| `committed.ingest.lag` | Per-`{ingestable_id}` replication lag from the source. |
+| `committed.ingest.lag` | Per-`{ingestable_id}` replication lag from the source, in bytes (`committed_ingest_lag_bytes` in PromQL): PostgreSQL, and MySQL without GTIDs. Absent while the lag is unknown. |
+| `committed.ingest.lag.transactions` | Per-`{ingestable_id}` replication lag from the source, in source transactions: MySQL with GTIDs, and SQL Server. Absent while the lag is unknown. |
 | `committed.ingest.errors` | Ingest errors, by `{ingestable_id}`. (counter) |
 | `committed.ingest.frozen` | By `{ingestable_id}`: 1 while an ingestable is frozen — wedged on a proposal it cannot commit (e.g. a row/transaction over `COMMITTED_MAX_PROPOSAL_BYTES`). It stays 1 across supervisor restarts and clears only when the worker makes durable progress past the wedge, so a **sustained** 1 is the alert signal (needs operator attention — see [ingestables.md](../ingestables.md)). `committed.ingest.supervisor_giveups` fires once the supervisor stops retrying. |
 | `committed.ingest.dedup_skipped` | Source events skipped as already-consumed (effectively-once dedup), by `{ingestable_id}`. (counter) |

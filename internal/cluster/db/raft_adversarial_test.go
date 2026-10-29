@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"sync"
@@ -27,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	tidwallwal "github.com/tidwall/wal"
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
@@ -1613,7 +1611,7 @@ func TestAdversarial_DiskFull(t *testing.T) {
 //
 // -----------------------------------------------------------------------------
 func TestAdversarial_SevereLagFollowerCatchesUp(t *testing.T) {
-	forLifecycleBackends(t, testSevereLagFollowerCatchesUp)
+	forLifecycleConfigs(t, testSevereLagFollowerCatchesUp)
 }
 
 func testSevereLagFollowerCatchesUp(t *testing.T, storageOpts []wal.Option) {
@@ -1897,9 +1895,9 @@ func testSevereLagFollowerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 	cluster.Partition([]uint64{2}, []uint64{3})
 
 	// Close every raft + storage now so the on-disk event log files are
-	// in a stable state for the byte-for-byte comparison below. Walking
-	// tidwall/wal segments while the underlying wal.Log is still open
-	// risks catching a segment mid-rotation.
+	// in a stable state for the byte-for-byte comparison below. Reading
+	// a node's event log while that node still writes it risks catching
+	// a segment mid-rotation.
 	for i, r := range rafts {
 		if alive[i] {
 			_ = r.Close()
@@ -1926,73 +1924,7 @@ func testSevereLagFollowerCatchesUp(t *testing.T, storageOpts []wal.Option) {
 	// inherently racy at close time. The shared prefix is the load-
 	// bearing invariant; any regression in determinism shows up here
 	// just as loudly as in a full-directory hash.
-	assertEventLogPrefixMatches(t, rafts, dirs)
-}
-
-// assertEventLogPrefixMatches reopens each node's events/ directory using its
-// backend and compares the common durable prefix. Native logs compare framed
-// records by sequence; segmented logs compare logical IDs and protobuf bytes
-// observed across all nodes. Runs with every raft + storage already
-// closed so the on-disk state is stable.
-func assertEventLogPrefixMatches(t *testing.T, rafts Rafts, dirs []string) {
-	t.Helper()
-	if compareSegmentedEventPrefix(t, dirs) {
-		return
-	}
-	// Reopen each events/ dir as a raw wal.Log so we can read raw bytes
-	// by sequence. wal.Open at the storage-layer level would re-run
-	// migrations + bbolt and want sync/ingest channels — too heavy for
-	// a post-mortem byte comparison.
-	logs := make([]*wallog, len(rafts))
-	for i, d := range dirs {
-		lg, err := openRawWalLog(filepath.Join(d, "events"))
-		if err != nil {
-			t.Fatalf("reopen events dir for node %d: %v", rafts[i].id, err)
-		}
-		logs[i] = lg
-		defer lg.Close()
-	}
-
-	// Determine the common prefix: the minimum lastSeq any node has.
-	// Since wal seq 1:1 corresponds to raft index on a fresh-start
-	// cluster (before any compaction), this is also the highest raft
-	// index every node has durably written to its event log.
-	minLastSeq := uint64(^uint64(0))
-	for i, lg := range logs {
-		last, err := lg.LastSeq()
-		if err != nil {
-			t.Fatalf("node %d lastSeq: %v", rafts[i].id, err)
-		}
-		if last < minLastSeq {
-			minLastSeq = last
-		}
-	}
-	if minLastSeq == 0 {
-		t.Fatal("every node's events/ is empty — test did not exercise the rebuild path")
-	}
-
-	// Compare entry-by-entry across nodes, from seq 1 through
-	// minLastSeq. Any mismatch is a determinism violation: the same
-	// raft index should map to the same pb.Entry bytes on every node
-	// (log matching property + ApplyCommitted writing every committed
-	// entry into events/ unconditionally).
-	for seq := uint64(1); seq <= minLastSeq; seq++ {
-		ref, err := logs[0].Read(seq)
-		if err != nil {
-			t.Fatalf("node %d read seq %d: %v", rafts[0].id, seq, err)
-		}
-		for i := 1; i < len(logs); i++ {
-			got, err := logs[i].Read(seq)
-			if err != nil {
-				t.Fatalf("node %d read seq %d: %v", rafts[i].id, seq, err)
-			}
-			if !bytes.Equal(ref, got) {
-				t.Fatalf("event log diverged at wal seq %d: node %d (%d bytes) != node %d (%d bytes) — "+
-					"determinism invariant violated after rebuild",
-					seq, rafts[i].id, len(got), rafts[0].id, len(ref))
-			}
-		}
-	}
+	assertEventLogPrefixMatches(t, dirs)
 }
 
 // severeLagProposal encodes a cluster.Proposal carrying the given
@@ -2301,31 +2233,6 @@ func (h *fatalHook) OnWrite(ce *zapcore.CheckedEntry, _ []zapcore.Field) {
 // can assert WHICH node fatal-exited.
 func newFatalCapturingLogger(nodeID uint64, c chan<- fatalEvent) *zap.Logger {
 	return zap.New(zapcore.NewNopCore(), zap.WithFatalHook(&fatalHook{nodeID: nodeID, c: c}))
-}
-
-// wallog is a thin shim around tidwall/wal.Log used only by
-// assertEventLogPrefixMatches so the test can read raw event log bytes
-// by sequence number without going through wal.Storage (which would
-// want a parser and sync/ingest channels and run bbolt migrations).
-type wallog struct {
-	l *tidwallwal.Log
-}
-
-func openRawWalLog(dir string) (*wallog, error) {
-	l, err := tidwallwal.Open(dir, nil)
-	if err != nil {
-		return nil, err
-	}
-	return &wallog{l: l}, nil
-}
-
-func (w *wallog) Close() error { return w.l.Close() }
-func (w *wallog) LastSeq() (uint64, error) {
-	return w.l.LastIndex()
-}
-
-func (w *wallog) Read(seq uint64) ([]byte, error) {
-	return w.l.Read(seq)
 }
 
 // -----------------------------------------------------------------------------

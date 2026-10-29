@@ -9,25 +9,19 @@ import (
 	"time"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 
-	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
 
-func TestEventLogReaderMatchesLegacy(t *testing.T) {
+func TestEventLogReaderMatchesProduction(t *testing.T) {
 	adapter, _ := newSegmentedEventAdapter(t)
-	legacy, err := tidwal.Open(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = legacy.Close() })
-	// A minimal legacy reader fixture: explicit-version resolution uses the real
-	// Storage cache; no background workers or BoltDB mutations are needed here.
-	storage := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(legacy), nil)}
+	// A minimal production reader fixture: explicit-version resolution uses the
+	// real Storage cache; no background workers or BoltDB mutations are needed here.
+	storage := &Storage{eventLog: productionBinding(t)}
+	production := storage.eventLog.managed
 	typ, _ := eventTestType(cluster.TypeRef{ID: "items", Version: 1})
 	storage.typeCache.Store(cluster.TypeRef{ID: "items", Version: 1}, typeCacheEntry{t: typ})
 	metadata, err := cluster.NewUpsertSyncableIndexEntity(&cluster.SyncableIndex{ID: "worker", Index: 5})
@@ -47,8 +41,8 @@ func TestEventLogReaderMatchesLegacy(t *testing.T) {
 	if err := adapter.appendRaw(inputs); err != nil {
 		t.Fatal(err)
 	}
-	for i, raw := range inputs {
-		if err := legacy.Write(uint64(i+1), frame(raw)); err != nil {
+	for _, raw := range inputs {
+		if err := production.Append([]eventlog.Record{{ID: rawIndex(t, raw), Payload: raw}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -70,7 +64,7 @@ func TestEventLogReaderMatchesLegacy(t *testing.T) {
 			}
 		}
 	}
-	// The real legacy reader and the experiment both pause before unapplied data,
+	// The production reader and the experiment both pause before unapplied data,
 	// then deliver it once the watermark advances.
 	storage.appliedIndex.Store(10)
 	want := &Reader{s: storage}

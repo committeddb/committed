@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,8 +11,8 @@ import (
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
-	twal "github.com/tidwall/wal"
 
+	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/fsutil"
 	"github.com/committeddb/committed/pkg/segmentlog"
@@ -47,6 +48,10 @@ const (
 	// LogCorrupt: a complete record fails its checksum, or the log is
 	// mid-compaction — not auto-repairable, rebuild from a healthy replica.
 	LogCorrupt LogStatus = "corrupt"
+	// LogNewerFormat: a complete record carries a frame version this binary
+	// does not read — a newer committed wrote it. Sound data: neither
+	// truncated nor spliced; run the newer binary.
+	LogNewerFormat LogStatus = "newer-format"
 )
 
 // Diagnosis is the result of scanning one WAL log directory.
@@ -194,8 +199,17 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 		}
 		var corrupt bool
 		records, incompleteAt := walkSegmentRecords(data, func(ordinal, off, n int, rec []byte) bool {
-			if _, uerr := unframe(rec); uerr == nil {
+			_, uerr := unframe(rec)
+			if uerr == nil {
 				return true
+			}
+			if errors.Is(uerr, cluster.ErrNewerFrame) {
+				corrupt = true
+				d.Status = LogNewerFormat
+				d.Records = total + ordinal
+				msg, _ := cluster.RedactedMessage(uerr)
+				d.Detail = fmt.Sprintf("record %d (segment %s, offset %d): %s", total+ordinal, seg.name, off, msg)
+				return false
 			}
 			// A structurally complete record that fails its checksum: a
 			// bit-flip in committed data, not an unacknowledged torn write.
@@ -254,7 +268,7 @@ func DiagnoseLog(dir string) (*Diagnosis, error) {
 // record (the write did not finish), the offset where that record starts,
 // else -1. What an incomplete or unframeable record MEANS is the caller's
 // call: a torn tail forgiven on the last plain segment (DiagnoseLog), or a
-// fetched file refused outright (AdoptEventSegments).
+// fetched record run refused outright (AppendFetchedRecords).
 func walkSegmentRecords(data []byte, visit func(ordinal, off, prefix int, rec []byte) bool) (records, incompleteAt int) {
 	off := 0
 	for off < len(data) {
@@ -342,50 +356,6 @@ func RepairNode(baseDir string, commit bool) ([]*Diagnosis, error) {
 			}
 		}
 		out = append(out, d)
-	}
-	return out, nil
-}
-
-// DecompressNode rewrites every compressed sealed segment under a STOPPED
-// node's data dir back to the plain pre-0.8.0 format — the offline downgrade
-// door: older binaries do not recognize ".zst" segments and would silently
-// open a partial log. Returns the number of segments rewritten per log dir,
-// in walLogSubdirs order. Only the event log compresses today, but every log
-// dir is swept for robustness. Refuses a baseDir whose node is running,
-// holding the exclusive stopped-node lock for the whole rewrite — the same
-// contract as RepairNode, with the same stake: decompressing files a live
-// process is appending to corrupts them.
-func DecompressNode(baseDir string) (map[string]int, error) {
-	lock, err := datadir.LockStoppedNodeExclusive(baseDir)
-	if err != nil {
-		return nil, err
-	}
-	if lock != nil {
-		defer func() { _ = lock.Close() }()
-	}
-	// Preflight every log before rewriting any of them. Decompression only
-	// reverses tidwall compression; it cannot convert another storage format.
-	for _, parts := range walLogSubdirs {
-		dir := filepath.Join(append([]string{baseDir}, parts...)...)
-		segmented, err := segmentlog.RecognizeDirectory(dir)
-		if err != nil {
-			return nil, err
-		}
-		if segmented {
-			return nil, fmt.Errorf("%s: segmented storage cannot be made compatible with pre-0.8.0 binaries by decompression", dir)
-		}
-	}
-	out := map[string]int{}
-	for _, parts := range walLogSubdirs {
-		dir := filepath.Join(append([]string{baseDir}, parts...)...)
-		n, err := twal.DecompressDir(dir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return out, fmt.Errorf("%s: %w", dir, err)
-		}
-		out[dir] = n
 	}
 	return out, nil
 }

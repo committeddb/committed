@@ -130,7 +130,10 @@ index ends immediately before the footer. Readers validate bounds before block
 allocation and verify block metadata against decoded frames before yielding any
 record from that block. Unknown versions, features, and reserved values fail.
 
-Limits: 16 MiB payload, 16 MiB + 16 bytes per block, 65,536 blocks per segment.
+Limits: 64 MiB payload (`MaxRecordBytes`), 64 MiB + 16 bytes per block, 65,536
+blocks per segment. Every on-disk size is 32-bit, so the payload limit is a
+product ceiling a later release can raise; a log holding a larger record is not
+readable by a release with the lower ceiling.
 Default block target: 256 KiB; experiments may select a different bounded target.
 An oversized record gets its own block. Coverage must have `Start < End`;
 `MaxUint64` can be an exclusive end but cannot be a stored ID. Empty segments have

@@ -6,7 +6,6 @@ import (
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
@@ -26,9 +25,6 @@ func BenchmarkEventLogCachedReads(b *testing.B) {
 		}},
 		{"segmented-cached", func(path string) (eventlog.EventLog, error) {
 			return segmented.Create(path, 0, segmentlog.LogOptions{SegmentBytes: segmentBytes, Cache: segmentlog.CacheOptions{RecentBytes: 64 << 20, HistoricalBytes: 64 << 20}})
-		}},
-		{"tidwall-default-cache", func(path string) (eventlog.EventLog, error) {
-			return tidwall.Create(path, 0, tidwall.Options{SegmentBytes: segmentBytes})
 		}},
 	}
 	for _, factory := range factories {

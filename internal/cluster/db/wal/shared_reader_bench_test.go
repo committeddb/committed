@@ -5,48 +5,49 @@ import (
 	"io"
 	"testing"
 
-	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db"
+	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
 // readerBenchmarkStore shares fixture writes and reader construction; timed
 // consumption uses the application's existing db.ActualReader interface.
-// The legacy implementation uses the production Reader and event framing.
+// The production implementation uses Storage's Reader.
 type readerBenchmarkStore interface {
 	append([][]byte, uint64) error
 	reader(uint64) (db.ActualReader, error)
 	close() error
 }
 
-type legacyReaderBenchmark struct {
+type productionReaderBenchmark struct {
 	storage *Storage
-	fixture *tidwal.Log // Untimed fixture construction only; Storage owns its lifetime.
-	next    uint64
 }
 
-func (s *legacyReaderBenchmark) append(records [][]byte, last uint64) error {
-	batch := new(tidwal.Batch)
+func (s *productionReaderBenchmark) append(records [][]byte, last uint64) error {
+	batch := make([]eventlog.Record, 0, len(records))
 	for _, raw := range records {
-		s.next++
-		batch.Write(s.next, frame(raw))
+		var entry pb.Entry
+		if err := proto.Unmarshal(raw, &entry); err != nil {
+			return err
+		}
+		batch = append(batch, eventlog.Record{ID: entry.GetIndex(), Payload: raw})
 	}
-	if err := s.fixture.WriteBatch(batch); err != nil {
+	if err := s.storage.eventLog.managed.Append(batch); err != nil {
 		return err
 	}
 	s.storage.appliedIndex.Store(last)
 	return nil
 }
 
-func (s *legacyReaderBenchmark) reader(after uint64) (db.ActualReader, error) {
+func (s *productionReaderBenchmark) reader(after uint64) (db.ActualReader, error) {
 	return &Reader{s: s.storage, raftIndex: after}, nil
 }
-func (s *legacyReaderBenchmark) close() error { return s.storage.eventLog.Close() }
+func (s *productionReaderBenchmark) close() error { return s.storage.eventLog.Close() }
 
 type segmentedReaderBenchmark struct {
 	adapter  *eventLogAdapter
@@ -75,27 +76,24 @@ func newReaderBenchmarkStore(b *testing.B, name string) readerBenchmarkStore {
 		b.Fatal(err)
 	}
 	resolver.typeCache.Store(cluster.TypeRef{ID: "items", Version: 1}, typeCacheEntry{t: typ})
-	if name == "production-tidwall" {
-		log, err := tidwal.Open(b.TempDir(), &tidwal.Options{SegmentSize: target, SegmentCacheSize: DefaultEventCacheSegments, SealedSegmentCompression: tidwal.CompressionZstd})
-		if err != nil {
-			b.Fatal(err)
-		}
-		resolver.eventLog = bindLegacyEventLog(tidwallbackend.OwnLegacy(log), nil)
-		return &legacyReaderBenchmark{storage: resolver, fixture: log}
-	}
 	log, err := segmented.Create(b.TempDir(), 1, segmentlog.LogOptions{SegmentBytes: target, Cache: segmentlog.CacheOptions{RecentBytes: 160 << 20, HistoricalBytes: 160 << 20}})
 	if err != nil {
 		b.Fatal(err)
+	}
+	if name == "production" {
+		resolver.eventLog = bindEventLog(log)
+		return &productionReaderBenchmark{storage: resolver}
 	}
 	return &segmentedReaderBenchmark{adapter: &eventLogAdapter{log: log}, resolver: resolver}
 }
 
 // BenchmarkActualReaderEngines measures identical protobuf histories through the
-// real production tidwall reader and the experimental segmented Actual reader.
+// production Reader and the experimental adapter's Actual reader, both over
+// the segmented engine.
 // This fixture bypasses Raft and background services for both implementations.
 func BenchmarkActualReaderEngines(b *testing.B) {
 	const total = 16384
-	for _, name := range []string{"production-tidwall", "segmented"} {
+	for _, name := range []string{"production", "segmented"} {
 		b.Run(name, func(b *testing.B) {
 			store := newReaderBenchmarkStore(b, name)
 			b.Cleanup(func() {

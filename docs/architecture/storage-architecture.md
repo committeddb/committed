@@ -10,13 +10,14 @@ for recovery procedures see [operations/rebuild.md](../operations/rebuild.md) an
 ## The four stores
 
 Under a node's data directory, committed keeps **three append-only write-ahead
-logs** (tidwall/wal) and **one key/value store** (BoltDB):
+logs** (the two raft logs on tidwall/wal, the event log on the segmented engine
+in `pkg/segmentlog`) and **one key/value store** (BoltDB):
 
 | Path | Store | Holds | Index space | Lifecycle |
 |------|-------|-------|-------------|-----------|
 | `raft/log` | EntryLog (tidwall) | raft log entries | raft index | append; tail-truncate on conflict; front-truncate on compaction |
 | `raft/state` | StateLog (tidwall) | raft `HardState` (term/vote/commit) + snapshot metadata | a private sequence | append latest-wins; periodic re-anchor |
-| `events` | eventLog (tidwall) | the permanent commit log (committed Actuals) | event index | append-only; rewritten only by the RTBF scrubber |
+| `events` | eventLog (segmented) | the permanent commit log (committed Actuals) | raft index (sparse after a scrub) | append-only; segments rewritten in place only by the RTBF scrubber |
 | `metadata` | BoltDB | applied state: applied index, versioned configs, ingest/sync positions, dead-letters | key/value | random-access read/write per apply |
 
 Two of these are raft/consensus plumbing (`raft/log`, `raft/state`), one is

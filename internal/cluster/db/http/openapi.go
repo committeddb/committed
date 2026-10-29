@@ -20,10 +20,12 @@ func (h *HTTP) OpenAPISpec(w httpgo.ResponseWriter, r *httpgo.Request) {
 // The strict default CSP set by the securityHeaders middleware
 // (default-src 'none') would block the CDN-hosted script and stylesheet
 // this page needs, so we override it with a narrower allowlist scoped
-// to unpkg.com. 'unsafe-inline' is unavoidable today because the HTML
-// carries inline <script>/<style> blocks and Swagger UI's bundle
-// injects inline styles at runtime. TODO: self-host the Swagger UI
-// assets and drop the CDN + 'unsafe-inline' exceptions.
+// to unpkg.com. 'unsafe-inline' is needed because the HTML carries
+// inline <script>/<style> blocks and Swagger UI's bundle injects inline
+// styles at runtime. The assets stay on the CDN by choice: self-hosting
+// would add ~1.5 MB to the binary for a convenience page, so
+// docs/api-tour.md instead says /docs needs internet access and points
+// offline users at /openapi.yaml.
 func (h *HTTP) SwaggerUI(w httpgo.ResponseWriter, r *httpgo.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy",

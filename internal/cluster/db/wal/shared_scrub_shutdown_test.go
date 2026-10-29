@@ -10,7 +10,6 @@ import (
 	pb "go.etcd.io/raft/v3/raftpb"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 )
 
@@ -21,11 +20,11 @@ type interruptedScrubLog struct {
 	once    sync.Once
 }
 
-func (l *interruptedScrubLog) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+func (l *interruptedScrubLog) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
 	if l.phase != "rewrite" {
-		return l.EventLog.RewriteWithPublicationLock(ctx, generation, transform, lock)
+		return l.EventLog.RewriteSealedWithPublicationLock(ctx, generation, transform, lock)
 	}
-	return l.EventLog.RewriteWithPublicationLock(ctx, generation, func(record eventlog.Record) ([]byte, bool, error) {
+	return l.EventLog.RewriteSealedWithPublicationLock(ctx, generation, func(record eventlog.Record) ([]byte, bool, error) {
 		l.once.Do(func() { close(l.entered) })
 		<-ctx.Done()
 		return nil, false, ctx.Err()
@@ -41,14 +40,14 @@ func (l *interruptedScrubLog) Reclaim(ctx context.Context) (eventlog.ReclaimResu
 }
 
 func TestSharedScrubShutdownDuringStorageWork(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		for _, phase := range []string{"rewrite", "reclaim"} {
 			t.Run(name+"/"+phase, func(t *testing.T) {
 				path := t.TempDir()
 				opener := storageTestOpeners()[name]
 				entered := make(chan struct{})
-				wrapped := func(path string, m *metrics.Metrics, options tidwall.LegacyOptions) (*eventLogBinding, error) {
-					binding, err := opener(path, m, options)
+				wrapped := func(path string, m *metrics.Metrics) (*eventLogBinding, error) {
+					binding, err := opener(path, m)
 					if err == nil {
 						binding.managed = &interruptedScrubLog{EventLog: binding.managed, phase: phase, entered: entered}
 					}
@@ -93,7 +92,7 @@ func TestSharedScrubShutdownDuringStorageWork(t *testing.T) {
 func TestStoragePolicyScanStopsBetweenRecords(t *testing.T) {
 	for name, opener := range storageTestOpeners() {
 		t.Run(name, func(t *testing.T) {
-			binding, err := opener(t.TempDir(), nil, tidwall.LegacyOptions{})
+			binding, err := opener(t.TempDir(), nil)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = binding.Close() })
 			require.NoError(t, binding.entries.Append([]eventlog.Record{

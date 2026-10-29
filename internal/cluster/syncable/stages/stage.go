@@ -1,10 +1,7 @@
 package stages
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -159,11 +156,11 @@ type Stage struct {
 	// added-elements fold through ONE stage instead of parallel fan
 	// stages, parallel aggregates, and a union merge.
 	Fan []FanArm `mapstructure:"fan" json:"fan,omitempty"`
-	// identityEmit marks an engine-SYNTHESIZED identity reshape (see
-	// expandSynthetic): it emits its input object verbatim. Never
-	// declarable; unexported, so it is invisible to config decode and
-	// the fingerprint.
-	identityEmit bool
+	// synthetic marks an engine-SYNTHESIZED identity reshape (see
+	// expandSynthetic) by kind — SyntheticRekey or SyntheticLift: it emits
+	// its input object verbatim. Never declarable; unexported, so it is
+	// invisible to config decode and the fingerprint.
+	synthetic string
 	// Merge combines PRIOR stages BY KEY (SQL's FULL OUTER JOIN
 	// USING(key), aliased): for each key any listed upstream holds, the
 	// fold unit is a tuple scoping each upstream's current output under
@@ -948,6 +945,7 @@ func ValidateShapes(stages []Stage) error {
 				if err != nil {
 					return fmt.Errorf("%s: %w", ew, err)
 				}
+				markFirstOnly(compiled, st.aggSlots)
 				e.compiled = compiled
 				continue
 			}
@@ -990,6 +988,7 @@ func ValidateShapes(stages []Stage) error {
 			if err != nil {
 				return fmt.Errorf("%s having: %w", where, err)
 			}
+			markFirstOnly(compiled, st.aggSlots)
 			st.havingCompiled = compiled
 		}
 		if len(st.Merge) > 0 && stageUsesSource(st) {
@@ -1621,28 +1620,25 @@ func KeyTypeAt(kts []string, i int) string {
 // Fingerprint identifies the stage definitions a store's state was
 // derived under: any change to them invalidates the store
 // (stagestore.Open resets on mismatch and the syncable re-derives from
-// the log). The marshal is DECLARED CONTENT ONLY (omitempty everywhere;
-// WhenClause marshals its set arms explicitly), so adding vocabulary
-// fields in a new binary does NOT alter the fingerprints of configs
-// that don't use them — the field lesson: a spurious reset is not "one
-// harmless rebuild", it is a silent ~30-minute (hours at scale)
-// re-derivation with live-tail latency degraded the whole way. The
-// reference contract test pins this stability; a DELIBERATE semantic
-// change that must reset unchanged configs gets an upgrade-notes
-// callout, never an accident.
+// the log). It is the fingerprint of the stages' plan, so two spellings
+// of one computation share it, and a change to what the stages compute
+// changes it. Its stability across releases is the plan encoding's
+// (PlanVersion, TestPlanReference): a spurious reset is not "one harmless
+// rebuild", it is a silent ~30-minute (hours at scale) re-derivation with
+// live-tail latency degraded the whole way, so a DELIBERATE change that
+// must reset unchanged configs bumps PlanVersion and gets an
+// upgrade-notes callout, never an accident.
 func Fingerprint(stages []Stage) string {
-	bs, err := json.Marshal(stages)
+	p, err := CompilePlan(stages)
 	if err != nil {
-		// Stages are plain data; Marshal cannot fail on them. Guard anyway:
-		// a non-marshalable future field must not silently reuse stale state.
-		// The shape is stored with the syncable's schema, so like every
-		// persisted string its error text goes through the redaction choke
-		// point.
+		// Only stages admission rejects fail to compile; their fingerprint
+		// must still differ from every admitted config's. The shape is
+		// stored with the syncable's schema, so like every persisted string
+		// its error text goes through the redaction choke point.
 		msg, _ := cluster.RedactedMessage(err)
-		return "unmarshalable:" + msg
+		return "uncompilable:" + msg
 	}
-	sum := sha256.Sum256(bs)
-	return hex.EncodeToString(sum[:])
+	return p.Fingerprint()
 }
 
 // IndexOf returns the index of the stage with this name, or -1.

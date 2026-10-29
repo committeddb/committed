@@ -154,7 +154,7 @@ func TestExprCaseInFoldArm(t *testing.T) {
 
 	var got string
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut("by-job", []byte("j1"))
+		v, err := g.Output(tx, "by-job", []byte("j1"))
 		got = string(v)
 		return err
 	}))

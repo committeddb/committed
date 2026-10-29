@@ -425,3 +425,52 @@ type     = "INT"
 		require.Contains(t, fe.Issue, "project_id")
 	})
 }
+
+// An index's columns may be written as a comma-separated string or as a list;
+// both reach the dialects as the same column set. A list entry that is not one
+// column name is a field error, not a silently mis-split index.
+func TestParseIndexColumnForms(t *testing.T) {
+	parse := func(index string) (*sql.Config, error) {
+		toml := `
+[sql]
+topic = "t"
+db = "testdb"
+table = "orders"
+primaryKey = "id"
+
+[[sql.mappings]]
+jsonPath = "$.id"
+column   = "id"
+type     = "TEXT"
+
+[[sql.indexes]]
+name  = "by_customer"
+index = ` + index + `
+`
+		v := readConfig(t, "toml", strings.NewReader(toml))
+		return (&sql.SyncableParser{}).ParseConfig(v, &TestDatabaseStorage{dbs: map[string]cluster.Database{"testdb": testDB}})
+	}
+
+	for _, form := range []string{`"customer, placed_at"`, `["customer", "placed_at"]`} {
+		config, err := parse(form)
+		require.NoError(t, err, form)
+		require.Len(t, config.Indexes, 1)
+		require.Equal(t, "by_customer", config.Indexes[0].IndexName)
+		require.Equal(t, []string{"customer", "placed_at"}, splitColumns(config.Indexes[0].ColumnNames), form)
+	}
+
+	for _, bad := range []string{`["customer", 7]`, `["customer, placed_at"]`, `[""]`, `7`} {
+		_, err := parse(bad)
+		var fe *cluster.FieldError
+		require.ErrorAs(t, err, &fe, bad)
+		require.Equal(t, "sql.indexes", fe.Field, bad)
+	}
+}
+
+func splitColumns(s string) []string {
+	parts := strings.Split(s, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}

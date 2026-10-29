@@ -76,9 +76,9 @@ func (p *SyncableParser) SchemaFromConfig(v *cluster.ParsedConfig, _ cluster.Dat
 	if err := v.UnmarshalKey("sql.mappings", &mappings); err != nil {
 		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.mappings: %w", err)
 	}
-	var indexes []Index
-	if err := v.UnmarshalKey("sql.indexes", &indexes); err != nil {
-		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.indexes: %w", err)
+	indexes, err := parseIndexes(v)
+	if err != nil {
+		return nil, err
 	}
 	config := &Config{
 		DatabaseID: v.GetString("sql.db"),
@@ -206,9 +206,9 @@ func (p *SyncableParser) ParseConfig(v *cluster.ParsedConfig, storage cluster.Da
 	p.warnKindMisuse(storage, topic, mappings)
 	p.warnUndeletable(topic, table, primaryKey, keyColumn)
 
-	var indexes []Index
-	if err := v.UnmarshalKey("sql.indexes", &indexes); err != nil {
-		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.indexes: %w", err)
+	indexes, err := parseIndexes(v)
+	if err != nil {
+		return nil, err
 	}
 
 	// Config identifiers are quoted before they reach SQL, but a control-char /
@@ -356,4 +356,42 @@ func classifyConfigErr(err error) error {
 		return err
 	}
 	return cluster.NotAdmissible(err)
+}
+
+// indexEntry is one [[sql.indexes]] table as written: index is either a
+// comma-separated string ("a, b") or a list of column names (["a", "b"]).
+type indexEntry struct {
+	Name  string `mapstructure:"name"`
+	Index any    `mapstructure:"index"`
+}
+
+// parseIndexes reads [[sql.indexes]], normalizing each entry's columns to the
+// comma-separated form the dialects quote (Index.ColumnNames).
+func parseIndexes(v *cluster.ParsedConfig) ([]Index, error) {
+	var entries []indexEntry
+	if err := v.UnmarshalKey("sql.indexes", &entries); err != nil {
+		return nil, fmt.Errorf("[sql.syncable-parser] parse sql.indexes: %w", err)
+	}
+	indexes := make([]Index, 0, len(entries))
+	for _, e := range entries {
+		var columns string
+		switch cols := e.Index.(type) {
+		case string:
+			columns = cols
+		case []any:
+			names := make([]string, 0, len(cols))
+			for _, c := range cols {
+				name, ok := c.(string)
+				if !ok || strings.TrimSpace(name) == "" || strings.Contains(name, ",") {
+					return nil, &cluster.FieldError{Field: "sql.indexes", Issue: fmt.Sprintf("index %q: each entry of the index list must be one column name (got %v)", e.Name, c)}
+				}
+				names = append(names, name)
+			}
+			columns = strings.Join(names, ",")
+		default:
+			return nil, &cluster.FieldError{Field: "sql.indexes", Issue: fmt.Sprintf("index %q: index must be a column name, a comma-separated list of them, or a list of column names", e.Name)}
+		}
+		indexes = append(indexes, Index{IndexName: e.Name, ColumnNames: columns})
+	}
+	return indexes, nil
 }

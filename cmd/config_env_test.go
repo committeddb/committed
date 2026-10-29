@@ -89,3 +89,15 @@ func TestGetenvDefault(t *testing.T) {
 	require.Equal(t, "set-value", getenvDefault("COMMITTED_TEST_GETENV", "fallback"))
 	require.Equal(t, "fallback", getenvDefault("COMMITTED_TEST_GETENV_UNSET", "fallback"))
 }
+
+// COMMITTED_PEER_URL naming another address than this node's COMMITTED_PEERS
+// entry is flagged (the entry is what the node advertises); the same address
+// in another spelling is not.
+func TestSelfURLDisagrees(t *testing.T) {
+	peers := db.Peers{1: "http://n1:9022", 2: "http://n2:9022"}
+	own, differs := selfURLDisagrees(peers, 2, "http://elsewhere:9022")
+	require.True(t, differs)
+	require.Equal(t, "http://n2:9022", own)
+	_, differs = selfURLDisagrees(peers, 2, "HTTP://N2:9022/")
+	require.False(t, differs)
+}

@@ -167,7 +167,7 @@ func TestTimeValuesFoldThroughStages(t *testing.T) {
 	out := func(stage, key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut(stage, []byte(key))
+			v, err := g.Output(tx, stage, []byte(key))
 			got = string(v)
 			return err
 		}))

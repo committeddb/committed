@@ -7,9 +7,7 @@ import (
 	"testing"
 
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
-	tidwallbackend "github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 
-	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
@@ -29,14 +27,10 @@ func selectionEntry(t *testing.T, index uint64, entities ...*cluster.Entity) []b
 	return raw
 }
 
-func TestEventLogSelectionsMatchLegacyPrefix(t *testing.T) {
+func TestEventLogSelectionsMatchProductionPrefix(t *testing.T) {
 	adapter, _ := newSegmentedEventAdapter(t)
-	legacy, err := tidwal.Open(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = legacy.Close() })
-	storage := &Storage{eventLog: bindLegacyEventLog(tidwallbackend.OwnLegacy(legacy), nil)}
+	storage := &Storage{eventLog: productionBinding(t)}
+	production := storage.eventLog.managed
 	snapshot := &cluster.Type{ID: "snapshot", Name: "snapshot", Version: 1, EntityKind: cluster.EntityKindSnapshot}
 	revision := &cluster.Type{ID: "revision", Name: "revision", Version: 1, EntityKind: cluster.EntityKindRevision}
 	snapshotReg, err := cluster.NewUpsertTypeEntity(snapshot)
@@ -72,8 +66,8 @@ func TestEventLogSelectionsMatchLegacyPrefix(t *testing.T) {
 	if err := adapter.appendRaw(records); err != nil {
 		t.Fatal(err)
 	}
-	for i, raw := range records {
-		if err := legacy.Write(uint64(i+1), frame(raw)); err != nil {
+	for _, raw := range records {
+		if err := production.Append([]eventlog.Record{{ID: rawIndex(t, raw), Payload: raw}}); err != nil {
 			t.Fatal(err)
 		}
 	}

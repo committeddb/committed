@@ -26,7 +26,7 @@ func mergeHarness(t *testing.T, sts []Stage) (fold func(topic, key, payload stri
 	get = func(stage, key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut(stage, []byte(key))
+			v, err := g.Output(tx, stage, []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -252,10 +252,11 @@ func TestMergeValidated(t *testing.T) {
 // the newer vocabulary. If this test fails, the binary you are building
 // will spuriously RESET the stage store of every unchanged config on
 // upgrade — a silent multi-minute (hours at scale) re-derivation with
-// live-tail latency degraded throughout (field-measured). Vocabulary
-// ADDITIONS must keep this stable (declared-content marshal: omitempty
-// + WhenClause's explicit arms). Only a DELIBERATE semantic change may
-// re-pin it, and that change ships with an upgrade-notes callout.
+// live-tail latency degraded throughout (field-measured). The fingerprint
+// is the plan's (Fingerprint), so vocabulary ADDITIONS must keep the plan
+// encoding stable (omitempty on new plan fields); only a DELIBERATE
+// semantic change may re-pin it, with a PlanVersion bump and an
+// upgrade-notes callout.
 func TestFingerprintReferenceContract(t *testing.T) {
 	sts := []Stage{
 		{
@@ -270,7 +271,7 @@ func TestFingerprintReferenceContract(t *testing.T) {
 			Emit:   []Emit{{Field: "total", Sum: "$.amt"}, {Field: "n", Count: true}},
 		},
 	}
-	const reference = "4b5151015db670971db43e9e9acbafa46ddacd98e1f74805a99c68930666914c"
+	const reference = "69a503151be99723c1785ed44b92f7a67b91333e7ee646c4f56e69b07f463d0e"
 	require.Equal(t, reference, Fingerprint(sts),
 		"fingerprint of an unchanged config drifted — unchanged configs would reset their stores on upgrade (see comment)")
 

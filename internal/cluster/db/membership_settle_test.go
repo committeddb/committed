@@ -23,10 +23,11 @@ func TestMembership_BackToBackChangesAreNotDropped(t *testing.T) {
 	d, _ := newWalDB(t)
 	const peerURL = "http://127.0.0.1:29331"
 	for i := 0; i < 30; i++ {
-		require.NoError(t, d.AddLearner(testCtx(t), 2, peerURL), "iteration %d: add", i)
+		id := uint64(i + 2) // a removed id never rejoins
+		require.NoError(t, d.AddLearner(testCtx(t), id, peerURL), "iteration %d: add", i)
 		require.True(t, d.RaftAppliedCoversStorageForTest(),
 			"iteration %d: AddLearner returned before raft's applied index passed the change — the next change would be dropped", i)
-		require.NoError(t, d.RemoveMember(testCtx(t), 2), "iteration %d: remove", i)
+		require.NoError(t, d.RemoveMember(testCtx(t), id), "iteration %d: remove", i)
 		require.True(t, d.RaftAppliedCoversStorageForTest(), "iteration %d: RemoveMember returned early", i)
 	}
 }

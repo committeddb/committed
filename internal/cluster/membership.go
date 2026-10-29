@@ -27,6 +27,13 @@ var ErrNotLearner = errors.New("cluster: not a learner")
 // voter). Add or promote another voter first.
 var ErrWouldRemoveLastVoter = errors.New("cluster: would remove the last voter")
 
+// ErrMembershipChangeInProgress is returned when a membership change is
+// requested while another is still taking effect (the configuration is in a
+// joint state). raft would silently drop the new change, so it is refused up
+// front instead of timing out. The HTTP layer maps it to 409; retry once the
+// in-progress change completes.
+var ErrMembershipChangeInProgress = errors.New("cluster: another membership change is still taking effect")
+
 // Member roles reported by Membership. A node is a voter (counts toward
 // quorum) or a learner (replicates the log but does not vote): a node joins
 // as a learner and is promoted to voter once it has caught up.
@@ -68,6 +75,16 @@ type Member struct {
 	// into the replicated address map. Empty when the member has not
 	// announced one (e.g. no COMMITTED_API_URL set).
 	APIURL string
+	// PeerURL is the member's recorded raft peer address — what the cluster
+	// agreed on. Empty when none is recorded.
+	PeerURL string
+	// CurrentPeerURL is the address the answering node's transport uses for
+	// this member right now, and CurrentPeerURLSource where it came from
+	// (boot, membership, self-report, agreed — or self for the answering
+	// node's own entry). They differ from PeerURL while a moved node's new
+	// address is being recorded.
+	CurrentPeerURL       string
+	CurrentPeerURLSource string
 }
 
 // Membership is a snapshot of the raft cluster's configuration and
@@ -80,6 +97,9 @@ type Member struct {
 type Membership struct {
 	// NodeID is the node that produced this snapshot.
 	NodeID uint64
+	// ClusterID is the cluster's id (empty while the cluster has none — an
+	// upgraded cluster before every member runs a release that mints one).
+	ClusterID string
 	// LeaderID is the raft leader this node currently believes in (0 if
 	// none known). A caller that reaches a node which cannot produce a
 	// leader-truthful answer uses this to find the leader.

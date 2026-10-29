@@ -206,6 +206,10 @@ func (d *SQLMockDialect) DestinationDeleteSQL() string {
 	return (&dialects.MySQLDialect{}).DestinationDeleteSQL()
 }
 
+func (d *SQLMockDialect) HasRowsSQL(table string) string {
+	return (&dialects.MySQLDialect{}).HasRowsSQL(table)
+}
+
 func (d *SQLMockDialect) Open(connectionString string) (*gosql.DB, error) {
 	return d.db, nil
 }
@@ -219,6 +223,21 @@ func (d *SQLMockDialect) IsPermanent(err error) bool {
 // placeholder counts, so the doubling is what the tests assert against).
 func (d *SQLMockDialect) BindArgs(values []any) []any {
 	return append(values, values...)
+}
+
+// CreateMultiRowUpsertSQL mirrors the mock's simplified CreateSQL: the column
+// list and one placeholder tuple per row, no conflict clause.
+func (d *SQLMockDialect) CreateMultiRowUpsertSQL(config *sql.Config, rows int) string {
+	cols := make([]string, len(config.Mappings))
+	for i, m := range config.Mappings {
+		cols[i] = m.Column
+	}
+	tuple := "(" + strings.TrimSuffix(strings.Repeat("?,", len(cols)), ",") + ")"
+	tuples := make([]string, rows)
+	for i := range tuples {
+		tuples[i] = tuple
+	}
+	return fmt.Sprintf("INSERT INTO %s(%s) VALUES %s", config.Table, strings.Join(cols, ","), strings.Join(tuples, ","))
 }
 
 func (d *SQLMockDialect) CreateEnrichedUpsertSQL(c *sql.Config, enrich map[string]sql.SpineEnrichment) string {

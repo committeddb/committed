@@ -2,7 +2,9 @@
 
 Routes are served by Chi from `internal/cluster/db/http/`. The full
 OpenAPI spec is available at `/openapi.yaml` with a Swagger UI at
-`/docs`. Every API endpoint lives under a `/v1` prefix (see
+`/docs`. The `/docs` page loads Swagger UI from unpkg.com, so it is blank
+in a browser without internet access; load `/openapi.yaml` into your own
+OpenAPI tool instead. Every API endpoint lives under a `/v1` prefix (see
 [`docs/architecture/api-compatibility.md`](architecture/api-compatibility.md)); bearer-token
 auth supports a legacy shared token or separate API, membership, and peer
 credentials (see

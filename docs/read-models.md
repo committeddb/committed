@@ -127,7 +127,7 @@ error handling, deletes, and schema evolution:
   columns, executed in manifest order inside the Actual's transaction.
   When two matched rules set the same column, the last rule wins.
   Zero matching rules → zero SQL: no ghost rows, and the
-  `committed_sync_rules_unmatched` counter ticks — the signal that a
+  `committed_sync_rules_unmatched_total` counter ticks — the signal that a
   new event variant shipped without a rule.
 - **Writes are absolute** (`from` extracts from the payload, `value`
   is a literal, `null = true` writes SQL NULL — exactly one per `set`
@@ -553,9 +553,10 @@ set = [ { column = "total", from = "$.total" },
 
 - **Every stage is a keyed refold**: an input lands in its key's retained
   set and the key's output is what recomputing from that set gives, so
-  redelivery, rekeying, and replay converge to identical bytes. An
-  aggregate stage without joins also keeps each key's fold state (exact
-  counts and sums, the current extremes, ordered value lists) and updates
+  redelivery, rekeying, and replay converge to identical bytes. Every
+  stage except a merge or a window also keeps each key's fold state (an
+  aggregate's exact counts and sums, current extremes and ordered value
+  lists; a `latest`, `liveSet` or plain stage's winning input) and updates
   it from the inputs that changed rather than re-reading the set; wherever
   that state cannot show the same result, the key recomputes from its set. Key
   comparisons are byte-exact; when two producers render the same logical
@@ -983,7 +984,8 @@ set = [ { column = "total", from = "$.total" },
   each stage's row — `keys` (the store's current output count) plus
   `inputs`/`fanned` flow counters since the worker started, and
   `unkeyedDeletes` (delete-shaped inputs whose key would not resolve or
-  render), `havingRejected` (refolds an aggregate's `having` held back),
+  render), `scrubbedInputs` (reads of inputs a scrub had erased while the
+  stage lagged behind it), `havingRejected` (refolds an aggregate's `having` held back),
   `windowRowsRecomputed`/`windowLargestPartition` (a window stage's
   recompute cost and its largest partition), and per-join resolution counters (`joins`: hits/misses — LOST retractions: nonzero here answers "the delete event
   arrived but the key is still live" in one read; each also warns once
@@ -1011,40 +1013,52 @@ set = [ { column = "total", from = "$.total" },
   types also render `?probeKey` parts, removing the canonical-digits
   probe obligation. Source digit strings are always preserved in
   VALUES; keys are identity.
-- **Upgrades never reset unchanged configs**: the store fingerprint
-  covers DECLARED content only, so new vocabulary in a new binary
-  leaves untouched configs' stores intact (pinned by a reference contract
-  test). When a store genuinely resets (a stage edit, an ownership
-  move), the worker re-derives before consuming and the status endpoint
-  says so: `workerState: "re-deriving"` with `stageRecovery {folded,
-  target}` progress on the default call — lag climbs by design until
-  the fold-only pass reaches the checkpoint.
-- **An aggregate's cost per input does not depend on its group's size,
-  for most arms.** In an aggregate stage without joins, an input updates
-  its key's fold state: `count`, `sum` and `avg` adjust a running total,
+- **A store resets when what the stages compute changes, not their
+  spelling**: the store fingerprint is the fingerprint of the stages'
+  compiled plan, so an edit that computes the same thing (a default
+  written out, such as `keyType = ["text"]`; an expression's case,
+  spacing, or redundant parentheses; `when` clauses reordered) changes
+  nothing, and new vocabulary in a new binary leaves untouched configs'
+  stores intact (pinned by reference contract tests). When a store
+  genuinely resets (a stage edit, an ownership move, a store format
+  change on upgrade), the worker re-derives before consuming and the
+  status endpoint says so: `workerState: "re-deriving"` with
+  `stageRecovery {folded, target}` progress on the default call — lag
+  climbs by design until the fold-only pass reaches the checkpoint.
+- **A stage's cost per input does not depend on its group's size, for
+  most shapes.** In an aggregate stage, an input updates its key's fold
+  state: `count`, `sum` and `avg` adjust a running total,
   `min` and `max` move the extreme, and `array_agg`, `string_agg`,
   `collect` and any `distinct` insert into an ordered list (so they cost
   in proportion to that list, which a `filter` keeps short). On the
   reference machine
   ([performance.md](operations/performance.md#reference-measurements)) the
   event-store recipe's five-emit aggregate takes about 0.06 ms per
-  appended event at both 1,000 and 10,000 events per key. A key recomputes
+  appended event at both 1,000 and 10,000 events per key. A `latest`,
+  `liveSet` or plain stage compares an input with its key's winning input,
+  about 0.01–0.02 ms per appended event at both sizes. A key recomputes
   from every input it holds — a cost proportional to its group's size —
   when: the input that held a `min` or `max` leaves or moves the wrong way;
   two values tie for an extreme but print differently (a date and its
-  midnight timestamp); an `interval` sum changes; or the stage has joins
-  (every change refolds the key). Inputs apply in log order, so a large
-  recompute holds up the inputs behind it. Group by the entity whose
+  midnight timestamp); an `interval` sum changes; the winning input leaves,
+  stops qualifying, or (in a `latest`) its order moves down; or a joined
+  dimension row changes (each key that references it recomputes). Inputs
+  apply in log order, so a large recompute holds up the inputs behind it. Group by the entity whose
   history you are aggregating (an order, an account, a device), not a
   tenant or a whole topic, and give the stage a `when` that drops inputs
   no emit reads: a rejected input is not retained, so it costs neither
   refold time nor disk.
-- Stage state lives in one bbolt file per syncable under
-  `<dataDir>/projections/` — derived, node-local, rebuildable from the
-  log. It retains every input of every key, so it grows with the topics
-  it reads, in proportion to the number and size of inputs and the
-  number of stages that keep them: one aggregate stage over 1,000,000
-  events of about 260 bytes held 841 MB. **Editing stage definitions
+- Stage state lives in one database per node under
+  `<dataDir>/projections/`, each syncable's state in its own key range —
+  derived, node-local, rebuildable from the log. It retains every input of every key, so it grows with the topics
+  it reads, in proportion to the number of inputs and the number of
+  stages that keep them. An input read from a topic, or an element a
+  `forEach` fans from one, is kept as a reference to its log entry, a
+  few bytes whatever the event's size; stage-fed inputs, merge sides,
+  window rows, fan-join pairs and join dimension rows are kept as
+  copies. One aggregate stage over 10,000,000 events held about 33 bytes
+  per event once compacted (about 45 right after the build, before the
+  database compacts away superseded state). **Editing stage definitions
   requires a rebuild** (the config-change guard enforces it): changed
   stages must re-derive from index 0, exactly like a changed table
   schema.

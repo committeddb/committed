@@ -1,46 +1,50 @@
 package cmd
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	twal "github.com/tidwall/wal"
 
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/wal"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func TestEventLogEnvironmentSelectsStorage(t *testing.T) {
-	for _, backend := range []string{"", "tidwall", " segmented "} {
-		t.Run("backend="+backend, func(t *testing.T) {
-			t.Setenv("COMMITTED_EVENT_LOG_BACKEND", backend)
-			t.Setenv("COMMITTED_EVENT_CACHE_SEGMENTS", "16")
-			t.Setenv("COMMITTED_EVENT_CACHE_RECENT_BYTES", "0")
-			t.Setenv("COMMITTED_EVENT_CACHE_HISTORICAL_BYTES", "1024")
-			options, err := loadEventLogOptions()
-			require.NoError(t, err)
-			base := t.TempDir()
-			for range 2 {
-				storage, err := wal.Open(base, nil, nil, nil, options...)
-				require.NoError(t, err)
-				require.NoError(t, storage.Close())
-				selected, err := segmentlog.RecognizeDirectory(datadir.EventsDir(base))
-				require.NoError(t, err)
-				require.Equal(t, backend == " segmented ", selected)
-			}
-		})
+// A new data directory gets the segmented event log; a tidwall one is refused
+// with the conversion named, and nothing in it changes.
+func TestNodeRunsTheSegmentedEventLog(t *testing.T) {
+	t.Setenv("COMMITTED_EVENT_CACHE_RECENT_BYTES", "0")
+	t.Setenv("COMMITTED_EVENT_CACHE_HISTORICAL_BYTES", "1024")
+	options, err := loadEventLogOptions()
+	require.NoError(t, err)
+
+	base := t.TempDir()
+	for range 2 {
+		storage, err := wal.Open(base, nil, nil, nil, options...)
+		require.NoError(t, err)
+		require.NoError(t, storage.Close())
+		segmented, err := segmentlog.RecognizeDirectory(datadir.EventsDir(base))
+		require.NoError(t, err)
+		require.True(t, segmented)
 	}
+
+	// A tidwall event log, as a node before 0.8.3 left it.
+	legacy := t.TempDir()
+	events, err := twal.Open(datadir.EventsDir(legacy), nil)
+	require.NoError(t, err)
+	require.NoError(t, events.Write(1, []byte("event")))
+	require.NoError(t, events.Close())
+	_, err = wal.Open(legacy, nil, nil, nil, options...)
+	require.ErrorIs(t, err, wal.ErrTidwallEventLog)
+	require.ErrorContains(t, err, "committed wal convert --data "+legacy)
+	segmented, err := segmentlog.RecognizeDirectory(datadir.EventsDir(legacy))
+	require.NoError(t, err)
+	require.False(t, segmented)
 }
 
-func TestEventLogEnvironmentValidation(t *testing.T) {
-	t.Setenv("COMMITTED_EVENT_CACHE_RECENT_BYTES", "")
-	t.Setenv("COMMITTED_EVENT_CACHE_HISTORICAL_BYTES", "")
-	for _, backend := range []string{"segmeted", "rocksdb", "SEGMENTED"} {
-		t.Setenv("COMMITTED_EVENT_LOG_BACKEND", backend)
-		_, err := loadEventLogOptions()
-		require.ErrorContains(t, err, "COMMITTED_EVENT_LOG_BACKEND")
-	}
-	t.Setenv("COMMITTED_EVENT_LOG_BACKEND", "segmented")
+func TestEventCacheBudgetValidation(t *testing.T) {
 	for _, name := range []string{"COMMITTED_EVENT_CACHE_RECENT_BYTES", "COMMITTED_EVENT_CACHE_HISTORICAL_BYTES"} {
 		t.Run(name, func(t *testing.T) {
 			for _, invalid := range []string{"-1", "1.5", "160MiB", "18446744073709551616"} {
@@ -65,4 +69,23 @@ func TestEventCacheByteBudgets(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tc.want, got)
 	}
+}
+
+// A proposal cap above what the event log stores is refused at startup; the
+// largest storable cap is accepted.
+func TestMaxProposalBytesIsBoundedByTheEventLog(t *testing.T) {
+	t.Setenv("COMMITTED_MAX_PROPOSAL_BYTES", strconv.FormatUint(wal.MaxProposalBytes, 10))
+	n, ok, err := loadMaxProposalBytes()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, wal.MaxProposalBytes, n)
+
+	t.Setenv("COMMITTED_MAX_PROPOSAL_BYTES", strconv.FormatUint(wal.MaxProposalBytes+1, 10))
+	_, _, err = loadMaxProposalBytes()
+	require.ErrorContains(t, err, "the largest proposal the event log stores")
+
+	t.Setenv("COMMITTED_MAX_PROPOSAL_BYTES", "")
+	_, ok, err = loadMaxProposalBytes()
+	require.NoError(t, err)
+	require.False(t, ok, "unset keeps the default")
 }

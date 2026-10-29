@@ -123,7 +123,7 @@ func (db *DB) appliedNotify() <-chan struct{} {
 }
 
 // notifyAppliedIndexAdvanced is invoked once per applied batch (on the apply
-// goroutine, or in step on the Ready loop) in which AppliedIndex advanced. It
+// goroutine) in which AppliedIndex advanced. It
 // closes the current broadcast channel (waking every waitForApplied caller)
 // and installs a fresh one for the next generation. Cheap and lock-bounded;
 // fired at most once per batch.

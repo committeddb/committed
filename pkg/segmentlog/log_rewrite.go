@@ -24,10 +24,10 @@ type SealedRewriteResult struct {
 // become empty catalog descriptors without payload files. Even a no-op can
 // publish the requested generation, writing only catalog metadata.
 //
-// This is deliberately a sealed-only operation, not a whole-log scrub. The active
-// tail, append frontier, and rotation accounting are unchanged. It cannot complete
-// a request whose scope includes active records. Generation describes this scoped
-// transaction; Committed's full scrub uses the whole-log Rewrite operation.
+// This is deliberately a sealed-only operation. The active tail, append frontier,
+// and rotation accounting are unchanged. It cannot complete a request whose scope
+// includes active records: Seal first to bring every appended record into scope.
+// Generation describes this scoped transaction.
 //
 // Replacement writing allows reads, appends, and rollover. The captured sealed
 // prefix is fixed; later sealed ranges and the active tail remain unchanged by
@@ -39,6 +39,19 @@ type SealedRewriteResult struct {
 func (l *Log) RewriteSealed(ctx context.Context, generation uint64, transform Transform) (result SealedRewriteResult, err error) {
 	resultAll, err := l.rewrite(ctx, generation, transform, false, nil)
 	return resultAll.SealedRewriteResult, err
+}
+
+// RewriteSealedWithPublicationLock performs RewriteSealed while excluding
+// caller-owned read lifetimes only during publication, as
+// RewriteWithPublicationLock does. Unlike that whole-log rewrite it does not
+// hold mutation ownership, so holders of the matching read lock may also
+// append while preparation runs.
+func (l *Log) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform Transform, publication sync.Locker) (SealedRewriteResult, error) {
+	if publication == nil {
+		return SealedRewriteResult{}, ErrInvalid
+	}
+	result, err := l.rewrite(ctx, generation, transform, false, publication)
+	return result.SealedRewriteResult, err
 }
 
 // RewriteResult describes a whole-log transaction. TailChanged reports completed

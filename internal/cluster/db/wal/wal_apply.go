@@ -16,9 +16,8 @@ import (
 )
 
 // ApplyCommitted applies a single committed raft entry to application
-// state. It is called by the raft Ready loop on each entry from
-// rd.CommittedEntries, after Save has persisted the entry and before
-// node.Advance(). Apply must complete before Advance per etcd-raft contract.
+// state. It is called on committed entries after Save has persisted them,
+// and before raft is told they are applied (MsgStorageApplyResp).
 //
 // ApplyCommitted is idempotent on re-apply: entries with index <=
 // AppliedIndex are skipped. The applied index is bumped after each
@@ -34,7 +33,7 @@ import (
 // normal operation: both advance together per entry.
 //
 // Errors here are treated as fatal by raft.go; see the apply error policy
-// comment in raft.go's Ready loop.
+// comment on raft.go's applyBatch.
 func (s *Storage) ApplyCommitted(entry *pb.Entry) error {
 	rejected, err := s.orderVerdicts([]*pb.Entry{entry})
 	if err != nil {

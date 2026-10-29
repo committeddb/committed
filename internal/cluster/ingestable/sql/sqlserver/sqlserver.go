@@ -44,7 +44,7 @@ type SQLServerDialect struct {
 	// the node. It decides the uniqueidentifier rendering for each session —
 	// see featureLevelCanonicalUUID. Nil (tests constructing the dialect
 	// directly) means the gate is open: the 0.8.0 rendering.
-	Features FeatureReader
+	Features sql.FeatureReader
 	// snapshotBatchHook is test-only failure injection for resume tests (the
 	// same seam the other dialects expose). Nil in production.
 	snapshotBatchHook func(table string, batch int) error
@@ -466,17 +466,11 @@ func (d *SQLServerDialect) TeardownSource(config *sql.Config) error {
 	return nil
 }
 
-// FeatureReader answers whether the whole cluster is at a feature level —
-// the db's cluster-minimum gate, sized to this dialect's one question.
-type FeatureReader interface {
-	FeatureEnabled(level uint64) bool
-}
-
 // featureLevelCanonicalUUID gates the canonical (RFC 4122 lowercase)
 // uniqueidentifier rendering. The spelling is in entity KEYS: a cluster where
 // one owner renders uppercase and the next lowercase would key the same row
 // twice, so every node keeps the pre-0.8.0 uppercase rendering until every
-// member announces level 2. See version.FeatureLevel and sessionRendering.
+// member announces level 2. See version.FeatureLevel and sql.SessionRendering.
 const featureLevelCanonicalUUID uint64 = 2
 
 // The two uniqueidentifier renderings a checkpoint can record
@@ -510,26 +504,6 @@ func (d *SQLServerDialect) typedTemporalEnabled() bool {
 	return d.Features == nil || d.Features.FeatureEnabled(featureLevelTypedTemporal)
 }
 
-// sessionRendering decides one session's rendering of a value family
-// (uniqueidentifier, temporal) from the checkpoint it resumes and that
-// rendering's cluster gate — 0 the legacy rendering, 1 the new one — and
-// whether the session must first re-snapshot (rerender): the checkpoint was
-// rendered the OTHER way, so every such key and payload field on the sink is
-// the old rendering and only a full re-emission at a bumped epoch (whose
-// closing markers sweep the old rows on keyed sinks) re-keys it. The
-// promotion is one-way: a promoted checkpoint stays promoted even if the gate
-// reads closed (a member mid-join announces level 0 for a moment), so a
-// membership change can never flip a sink back.
-func sessionRendering(checkpoint uint32, hasCheckpoint, gateOpen bool) (rendering uint32, rerender bool) {
-	if checkpoint == 1 {
-		return 1, false
-	}
-	if gateOpen {
-		return 1, hasCheckpoint
-	}
-	return 0, false
-}
-
 // renderUniqueidentifier spells a GUID for this session: the driver's
 // uppercase form (legacy), or RFC 4122 lowercase (canonical).
 func renderUniqueidentifier(u mssql.UniqueIdentifier, canonical bool) string {
@@ -539,7 +513,7 @@ func renderUniqueidentifier(u mssql.UniqueIdentifier, canonical bool) string {
 	return u.String()
 }
 
-// renderings is one session's choice per value family (see sessionRendering).
+// renderings is one session's choice per value family (see sql.SessionRendering).
 type renderings struct {
 	canonicalUUID bool
 	typedTemporal bool

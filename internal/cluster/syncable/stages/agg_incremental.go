@@ -2,6 +2,7 @@ package stages
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,8 @@ import (
 // decode and an evaluation per input on every change. This file keeps, next
 // to the retained set, the key's FOLD STATE: the row count and, per arm, an
 // exact running value — counts and sums, the current extreme, the ordered
-// item list. A changed input then removes its old contribution and adds its
+// item list (only its first item for an array_agg read as [1]). A changed
+// input then removes its old contribution and adds its
 // new one: one decode and evaluation per CHANGED input.
 //
 // It is an evaluation strategy under the refold contract, never a different
@@ -33,19 +35,23 @@ import (
 //   - a min/max whose extreme is removed, or tied by an equal value that
 //     renders differently (the full refold keeps the first in input-key
 //     order, which the state does not know);
+//   - an array_agg read as [1] whose first item is removed (the state
+//     does not know the next);
 //   - an interval sum (its range check runs on intermediate sums);
 //   - any evaluation error, so the error surfaces exactly as the full
 //     refold raises it.
 //
-// Only aggregate stages without joins keep a state: a join makes an input's
-// contribution depend on dimension rows, which change without the input.
+// A join makes an input's membership and contribution depend on dimension
+// rows, which change without the input: a dimension change marks its
+// dependent keys full (Dirty.MarkFull), so each refolds in full and its
+// state is rebuilt under the new rows. Merge stages keep no state.
 
 // errAggFallback asks for a full refold of the key.
 var errAggFallback = errors.New("aggregate key needs a full refold")
 
 // incrementalAggregate reports whether a stage keeps a fold state.
 func (st *Stage) incrementalAggregate() bool {
-	return st.Reduce == "aggregate" && len(st.Joins) == 0 && len(st.Merge) == 0
+	return st.Reduce == "aggregate" && len(st.Merge) == 0
 }
 
 // usesItems reports whether a slot keeps its contributions as an item list:
@@ -53,6 +59,22 @@ func (st *Stage) incrementalAggregate() bool {
 // values, not a running total).
 func (s *exprAgg) usesItems() bool {
 	return s.fn == "array_agg" || s.fn == "string_agg" || s.distinct
+}
+
+// markFirstOnly marks the slots an aggregate expression reads only as their
+// first element: (array_agg(…))[1], without distinct. Each call is its own
+// slot, so the subscript is the slot's only reader.
+func markFirstOnly(n Node, slots []exprAgg) {
+	if x, ok := n.(exprSubscript); ok && !x.slice {
+		a, isAgg := x.operand.(exprAgg)
+		one, isNum := x.lo.(exprNum)
+		if isAgg && isNum && a.fn == "array_agg" && !a.distinct && one.val.Cmp(big.NewRat(1, 1)) == 0 {
+			slots[a.slot].firstOnly = true
+		}
+	}
+	for _, c := range exprChildren(n) {
+		markFirstOnly(c, slots)
+	}
 }
 
 // aggDelta is one key's input changes within a drain: per input key, its
@@ -63,6 +85,12 @@ type aggDelta struct {
 
 type inputChange struct {
 	old, cur []byte
+	curIn    *decodedInput // cur decoded, when the fold had it (nil: decode cur)
+}
+
+// decodedInput is a retained input as unpackStageInput returns it.
+type decodedInput struct {
+	data, parent any
 }
 
 // slotContrib is one input's contribution to one expression-aggregate slot.
@@ -85,13 +113,28 @@ type aggContrib struct {
 }
 
 // contribution evaluates one retained input exactly as refoldAggregate folds
-// it. errAggFallback (or an evaluation error, which the caller also turns
-// into a full refold) means the input cannot be accounted incrementally.
-func contribution(st *Stage, inKey, retained []byte) (*aggContrib, error) {
-	_, payload := decodeRetained(retained)
-	obj, parent, err := unpackStageInput(st, payload)
+// it; nil means the input is not a member (a join does not admit it).
+// errAggFallback (or an evaluation error, which the caller also turns into a
+// full refold) means the input cannot be accounted incrementally;
+// errInputAbsent, that the log no longer holds it (pointer.go).
+func (g *Graph) contribution(tx *stagestore.Tx, st *Stage, inKey, retained []byte) (*aggContrib, error) {
+	in, err := g.loadInput(st, inKey, retained)
 	if err != nil {
 		return nil, err
+	}
+	return g.contributionOf(tx, st, inKey, in.data, in.parent)
+}
+
+// contributionOf is contribution over an input already decoded.
+func (g *Graph) contributionOf(tx *stagestore.Tx, st *Stage, inKey []byte, obj, parent any) (*aggContrib, error) {
+	if len(st.Joins) > 0 {
+		if ok, err := g.inputQualifies(tx, st, obj, parent); err != nil || !ok {
+			return nil, err
+		}
+		var err error
+		if obj, err = g.joinLookupScope(tx, st, obj, parent); err != nil {
+			return nil, err
+		}
 	}
 	obj = withSource(obj, st.inputSource(inKey))
 	c := &aggContrib{slots: make([]slotContrib, len(st.aggSlots)), emits: make([]emitContrib, len(st.Emit))}
@@ -183,7 +226,8 @@ type stateItem struct {
 	ord   []any
 }
 
-// slotState is one slot's (or legacy arm's) running fold.
+// slotState is one slot's (or legacy arm's) running fold. A firstOnly
+// slot's n counts its items and items holds only the first.
 type slotState struct {
 	n     int64
 	sum   *big.Rat
@@ -267,7 +311,13 @@ func (as *aggState) apply(st *Stage, inKey []byte, c *aggContrib, sign int64) er
 	as.count += sign
 	for k := range st.aggSlots {
 		s := &st.aggSlots[k]
-		if err := applySlot(&as.slots[k], s.fn, s.usesItems(), inKey, c.slots[k], sign, s.itemLess); err != nil {
+		var err error
+		if s.firstOnly {
+			err = applyFirst(&as.slots[k], inKey, c.slots[k], sign, s.itemLess)
+		} else {
+			err = applySlot(&as.slots[k], s.fn, s.usesItems(), inKey, c.slots[k], sign, s.itemLess)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -291,7 +341,13 @@ func (as *aggState) apply(st *Stage, inKey []byte, c *aggContrib, sign int64) er
 func (as *aggState) replace(st *Stage, inKey []byte, oc, nc *aggContrib) error {
 	for k := range st.aggSlots {
 		s := &st.aggSlots[k]
-		if err := replaceSlot(&as.slots[k], s.fn, s.usesItems(), inKey, oc.slots[k], nc.slots[k], s.itemLess); err != nil {
+		var err error
+		if s.firstOnly {
+			err = replaceFirst(&as.slots[k], inKey, oc.slots[k], nc.slots[k], s.itemLess)
+		} else {
+			err = replaceSlot(&as.slots[k], s.fn, s.usesItems(), inKey, oc.slots[k], nc.slots[k], s.itemLess)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -333,6 +389,45 @@ func replaceSlot(ss *slotState, fn string, items bool, inKey []byte, o, n slotCo
 		return err
 	}
 	return applySlot(ss, fn, items, inKey, n, +1, less)
+}
+
+// applyFirst is applySlot for a firstOnly slot. Removing the first item
+// refolds: the state does not know the next.
+func applyFirst(ss *slotState, inKey []byte, c slotContrib, sign int64, less func(a, b *stateItem) bool) error {
+	if !c.in {
+		return nil
+	}
+	if sign < 0 {
+		if ss.n <= 1 || len(ss.items) == 0 || bytes.Equal(ss.items[0].inKey, inKey) {
+			return errAggFallback
+		}
+		ss.n--
+		return nil
+	}
+	it := stateItem{inKey: inKey, val: c.val, ord: c.ord}
+	ss.n++
+	if len(ss.items) == 0 || less(&it, &ss.items[0]) {
+		ss.items = []stateItem{it}
+	}
+	return nil
+}
+
+// replaceFirst is replaceSlot for a firstOnly slot: the input holding the
+// first item keeps it when its new item sorts no later (every other item
+// sorted after the old one), and refolds otherwise.
+func replaceFirst(ss *slotState, inKey []byte, o, n slotContrib, less func(a, b *stateItem) bool) error {
+	if o.in && len(ss.items) > 0 && bytes.Equal(ss.items[0].inKey, inKey) {
+		it := stateItem{inKey: inKey, val: n.val, ord: n.ord}
+		if !n.in || less(&ss.items[0], &it) {
+			return errAggFallback
+		}
+		ss.items[0] = it
+		return nil
+	}
+	if err := applyFirst(ss, inKey, o, -1, less); err != nil {
+		return err
+	}
+	return applyFirst(ss, inKey, n, +1, less)
 }
 
 // legacyFn names a legacy emit arm's fold.
@@ -441,6 +536,12 @@ func nullableDistinctKey(v any) string {
 // slotResult is the slot's value from its state, as exprAgg.result computes
 // it from a full fold.
 func slotResult(s *exprAgg, ss *slotState) any {
+	if s.firstOnly {
+		if len(ss.items) == 0 {
+			return nil
+		}
+		return []any{ss.items[0].val} // read only as [1]
+	}
 	if s.usesItems() {
 		items := ss.items
 		if s.distinct {
@@ -498,10 +599,12 @@ func slotResult(s *exprAgg, ss *slotState) any {
 }
 
 // renderState is the key's output from its state: the refold's results,
-// having, and emit rendering (aggregateOutput), fed from the state.
-func (g *Graph) renderState(st *Stage, as *aggState) ([]byte, bool, error) {
+// having, and emit rendering (aggregateOutput), fed from the state. count
+// says whether a having rejection counts in the stage's flow counters: it
+// does for a refold's result, not for a read of an output already counted.
+func (g *Graph) renderState(st *Stage, as *aggState, count bool) ([]byte, any, bool, error) {
 	if as.count == 0 {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	results := make(aggResults, len(st.aggSlots))
 	for k := range st.aggSlots {
@@ -541,39 +644,77 @@ func (g *Graph) renderState(st *Stage, as *aggState) ([]byte, bool, error) {
 			legacy.maxs[i] = es.best
 		}
 	}
-	return g.aggregateOutput(st, results, legacy)
+	return g.aggregateOutputObject(st, results, legacy, count)
 }
 
 // refoldAggregateIncremental refolds an aggregate key from its fold state
 // and this drain's input changes, or in full when the state cannot show the
 // result (see the file comment). Either way the key's state is left in step
 // with its retained set.
-func (g *Graph) refoldAggregateIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) ([]byte, bool, error) {
+func (g *Graph) refoldAggregateIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) ([]byte, any, bool, error) {
 	n := g.byName[st.Name]
-	if delta != nil {
-		if out, live, err := g.tryIncremental(tx, st, outKey, delta); err == nil {
-			n.aggIncremental.Add(1)
-			return out, live, nil
+	as, err := g.loadAggState(tx, st, outKey)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if delta != nil && as != nil {
+		if out, obj, live, err := g.tryIncremental(tx, st, outKey, as, delta); err == nil {
+			n.foldStateRefolds.Add(1)
+			if checkFoldState != nil {
+				checkFoldState(g, tx, st, outKey, out, live)
+			}
+			return out, obj, live, nil
 		} else if !errors.Is(err, errAggFallback) {
-			return nil, false, err
+			return nil, nil, false, err
 		}
 	}
-	n.aggFull.Add(1)
+	n.fullRefolds.Add(1)
 	return g.refoldAggregateFull(tx, st, outKey)
 }
 
-func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delta *aggDelta) ([]byte, bool, error) {
+// knownOutput is a key's output before its refold (nil: none) as the fold
+// state knows it; unknown when the key kept a state that could not be
+// rendered (written by a later release, or damaged).
+type knownOutput struct {
+	out     []byte
+	unknown bool
+}
+
+// loadAggState reads a key's fold state to refold from (nil: none), and
+// sets g.priorOut to the key's output before the refold when the state
+// says it. A key that keeps a state has no stored output: its output is
+// the state's rendering (see refoldKey).
+func (g *Graph) loadAggState(tx *stagestore.Tx, st *Stage, outKey []byte) (*aggState, error) {
 	raw, err := tx.GetAcc(st.Name, outKey)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	if raw == nil {
-		return nil, false, errAggFallback
+	switch {
+	case raw != nil:
+		as, err := decodeAggState(st, raw)
+		if err != nil {
+			g.priorOut = &knownOutput{unknown: true}
+			return nil, nil
+		}
+		prior, _, _, err := g.renderState(st, as, false)
+		if err != nil {
+			g.priorOut = &knownOutput{unknown: true}
+			return nil, nil
+		}
+		g.priorOut = &knownOutput{out: prior}
+		return as, nil
+	case tx.KeyAdded(st.Name, outKey):
+		// A key new in this batch: its inputs are all in the delta, so it
+		// folds from the empty state without reading them, and it had no
+		// output.
+		g.priorOut = &knownOutput{}
+		return newAggState(st), nil
 	}
-	as, err := decodeAggState(st, raw)
-	if err != nil {
-		return nil, false, errAggFallback
-	}
+	return nil, nil
+}
+
+func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, as *aggState, delta *aggDelta) ([]byte, any, bool, error) {
+	var err error
 	keys := make([]string, 0, len(delta.inputs))
 	for k := range delta.inputs {
 		keys = append(keys, k)
@@ -587,16 +728,23 @@ func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delt
 		}
 		var oc, nc *aggContrib
 		if ch.old != nil {
-			if oc, err = contribution(st, inKey, ch.old); err != nil {
-				return nil, false, errAggFallback
+			if oc, err = g.contribution(tx, st, inKey, ch.old); err != nil {
+				return nil, nil, false, errAggFallback
 			}
 		}
 		if ch.cur != nil {
-			if nc, err = contribution(st, inKey, ch.cur); err != nil {
-				return nil, false, errAggFallback
+			if ch.curIn != nil {
+				nc, err = g.contributionOf(tx, st, inKey, ch.curIn.data, ch.curIn.parent)
+			} else {
+				nc, err = g.contribution(tx, st, inKey, ch.cur)
+			}
+			if err != nil {
+				return nil, nil, false, errAggFallback
 			}
 		}
 		switch {
+		case oc == nil && nc == nil:
+			continue // a non-member before and after
 		case oc != nil && nc != nil:
 			err = as.replace(st, inKey, oc, nc)
 		case oc != nil:
@@ -605,30 +753,36 @@ func (g *Graph) tryIncremental(tx *stagestore.Tx, st *Stage, outKey []byte, delt
 			err = as.apply(st, inKey, nc, +1)
 		}
 		if err != nil {
-			return nil, false, errAggFallback
+			return nil, nil, false, errAggFallback
 		}
 	}
 	if as.count < 0 {
-		return nil, false, errAggFallback
+		return nil, nil, false, errAggFallback
 	}
-	out, live, err := g.renderState(st, as)
+	out, obj, live, err := g.renderState(st, as, true)
 	if err != nil {
-		return nil, false, errAggFallback // the full refold raises it
+		return nil, nil, false, errAggFallback // the full refold raises it
 	}
-	return out, live, g.storeAggState(tx, st, outKey, as)
+	return out, obj, live, g.storeAggState(tx, st, outKey, as)
 }
 
 // refoldAggregateFull refolds the key from every retained input and rebuilds
 // its state. The output is refoldAggregate's: on any input the state cannot
 // account for, the state is dropped and the plain refold decides.
-func (g *Graph) refoldAggregateFull(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, bool, error) {
+func (g *Graph) refoldAggregateFull(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, any, bool, error) {
 	as := newAggState(st)
 	ok := true
 	err := tx.InputsFor(st.Name, outKey, func(inKey, val []byte) error {
-		c, err := contribution(st, inKey, val)
+		c, err := g.contribution(tx, st, inKey, val)
+		if errors.Is(err, errInputAbsent) {
+			return nil // scrubbed: absent until its retraction folds
+		}
 		if err != nil {
 			ok = false
 			return errAggFallback
+		}
+		if c == nil {
+			return nil // not a member
 		}
 		if err := as.apply(st, append([]byte(nil), inKey...), c, +1); err != nil {
 			ok = false
@@ -637,153 +791,416 @@ func (g *Graph) refoldAggregateFull(tx *stagestore.Tx, st *Stage, outKey []byte)
 		return nil
 	})
 	if err != nil && !errors.Is(err, errAggFallback) {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	if !ok {
 		if err := tx.DeleteAcc(st.Name, outKey); err != nil {
-			return nil, false, err
+			return nil, nil, false, err
 		}
-		return g.refoldAggregate(tx, st, outKey)
+		return g.refoldAggregateNoObject(tx, st, outKey)
 	}
-	out, live, err := g.renderState(st, as)
+	out, obj, live, err := g.renderState(st, as, true)
 	if err != nil {
 		if derr := tx.DeleteAcc(st.Name, outKey); derr != nil {
-			return nil, false, derr
+			return nil, nil, false, derr
 		}
-		return g.refoldAggregate(tx, st, outKey)
+		return g.refoldAggregateNoObject(tx, st, outKey)
 	}
-	return out, live, g.storeAggState(tx, st, outKey, as)
+	return out, obj, live, g.storeAggState(tx, st, outKey, as)
 }
 
 func (g *Graph) storeAggState(tx *stagestore.Tx, st *Stage, outKey []byte, as *aggState) error {
+	g.keptState = as.count != 0
 	if as.count == 0 {
 		return tx.DeleteAcc(st.Name, outKey)
 	}
-	raw, err := encodeAggState(as)
-	if err != nil {
-		return err
+	return tx.PutAcc(st.Name, outKey, encodeAggState(st, as))
+}
+
+// The stored state, in a compact binary form laid out by the stage: each
+// slot writes only what its fold keeps, and an expr emit (its aggregates
+// are slots) writes nothing. A store keeps no state across a format change
+// (the store resets), so one layout is read; a state that does not decode
+// under the stage refolds that key in full and is rewritten — never a
+// wrong result.
+
+const stateBinaryV2 = 0x02
+
+// slotLayout is what one slot's state holds.
+type slotLayout uint8
+
+const (
+	layoutNone  slotLayout = iota // an expr emit
+	layoutCount                   // n
+	layoutSum                     // n, then the sum when n is not 0
+	layoutBest                    // n, then the extreme
+	layoutItems                   // the items, each with the slot's order keys
+	layoutFirst                   // n, then the first item when n is not 0
+)
+
+func (s *exprAgg) layout() slotLayout {
+	switch {
+	case s.firstOnly:
+		return layoutFirst
+	case s.usesItems():
+		return layoutItems
+	case s.fn == "count":
+		return layoutCount
+	case s.fn == "sum", s.fn == "avg":
+		return layoutSum
 	}
-	return tx.PutAcc(st.Name, outKey, raw)
+	return layoutBest
 }
 
-// The stored state: JSON, values in the window codec's typed tags.
-
-type storedItem struct {
-	K []byte `json:"k"`
-	V any    `json:"v"`
-	O []any  `json:"o,omitempty"`
-}
-
-type storedSlot struct {
-	N     int64        `json:"n,omitempty"`
-	Sum   string       `json:"s,omitempty"`
-	Best  any          `json:"b,omitempty"`
-	Items []storedItem `json:"i,omitempty"`
-}
-
-type storedState struct {
-	Count int64        `json:"c"`
-	Slots []storedSlot `json:"a"`
-	Emits []storedSlot `json:"e"`
-}
-
-func encodeSlot(ss *slotState) storedSlot {
-	out := storedSlot{N: ss.n, Best: encodeStateValue(ss.best)}
-	if ss.sum != nil {
-		out.Sum = ss.sum.RatString()
+func emitLayout(e *Emit) slotLayout {
+	if e.Expr != "" {
+		return layoutNone
 	}
-	for i := range ss.items {
-		it := &ss.items[i]
-		si := storedItem{K: it.inKey, V: encodeStateValue(it.val)}
-		for _, o := range it.ord {
-			si.O = append(si.O, encodeStateValue(o))
+	switch legacyFn(e) {
+	case "count":
+		return layoutCount
+	case "collect":
+		return layoutItems
+	case "sum":
+		return layoutSum
+	case "min", "max":
+		return layoutBest
+	}
+	return layoutNone
+}
+
+func encodeAggState(st *Stage, as *aggState) []byte {
+	b := make([]byte, 0, 64)
+	b = append(b, stateBinaryV2)
+	b = binary.AppendVarint(b, as.count)
+	for k := range st.aggSlots {
+		b = appendSlot(b, st.aggSlots[k].layout(), &as.slots[k])
+	}
+	for i := range st.Emit {
+		b = appendSlot(b, emitLayout(&st.Emit[i]), &as.emits[i])
+	}
+	return b
+}
+
+func appendSlot(b []byte, l slotLayout, ss *slotState) []byte {
+	switch l {
+	case layoutCount:
+		b = binary.AppendVarint(b, ss.n)
+	case layoutSum:
+		b = binary.AppendVarint(b, ss.n)
+		if ss.n != 0 {
+			b = appendRat(b, ss.sum)
 		}
-		if len(it.ord) > 0 && si.O == nil {
-			si.O = []any{}
+	case layoutBest:
+		b = appendStateValue(binary.AppendVarint(b, ss.n), ss.best)
+	case layoutItems:
+		b = binary.AppendUvarint(b, uint64(len(ss.items)))
+		for i := range ss.items {
+			b = appendItem(b, &ss.items[i])
 		}
-		out.Items = append(out.Items, si)
+	case layoutFirst:
+		b = binary.AppendVarint(b, ss.n)
+		if ss.n != 0 {
+			b = appendItem(b, &ss.items[0])
+		}
 	}
-	return out
+	return b
 }
 
-// encodeStateValue tags a value; nil stays nil.
-func encodeStateValue(v any) any {
-	if v == nil {
+// appendItem writes an item: its input key, its value, and its order keys
+// (as many as the slot has).
+func appendItem(b []byte, it *stateItem) []byte {
+	b = appendBytes(b, it.inKey)
+	b = appendStateValue(b, it.val)
+	for _, o := range it.ord {
+		b = appendStateValue(b, o)
+	}
+	return b
+}
+
+// State value tags: the window codec's value set. A value of any other type
+// is stored as nil, as the JSON form stores it.
+const (
+	tagNil byte = iota
+	tagRat
+	tagString
+	tagFalse
+	tagTrue
+	tagTimestamp
+	tagZonedTimestamp
+	tagDate
+	tagInterval
+)
+
+func appendStateValue(b []byte, v any) []byte {
+	switch t := v.(type) {
+	case *big.Rat:
+		return appendRat(append(b, tagRat), t)
+	case string:
+		return appendBytes(append(b, tagString), []byte(t))
+	case bool:
+		if t {
+			return append(b, tagTrue)
+		}
+		return append(b, tagFalse)
+	case timestampVal:
+		tag := tagTimestamp
+		if t.zoned {
+			tag = tagZonedTimestamp
+		}
+		return binary.AppendVarint(append(b, tag), t.us)
+	case dateVal:
+		return binary.AppendVarint(append(b, tagDate), t.days)
+	case intervalVal:
+		b = binary.AppendVarint(append(b, tagInterval), t.months)
+		b = binary.AppendVarint(b, t.days)
+		return binary.AppendVarint(b, t.us)
+	}
+	return append(b, tagNil)
+}
+
+// appendRat writes a rational as its sign and the bytes of its numerator's
+// magnitude and its denominator.
+func appendRat(b []byte, r *big.Rat) []byte {
+	sign := byte(0)
+	if r.Sign() < 0 {
+		sign = 1
+	}
+	b = append(b, sign)
+	b = appendBytes(b, r.Num().Bytes())
+	return appendBytes(b, r.Denom().Bytes())
+}
+
+func appendBytes(b, v []byte) []byte {
+	b = binary.AppendUvarint(b, uint64(len(v)))
+	return append(b, v...)
+}
+
+// stateReader reads a binary state; the first malformed read sticks as err.
+type stateReader struct {
+	b   []byte
+	err error
+}
+
+var errBadState = errors.New("malformed fold state")
+
+func (r *stateReader) fail() {
+	if r.err == nil {
+		r.err = errBadState
+	}
+	r.b = nil
+}
+
+func (r *stateReader) byte() byte {
+	if len(r.b) == 0 {
+		r.fail()
+		return 0
+	}
+	c := r.b[0]
+	r.b = r.b[1:]
+	return c
+}
+
+func (r *stateReader) varint() int64 {
+	v, n := binary.Varint(r.b)
+	if n <= 0 {
+		r.fail()
+		return 0
+	}
+	r.b = r.b[n:]
+	return v
+}
+
+func (r *stateReader) uvarint() uint64 {
+	v, n := binary.Uvarint(r.b)
+	if n <= 0 {
+		r.fail()
+		return 0
+	}
+	r.b = r.b[n:]
+	return v
+}
+
+// count reads a length no larger than the bytes left, so a corrupt length
+// cannot ask for a huge allocation.
+func (r *stateReader) count() int {
+	v := r.uvarint()
+	if v > uint64(len(r.b)) {
+		r.fail()
+		return 0
+	}
+	return int(v) //nolint:gosec // G115: v is at most len(r.b)
+}
+
+func (r *stateReader) bytes() []byte {
+	n := r.count()
+	if r.err != nil {
 		return nil
 	}
-	return encodeWinValue(v)
+	v := r.b[:n:n]
+	r.b = r.b[n:]
+	return v
 }
 
-func encodeAggState(as *aggState) ([]byte, error) {
-	s := storedState{Count: as.count, Slots: make([]storedSlot, len(as.slots)), Emits: make([]storedSlot, len(as.emits))}
-	for i := range as.slots {
-		s.Slots[i] = encodeSlot(&as.slots[i])
+func (r *stateReader) rat() *big.Rat {
+	sign := r.byte()
+	num := new(big.Int).SetBytes(r.bytes())
+	den := new(big.Int).SetBytes(r.bytes())
+	if r.err != nil || sign > 1 || den.Sign() == 0 {
+		r.fail()
+		return nil
 	}
-	for i := range as.emits {
-		s.Emits[i] = encodeSlot(&as.emits[i])
+	if sign == 1 {
+		num.Neg(num)
 	}
-	return json.Marshal(s)
+	return new(big.Rat).SetFrac(num, den)
 }
 
-func decodeSlot(s storedSlot, nOrd int) (slotState, error) {
-	ss := slotState{n: s.N}
-	if s.Sum != "" {
-		r, ok := new(big.Rat).SetString(s.Sum)
-		if !ok {
-			return ss, fmt.Errorf("bad sum %q", s.Sum)
-		}
-		ss.sum = r
+func (r *stateReader) value() any {
+	switch r.byte() {
+	case tagNil:
+		return nil
+	case tagRat:
+		return r.rat()
+	case tagString:
+		return string(r.bytes())
+	case tagFalse:
+		return false
+	case tagTrue:
+		return true
+	case tagTimestamp:
+		return timestampVal{us: r.varint()}
+	case tagZonedTimestamp:
+		return timestampVal{us: r.varint(), zoned: true}
+	case tagDate:
+		return dateVal{days: r.varint()}
+	case tagInterval:
+		months := r.varint()
+		days := r.varint()
+		return intervalVal{months: months, days: days, us: r.varint()}
 	}
-	var err error
-	if ss.best, err = decodeStateValue(s.Best); err != nil {
-		return ss, err
-	}
-	for _, si := range s.Items {
-		it := stateItem{inKey: si.K, ord: make([]any, nOrd)}
-		if it.val, err = decodeStateValue(si.V); err != nil {
-			return ss, err
+	r.fail()
+	return nil
+}
+
+func (r *stateReader) slot(l slotLayout, nOrd int) slotState {
+	var ss slotState
+	switch l {
+	case layoutCount:
+		ss.n = r.varint()
+	case layoutSum:
+		if ss.n = r.varint(); ss.n != 0 {
+			ss.sum = r.rat()
 		}
-		if len(si.O) != nOrd {
-			return ss, fmt.Errorf("item has %d order keys, want %d", len(si.O), nOrd)
-		}
-		for i, o := range si.O {
-			if it.ord[i], err = decodeStateValue(o); err != nil {
-				return ss, err
+	case layoutBest:
+		ss.n = r.varint()
+		ss.best = r.value()
+	case layoutItems:
+		for range r.count() {
+			if r.err != nil {
+				break
 			}
+			ss.items = append(ss.items, r.item(nOrd))
 		}
-		ss.items = append(ss.items, it)
+	case layoutFirst:
+		switch ss.n = r.varint(); {
+		case ss.n < 0:
+			r.fail()
+		case ss.n > 0:
+			ss.items = []stateItem{r.item(nOrd)}
+		}
 	}
-	return ss, nil
+	return ss
 }
 
-func decodeStateValue(v any) (any, error) {
-	if v == nil {
-		return nil, nil
+func (r *stateReader) item(nOrd int) stateItem {
+	it := stateItem{inKey: r.bytes(), val: r.value()}
+	if nOrd > 0 {
+		it.ord = make([]any, nOrd)
+		for i := range it.ord {
+			it.ord[i] = r.value()
+		}
 	}
-	return decodeWinValue(v)
+	return it
 }
 
 func decodeAggState(st *Stage, raw []byte) (*aggState, error) {
-	var s storedState
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&s); err != nil {
-		return nil, err
+	if len(raw) == 0 || raw[0] != stateBinaryV2 {
+		return nil, errBadState
 	}
-	if len(s.Slots) != len(st.aggSlots) || len(s.Emits) != len(st.Emit) {
-		return nil, fmt.Errorf("state shape does not match the stage")
+	r := &stateReader{b: raw[1:]}
+	as := newAggState(st)
+	as.count = r.varint()
+	for k := range st.aggSlots {
+		s := &st.aggSlots[k]
+		as.slots[k] = r.slot(s.layout(), len(s.order))
 	}
-	as := &aggState{count: s.Count, slots: make([]slotState, len(s.Slots)), emits: make([]slotState, len(s.Emits))}
-	var err error
-	for i := range s.Slots {
-		if as.slots[i], err = decodeSlot(s.Slots[i], len(st.aggSlots[i].order)); err != nil {
-			return nil, err
-		}
+	for i := range st.Emit {
+		as.emits[i] = r.slot(emitLayout(&st.Emit[i]), 0)
 	}
-	for i := range s.Emits {
-		if as.emits[i], err = decodeSlot(s.Emits[i], 0); err != nil {
-			return nil, err
-		}
+	if r.err == nil && len(r.b) != 0 {
+		r.fail()
+	}
+	if r.err != nil {
+		return nil, r.err
 	}
 	return as, nil
+}
+
+// refoldAggregateNoObject is refoldAggregate in refoldAggregateFull's shape.
+func (g *Graph) refoldAggregateNoObject(tx *stagestore.Tx, st *Stage, outKey []byte) ([]byte, any, bool, error) {
+	out, live, err := g.refoldAggregate(tx, st, outKey)
+	return out, nil, live, err
+}
+
+// Output reads a stage's current output for one key (nil if absent): for
+// an incremental aggregate key that keeps a fold state, its rendering;
+// otherwise the stored output.
+func (g *Graph) Output(tx *stagestore.Tx, stage string, outKey []byte) ([]byte, error) {
+	if n := g.byName[stage]; n != nil && n.def.incrementalAggregate() {
+		raw, err := tx.GetAcc(stage, outKey)
+		if err != nil {
+			return nil, err
+		}
+		if raw != nil {
+			return g.renderStored(n.def, raw)
+		}
+	}
+	return tx.GetOut(stage, outKey)
+}
+
+// OutputCount reports how many keys of a stage hold an output — the
+// introspection read that distinguishes "the fan produced nothing" from
+// "the join never matched". 0 for a stage that has never folded.
+func (g *Graph) OutputCount(tx *stagestore.Tx, stage string) (int, error) {
+	count, err := tx.OutKeyCount(stage)
+	if err != nil {
+		return 0, err
+	}
+	n := g.byName[stage]
+	if n == nil || !n.def.incrementalAggregate() {
+		return count, nil
+	}
+	err = tx.EachAcc(stage, func(_, raw []byte) error {
+		out, err := g.renderStored(n.def, raw)
+		if out != nil {
+			count++
+		}
+		return err
+	})
+	return count, err
+}
+
+// renderStored is a stored fold state's output (nil: none, as when having
+// holds the key back).
+func (g *Graph) renderStored(st *Stage, raw []byte) ([]byte, error) {
+	as, err := decodeAggState(st, raw)
+	if err != nil {
+		return nil, fmt.Errorf("stage %q: decode fold state: %w", st.Name, err)
+	}
+	out, _, live, err := g.renderState(st, as, false)
+	if err != nil || !live {
+		return nil, err
+	}
+	return out, nil
 }

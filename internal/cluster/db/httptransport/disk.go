@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 
 	"github.com/committeddb/committed/internal/cluster"
 )
@@ -43,8 +42,7 @@ func (t *HttpTransport) handleDiskReport(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if r.Header.Get(clusterIDHeader) != clusterID || r.Header.Get(protocolHeader) != protocolVersion {
-		http.Error(w, "wrong cluster or protocol", http.StatusPreconditionFailed)
+	if !t.admitPeer(w, r, false) {
 		return
 	}
 	if t.token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+t.token)) != 1 {
@@ -89,7 +87,7 @@ func (t *HttpTransport) SendDiskReport(ctx context.Context, leader uint64, state
 	if p == nil {
 		return cluster.DiskVerdict{}, fmt.Errorf("disk report: peer %d is not registered", leader)
 	}
-	target, err := url.JoinPath(p.url, diskReportPath)
+	target, err := p.endpoint(diskReportPath)
 	if err != nil {
 		return cluster.DiskVerdict{}, err
 	}
@@ -105,12 +103,8 @@ func (t *HttpTransport) SendDiskReport(ctx context.Context, leader uint64, state
 	if err != nil {
 		return cluster.DiskVerdict{}, err
 	}
-	req.Header.Set(clusterIDHeader, clusterID)
-	req.Header.Set(protocolHeader, protocolVersion)
+	t.setPeerHeaders(req.Header, leader)
 	req.Header.Set("Content-Type", "application/json")
-	if t.token != "" {
-		req.Header.Set("Authorization", "Bearer "+t.token)
-	}
 	// A peer redirect must not carry the infrastructure credential elsewhere.
 	client := *t.client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }

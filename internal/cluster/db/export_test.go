@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -149,31 +149,6 @@ func SetTestTransportFactory(f TransportFactory) {
 	pkgDefaultTransportFactory = f
 }
 
-// PartitionPeerForTest drops the named peer from this Raft's transport so
-// outbound messages to it become no-ops. Combined with calling the same
-// method on the OTHER side of the partition, this simulates a transport-
-// level network partition without touching the etcd raft state machine.
-//
-// This is exposed as an exported method on a *_test.go file so it lives
-// in the production package (giving it access to n.transport) but does
-// not ship in non-test builds. Tests in package db_test reach it via
-// db.(*Raft).PartitionPeerForTest.
-//
-// Used by TestPreVote_PartitionedFollowerDoesNotDisruptLeader to verify
-// that a partitioned-then-rejoining follower does not disrupt a healthy
-// leader when PreVote is enabled.
-func (n *Raft) PartitionPeerForTest(id uint64) {
-	n.transport.RemovePeer(id)
-}
-
-// UnpartitionPeerForTest re-adds a previously-removed peer to this Raft's
-// transport, healing the partition. The peer struct must carry the same
-// Context (URL) the cluster was started with — the test passes the
-// original raft.Peer back through.
-func (n *Raft) UnpartitionPeerForTest(p raft.Peer) error {
-	return n.transport.AddPeer(p)
-}
-
 // MembersForTest returns this Raft's current membership as observed locally:
 // members is the union of voters (incoming + mid-joint outgoing) and learners,
 // and joint reports whether the configuration is still in the joint state.
@@ -245,6 +220,24 @@ func NewRaftForCompactionTest(s raftStorage, maxSize uint64, maxAge time.Duratio
 	n.lastCompactTime.Store(time.Now().UnixNano())
 	return n
 }
+
+// ProposeUpdateNodeForTest proposes an address UpdateNode without waiting, as
+// the leader's agreed-address loop does.
+func (db *DB) ProposeUpdateNodeForTest(ctx context.Context, id uint64, peerURL string) error {
+	return db.proposeUpdateNode(ctx, id, peerURL)
+}
+
+// SetMembershipReproposeIntervalForTest shortens how long a dropped membership
+// change waits before it is proposed again.
+func SetMembershipReproposeIntervalForTest(t interface{ Cleanup(func()) }, d time.Duration) {
+	old := membershipReproposeInterval
+	membershipReproposeInterval = d
+	t.Cleanup(func() { membershipReproposeInterval = old })
+}
+
+// SetSnapshotLacksMemberForTest marks the held snapshot as missing a member,
+// as applying an add does.
+func (n *Raft) SetSnapshotLacksMemberForTest() { n.snapshotLacksMember.Store(true) }
 
 // MaybeCompactForTest exposes maybeCompact so unit tests can drive the
 // decision logic without wiring up a full Ready loop.
@@ -674,7 +667,7 @@ func (db *DB) RaftAppliedCoversStorageForTest() bool { return db.raft.raftApplie
 // WaitForVoterForTest drives waitForMembership(memberVoter) directly, for the
 // bounded-wait test.
 func (db *DB) WaitForVoterForTest(ctx context.Context, id uint64) error {
-	return db.waitForMembership(ctx, id, memberVoter)
+	return db.waitForMembership(ctx, id, memberVoter, db.raft.rejectionsSoFar(), nil)
 }
 
 // SetMembershipSettleTimeoutForTest shortens the settle timeout; returns the
@@ -726,3 +719,34 @@ const FeatureLevelZonePinningForTest = featureLevelZonePinning
 
 // TermForTest returns the live Raft term without reading storage during snapshot work.
 func (n *Raft) TermForTest() uint64 { return n.node.Status().GetTerm() }
+
+// MembershipGuardMarkerForTest is the Context of the UpdateNode that switches
+// the apply-time membership guard on.
+const MembershipGuardMarkerForTest = membershipGuardMarker
+
+// GuardRejectionsForTest counts the changes this node's membership guard
+// refused.
+func (n *Raft) GuardRejectionsForTest() uint64 { return n.guard.rejections.Load() }
+
+// MembershipGuardOnForTest reports whether this node has applied the marker
+// that switches the membership guard on, and raft has acknowledged it (a
+// conf change proposed before then is dropped).
+func (db *DB) MembershipGuardOnForTest() bool {
+	_, on := db.storage.MembershipGuardIndex()
+	return on && db.raft.membershipApplied()
+}
+
+// AddLearnerUncheckedForTest proposes an add-learner without the
+// proposal-time checks, as a request racing another change would reach the
+// log, and waits like AddLearner.
+func (db *DB) AddLearnerUncheckedForTest(ctx context.Context, id uint64, peerURL string) error {
+	cc := &raftpb.ConfChangeV2{
+		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
+		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode.Enum(), NodeId: &id}},
+		Context:    []byte(peerURL),
+	}
+	return db.proposeConfChange(ctx, cc, id, memberLearner)
+}
+
+// IsRemovedForTest is the transport's IsIDRemoved answer for id.
+func (n *Raft) IsRemovedForTest(id uint64) bool { return n.isRemoved(id) }

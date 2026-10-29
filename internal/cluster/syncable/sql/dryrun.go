@@ -38,7 +38,10 @@ const dryRunFindingFloor = 50
 func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts cluster.DryRunOptions) (*cluster.DryRunReport, error) {
 	start := time.Now()
 	cfg := p.config
-	g := stages.BuildGraph(cfg.Stages)
+	g, err := stageGraph(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	dir, err := os.MkdirTemp("", "committed-dryrun-*")
 	if err != nil {
@@ -132,7 +135,7 @@ func (p *Projection) DryRun(ctx context.Context, feed cluster.DryRunFeed, opts c
 	}
 	err = store.View(func(tx *stagestore.Tx) error {
 		for name, fc := range flows {
-			keys, err := tx.OutKeyCount(name)
+			keys, err := g.OutputCount(tx, name)
 			if err != nil {
 				return err
 			}

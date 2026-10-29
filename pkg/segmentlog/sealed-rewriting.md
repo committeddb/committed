@@ -2,14 +2,19 @@
 
 `Log.RewriteSealed(ctx, generation, transform)` applies the generic keep/replace/
 remove callback to sealed records and publishes the resulting layout atomically.
-This is experimental and is not connected to Committed's RTBF protocol.
+Committed's scrub uses it so that appends continue while it rewrites: under its
+own append lock it calls `Log.Seal`, which closes the active tail as a sealed
+range (a rollover with an empty successor) and returns the scope's new end, then
+releases that lock and runs `RewriteSealedWithPublicationLock`. Every record
+through the scrub bound is then in scope, and later appends are not.
 
 ## Scope and identity
 
 The returned `SealedEnd` is the exclusive end of the sealed scope. The active
 tail is untouched, including its append frontier and original rotation accounting.
-An application cannot treat this operation as completing erasure of active records.
-Use `Log.Rewrite` when the tail must join the transaction. It preserves original
+An application cannot treat this operation as completing erasure of active records:
+call `Seal` first to bring them into scope, or use `Log.Rewrite` when the tail
+must join the transaction. It preserves original
 accounting and append progress through a catalog checkpoint; see
 [whole-log rewriting](whole-log-rewriting.md).
 

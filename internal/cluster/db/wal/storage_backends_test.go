@@ -12,7 +12,6 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/datadir"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 	"github.com/committeddb/committed/internal/cluster/metrics"
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
@@ -20,16 +19,14 @@ import (
 // Each factory is explicitly chosen and remembers whether it created this test
 // directory. No on-disk format inference or production selector is involved.
 func storageTestOpeners() map[string]eventLogOpener {
-	result := map[string]eventLogOpener{"production-tidwall": openEventLog}
+	result := map[string]eventLogOpener{}
 	for name, create := range eventLogTestBackends() {
 		created := false
-		result[name] = func(path string, _ *metrics.Metrics, _ tidwall.LegacyOptions) (*eventLogBinding, error) {
+		result[name] = func(path string, _ *metrics.Metrics) (*eventLogBinding, error) {
 			var log eventlog.EventLog
 			var err error
 			if !created {
 				log, err = create(path)
-			} else if name == "tidwall" {
-				log, err = tidwall.Open(path)
 			} else {
 				cache := segmentlog.CacheOptions{}
 				if name == "segmented-cached" {
@@ -123,7 +120,7 @@ func TestStorageStartupApplyAndReopenBackends(t *testing.T) {
 func TestStorageFailedStartupClosesEventBackend(t *testing.T) {
 	path := t.TempDir()
 	var binding *eventLogBinding
-	openEvents := func(dir string, _ *metrics.Metrics, _ tidwall.LegacyOptions) (*eventLogBinding, error) {
+	openEvents := func(dir string, _ *metrics.Metrics) (*eventLogBinding, error) {
 		log, err := segmented.Create(dir, 1, segmentlog.LogOptions{})
 		require.NoError(t, err)
 		require.NoError(t, log.Append([]eventlog.Record{{ID: 1, Payload: []byte{0xff}}}))

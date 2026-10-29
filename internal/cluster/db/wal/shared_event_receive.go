@@ -18,6 +18,8 @@ func (s *Storage) appendFetchedEntries(generation uint64, payloads [][]byte) err
 	if err != nil {
 		return err
 	}
+	s.eventRewriteMu.Lock()
+	defer s.eventRewriteMu.Unlock()
 	s.eventAppendMu.Lock()
 	defer s.eventAppendMu.Unlock()
 	s.eventMu.RLock()

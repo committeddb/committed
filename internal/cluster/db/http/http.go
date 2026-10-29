@@ -186,6 +186,7 @@ func New(d *db.DB, opts ...Option) *HTTP {
 			r.Post("/v1/membership", h.AddMember)
 			r.Post("/v1/membership/{id}/promote", h.PromoteMember)
 			r.Delete("/v1/membership/{id}", h.RemoveMember)
+			r.Put("/v1/membership/{id}/address", h.SetMemberAddress)
 			r.Get("/v1/node/backup", h.NodeBackup)
 			if o.pprof {
 				r.Mount("/debug", middleware.Profiler())
@@ -344,6 +345,7 @@ func New(d *db.DB, opts ...Option) *HTTP {
 				r.Post("/membership", h.AddMember)
 				r.Post("/membership/{id}/promote", h.PromoteMember)
 				r.Delete("/membership/{id}", h.RemoveMember)
+				r.Put("/membership/{id}/address", h.SetMemberAddress)
 			}
 
 			// Answer unmatched /v1 paths from inside this (authenticated)

@@ -9,8 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	twal "github.com/tidwall/wal"
-
-	"github.com/committeddb/committed/internal/cluster/db/eventlog/tidwall"
 )
 
 // encodeRecord returns the exact on-disk shape of one committed WAL record:
@@ -150,6 +148,33 @@ func TestRepairLog_MagicCorruptionIsCorruptionNotValid(t *testing.T) {
 	require.Equal(t, before, after, "magic corruption is data corruption — never modified, never counted valid")
 }
 
+// TestRepairLog_NewerFrameIsNotCorruption: a record a newer binary framed
+// (intact magic, a version above this binary's) is sound data this binary
+// cannot read. It is diagnosed as such, never counted corrupt (whose remedy,
+// a backup splice or a rebuild, would discard it), and never modified.
+func TestRepairLog_NewerFrameIsNotCorruption(t *testing.T) {
+	dir := t.TempDir()
+	payloads := [][]byte{[]byte("alpha"), []byte("bravo"), []byte("charlie")}
+	segPath := writeSegment(t, dir, 1, payloads)
+
+	raw, err := os.ReadFile(segPath)
+	require.NoError(t, err)
+	versionPos := len(encodeRecord(payloads[0])) + (len(encodeRecord(payloads[1])) - len(frame(payloads[1]))) + len(frameMagic)
+	raw[versionPos] = frameVersion + 1
+	require.NoError(t, os.WriteFile(segPath, raw, 0o600))
+
+	d, err := RepairLog(dir, true)
+	require.NoError(t, err)
+	require.Equal(t, LogNewerFormat, d.Status)
+	require.False(t, d.Repaired)
+	require.Equal(t, 1, d.Records, "the records before it are counted")
+	require.Contains(t, d.Detail, "written by a newer committed")
+
+	after, err := os.ReadFile(segPath)
+	require.NoError(t, err)
+	require.Equal(t, raw, after, "a newer binary's log is never modified")
+}
+
 // TestDiagnoseLog_Clean: a fully valid log reports clean with the record count.
 func TestDiagnoseLog_Clean(t *testing.T) {
 	dir := t.TempDir()
@@ -174,13 +199,9 @@ func TestOfflineMaintenance_RefusesRunningNode(t *testing.T) {
 
 	_, err = RepairNode(dir, false)
 	require.ErrorContains(t, err, "in use by a running node", "repair must refuse a live node")
-	_, err = DecompressNode(dir)
-	require.ErrorContains(t, err, "in use by a running node", "decompress must refuse a live node")
 
 	require.NoError(t, s.Close())
 	_, err = RepairNode(dir, false)
-	require.NoError(t, err, "a stopped node's dir must be accepted")
-	_, err = DecompressNode(dir)
 	require.NoError(t, err, "a stopped node's dir must be accepted")
 }
 
@@ -203,7 +224,7 @@ func TestOpenLog_WrapsTornTailWithActionableError(t *testing.T) {
 
 	for name, open := range map[string]func() error{
 		"raft":  func() error { _, err := openLog(dir, "entry_log", nil, nil); return err },
-		"event": func() error { _, err := openEventLog(dir, nil, tidwall.LegacyOptions{}); return err },
+		"event": func() error { _, err := openTidwallEventReader(dir); return err },
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := open()

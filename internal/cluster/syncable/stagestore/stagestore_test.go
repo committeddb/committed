@@ -1,6 +1,7 @@
 package stagestore
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,14 +56,76 @@ func TestStoreFingerprintMismatchResets(t *testing.T) {
 	require.NoError(t, s.Close())
 }
 
-func TestStoreCorruptFileResets(t *testing.T) {
+func TestStoreCorruptDatabaseResets(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "p1.db"), []byte("not a bolt file, definitely"), 0o600))
+	require.NoError(t, os.WriteFile(dbDir(dir), []byte("not a database, definitely"), 0o600))
 
 	s, reset, err := Open(dir, "p1", "fp")
 	require.NoError(t, err, "a torn store is deleted and rebuilt, never fatal")
 	require.True(t, reset)
 	require.NoError(t, s.Close())
+}
+
+// The one-file-per-syncable stores of earlier formats are removed when the
+// shared database opens: nothing can read them, and their syncables
+// re-derive.
+func TestStoreRemovesLegacyFiles(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "p1.db")
+	require.NoError(t, os.WriteFile(legacy, []byte("a format 3 bbolt store"), 0o600))
+
+	s, reset, err := Open(dir, "p1", "fp")
+	require.NoError(t, err)
+	require.True(t, reset)
+	require.NoError(t, s.Close())
+	_, err = os.Stat(legacy)
+	require.True(t, os.IsNotExist(err))
+}
+
+// Syncables share one database but never each other's state: a reset or a
+// removal of one leaves the other whole.
+func TestStoresShareADatabaseInIsolation(t *testing.T) {
+	dir := t.TempDir()
+	put := func(s *Store, v string) {
+		require.NoError(t, s.Update(func(tx *Tx) error {
+			return errors.Join(tx.PutOut("s", []byte("k"), []byte(v)), tx.SetFrontier(9))
+		}))
+	}
+	get := func(s *Store) string {
+		var got []byte
+		require.NoError(t, s.View(func(tx *Tx) error {
+			var err error
+			got, err = tx.GetOut("s", []byte("k"))
+			return err
+		}))
+		return string(got)
+	}
+	a, _, err := Open(dir, "a", "fp")
+	require.NoError(t, err)
+	b, _, err := Open(dir, "a2", "fp") // a name that extends another's
+	require.NoError(t, err)
+	put(a, "A")
+	put(b, "B")
+	require.Equal(t, "A", get(a))
+	require.Equal(t, "B", get(b))
+
+	require.NoError(t, a.Close())
+	a, reset, err := Open(dir, "a", "fp-changed")
+	require.NoError(t, err)
+	require.True(t, reset)
+	require.Empty(t, get(a), "a's state reset")
+	require.Equal(t, "B", get(b), "b's state untouched")
+	require.NoError(t, a.Close())
+
+	require.NoError(t, Remove(dir, "a"))
+	has, err := HasState(dir, "a")
+	require.NoError(t, err)
+	require.False(t, has)
+	require.Equal(t, "B", get(b))
+	require.NoError(t, b.Close())
+	has, err = HasState(dir, "a2")
+	require.NoError(t, err)
+	require.True(t, has, "state survives the database closing")
 }
 
 func TestStoreEmptyDirRejected(t *testing.T) {

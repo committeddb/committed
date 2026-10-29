@@ -61,23 +61,16 @@ func TestFetchedLogicalEntriesBackends(t *testing.T) {
 			// Read through the raw storage capability to ensure no re-marshalling
 			// silently changed unknown fields on disk.
 			for i, raw := range [][]byte{ten, twenty, thirty} {
-				var stored []byte
-				if reopened.eventLog.managed != nil {
-					record, err := reopened.eventLog.managed.Read(uint64(i+1) * 10)
-					require.NoError(t, err)
-					stored = record.Payload
-				} else {
-					stored, err = reopened.readEventAt(uint64(i + 1))
-					require.NoError(t, err)
-				}
-				require.Equal(t, raw, stored)
+				record, err := reopened.eventLog.managed.Read(uint64(i+1) * 10)
+				require.NoError(t, err)
+				require.Equal(t, raw, record.Payload)
 			}
 		})
 	}
 }
 
 func TestFetchedLogicalEntriesUseSelectedGeneration(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		t.Run(name, func(t *testing.T) {
 			s, err := openStorage(t.TempDir(), nil, nil, nil, storageTestOpeners()[name], WithSafeMode())
 			require.NoError(t, err)

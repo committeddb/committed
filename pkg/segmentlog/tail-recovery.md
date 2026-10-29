@@ -3,7 +3,7 @@
 Recovery validates every frame and reconstructs the physical SHA-256 digest.
 Validation-only scans now reuse their group header and body buffers. The body
 buffer grows when a larger validated group requires it; its size is bounded by
-the existing 32 MiB group limit plus trailer. The scanner creates no record list
+the group limit (64 MiB + 16 bytes) plus trailer. The scanner creates no record list
 when there is no visitor. Scans that deliver records keep independent group bodies
 so callers can retain payloads across callbacks.
 

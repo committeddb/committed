@@ -85,7 +85,7 @@ func TestWhenExprCollapsesComputeThenFilter(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("quoted-open", []byte(key))
+			v, err := g.Output(tx, "quoted-open", []byte(key))
 			got = string(v)
 			return err
 		}))

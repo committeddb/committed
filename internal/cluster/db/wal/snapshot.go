@@ -103,7 +103,7 @@ func (s *Storage) CreateSnapshot(index uint64, confState *pb.ConfState) (*pb.Sna
 // follower needing the gap is shipped that stale snapshot and loops until the
 // leader's next compaction refreshes it. No-op when no snapshot is pending (a direct
 // Compact with no preceding CreateSnapshot). Mirrors the persist half of Save and,
-// like Save, runs on the raft serve goroutine, so it shares Save's snapMu discipline
+// like Save, runs on raft's append goroutine, so it shares Save's snapMu discipline
 // (copy under the lock, append without it).
 func (s *Storage) persistPendingSnapshot() error {
 	s.snapMu.Lock()
@@ -182,9 +182,9 @@ func (s *Storage) RestoreSnapshot(snap *pb.Snapshot) error {
 	// snapshot is a compacted metadata baseline, so a pre-restore count no longer
 	// maps onto the state — reset it, exactly as a restart does (Open starts it at
 	// zero and re-accumulates from post-restart applies). Done here, synchronously
-	// on the Ready-loop goroutine, rather than in the async refreshAfterRestore: a
-	// later ApplyCommitted (same goroutine) may bump it, and an async reset would
-	// race and clobber that legitimate post-restore increment.
+	// while apply is held off for the install, rather than in the async
+	// refreshAfterRestore: a later ApplyCommitted may bump it, and an async reset
+	// would race and clobber that legitimate post-restore increment.
 	s.metadataBacklog.Store(0)
 	s.metadataBacklogBytes.Store(0)
 
@@ -283,16 +283,6 @@ func (s *Storage) swapBboltToSnapshotData(data []byte, reconciledIndex uint64) e
 	}
 	s.keyValueStorage = db
 
-	// The swapped-in bbolt came from another node's CreateSnapshot. That node
-	// normally already migrated to the versioned-bucket layout before
-	// snapshotting, but a snapshot from a pre-migration node would arrive flat;
-	// run the idempotent migration so forEachCurrent — in every later reader —
-	// sees versioned buckets rather than silently finding nothing. Mirrors Open,
-	// which migrates immediately after bolt.Open.
-	if err := db.Update(migrateToVersionedBuckets); err != nil {
-		return fmt.Errorf("migrate swapped bbolt to versioned buckets: %w", err)
-	}
-
 	// Reconcile appliedIndex to reconciledIndex (the snapshot's raft index). The
 	// serialized bbolt embeds the source node's LIVE appliedIndex, which is >=
 	// the snapshot's raft index (compactTo = applied-8, below applied). Adopting
@@ -305,6 +295,10 @@ func (s *Storage) swapBboltToSnapshotData(data []byte, reconciledIndex uint64) e
 	// kvMu.RLock and would deadlock under a caller holding kvMu.Lock — so a
 	// restart's loadAppliedIndex reads the reconciled value, not the embedded one.
 	if err := db.Update(func(tx *bolt.Tx) error {
+		// A snapshot from an older release lacks the buckets it predates.
+		if err := createBuckets(tx); err != nil {
+			return err
+		}
 		b := tx.Bucket(appliedIndexBucket)
 		if b == nil {
 			return ErrBucketMissing

@@ -84,6 +84,14 @@ var ErrCompactionDeferred = errors.New("raft-log compaction deferred: a layout f
 // from a healthy replica.
 var ErrCorruptEntry = errors.New("wal: entry checksum mismatch (data corruption); see docs/operations/rebuild.md")
 
+// ErrNewerFrame marks a stored WAL entry framed by a newer binary: the frame's
+// magic is intact but its version byte is above the one this binary reads.
+// The entry is unreadable here exactly as a corrupt one is, so the error also
+// matches ErrCorruptEntry and every reader refuses it the same way, but the
+// remedy is the opposite: run the binary that wrote it. Repairing or
+// rebuilding would discard sound data.
+var ErrNewerFrame = errors.New("wal: entry written by a newer committed")
+
 // ErrNotSyncableOwner is returned by RebuildSyncable / RematerializeSyncable
 // when this node does not serve the zone-pinned syncable: the verbs' worker
 // drain must run WHERE THE WORKER RUNS (the drain-before-reset ordering that
@@ -614,6 +622,11 @@ type StageStat struct {
 	// stays live. Nonzero answers "the delete event arrived but the key
 	// is still live" in one read. Omitted while zero.
 	UnkeyedDeletes int64 `json:"unkeyedDeletes,omitempty"`
+	// ScrubbedInputs counts reads, since the worker started, of retained
+	// inputs a scrub had already erased from the log: inputs a later entry
+	// deletes or supersedes, which the stage holds until it folds that
+	// entry. Nonzero while a stage lags behind a scrub. Omitted while zero.
+	ScrubbedInputs int64 `json:"scrubbedInputs,omitempty"`
 	// HavingRejected counts refolds an aggregate stage's having held back
 	// since the worker started — "folded but filtered" told apart from "no
 	// inputs" (keys 0 with havingRejected > 0: the having rejects every
@@ -651,7 +664,10 @@ type StageStat struct {
 // rendering version it was last converged under, next to those rows (so it
 // moves, drops, and restores with them). The worker verifies the stamp before
 // it syncs and parks on a mismatch; a rematerialization re-stamps on
-// completion (db/rendering_stamp.go). Resolved through the Unwrap chain
+// completion (db/rendering_stamp.go). An unstamped destination is stamped
+// when committed has not written to it (checkpoint 0) or it holds no rows;
+// one holding rows committed wrote under no stamp (a restore from a
+// pre-stamp backup, a hand rebuild) parks. Resolved through the Unwrap chain
 // (SyncableAs), so mode wrappers forward it.
 type RenderingStamped interface {
 	// RenderingVersion is the version this binary renders.
@@ -661,6 +677,9 @@ type RenderingStamped interface {
 	RenderingStamp(ctx context.Context) (version uint64, present bool, err error)
 	// StampRendering records RenderingVersion as the destination's stamp.
 	StampRendering(ctx context.Context) error
+	// DestinationHasRows reports whether the destination, or any helper
+	// table committed keeps beside it, holds a row.
+	DestinationHasRows(ctx context.Context) (bool, error)
 }
 
 //counterfeiter:generate . SyncableParser
@@ -673,6 +692,26 @@ type StageRecoverer interface {
 	// is already durably applied), refolding each touched key once for the
 	// run, and advances the frontier to the last.
 	FoldStagesOnly(as []*Actual) error
+}
+
+// EntityReader reads a committed entity back from the event log by raft
+// index: a staged projection keeps a pointer to an input instead of a copy
+// and reads the input back when a refold needs it.
+type EntityReader interface {
+	// ReadEntity returns the data of the last entity of topic typeID with
+	// key in the Actual at raft index, as the fold that kept the pointer
+	// read it: migrated from type version from to version to (from 0: the
+	// data as stored). found is false when the log no longer holds the
+	// entity: a scrub erased it, which it does only to an entity a later
+	// entry for the same key deletes or supersedes. A missing entity that no
+	// committed scrub can account for is an error.
+	ReadEntity(index uint64, typeID string, key []byte, from, to int) (data []byte, found bool, err error)
+}
+
+// EntityReaderAware is a syncable that reads entities back from the log; the
+// engine hands it a reader before it syncs.
+type EntityReaderAware interface {
+	SetEntityReader(r EntityReader)
 }
 
 type SyncableParser interface {

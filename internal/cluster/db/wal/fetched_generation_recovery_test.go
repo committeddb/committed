@@ -60,7 +60,7 @@ func TestFetchedGenerationAdoptionAndRestart(t *testing.T) {
 }
 
 func TestFetchedGenerationInterruptedPublication(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		for _, after := range []bool{false, true} {
 			phase := "before-publication"
 			if after {
@@ -99,7 +99,7 @@ func TestFetchedGenerationInterruptedPublication(t *testing.T) {
 }
 
 func TestFetchedGenerationDoesNotRelabelHistory(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented"} {
+	for _, name := range []string{"segmented"} {
 		for _, erased := range []bool{false, true} {
 			mode := "surviving"
 			if erased {
@@ -134,7 +134,7 @@ func TestFetchedGenerationDoesNotRelabelHistory(t *testing.T) {
 }
 
 func TestFetchedGenerationPreservesExistingAppliedProgress(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented"} {
+	for _, name := range []string{"segmented"} {
 		t.Run(name, func(t *testing.T) {
 			path := t.TempDir()
 			opener := storageTestOpeners()[name]
@@ -163,7 +163,7 @@ func TestFetchedGenerationPreservesExistingAppliedProgress(t *testing.T) {
 }
 
 func TestSharedServeAdoptsPeerGeneration(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented"} {
+	for _, name := range []string{"segmented"} {
 		t.Run(name, func(t *testing.T) {
 			source, err := openStorage(t.TempDir(), nil, nil, nil, storageTestOpeners()[name], WithSafeMode())
 			require.NoError(t, err)

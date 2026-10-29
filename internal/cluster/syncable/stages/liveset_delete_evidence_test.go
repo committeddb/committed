@@ -61,7 +61,7 @@ func TestLiveSetDeleteSideLiveTopology(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("unbilled", []byte(key))
+			v, err := g.Output(tx, "unbilled", []byte(key))
 			got = string(v)
 			return err
 		}))
@@ -116,7 +116,7 @@ func TestUnkeyedDeleteShapedInputCounted(t *testing.T) {
 	get := func(key string) string {
 		var got string
 		require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-			v, err := tx.GetOut("txn-live", []byte(key))
+			v, err := g.Output(tx, "txn-live", []byte(key))
 			got = string(v)
 			return err
 		}))

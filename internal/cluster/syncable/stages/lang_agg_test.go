@@ -108,7 +108,7 @@ func (h *aggHarness) del(key string) {
 func (h *aggHarness) out(stage, key string) string {
 	var got string
 	require.NoError(h.t, h.store.View(func(tx *stagestore.Tx) error {
-		v, err := tx.GetOut(stage, []byte(key))
+		v, err := h.g.Output(tx, stage, []byte(key))
 		got = string(v)
 		return err
 	}))
@@ -173,7 +173,7 @@ func TestAggregateHaving(t *testing.T) {
 	require.Equal(t, `{"total":6}`, h.out("g", "a"), "flipped back in")
 	require.Equal(t, `{"keys":1}`, h.out("down", "all"))
 
-	require.Positive(t, h.g.FlowCounts()["g"].HavingRejected)
+	require.EqualValues(t, 2, h.g.FlowCounts()["g"].HavingRejected, "the two refolds held back (reading a key's prior output counts none)")
 }
 
 // sum folds intervals (PG's sum(interval)); avg over intervals and a mix

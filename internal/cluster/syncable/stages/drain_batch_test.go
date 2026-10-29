@@ -63,7 +63,7 @@ func replayInRuns(t *testing.T, ops []stageOp, runs []int) string {
 	}
 	require.Equal(t, len(ops), i)
 	require.NoError(t, store.Close())
-	dump, _ := dumpStore(t, stagestore.FilePath(dir, "fixture"))
+	dump, _ := dumpStore(t, g, dir, "fixture")
 	return dump
 }
 
@@ -78,7 +78,7 @@ func TestDrainOncePerRunMatchesDrainPerOp(t *testing.T) {
 		perOp[i] = 1
 	}
 	want := replayInRuns(t, ops, perOp)
-	require.Contains(t, want, "stage:els:out", "the fixture's aggregate produced output")
+	require.Contains(t, want, "stage:els:acc", "the fixture's aggregate keeps a fold state (its output is the state's rendering)")
 
 	require.Equal(t, want, replayInRuns(t, ops, []int{len(ops)}), "one run for the whole feed")
 

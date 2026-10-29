@@ -1057,10 +1057,13 @@ func (p *exprParser) parseExtract() (Node, error) {
 	if t.kind != "ident" && t.kind != "str" {
 		return nil, fmt.Errorf("expected a field name in extract at position %d, got %q", t.pos, t.text)
 	}
-	field := exprStr{t.text}
-	if _, err := timeUnitLiteral(field, "extract", func(string) bool { return true }); err != nil {
+	// The field is kept in its canonical unit, as date_part's is, so the
+	// two spellings compile to one tree.
+	unit, err := timeUnitLiteral(exprStr{t.text}, "extract", func(string) bool { return true })
+	if err != nil {
 		return nil, err
 	}
+	field := exprStr{unit}
 	if !p.atKeyword("from") {
 		nt := p.peek()
 		return nil, fmt.Errorf("expected from in extract at position %d, got %q", nt.pos, nt.text)

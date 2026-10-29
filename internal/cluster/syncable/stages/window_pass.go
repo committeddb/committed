@@ -729,5 +729,5 @@ func (p *winPass) computeRow(i int) (same bool, err error) {
 	if prior != nil && bytes.Equal(prior, out) {
 		return same, nil
 	}
-	return same, p.g.publishOutput(p.tx, p.n, row.inKey, out, p.dirty)
+	return same, p.g.publishOutput(p.tx, p.n, row.inKey, out, nil, p.dirty)
 }

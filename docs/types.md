@@ -88,7 +88,7 @@ Declaring none (`unspecified`, the default for every type written
 before the field existed) changes nothing — no enforcement ever applies
 to it. A declared kind is immutable: a version bump must restate it,
 and changing it means a new type/topic. Today the validation matrix
-warns (log + `committed_entity_kind_misuse` metric) when a leaf-mapped
+warns (log + `committed_entity_kind_misuse_total` metric) when a leaf-mapped
 `sql` syncable targets an `event`-kind topic — events are partial by
 design, so each variant either dead-letters on the jsonpaths it doesn't
 carry or clobbers columns it didn't mean to write. The

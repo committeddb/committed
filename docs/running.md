@@ -55,14 +55,19 @@ same image can be templated per-node by an orchestrator:
 | `COMMITTED_DATA_DIR` | `./data` | Directory for the WAL, raft state, and metadata. |
 | `COMMITTED_PEER_URL` | `http://127.0.0.1:9022` | This node's advertised raft peer URL. Used when `COMMITTED_PEERS` is unset. |
 | `COMMITTED_PEERS` | _(unset)_ | Full static cluster membership as `id=url` pairs, e.g. `1=http://n1:9022,2=http://n2:9022,3=http://n3:9022`. Give the same value to every node; it must include this node's `COMMITTED_NODE_ID`. |
+| `COMMITTED_CLUSTER_NAME` | _(unset)_ | Optional. Mixed into the cluster id a new cluster derives from `COMMITTED_PEERS` at its first boot, so two clusters bootstrapped from identical `COMMITTED_PEERS` (short Kubernetes DNS names repeated across namespaces) get different ids. Nodes refuse peers of another cluster. |
 | `COMMITTED_ZONE` | _(unset)_ | This node's zone (vendor-neutral: an AZ, rack, or site), announced into the cluster at startup. A syncable config with `zone = "..."` is served by a node in that zone instead of the leader — see [`operations/zones.md`](operations/zones.md). |
 | `COMMITTED_API_URL` | _(unset)_ | This node's advertised HTTP API base URL (e.g. `http://n1:8080`), self-announced into the cluster so followers can proxy leader-only reads. Set it on every node. |
 
-`COMMITTED_PEERS` is consumed only on a node's **first** boot
-(`raft.StartNode`). After that, membership is restored from the WAL on
-restart, so editing `COMMITTED_PEERS` has no effect — use the
-membership API for live changes (see
-[`operations/membership.md`](operations/membership.md)). When
+On a node's **first** boot `COMMITTED_PEERS` bootstraps the cluster's
+membership and derives its id. After that, membership comes from the log —
+add and remove members with the membership API (see
+[`operations/membership.md`](operations/membership.md)) — but
+`COMMITTED_PEERS` still supplies addresses on every boot: an entry you
+change since the node's last boot replaces the recorded address (machines
+moved, a restore onto new machines, a switch to `https`), while an entry
+you leave unchanged never overrides an address the cluster has since
+recorded. A voter that moves is also learned by its peers on its own. When
 `COMMITTED_PEERS` is unset the node bootstraps a single-node cluster
 advertising `COMMITTED_PEER_URL`.
 

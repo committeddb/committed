@@ -19,9 +19,9 @@ machines:
 | Apply rate (batched) | ≥ 1,000 entries/sec | How fast committed entries become readable/syncable |
 | Syncable catch-up read rate | ≥ 500,000 entries/sec | Rebuild, re-materialization, new consumer of an old topic |
 | Ingest snapshot rate | ≥ 5,000 rows/sec | Initial snapshot of a source table (pipelined) |
-| Ingest streaming rate | ≥ 1,000 source transactions/sec per ingestable | Change capture after the snapshot, in source commit order |
-| Source commit to read-model row | ≤ 1.5 s at p99 | An event committed at the source until a projection's row shows it |
-| Projection rate, one aggregate stage into PostgreSQL | ≥ 1,500 events/sec | How fast one projection consumes the log; past this rate its read model falls behind |
+| Ingest streaming rate | ≥ 5,000 source transactions/sec per ingestable (PostgreSQL, MySQL) | Change capture after the snapshot, in source commit order |
+| Source commit to read-model row | ≤ 1 s at p99 | An event committed at the source until a projection's row shows it |
+| Projection rate, one aggregate stage into PostgreSQL | ≥ 7,500 events/sec | How fast one projection consumes the log; past this rate its read model falls behind |
 
 Two shapes matter more than any single number:
 
@@ -133,10 +133,35 @@ with four streams growing to 10,000 events:
 Each read model matched the source exactly. SQL Server's idle latency is its
 change-tracking poll (`pollInterval`, 250 ms by default).
 
-Offered 5,000 events/sec for one minute (PostgreSQL), the ingestable kept
-up: its lag was back to zero when the writers stopped. The projection was the
-slower stage, draining at ~1,800 events/sec; the read model held all 300,000
-events 115 s after the last append (~1,700 events/sec end to end).
+At 10,000 events/sec — measured 2026-10-16 on the same three nodes, with the
+databases on an 8-vCPU machine, one event per source transaction from 128
+writers for 3 minutes (1.8 million events into ~278,000 streams, four of them
+growing to 10,000 events):
+
+| Source | Commit to row p50 | p99 | Catch-up after the last append | Second read model from the log |
+|---|---|---|---|---|
+| PostgreSQL 16 | 120 ms | 263 ms | 1.2 s | 14,423 events/sec |
+| MySQL 9 | 138 ms | 375 ms | 1.2 s | 14,547 events/sec |
+
+Both kept pace for the whole run: the p99 in each minute stayed flat, the
+ingestable's lag stayed near zero, and the read model matched the source
+exactly. The leader, which runs the ingestable and the projection, used
+about 60% of its two vCPUs.
+
+SQL Server is not in this table: its change-tracking source accepted only
+about 7,000 inserts/sec at this load, even with twice the CPU, so the run
+could not offer committed 10,000/sec. At the rate it did accept, committed
+kept up (catch-up 1.2 s) with a p99 of 2.0 s, most of it waiting on the
+change-tracking queries.
+
+Building a read model over history — measured 2026-10-29 on the same three
+nodes: the event-store recipe's projection built from an existing log of
+100 million events (15.7 million streams) in 65 minutes, 25,800 events/sec
+on average, and every one of its 15,742,438 rows matched the source. The
+build runs on one worker, so its rate is one node's. The projection's stage
+state took about 42 bytes per event, against 36 for the log itself; 0.8.2
+needed about 610 bytes per event for the same projection, and slowed to
+15,500 events/sec by 81 million events.
 
 ## Re-measuring
 

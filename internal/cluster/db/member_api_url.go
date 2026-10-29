@@ -109,13 +109,20 @@ func (db *DB) MemberAPIURL(id uint64) (string, bool) {
 func (db *DB) Membership() cluster.Membership {
 	leaderID, term, commit, isLeader, views := db.raft.membershipView()
 	apiURLs := db.storage.MemberAPIURLs()
+	peerURLs := db.storage.MemberPeerURLs()
 
 	members := make([]cluster.Member, 0, len(views))
 	for _, v := range views {
 		m := cluster.Member{
-			ID:     v.id,
-			Role:   cluster.MemberRoleVoter,
-			APIURL: apiURLs[v.id],
+			ID:      v.id,
+			Role:    cluster.MemberRoleVoter,
+			APIURL:  apiURLs[v.id],
+			PeerURL: peerURLs[v.id],
+		}
+		if v.id == db.raft.id {
+			m.CurrentPeerURL, m.CurrentPeerURLSource = db.raft.selfURL, "self"
+		} else if view, ok := db.raft.transport.PeerAddress(v.id); ok {
+			m.CurrentPeerURL, m.CurrentPeerURLSource = view.URL, view.Source
 		}
 		if v.learner {
 			m.Role = cluster.MemberRoleLearner
@@ -130,8 +137,13 @@ func (db *DB) Membership() cluster.Membership {
 	}
 	sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
 
+	clusterID := ""
+	if id, ok := db.raft.ident.ClusterID(); ok {
+		clusterID = id.String()
+	}
 	return cluster.Membership{
 		NodeID:       db.ID(),
+		ClusterID:    clusterID,
 		LeaderID:     leaderID,
 		Term:         term,
 		CommitIndex:  commit,

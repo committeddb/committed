@@ -46,60 +46,6 @@ func (s *Storage) DataEventIndex() uint64 {
 	return s.dataEventIndex.Load()
 }
 
-// firstEventSeq returns the wal sequence of the first entry in the
-// permanent event log, or 0 when the log is empty. Package-internal.
-// Takes eventMu.RLock so it never observes the handle mid-swap.
-func (s *Storage) firstEventSeq() (uint64, error) {
-	s.eventMu.RLock()
-	defer s.eventMu.RUnlock()
-	return s.firstEventSeqLocked()
-}
-
-// firstEventSeqLocked is firstEventSeq without the lock; the caller must hold
-// eventMu (R or W). Used by the scrub swap, which already holds eventMu.Lock
-// and would deadlock re-acquiring RLock.
-func (s *Storage) firstEventSeqLocked() (uint64, error) {
-	if err := s.requireNativeEventLogLocked(); err != nil {
-		return 0, err
-	}
-	return s.nativeEventTransferLocked().FirstSequence()
-}
-
-// lastEventSeq returns the wal sequence of the last entry in the
-// permanent event log, or 0 when the log is empty. Package-internal.
-func (s *Storage) lastEventSeq() (uint64, error) {
-	s.eventMu.RLock()
-	defer s.eventMu.RUnlock()
-	return s.lastEventSeqLocked()
-}
-
-// lastEventSeqLocked is lastEventSeq without the lock; caller must hold eventMu.
-func (s *Storage) lastEventSeqLocked() (uint64, error) {
-	if err := s.requireNativeEventLogLocked(); err != nil {
-		return 0, err
-	}
-	return s.nativeEventTransferLocked().LastSequence()
-}
-
-// readEventAt reads the pb.Entry bytes at the given wal sequence from the
-// permanent event log, verifying the per-entry checksum (see checksum.go).
-// Package-internal; callers outside the storage tier should go through the
-// Reader abstraction, which handles raft index ↔ wal seq translation and
-// filters metadata entries.
-func (s *Storage) readEventAt(seq uint64) ([]byte, error) {
-	s.eventMu.RLock()
-	defer s.eventMu.RUnlock()
-	return s.readEventAtLocked(seq)
-}
-
-// readEventAtLocked is readEventAt without the lock; caller must hold eventMu.
-func (s *Storage) readEventAtLocked(seq uint64) ([]byte, error) {
-	if err := s.requireNativeEventLogLocked(); err != nil {
-		return nil, err
-	}
-	return s.nativeEventTransferLocked().ReadPayload(seq)
-}
-
 // unframe verifies and strips the checksum frame from a raw log read,
 // recording a corruption-counter sample (attributed to logName) before
 // returning ErrCorruptEntry on invalid framing or a CRC mismatch. The metrics

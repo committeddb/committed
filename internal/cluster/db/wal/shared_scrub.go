@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	bolt "go.etcd.io/bbolt"
 	pb "go.etcd.io/raft/v3/raftpb"
+	"go.uber.org/zap"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
@@ -125,13 +127,20 @@ func (s *Storage) runPendingSharedScrub() (err error) {
 			return ErrLayoutFrozen
 		}
 		release()
+		started := time.Now()
 		plan, err := s.prepareScrubPlan(bound, hash, cmdIndex)
 		if err != nil {
 			return err
 		}
-		if _, err := s.rewriteSharedPlan(ctx, bound, plan); err != nil {
+		result, err := s.rewriteSharedPlan(ctx, bound, plan)
+		if err != nil {
 			return err
 		}
+		s.logger.Info("scrubbed permanent event log",
+			zap.Uint64("bound", bound),
+			zap.Int("tombstonedKeys", len(plan.selections)),
+			zap.Uint64("changedEntries", result.ChangedRecords),
+			zap.Duration("took", time.Since(started)))
 	}
 }
 

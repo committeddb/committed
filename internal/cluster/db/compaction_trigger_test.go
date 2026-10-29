@@ -187,3 +187,29 @@ func (s *compactionStorage) Compact(index uint64) error {
 	s.compacts = append(s.compacts, index)
 	return nil
 }
+
+// A member added after the held snapshot can't install it (raft ignores a
+// snapshot whose membership lacks it). Once the log is compacted, the next
+// compaction pass takes a snapshot at once — whatever the policy says — and
+// leaves the log uncut; a never-compacted log serves the member from index
+// 1 and needs none.
+func TestMaybeCompact_SnapshotsForAMemberAddedAfterTheSnapshot(t *testing.T) {
+	fake := newCompactionStorage(100, 100, 128)
+	index, term := uint64(50), uint64(1)
+	require.NoError(t, fake.ApplySnapshot(&raftpb.Snapshot{Metadata: &raftpb.SnapshotMetadata{Index: &index, Term: &term, ConfState: &raftpb.ConfState{}}}))
+	r := db.NewRaftForCompactionTest(fake, 0, 0, zap.NewNop())
+
+	r.SetSnapshotLacksMemberForTest()
+	r.MaybeCompactForTest()
+	require.Equal(t, []uint64{100}, fake.snapshots, "a snapshot at applied that includes the new member")
+	require.Empty(t, fake.compacts, "the policy, not a new member, cuts the log")
+
+	r.MaybeCompactForTest()
+	require.Len(t, fake.snapshots, 1, "once is enough")
+
+	uncompacted := newCompactionStorage(100, 100, 128)
+	r = db.NewRaftForCompactionTest(uncompacted, 0, 0, zap.NewNop())
+	r.SetSnapshotLacksMemberForTest()
+	r.MaybeCompactForTest()
+	require.Empty(t, uncompacted.snapshots)
+}

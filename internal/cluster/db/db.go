@@ -15,6 +15,7 @@ import (
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/committeddb/committed/internal/cluster"
 	"github.com/committeddb/committed/internal/cluster/metrics"
@@ -77,9 +78,19 @@ var ErrIngestOutOfOrder = errors.New("db: ingest proposal rejected at apply: out
 // silently. Overridable via WithProposeTimeout (tests drop it to milliseconds).
 const defaultProposeTimeout = 30 * time.Second
 
+// proposeQueueDepth is how many marshaled proposals may wait on proposeC for
+// the raft reader. It covers the ingest pipeline's bursts between the
+// reader's batches; a full queue blocks the proposer, as an unbuffered send
+// did.
+const proposeQueueDepth = 1024
+
 type Peers map[uint64]string
 
 type DB struct {
+	// zones memoizes each syncable's configured zone by its config bytes
+	// (see syncableZone): the sync loop asks on every entry it reads.
+	zones sync.Map // syncable id -> zoneMemo
+
 	ErrorC      <-chan error
 	proposeC    chan<- []byte
 	confChangeC chan<- *raftpb.ConfChangeV2
@@ -315,7 +326,10 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		cfg.maxProposalBytes = DefaultMaxProposalBytes
 	}
 
-	proposeC := make(chan []byte)
+	// Buffered, so a proposer hands off without waiting for the raft reader
+	// to be scheduled, and the reader finds proposals queued to step as one
+	// batch (Raft.collectProposals).
+	proposeC := make(chan []byte, proposeQueueDepth)
 	confChangeC := make(chan *raftpb.ConfChangeV2)
 
 	rpeers := make([]raft.Peer, len(peers))
@@ -430,6 +444,9 @@ func New(id uint64, peers Peers, s Storage, p Parser, sync <-chan *SyncableWithI
 		// configured zone differs from the stored one, so zoneless fixtures
 		// and steady-state restarts stay proposal-free.
 		go db.announceZone()
+		go db.announceClusterIdentity()
+		go db.announceIncarnation()
+		go db.recordAgreedAddresses()
 	}
 
 	// Start the disk-usage watcher last, once db.raft is wired, so its
@@ -599,9 +616,8 @@ func (db *DB) listenForIngestables(ingest <-chan *IngestableWithID) {
 // returns nil, db.storage.Type/Database/etc. will see the new entity.
 //
 // On ctx cancellation Propose returns ctx.Err() and the waiter is
-// unregistered. The proposal may still be applied later (raft has
-// already accepted it via the proposeC send) — the caller just no
-// longer waits.
+// unregistered. The proposal may still be applied later (the proposeC send
+// queued it for raft) — the caller just no longer waits.
 //
 // System-internal proposers that want to pipeline submissions (ingest
 // position bumps, which collect acks for later drain) use proposeAsync
@@ -1314,13 +1330,17 @@ func (db *DB) AddMember(ctx context.Context, id uint64, rawURL string) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
 	}
-	if rawURL == "" {
-		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
+	peerURL, err := cluster.CanonicalPeerURL(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %w", cluster.ErrInvalidMember, err)
+	}
+	if err := db.removedMemberError(id); err != nil {
+		return err
 	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
 		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddNode.Enum(), NodeId: &id}},
-		Context:    []byte(rawURL),
+		Context:    []byte(peerURL),
 	}
 	return db.proposeConfChange(ctx, cc, id, memberVoter)
 }
@@ -1343,13 +1363,23 @@ func (db *DB) AddLearner(ctx context.Context, id uint64, rawURL string) error {
 	if id == 0 {
 		return fmt.Errorf("%w: id must be non-zero", cluster.ErrInvalidMember)
 	}
-	if rawURL == "" {
-		return fmt.Errorf("%w: url must be non-empty", cluster.ErrInvalidMember)
+	peerURL, err := cluster.CanonicalPeerURL(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: %w", cluster.ErrInvalidMember, err)
+	}
+	if err := db.removedMemberError(id); err != nil {
+		return err
+	}
+	// raft would demote a voter named in an add-learner; promote and demote
+	// are never spelled as an add.
+	voters, _, _ := db.raft.memberStatus()
+	if _, isVoter := voters[id]; isVoter {
+		return fmt.Errorf("%w: node %d is already a voter; adding it as a learner would demote it", cluster.ErrInvalidMember, id)
 	}
 	cc := &raftpb.ConfChangeV2{
 		Transition: raftpb.ConfChangeTransitionJointImplicit.Enum(),
 		Changes:    []*raftpb.ConfChangeSingle{{Type: raftpb.ConfChangeAddLearnerNode.Enum(), NodeId: &id}},
-		Context:    []byte(rawURL),
+		Context:    []byte(peerURL),
 	}
 	return db.proposeConfChange(ctx, cc, id, memberLearner)
 }
@@ -1438,15 +1468,36 @@ const (
 // this node. Submission itself can fail fast if ctx fires or the DB is
 // shutting down before the propose loop accepts the change.
 func (db *DB) proposeConfChange(ctx context.Context, cc *raftpb.ConfChangeV2, id uint64, target membershipTarget) error {
-	select {
-	case db.confChangeC <- cc:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-db.ctx.Done():
-		return db.ctx.Err()
+	// raft drops a conf change proposed while another is still taking effect
+	// (the joint state) with nothing but a log line; refuse it here so the
+	// caller gets a 409 to retry instead of a 60-second settle timeout.
+	if _, _, joint := db.raft.memberStatus(); joint {
+		return cluster.ErrMembershipChangeInProgress
 	}
-	return db.waitForMembership(ctx, id, target)
+	rejections := db.raft.rejectionsSoFar()
+	propose := func() error {
+		select {
+		case db.confChangeC <- proto.Clone(cc).(*raftpb.ConfChangeV2):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-db.ctx.Done():
+			return db.ctx.Err()
+		}
+	}
+	if err := propose(); err != nil {
+		return err
+	}
+	return db.waitForMembership(ctx, id, target, rejections, propose)
 }
+
+// membershipReproposeInterval is how long a membership change may go without
+// taking effect, with nothing else in progress, before waitForMembership
+// proposes it again. raft drops a change proposed while another is pending —
+// the leader's own address record or guard marker, say, right after a
+// cluster starts — with nothing but a log line. A var so tests can shorten
+// it.
+var membershipReproposeInterval = 2 * time.Second
 
 // membershipSettleTimeout bounds waitForMembership when the caller's ctx
 // carries no deadline. raft can silently drop a conf change (a previous one
@@ -1474,7 +1525,21 @@ var ErrMembershipUnsettled = errors.New("membership change not applied within th
 // the auto-leave entries apply, so each step wakes the waiter. Requiring
 // joint==false means a successful return reflects the final (non-joint)
 // configuration, not the transient joint state.
-func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershipTarget) error {
+//
+// rejections is the membership guard's verdict count before the change was
+// proposed: a later verdict refusing a change for id ends the wait with its
+// error once the configuration has settled (a refused change still passes
+// through a joint configuration, and the caller's next change must not meet
+// it), since the change will never take effect.
+//
+// repropose, when not nil, proposes the change again. It runs when the change
+// has gone membershipReproposeInterval without taking effect while this node
+// sees no change in progress and has applied everything it knows committed —
+// so raft dropped it. A second copy is harmless: raft drops it while the first
+// is pending, and applying an add, promote or remove that already took effect
+// changes nothing. (Only a node that is caught up re-proposes, so a lagging
+// node can't slip a stale copy in behind a later change.)
+func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershipTarget, rejections uint64, repropose func() error) error {
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeoutCause(ctx, membershipSettleTimeout, ErrMembershipUnsettled)
@@ -1496,6 +1561,12 @@ func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershi
 			return !isVoter && !isLearner
 		}
 	}
+	var tick <-chan time.Time
+	if repropose != nil {
+		ticker := time.NewTicker(membershipReproposeInterval)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
 	for {
 		if settled() {
 			return nil
@@ -1508,8 +1579,19 @@ func (db *DB) waitForMembership(ctx context.Context, id uint64, target membershi
 		if settled() {
 			return nil
 		}
+		if err := db.raft.rejectedSince(rejections, id); err != nil {
+			if _, _, joint := db.raft.memberStatus(); !joint && db.raft.membershipApplied() {
+				return err
+			}
+		}
 		select {
 		case <-ch:
+		case <-tick:
+			if db.raft.rejectedSince(rejections, id) == nil && db.raft.membershipIdle() {
+				if err := repropose(); err != nil {
+					return err
+				}
+			}
 		case <-ctx.Done():
 			if cause := context.Cause(ctx); errors.Is(cause, ErrMembershipUnsettled) {
 				return cause

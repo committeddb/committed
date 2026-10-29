@@ -5,7 +5,34 @@
 # starts the cluster, starts the source and read-model databases, runs
 # eventstore-load, collects the results, and tears it all down.
 #
-#   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [-- eventstore-load flags]
+#   ./run.sh [--labels a,b] [--engines postgres,mysql,sqlserver] [--profile]
+#            [--pinned-labels a] [--segmented-labels a] [--profile-every SECONDS]
+#            [--save-log DEST] [--from-log SRC] [--node-env "VAR=value ..."]
+#            [-- eventstore-load flags]
+#
+# --node-env sets more environment on every node (space-separated
+# VAR=value pairs), e.g. --node-env COMMITTED_PROJECTION_STORE_CACHE_BYTES=4294967296.
+#
+# --save-log DEST, after a run with -history N -history-snapshot-only, takes
+# a live backup of a follower and stores it with the history's dataset.json
+# under DEST/<label>/: an s3:// prefix (the node uploads it with its instance
+# role), or a local directory when the nodes are local.
+#
+# --from-log SRC restores every node from SRC/backup.tar (a prefix --save-log
+# wrote, label included) as one new cluster instead of starting empty, and
+# runs eventstore-load with -history-from-log SRC/dataset.json: it checks the
+# log came back whole and builds over it. The source database starts empty.
+# Pass -history-scrub N to eventstore-load (after --) to erase N subjects and
+# time the scrub instead of building, with a probe write to the first node
+# every 100ms timed for as long as the scrub runs; restore.txt records each
+# node's event log before it and nodes/<node>.du after.
+#
+# A label in --pinned-labels runs with node i in zone zi and the projections
+# pinned to a follower's zone, so they sync off the leader. It names a build
+# in bin/ like any other label (copy a build to a second name to run it both
+# ways). A label in --segmented-labels runs its nodes with the segmented event
+# log (COMMITTED_EVENT_LOG_BACKEND=segmented) instead of the default, the same
+# way; it matters only for builds before 0.8.3, which run segmented alone.
 #
 # Environment:
 #   BENCH_NODES        cluster machine addresses, space-separated; "local" runs
@@ -15,15 +42,40 @@
 #   BENCH_DATA_DIR     data directory on every machine (default ./local-data)
 #   BENCH_RESULTS_DIR  where results go (default ./results)
 #   BENCH_RUN_ID, BENCH_INSTANCE_TYPES   recorded in the results
+#   BENCH_PROFILE      set (or pass --profile) to take a 30 s CPU profile and
+#                      a 5 s execution trace from every node every
+#                      BENCH_PROFILE_EVERY seconds (default 90) while the
+#                      workload runs, into <results>/profiles/
+#   BENCH_NODE_MEMORY  with local nodes, run each in its own container limited
+#                      to this much memory (a docker --memory value, e.g. 2g),
+#                      with no swap. The limit covers the page cache, so a
+#                      store larger than it reads from disk as it would on a
+#                      machine that size. Every 30 s each node's memory, major
+#                      faults, disk I/O and projection bytes go to
+#                      <results>/memory.tsv. Needs a bundle.sh --docker build;
+#                      not with --save-log or --from-log.
+#   BENCH_NODE_CPUS    the containers' CPU limit (default 2)
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 labels=$(ls "$here/bin" | grep -v '^eventstore-load$' | paste -sd, -)
 engines=postgres
+pinned=
+segmented=
+save_dest=
+from_log=
+node_env=
 while [ $# -gt 0 ]; do
   case $1 in
   --labels) labels=$2; shift 2 ;;
   --engines) engines=$2; shift 2 ;;
+  --profile) BENCH_PROFILE=1; shift ;;
+  --profile-every) BENCH_PROFILE_EVERY=$2; shift 2 ;;
+  --pinned-labels) pinned=$2; shift 2 ;;
+  --segmented-labels) segmented=$2; shift 2 ;;
+  --save-log) save_dest=${2%/}; shift 2 ;;
+  --from-log) from_log=${2%/}; shift 2 ;;
+  --node-env) node_env=$2; shift 2 ;;
   --) shift; break ;;
   *) echo "run.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -33,6 +85,7 @@ load_args=("$@")
 DATA=${BENCH_DATA_DIR:-$here/local-data}
 RESULTS=${BENCH_RESULTS_DIR:-$here/results}
 NODES=${BENCH_NODES:-local}
+MEM=${BENCH_NODE_MEMORY:-}
 PW=BenchPassw0rd2026 # throwaway databases on a throwaway rig
 API_PORT=18080
 PEER_PORT=18079
@@ -48,6 +101,12 @@ else
   src_host=$(hostname -I | awk '{print $1}')
 fi
 count=${#hosts[@]}
+if [ -n "$MEM" ]; then
+  [ "$NODES" = local ] || { echo "run.sh: BENCH_NODE_MEMORY needs local nodes" >&2; exit 2; }
+  [ -z "$save_dest$from_log" ] || { echo "run.sh: BENCH_NODE_MEMORY can't be used with --save-log or --from-log" >&2; exit 2; }
+  # The nodes reach the databases through the host.
+  src_host=host.docker.internal
+fi
 
 api_port() { if [ "$NODES" = local ]; then echo $((API_PORT + ($1 - 1) * 10000)); else echo $API_PORT; fi; }
 peer_port() { if [ "$NODES" = local ]; then echo $((PEER_PORT + ($1 - 1) * 10000)); else echo $PEER_PORT; fi; }
@@ -78,27 +137,142 @@ install_committed() {
   done
 }
 
+# peer_host i: the address the other nodes reach node i at.
+peer_host() { if [ -n "$MEM" ]; then echo "bench-node$1"; else echo "${hosts[$(($1 - 1))]}"; fi; }
+
 peers() {
   local i out=
   for i in $(seq 1 "$count"); do
-    out="$out${out:+,}$i=http://${hosts[$((i - 1))]}:$(peer_port "$i")"
+    out="$out${out:+,}$i=http://$(peer_host "$i"):$(peer_port "$i")"
   done
   echo "$out"
 }
 
+# start_containers [zoned]: start_nodes for BENCH_NODE_MEMORY. Each node's
+# data lives in a docker volume, not a bind mount, so the host's own page
+# cache can't serve its reads around the limit.
+start_containers() {
+  local zoned=${1:-} i p; p=$(peers)
+  docker network inspect bench >/dev/null 2>&1 || docker network create bench >/dev/null
+  for i in $(seq 1 "$count"); do
+    docker rm -f "bench-node$i" >/dev/null 2>&1 || true
+    docker volume rm "bench-node$i" >/dev/null 2>&1 || true
+    docker run -d --name "bench-node$i" --network bench --memory "$MEM" --memory-swap "$MEM" \
+      --cpus "${BENCH_NODE_CPUS:-2}" -p "$(api_port "$i"):$(api_port "$i")" \
+      -v "$(node_dir "$i")/committed-bin:/usr/local/bin/committed:ro" -v "bench-node$i:/data" \
+      -e APP_DB_PASSWORD=$PW -e COMMITTED_NODE_ID="$i" -e COMMITTED_API_ADDR=":$(api_port "$i")" \
+      -e COMMITTED_PEER_URL="http://bench-node$i:$(peer_port "$i")" -e COMMITTED_PEERS="$p" \
+      -e COMMITTED_DATA_DIR=/data ${zoned:+-e COMMITTED_ZONE=z$i} ${BENCH_PROFILE:+-e COMMITTED_PPROF=true} \
+      ${backend:+-e COMMITTED_EVENT_LOG_BACKEND=$backend} $(for v in $node_env; do printf -- '-e %s ' "$v"; done) \
+      alpine:3.22 committed node >/dev/null
+  done
+}
+
+# sample_memory file: every 30 s, a line per container node: its memory
+# (total, anonymous, page cache), major faults, bytes read and written, and
+# projection store bytes. Runs until killed.
+sample_memory() {
+  local file=$1 start i t
+  printf 't\tnode\tmemory\tanon\tfile\tmajor_faults\tread_bytes\twrite_bytes\tprojection_bytes\n' >"$file"
+  start=$(date +%s)
+  while true; do
+    t=$(($(date +%s) - start))
+    for i in $(seq 1 "$count"); do
+      docker exec "bench-node$i" sh -c 'cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.stat /sys/fs/cgroup/io.stat; du -sb /data/projections 2>/dev/null' 2>/dev/null |
+        awk -v t="$t" -v n="$i" '
+          NR == 1 { cur = $1 }
+          $1 == "anon" { anon = $2 }
+          $1 == "file" { file = $2 }
+          $1 == "pgmajfault" { maj = $2 }
+          /rbytes=/ { for (f = 2; f <= NF; f++) { split($f, kv, "="); if (kv[1] == "rbytes") r += kv[2]; if (kv[1] == "wbytes") w += kv[2] } }
+          $2 == "/data/projections" { proj = $1 }
+          END { printf "%d\t%d\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\n", t, n, cur, anon, file, maj, r, w, proj }' >>"$file" || true
+    done
+    sleep 30
+  done
+}
+
+# start_nodes [zoned]: with zoned set, node i starts in zone zi. Each node
+# starts empty, or on its restored data directory with --from-log.
 start_nodes() {
-  local i p; p=$(peers)
+  if [ -n "$MEM" ]; then start_containers "$@"; return; fi
+  local zoned=${1:-} i p fresh; p=$(peers)
   for i in $(seq 1 "$count"); do
     local dir; dir=$(node_dir "$i")
-    on_node "$i" "rm -rf '$dir/data' && mkdir -p '$dir/data' && cd '$dir' || exit 1; \
+    fresh="rm -rf '$dir/data' && mkdir -p '$dir/data' &&"
+    [ -z "$from_log" ] || fresh=
+    on_node "$i" "$fresh cd '$dir' || exit 1; \
       APP_DB_PASSWORD=$PW COMMITTED_NODE_ID=$i COMMITTED_API_ADDR=:$(api_port "$i") \
       COMMITTED_PEER_URL=http://${hosts[$((i - 1))]}:$(peer_port "$i") COMMITTED_PEERS=$p \
-      COMMITTED_DATA_DIR='$dir/data' nohup ./committed-bin node > node.log 2>&1 < /dev/null & echo \$! > '$dir/pid'"
+      COMMITTED_DATA_DIR='$dir/data' ${zoned:+COMMITTED_ZONE=z$i} ${BENCH_PROFILE:+COMMITTED_PPROF=true} \
+      ${backend:+COMMITTED_EVENT_LOG_BACKEND=$backend} $node_env nohup ./committed-bin node > node.log 2>&1 < /dev/null & echo \$! > '$dir/pid'"
+  done
+}
+
+# fetch src name dest_dir [node]: copy src/name (an s3:// prefix or a local
+# directory) into dest_dir, on node i when given, else here.
+fetch() {
+  local src=$1 name=$2 dest=$3 node=${4:-} cmd
+  case $src in
+  s3://*) cmd="aws s3 cp --only-show-errors '$src/$name' '$dest/$name'" ;;
+  *) cmd="cp '$src/$name' '$dest/$name'" ;;
+  esac
+  if [ -n "$node" ]; then on_node "$node" "$cmd"; else sh -c "$cmd"; fi
+}
+
+# restore_nodes src out: every node restored from src's backup.tar as a
+# member of one new cluster — node 1 mints the seed, the rest join it, as
+# docs/operations/backup.md describes.
+restore_nodes() {
+  local src=$1 out=$2 i dir seed t0 pids=()
+  t0=$(date +%s)
+  for i in $(seq 1 "$count"); do
+    dir=$(node_dir "$i")
+    on_node "$i" "rm -rf '$dir/data' && mkdir -p '$dir'" || return 1
+    fetch "$src" backup.tar "$dir" "$i" &
+    pids+=($!)
+  done
+  for i in "${pids[@]}"; do wait "$i" || return 1; done
+  echo "downloaded: $(($(date +%s) - t0))s" | tee "$out/restore.txt"
+  t0=$(date +%s)
+  dir=$(node_dir 1)
+  seed=$(on_node 1 "cd '$dir' && ./committed-bin restore --from backup.tar --data '$dir/data' --node-id 1 --new-cluster && rm -f backup.tar" |
+    tee -a "$out/restore.txt" | sed -n 's/.*--cluster-id \([0-9a-f-]*\).*/\1/p')
+  [ -n "$seed" ] || { echo "run.sh: restore of node 1 printed no cluster seed" >&2; return 1; }
+  pids=()
+  for i in $(seq 2 "$count"); do
+    dir=$(node_dir "$i")
+    on_node "$i" "cd '$dir' && ./committed-bin restore --from backup.tar --data '$dir/data' --node-id $i --cluster-id $seed && rm -f backup.tar" >>"$out/restore.txt" &
+    pids+=($!)
+  done
+  for i in ${pids[@]+"${pids[@]}"}; do wait "$i" || return 1; done
+  echo "restored: $(($(date +%s) - t0))s" | tee -a "$out/restore.txt"
+  # A build with `wal convert` (0.8.3+) runs only the segmented event log, so
+  # an archive saved by an earlier build is converted before the nodes start.
+  if on_node 1 "cd '$(node_dir 1)' && ./committed-bin wal convert --help" >/dev/null 2>&1; then
+    t0=$(date +%s)
+    pids=()
+    for i in $(seq 1 "$count"); do
+      dir=$(node_dir "$i")
+      on_node "$i" "cd '$dir' && ./committed-bin wal convert --data '$dir/data'" >>"$out/restore.txt" &
+      pids+=($!)
+    done
+    for i in "${pids[@]}"; do wait "$i" || return 1; done
+    echo "converted: $(($(date +%s) - t0))s" | tee -a "$out/restore.txt"
+  fi
+  # The event log as restored, before the run changes it (collect_nodes
+  # records it again at the end, after a -history-scrub run's rewrite).
+  for i in $(seq 1 "$count"); do
+    echo "node$i event log: $(on_node "$i" "d='$(node_dir "$i")/data/events'; du -sb \"\$d\" 2>/dev/null || du -sk \"\$d\" | awk '{print \$1 * 1024}'" | cut -f1) bytes" | tee -a "$out/restore.txt"
   done
 }
 
 stop_nodes() {
   local i
+  if [ -n "$MEM" ]; then
+    for i in $(seq 1 "$count"); do docker stop -t 10 "bench-node$i" >/dev/null 2>&1 || true; done
+    return
+  fi
   for i in $(seq 1 "$count"); do
     local dir; dir=$(node_dir "$i")
     on_node "$i" "if [ -f '$dir/pid' ]; then kill \$(cat '$dir/pid') 2>/dev/null; \
@@ -107,11 +281,20 @@ stop_nodes() {
   done
 }
 
+# collect_nodes dir: each node's log and the bytes in each area of its data
+# directory (event log, raft log, metadata, projection stores).
 collect_nodes() {
   local out=$1 i
   mkdir -p "$out/nodes"
   for i in $(seq 1 "$count"); do
     local dir; dir=$(node_dir "$i")
+    if [ -n "$MEM" ]; then
+      docker run --rm -v "bench-node$i:/data" alpine:3.22 sh -c 'du -sb /data/*' >"$out/nodes/node$i.du" 2>/dev/null || true
+      docker logs "bench-node$i" >"$out/nodes/node$i.log" 2>&1 || true
+      echo "oom killed: $(docker inspect -f '{{.State.OOMKilled}}' "bench-node$i" 2>/dev/null)" >>"$out/nodes/node$i.du"
+      continue
+    fi
+    on_node "$i" "du -sb '$dir/data'/* 2>/dev/null" >"$out/nodes/node$i.du" 2>/dev/null || true
     if [ "$NODES" = local ]; then
       cp "$dir/node.log" "$out/nodes/node$i.log" 2>/dev/null || true
     else
@@ -166,7 +349,65 @@ start_dbs() {
   wait_for "read-model postgres" docker exec bench-read pg_isready -U committed -d app -h 127.0.0.1
 }
 
-cleanup() { stop_nodes; stop_dbs; }
+# profile_nodes dir: every BENCH_PROFILE_EVERY seconds, a 30 s CPU profile
+# and then a 5 s execution trace (where goroutines wait, which a CPU profile
+# cannot show) from each node at once, named by node and seconds since the
+# workload began. Runs until killed.
+profile_nodes() {
+  local dir=$1 start i t
+  mkdir -p "$dir"
+  start=$(date +%s)
+  while true; do
+    t=$(($(date +%s) - start))
+    for i in $(seq 1 "$count"); do
+      curl -s -o "$dir/node$i-t$t.pprof" "http://${hosts[$((i - 1))]}:$(api_port "$i")/debug/pprof/profile?seconds=30" &
+    done
+    wait || true # a node not yet listening, or gone
+    for i in $(seq 1 "$count"); do
+      curl -s -o "$dir/node$i-t$t.trace" "http://${hosts[$((i - 1))]}:$(api_port "$i")/debug/pprof/trace?seconds=5" &
+    done
+    wait || true # a node not yet listening, or gone
+    sleep "$((${BENCH_PROFILE_EVERY:-90} - 35))"
+  done
+}
+
+# save_log dest out: a live backup of a follower (the backup docs' advice),
+# and the history's dataset.json from out, into dest.
+save_log() {
+  local dest=$1 out=$2 leader i src=1 dir
+  leader=$(curl -s -m 10 "http://${hosts[0]}:$(api_port 1)/v1/node/status" | sed -n 's/.*"leader":\([0-9]*\).*/\1/p')
+  for i in $(seq 1 "$count"); do
+    if [ "$i" != "$leader" ]; then src=$i; break; fi
+  done
+  dir=$(node_dir "$src")
+  echo "backing up node $src (leader ${leader:-unknown}) to $dest"
+  local t0; t0=$(date +%s)
+  on_node "$src" "cd '$dir' && ./committed-bin backup --live --target http://127.0.0.1:$(api_port "$src") --to '$dir/backup.tar'" || return 1
+  on_node "$src" "ls -l '$dir/backup.tar'" | awk '{print "archive bytes:", $5}' | tee "$out/save.txt"
+  echo "backup: $(($(date +%s) - t0))s" | tee -a "$out/save.txt"
+  case $dest in
+  s3://*)
+    on_node "$src" "aws s3 cp --only-show-errors '$dir/backup.tar' '$dest/backup.tar' && rm -f '$dir/backup.tar'" || return 1
+    aws s3 cp --only-show-errors "$out/dataset.json" "$dest/dataset.json" || return 1
+    ;;
+  *)
+    [ "$NODES" = local ] || { echo "run.sh: --save-log needs an s3:// prefix for remote nodes" >&2; return 1; }
+    mkdir -p "$dest" && mv "$dir/backup.tar" "$dest/backup.tar" && cp "$out/dataset.json" "$dest/dataset.json" || return 1
+    ;;
+  esac
+  echo "saved: $(($(date +%s) - t0))s, $dest/backup.tar and dataset.json" | tee -a "$out/save.txt"
+}
+
+remove_containers() {
+  local i
+  for i in $(seq 1 "$count"); do
+    docker rm -f "bench-node$i" >/dev/null 2>&1 || true
+    docker volume rm "bench-node$i" >/dev/null 2>&1 || true
+  done
+  docker network rm bench >/dev/null 2>&1 || true
+}
+
+cleanup() { stop_nodes; stop_dbs; [ -z "$MEM" ] || remove_containers; }
 trap cleanup EXIT
 
 nodes_flag=
@@ -175,6 +416,7 @@ for i in $(seq 1 "$count"); do nodes_flag="$nodes_flag${nodes_flag:+,}http://${h
 {
   echo "run ${BENCH_RUN_ID:-local} on $(uname -srm), $(nproc 2>/dev/null || sysctl -n hw.ncpu) cpus"
   echo "nodes: ${hosts[*]} (${BENCH_NODE_AZS:-})  load: ${BENCH_LOAD_AZ:-}  ${BENCH_INSTANCE_TYPES:-}"
+  [ -z "$MEM" ] || echo "node containers: memory $MEM, cpus ${BENCH_NODE_CPUS:-2}, no swap"
 } | tee "$RESULTS/environment.txt"
 
 status=0
@@ -188,15 +430,40 @@ for label in "${label_list[@]}"; do
     echo "=== $label / $engine"
     "$here/bin/$label/committed" --version >"$out/version.txt" 2>&1 || true
     start_dbs "$engine"
-    start_nodes
+    pin=()
+    case ",$pinned," in *",$label,"*) pin=(-pin-follower) ;; esac
+    backend= # read by start_nodes
+    case ",$segmented," in *",$label,"*) backend=segmented ;; esac
+    echo "event log: ${backend:-default (segmented from 0.8.3, tidwall before)}" >>"$out/version.txt"
+    restored=()
+    if [ -n "$from_log" ]; then
+      restore_nodes "$from_log" "$out" || { status=1; continue; }
+      fetch "$from_log" dataset.json "$out" || { status=1; continue; }
+      restored=(-history-from-log "$out/dataset.json")
+    fi
+    start_nodes ${pin[@]+zoned}
+    profiler= sampler=
+    if [ -n "${BENCH_PROFILE:-}" ]; then
+      profile_nodes "$out/profiles" &
+      profiler=$!
+    fi
+    if [ -n "$MEM" ]; then
+      sample_memory "$out/memory.tsv" &
+      sampler=$!
+    fi
     set +e
     "$here/bin/eventstore-load" -nodes "$nodes_flag" -engine "$engine" -label "$label" \
       -recipe "$here/recipe/event-store-read-models.md" -results "$out" \
       -src-dsn "$src_dsn" -src-url "$src_url" -read-dsn "$read_dsn" -read-url "$read_url" \
-      ${load_args[@]+"${load_args[@]}"} 2>&1 | tee "$out/load.log"
+      ${pin[@]+"${pin[@]}"} ${restored[@]+"${restored[@]}"} ${load_args[@]+"${load_args[@]}"} 2>&1 | tee "$out/load.log"
     rc=${PIPESTATUS[0]}
     set -e
     [ "$rc" -eq 0 ] || status=$rc
+    if [ -n "$save_dest" ] && [ "$rc" -eq 0 ]; then
+      save_log "$save_dest/$label" "$out" || status=1
+    fi
+    if [ -n "$profiler" ]; then kill "$profiler" 2>/dev/null || true; wait "$profiler" 2>/dev/null || true; fi
+    if [ -n "$sampler" ]; then kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true; fi
     stop_nodes
     collect_nodes "$out"
     docker logs bench-src >"$out/source.log" 2>&1 || true

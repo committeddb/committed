@@ -78,7 +78,7 @@ func TestExprOrderingAgreesWithMinMaxFolds(t *testing.T) {
 	}
 	var out map[string]string
 	require.NoError(t, store.View(func(tx *stagestore.Tx) error {
-		bs, err := tx.GetOut("g", []byte("k"))
+		bs, err := g.Output(tx, "g", []byte("k"))
 		if err != nil {
 			return err
 		}

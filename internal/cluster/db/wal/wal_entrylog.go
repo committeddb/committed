@@ -246,6 +246,7 @@ func (s *Storage) resetEntryLogToSnapshot(index, term uint64) error {
 		return fmt.Errorf("write snapshot dummy: %w", err)
 	}
 	s.EntryLog = fresh
+	s.entryCache.clear()
 	// After the swap, not before: a reader compares the epoch around its
 	// copy, so the bump must follow the change it reports (see the field).
 	s.entryLogEpoch.Add(1)
@@ -296,6 +297,7 @@ func (s *Storage) resetEntryLogToEmpty() error {
 		return fmt.Errorf("reopen entry log: %w", err)
 	}
 	s.EntryLog = fresh
+	s.entryCache.clear()
 	// After the swap, not before: a reader compares the epoch around its
 	// copy, so the bump must follow the change it reports (see the field).
 	s.entryLogEpoch.Add(1)
@@ -417,7 +419,7 @@ func (s *Storage) reconcileEntryLogWithHardState() error {
 // SetLostNotifier installs the truncation lost-callback. db.New calls it
 // (via the lostNotifierSetter optional interface) with db.notifyLost
 // because the callback can't be passed at Open time — the DB it closes
-// over doesn't exist yet. It MUST be called before the raft serveChannels
+// over doesn't exist yet. It MUST be called before raft's append
 // goroutine starts (db wires it inside newRaftWithOptions, before
 // startRaft), since appendEntries — the sole reader — runs only on that
 // goroutine; setting it after would race. See the lostCallback field doc
@@ -468,7 +470,7 @@ func (s *Storage) appendEntries(ents []*pb.Entry) error {
 	}
 
 	// Snapshot the current bounds. appendEntries is only ever invoked from
-	// the raft serveChannels goroutine (the sole writer), so observing them
+	// raft's append goroutine (the sole writer), so observing them
 	// once at the top is sufficient — no other writer can race us.
 	firstIndex := s.firstIndex.Load()
 	lastIndex := s.lastIndex.Load()
@@ -545,8 +547,8 @@ func (s *Storage) appendEntries(ents []*pb.Entry) error {
 		// Signal only after the truncation actually executed, so a waiter
 		// never sees ErrProposalLost for an entry that survived. The
 		// callback (db.notifyLost) only does map lookups and non-blocking
-		// channel sends, so calling it inline on the serveChannels
-		// goroutine — exactly as notifyApplied is — is safe.
+		// channel sends, so calling it inline on raft's append goroutine is
+		// safe.
 		if len(lostIDs) > 0 {
 			s.lostCallback(lostIDs)
 		}
@@ -584,6 +586,7 @@ func (s *Storage) appendEntries(ents []*pb.Entry) error {
 	}
 
 	s.lastIndex.Store(ents[len(ents)-1].GetIndex())
+	s.entryCache.append(ents)
 
 	return nil
 }

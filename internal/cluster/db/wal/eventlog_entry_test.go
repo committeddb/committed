@@ -8,7 +8,6 @@ import (
 	"github.com/committeddb/committed/internal/cluster/db/eventlog"
 	"github.com/committeddb/committed/internal/cluster/db/eventlog/segmented"
 
-	tidwal "github.com/tidwall/wal"
 	pb "go.etcd.io/raft/v3/raftpb"
 	"google.golang.org/protobuf/proto"
 
@@ -17,7 +16,7 @@ import (
 	"github.com/committeddb/committed/pkg/segmentlog"
 )
 
-func TestEventLogEventsScrubMatchesLegacyBytes(t *testing.T) {
+func TestEventLogEventsScrubMatchesInputBytes(t *testing.T) {
 	adapter, path := newSegmentedEventAdapter(t)
 	deleted := &clusterpb.LogEntity{Type: &clusterpb.TypeRef{ID: "items", Version: 1}, Body: &clusterpb.LogEntity_Delete{Delete: &clusterpb.LogDelete{Key: []byte("gone")}}}
 	inputs := [][]byte{
@@ -29,36 +28,16 @@ func TestEventLogEventsScrubMatchesLegacyBytes(t *testing.T) {
 		experimentEntry(t, 80, pb.EntryNormal, experimentRow("snapshot", "latest")),
 		experimentEntry(t, 90, pb.EntryNormal, deleted),
 	}
-	legacy, err := tidwal.Open(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = legacy.Close() })
-	batch := new(tidwal.Batch)
-	for i, raw := range inputs {
-		batch.Write(uint64(i+1), frame(raw))
-	}
-	if err := legacy.WriteBatch(batch); err != nil {
-		t.Fatal(err)
-	}
 	if err := adapter.appendRaw(inputs); err != nil {
 		t.Fatal(err)
 	}
-	for i, raw := range inputs {
+	for _, raw := range inputs {
 		entry := new(pb.Entry)
 		if err := proto.Unmarshal(raw, entry); err != nil {
 			t.Fatal(err)
 		}
-		framed, err := legacy.Read(uint64(i + 1))
-		if err != nil {
-			t.Fatal(err)
-		}
-		old, err := unframe(framed)
-		if err != nil {
-			t.Fatal(err)
-		}
 		got, err := adapter.readRaw(entry.GetIndex())
-		if err != nil || !bytes.Equal(old, got) {
+		if err != nil || !bytes.Equal(raw, got) {
 			t.Fatal("raw-entry mismatch", err)
 		}
 	}
@@ -66,15 +45,7 @@ func TestEventLogEventsScrubMatchesLegacyBytes(t *testing.T) {
 	msel := map[string]uint64{string(tombstoneKey("items", []byte("snapshot"))): 80}
 	filter := func(raw []byte) (bool, []byte, error) { return scrubFilterEntry(raw, sel, msel, 90) }
 	expected := map[uint64][]byte{}
-	for i := range inputs {
-		framed, err := legacy.Read(uint64(i + 1))
-		if err != nil {
-			t.Fatal(err)
-		}
-		raw, err := unframe(framed)
-		if err != nil {
-			t.Fatal(err)
-		}
+	for _, raw := range inputs {
 		keep, out, err := filter(raw)
 		if err != nil {
 			t.Fatal(err)

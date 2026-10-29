@@ -21,6 +21,13 @@ type observedScrubLog struct {
 	generations []uint64
 }
 
+// RewriteSealedWithPublicationLock is the scrub's publication.
+func (l *observedScrubLog) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+	l.generations = append(l.generations, generation)
+	return l.EventLog.RewriteSealedWithPublicationLock(ctx, generation, transform, lock)
+}
+
+// RewriteWithPublicationLock is a fetched generation's publication.
 func (l *observedScrubLog) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
 	l.generations = append(l.generations, generation)
 	return l.EventLog.RewriteWithPublicationLock(ctx, generation, transform, lock)
@@ -36,9 +43,19 @@ type failedScrubPublication struct {
 	failure error
 }
 
+// RewriteSealedWithPublicationLock is the scrub's publication.
+func (l failedScrubPublication) RewriteSealedWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+	return l.fail(l.EventLog.RewriteSealedWithPublicationLock, ctx, generation, transform, lock)
+}
+
+// RewriteWithPublicationLock is a fetched generation's publication.
 func (l failedScrubPublication) RewriteWithPublicationLock(ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
+	return l.fail(l.EventLog.RewriteWithPublicationLock, ctx, generation, transform, lock)
+}
+
+func (l failedScrubPublication) fail(rewrite func(context.Context, uint64, eventlog.Transform, sync.Locker) (eventlog.RewriteResult, error), ctx context.Context, generation uint64, transform eventlog.Transform, lock sync.Locker) (eventlog.RewriteResult, error) {
 	if l.after {
-		if _, err := l.EventLog.RewriteWithPublicationLock(ctx, generation, transform, lock); err != nil {
+		if _, err := rewrite(ctx, generation, transform, lock); err != nil {
 			return eventlog.RewriteResult{}, err
 		}
 	}
@@ -46,7 +63,7 @@ func (l failedScrubPublication) RewriteWithPublicationLock(ctx context.Context, 
 }
 
 func TestSharedScrubLifecycleRecovery(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		for _, interruption := range []string{"before-publication", "after-publication", "before-removal", "after-removal"} {
 			for _, newer := range []bool{false, true} {
 				for _, hash := range []bool{false, true} {
@@ -185,7 +202,7 @@ func TestSharedScrubLifecycleRecovery(t *testing.T) {
 }
 
 func TestSharedScrubPublishedBeforeAppliedProgressSaved(t *testing.T) {
-	for _, name := range []string{"tidwall", "segmented", "segmented-cached"} {
+	for _, name := range []string{"segmented", "segmented-cached"} {
 		t.Run(name, func(t *testing.T) {
 			path := t.TempDir()
 			opener := storageTestOpeners()[name]

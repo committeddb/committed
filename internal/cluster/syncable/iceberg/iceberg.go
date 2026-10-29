@@ -121,6 +121,31 @@ func (s *Syncable) StampRendering(ctx context.Context) error {
 	return nil
 }
 
+// DestinationHasRows implements cluster.RenderingStamped from the current
+// snapshot's summary: no snapshot is an empty table, and a summary without
+// total-records counts as rows (the caller parks rather than guess).
+func (s *Syncable) DestinationHasRows(ctx context.Context) (bool, error) {
+	if err := s.tbl.Refresh(ctx); err != nil {
+		return false, fmt.Errorf("[iceberg] refresh table: %w", err)
+	}
+	snap := s.tbl.CurrentSnapshot()
+	if snap == nil {
+		return false, nil
+	}
+	if snap.Summary == nil {
+		return true, nil
+	}
+	v, ok := snap.Summary.Properties["total-records"]
+	if !ok {
+		return true, nil
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return true, nil //nolint:nilerr // an unreadable count is treated as rows, never as empty
+	}
+	return n > 0, nil
+}
+
 var _ cluster.RenderingStamped = (*Syncable)(nil)
 
 // Teardown implements cluster.Teardownable. Drop mode purges the table

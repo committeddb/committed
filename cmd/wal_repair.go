@@ -65,7 +65,7 @@ func runWalRepair() error {
 		return err
 	}
 
-	corrupt, torn, incomplete := false, false, false
+	corrupt, torn, incomplete, newer := false, false, false, false
 	for _, d := range results {
 		_, _ = fmt.Fprintf(os.Stdout, "%s: %s — %s\n", d.Dir, d.Status, d.Detail)
 		switch d.Status {
@@ -73,12 +73,17 @@ func runWalRepair() error {
 			incomplete = true
 		case wal.LogCorrupt:
 			corrupt = true
+		case wal.LogNewerFormat:
+			newer = true
 		case wal.LogTornTail:
 			torn = true
 		}
 	}
 
 	switch {
+	case newer:
+		_, _ = fmt.Fprintln(os.Stdout, "\nlog(s) written by a newer committed: run that version or newer on this data directory; nothing was changed")
+		return fmt.Errorf("wal repair: log written by a newer committed; nothing to repair")
 	case incomplete:
 		return fmt.Errorf("wal repair: incomplete segmented tail left unchanged; safe truncation requires establishing the durable event boundary")
 	case corrupt:
@@ -149,53 +154,50 @@ func runWalSplice() error {
 	return nil
 }
 
-var walDecompressData string
+var walConvertData string
 
-var walDecompressCmd = &cobra.Command{
-	Use:   "decompress",
-	Short: "Rewrite compressed WAL segments to the plain format for a downgrade",
-	Long: `Rewrite a stopped node's compressed (.zst) event-log segments back to the
-plain pre-0.8.0 segment format.
+var walConvertCmd = &cobra.Command{
+	Use:   "convert",
+	Short: "Convert a stopped node's tidwall event log to the segmented engine",
+	Long: `Rewrite a stopped node's event log from the tidwall engine, which releases
+before 0.8.3 wrote, to the segmented engine, which this release runs. A node
+refuses to start on a tidwall event log.
 
-Run this only with the node STOPPED (enforced: a data directory whose node is
-running is refused via its lock), and only when downgrading to a binary
-older than 0.8.0 — those binaries do not recognize compressed segments and
-would open a partial log. Upgrades need nothing: mixed logs read
-transparently, and the background sealer re-compresses after the next start
-on a 0.8.0+ binary.
+Upgrading to this release needs the cluster down: stop every node, run this
+command on each node's data directory with the new binary, then start them
+all. The node must be STOPPED (enforced via its lock).
 
-This command applies to tidwall storage. Segmented storage uses a different
-on-disk format and is refused before any log is rewritten; decompression
-cannot make that format readable by pre-0.8.0 binaries.`,
+The new log holds the same records at the same raft indexes, with the same
+scrub progress. It is built beside the old one, so the data directory needs
+free space for a second copy of the event log while this runs, and it is
+checked record by record before it replaces the old log, which is then
+removed. An interrupted run leaves the old log in place; run it again.
+Running it on a node that is already converted changes nothing.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if walDecompressData == "" {
+		if walConvertData == "" {
 			return fmt.Errorf("--data is required (the stopped node's data directory)")
 		}
-		counts, err := wal.DecompressNode(walDecompressData)
+		res, err := wal.ConvertEventLog(walConvertData)
 		if err != nil {
 			return err
 		}
-		total := 0
-		for dir, n := range counts {
-			_, _ = fmt.Fprintf(os.Stdout, "%s: %d segment(s) rewritten\n", dir, n)
-			total += n
+		if res.AlreadySegmented {
+			_, _ = fmt.Fprintln(os.Stdout, "the event log is already segmented; nothing to do")
+			return nil
 		}
-		if total == 0 {
-			_, _ = fmt.Fprintln(os.Stdout, "no compressed segments found; the data dir is already downgrade-ready")
-		} else {
-			_, _ = fmt.Fprintln(os.Stdout, "done; the data dir is downgrade-ready")
-		}
+		_, _ = fmt.Fprintf(os.Stdout, "converted %d records through raft index %d (scrub generation %d); the node can be started\n",
+			res.Records, res.LastIndex, res.Generation)
 		return nil
 	},
 }
 
 func init() {
+	walConvertCmd.Flags().StringVar(&walConvertData, "data", "", "the stopped node's data directory; required")
+	walCmd.AddCommand(walConvertCmd)
 	walRepairCmd.Flags().StringVar(&walRepairData, "data", "", "the stopped node's data directory; required")
 	walRepairCmd.Flags().BoolVar(&walRepairCommit, "commit", false, "apply the repair (default: dry run, report only)")
 	walRepairCmd.Flags().StringVar(&walRepairFrom, "from", "", "a backup (.tar or .tar.gz) of this node to splice mid-log corruption from")
-	walDecompressCmd.Flags().StringVar(&walDecompressData, "data", "", "the stopped node's data directory; required")
 	walCmd.AddCommand(walRepairCmd)
-	walCmd.AddCommand(walDecompressCmd)
 	rootCmd.AddCommand(walCmd)
 }

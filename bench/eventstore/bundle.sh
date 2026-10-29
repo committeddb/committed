@@ -2,22 +2,26 @@
 # Builds a bench bundle for run.sh: the committed builds to compare, the load
 # generator, the recipe, and run.sh.
 #
-#   bench/eventstore/bundle.sh [-o dir] [--local] [label=gitref ...]
+#   bench/eventstore/bundle.sh [-o dir] [--local | --docker] [label=gitref ...]
 #
 # With no label=gitref, the bundle holds the working tree as "head". Each
 # label=gitref builds that commit (git archive, so the working tree is left
 # alone). By default the nodes are linux/arm64 and the load generator
-# linux/amd64; --local builds both for this machine.
+# linux/amd64; --local builds both for this machine, and --docker builds the
+# nodes for this machine's Docker and the load generator for this machine
+# (for run.sh's BENCH_NODE_MEMORY).
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
 out=$root/bench-bundle
 local_build=
+docker_build=
 refs=()
 while [ $# -gt 0 ]; do
   case $1 in
   -o) out=$2; shift 2 ;;
   --local) local_build=1; shift ;;
+  --docker) docker_build=1; shift ;;
   *=*) refs+=("$1"); shift ;;
   *) echo "bundle.sh: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -28,6 +32,9 @@ load_env=(GOOS=linux GOARCH=amd64)
 if [ -n "$local_build" ]; then
   node_env=(GOOS="$(go env GOOS)" GOARCH="$(go env GOARCH)")
   load_env=("${node_env[@]}")
+elif [ -n "$docker_build" ]; then
+  node_env=(GOOS=linux GOARCH="$(docker version --format '{{.Server.Arch}}')")
+  load_env=(GOOS="$(go env GOOS)" GOARCH="$(go env GOARCH)")
 fi
 export CGO_ENABLED=0
 
