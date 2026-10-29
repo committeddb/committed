@@ -11161,7 +11161,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## github.com/go-jose/go-jose/v4 v4.1.4
+## github.com/go-jose/go-jose/v4 v4.1.6
 
 ```
 
@@ -21826,7 +21826,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## golang.org/x/net v0.61.0
+## golang.org/x/net v0.62.0
 
 ```
 Copyright 2009 The Go Authors.
