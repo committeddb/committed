@@ -2540,7 +2540,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-## github.com/PaesslerAG/gval v1.0.0
+## github.com/PaesslerAG/gval v1.2.4
 
 ```
 Copyright (c) 2017, Paessler AG <support@paessler.com>
@@ -11135,7 +11135,7 @@ SOFTWARE.
 
 ```
 
-## github.com/go-chi/chi/v5 v5.4.0
+## github.com/go-chi/chi/v5 v5.5.0
 
 ```
 Copyright (c) 2015-present Peter Kieltyka (https://github.com/pkieltyka), Google Inc.
@@ -14189,7 +14189,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## github.com/klauspost/compress v1.20.1
+## github.com/klauspost/compress v1.20.3
 
 ```
 Copyright (c) 2012 The Go Authors. All rights reserved.
@@ -18231,7 +18231,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
-## go.etcd.io/etcd/client/pkg/v3 v3.7.2
+## go.etcd.io/etcd/client/pkg/v3 v3.7.3
 
 ```
 
